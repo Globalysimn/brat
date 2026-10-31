@@ -41,8 +41,8 @@ double item_total(item_t *items, int n) {
 """
 
 SRC = """extern "libprobe.so" struct item_t { id: i64, weight: f64 }
-extern "libprobe.so" fn item_weight(it: ptr, out: ptr) -> i32;
-extern "libprobe.so" fn item_total(items: ptr, n: i32) -> f64;
+extern "libprobe.so" fn item_weight(it: ptr[item_t], out: ptr[f64]) -> i32;
+extern "libprobe.so" fn item_total(items: ptr[item_t], n: i32) -> f64;
 fn main() -> i64 {
   print("ok")
   return 0
@@ -84,8 +84,8 @@ q = run([sys.executable, CLI, "ffi", "--bin", "prog.exe", "--json"])
 assert q.returncode == 0, "brat ffi --bin: %r" % (q.stdout + q.stderr)[-800:]
 contract = json.loads(q.stdout)["contract"]
 assert [f["name"] for f in contract["fns"]] == ["item_total", "item_weight"], contract["fns"]
-assert contract["fns"][0]["params"] == ["ptr", "i32"], contract["fns"][0]
-assert contract["fns"][1]["params"] == ["ptr", "ptr"], contract["fns"][1]
+assert contract["fns"][0]["params"] == ["ptr[item_t]", "i32"], contract["fns"][0]
+assert contract["fns"][1]["params"] == ["ptr[item_t]", "ptr[f64]"], contract["fns"][1]
 assert contract["fns"][0]["ret"] == "f64", contract["fns"][0]
 item = contract["structs"][0]
 assert (item["name"], item["size"], item["align"]) == ("item_t", 16, 8), item
@@ -104,7 +104,7 @@ with open(os.path.join(TMP, "prog_bad.brat"), "w", encoding="utf-8") as f:
 bad = run([sys.executable, CLI, "ffi", "prog_bad.brat", "--header", "probe.h",
            "--bin", "prog.exe"], env=env)
 assert bad.returncode == 1, "drift must exit 1: %r" % (bad.stdout + bad.stderr)[-800:]
-assert "item_total: recorded f64(ptr, i32), now f64(ptr, i64)" in bad.stdout, bad.stdout
+assert "item_total: recorded f64(ptr[item_t], i32), now f64(ptr[item_t], i64)" in bad.stdout, bad.stdout
 
 # a header that changed under the binary is named too
 with open(os.path.join(TMP, "probe_bad.h"), "w", encoding="utf-8") as f:

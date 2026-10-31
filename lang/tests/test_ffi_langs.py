@@ -57,12 +57,15 @@ def cli(*args, timeout=600):
 
 
 HEADER = """
+#include <stdint.h>
 int8_t neg(void);
 int8_t take(int8_t x);
 int16_t add16(int16_t a, int16_t b);
 uint16_t u16max(void);
+_Bool is_true(_Bool x);
 double scale(double x, double k);
 const char *greet(void);
+void *identity(void *p);
 struct Narrow { int8_t a; int16_t b; int32_t c; };
 struct Narrow shift(struct Narrow n);
 /* no BRAT spelling: 80-bit extended, 16 bytes in a box */
@@ -76,8 +79,10 @@ int8_t neg(void) { return (int8_t)-1; }
 int8_t take(int8_t x) { return (int8_t)(x - 1); }
 int16_t add16(int16_t a, int16_t b) { return (int16_t)(a + b); }
 uint16_t u16max(void) { return (uint16_t)65535; }
+_Bool is_true(_Bool x) { return x; }
 double scale(double x, double k) { return x * k; }
 const char *greet(void) { return "hello"; }
+void *identity(void *p) { return p; }
 struct Narrow shift(struct Narrow n) {
     struct Narrow r = { (int8_t)(n.a + 1), (int16_t)(n.b + 1), n.c + 1 };
     return r;
@@ -90,6 +95,7 @@ extern "LIB" fn neg() -> i8
 extern "LIB" fn take(x: i8) -> i8
 extern "LIB" fn add16(a: i16, b: i16) -> i16
 extern "LIB" fn u16max() -> u16
+extern "LIB" fn is_true(x: bool) -> bool
 extern "LIB" fn scale(x: f64, k: f64) -> f64
 extern "LIB" fn greet() -> str
 extern struct Narrow { a: i8, b: i16, c: i32 }
@@ -100,6 +106,7 @@ fn main() -> i64 {
   print(take(-4))
   print(add16(-1000, 234))
   print(u16max())
+  print(is_true(true))
   print(scale(1.5, 4.0))
   print(greet())
   let m = shift(Narrow { a: 1, b: 2, c: 3 })
@@ -110,7 +117,7 @@ fn main() -> i64 {
 }
 """
 
-WANT = "-1\n-5\n-766\n65535\n6.0\nhello\n2\n3\n4\n"
+WANT = "-1\n-5\n-766\n65535\nTrue\n6.0\nhello\n2\n3\n4\n"
 
 
 def main():
@@ -146,6 +153,7 @@ print(lib.neg())
 print(lib.take(-4))
 print(lib.add16(-1000, 234))
 print(lib.u16max())
+print(lib.is_true(True))
 print(float(lib.scale(1.5, 4.0)))
 print(lib.greet().decode())
 m = lib.shift(langs_bind.Narrow(a=1, b=2, c=3))
@@ -165,6 +173,8 @@ print(m.c)
     check(gr.returncode == 0, "bindgen rust: %r" % (gr.stdout + gr.stderr))
     rtext = open(rs, encoding="utf-8").read()
     check("pub fn take(a0: i8) -> i8;" in rtext, "rust keeps the width: %r" % rtext)
+    check("pub fn is_true(a0: bool) -> bool;" in rtext,
+          "rust keeps C _Bool as bool: %r" % rtext)
     check("pub struct Narrow {" in rtext and "pub a: i8," in rtext, "rust record: %r" % rtext)
     check("no_spelling" not in rtext.split("extern \"C\" {")[1],
           "an unrepresentable type must not be declared in rust: %r" % rtext)
@@ -177,6 +187,13 @@ print(m.c)
     gtext = open(go, encoding="utf-8").read()
     check('import "C"' in gtext and '#include "' in gtext, "go is a cgo file: %r" % gtext)
     check("func takeC(a0 C.int8_t) C.int8_t" in gtext, "go keeps the width: %r" % gtext)
+    check("func is_trueC(a0 C.bool) C.bool" in gtext,
+          "go keeps C _Bool as bool: %r" % gtext)
+    check("func greetC() *C.char" in gtext, "go spells char pointers: %r" % gtext)
+    check("func identityC(a0 unsafe.Pointer) unsafe.Pointer" in gtext,
+          "go spells void pointers: %r" % gtext)
+    check("func shiftC(a0 Narrow) Narrow" in gtext,
+          "go uses the declared struct alias: %r" % gtext)
     check("// skipped: no_spelling" in gtext, "go notes the same skip: %r" % gtext)
 
     # `no_spelling` is skipped by every language for the same reason: the reason
@@ -193,6 +210,8 @@ print(m.c)
                                            os.path.join(TMP, "langs.rlib")]),
                             ("go", go, ["go", "build", "-o", os.path.join(TMP, "langs.a")])):
         if shutil.which(tool):
+            if tool == "go":
+                write("go.mod", "module example.com/brat-bindings-test\n\ngo 1.18\n")
             r = subprocess.run(cmd + ([path] if tool == "rustc" else []),
                                capture_output=True, text=True, timeout=600, cwd=TMP)
             check(r.returncode == 0, "%s rejected the binding: %r" % (tool, r.stderr))

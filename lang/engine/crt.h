@@ -2451,8 +2451,18 @@ BFN int vnorm(char *s) {
 static int _vfiles_free(void) {
     const char *v = getenv("BRAT_FILES");
     if (!v) return 0;
-    return v[0] == '1' || strcmp(v, "yes") == 0 || strcmp(v, "true") == 0 ||
-           strcmp(v, "on") == 0;
+    while (isspace((unsigned char)*v)) v++;
+    const char *values[] = {"1", "yes", "true", "on"};
+    for (size_t i = 0; i < sizeof values / sizeof values[0]; i++) {
+        const char *p = v, *word = values[i];
+        while (*p && *word && tolower((unsigned char)*p) == *word) {
+            p++;
+            word++;
+        }
+        while (isspace((unsigned char)*p)) p++;
+        if (!*p && !*word) return 1;
+    }
+    return 0;
 }
 
 BFN const char *vconfine(const char *p) {
@@ -3080,6 +3090,11 @@ static int _vsk_take(bint slot) {
     _vsk_unlock();
     return fd;
 }
+static int _vsk_slot_id(Val slot, bint *id) {
+    if (slot.tag != V_INT) return 0;
+    *id = slot.as.ival;
+    return 1;
+}
 
 /* A write to a peer that has gone away must return EPIPE, not kill the process.
  * Linux and Windows take MSG_NOSIGNAL / have no SIGPIPE; macOS needs the socket option. */
@@ -3248,7 +3263,9 @@ BFN Val vtcp_connect(Val addr) {
     return _vok_int(slot);
 }
 BFN Val vtcp_accept(Val slot) {
-    int lfd = _vsk_get((bint)vlong(slot));
+    bint id;
+    if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
+    int lfd = _vsk_get(id);
     if (lfd < 0) return _verr_c("bad socket slot");
     int fd = (int)accept(lfd, NULL, NULL);
     if (fd < 0) return _verr_c("accept failed");
@@ -3260,9 +3277,12 @@ BFN Val vtcp_accept(Val slot) {
 }
 
 BFN Val vtcp_recv(Val slot, Val n) {
-    bint want = (bint)vlong(n);
+    if (n.tag != V_INT) return _verr_c("recv wants 0 <= n <= 1048576");
+    bint want = n.as.ival;
     if (want < 0 || want > _VRECV_MAX) return _verr_c("recv wants 0 <= n <= 1048576");
-    int fd = _vsk_get((bint)vlong(slot));
+    bint id;
+    if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
+    int fd = _vsk_get(id);
     if (fd < 0) return _verr_c("bad socket slot");
     char *buf = (char *)malloc((size_t)want + 1);
     if (!buf) vfatal_oom();
@@ -3280,7 +3300,9 @@ BFN Val vtcp_recv(Val slot, Val n) {
 }
 BFN Val vtcp_send(Val slot, Val data) {
     if (data.tag != V_STR) return _verr_c("tcp_send wants string data");
-    int fd = _vsk_get((bint)vlong(slot));
+    bint id;
+    if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
+    int fd = _vsk_get(id);
     if (fd < 0) return _verr_c("bad socket slot");
     const char *p = data.as.str;
     size_t left = strlen(p);
@@ -3302,7 +3324,9 @@ BFN Val vtcp_send(Val slot, Val data) {
     return _vok_int((bint)done);
 }
 BFN Val vtcp_close(Val slot) {
-    int fd = _vsk_take((bint)vlong(slot));
+    bint id;
+    if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
+    int fd = _vsk_take(id);
     if (fd < 0) return _verr_c("bad socket slot");
     close(fd);
     return _vok_int(0);
@@ -4206,7 +4230,14 @@ BFN Val vtagof(Val v) {
 }
 BFN bint vlong(Val v) {
     if (v.tag == V_INT) return v.as.ival;
-    if (v.tag == V_FLOAT) return (bint)v.as.fval;
+    if (v.tag == V_FLOAT) {
+        if (!(v.as.fval >= -9223372036854775808.0 &&
+              v.as.fval < 9223372036854775808.0)) {
+            vraise("integer out of range");
+            return 0;
+        }
+        return (bint)v.as.fval;
+    }
     vraise("not a number"); return 0;
 }
 /* A vec operation that got the wrong receiver raises and returns an empty vec:

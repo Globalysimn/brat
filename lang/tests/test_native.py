@@ -71,8 +71,13 @@ for prog in PROGS:
     exe = build(prog)
     rc2, out2 = run_native(exe)
     assert rc1 == rc2, '%s exit: interp=%d native=%d' % (prog, rc1, rc2)
-    assert out1 == out2, '%s DIFF:\n--- interp ---\n%s\n--- native ---\n%s' % (
-        prog, out1[:1500], out2[:1500])
+    if os.path.basename(prog) == 'spawn.brat':
+        left, right = out1.splitlines(), out2.splitlines()
+        assert sorted(left[:3]) == sorted(right[:3]) and left[3:] == right[3:], \
+            '%s DIFF (spawn send order is unspecified):\n%s\n%s' % (prog, out1, out2)
+    else:
+        assert out1 == out2, '%s DIFF:\n--- interp ---\n%s\n--- native ---\n%s' % (
+            prog, out1[:1500], out2[:1500])
     n += 1
     print('native ok: %s' % os.path.basename(prog))
 

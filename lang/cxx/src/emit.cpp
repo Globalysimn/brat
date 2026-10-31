@@ -228,6 +228,7 @@ bool ffi_int_result(const std::string &t) {
 // being spelled as a machine word.
 static const std::map<std::string, std::string> &ffi_scalar_c() {
     static const std::map<std::string, std::string> t = {
+        {"bool", "_Bool"},
         {"i8", "signed char"}, {"u8", "unsigned char"},
         {"i16", "short"},      {"u16", "unsigned short"},
         {"i32", "int"},        {"u32", "unsigned"},
@@ -830,7 +831,7 @@ struct Emitter {
                         const std::string &elem = "");
     std::string slice_elem(const Expr &e);
     // `&x` inside the call being built: (name, c name, scratch, width)
-    struct OutBind { std::string name, cn, scratch; int width; };
+    struct OutBind { std::string name, cn, scratch, elem; };
     std::vector<OutBind> out_binds;
     bool in_out_arg = false;
     std::pair<std::vector<std::string>, std::string> out_addr(const Expr &e, const std::string *ann);
@@ -1817,7 +1818,7 @@ const std::set<std::string> VBUILTIN_DIRECT = {"del", "copy", "slice"};
 const std::set<std::string> MAP_METH = {"get", "has", "keys", "del", "set",
                                         "items", "vals", "copy", "get_or"};
 
-const std::set<std::string> FFI_TYPES = {"i8", "u8", "i16", "u16", "i32", "u32",
+const std::set<std::string> FFI_TYPES = {"bool", "i8", "u8", "i16", "u16", "i32", "u32",
                                          "i64", "u64", "usize", "f32", "f64",
                                          "str", "ptr"};
 
@@ -4466,7 +4467,9 @@ std::string Emitter::val_to_c_struct(const std::string &sname, const std::string
         std::string base_expr = cat("(*map_get((", valexpr, ").as.map, \"", f, "\"))");
         const std::string ffn = ffi_c(f);
         std::string member;
-        if (ft == "str") {
+        if (ft == "bool") {
+            member = cat(".", ffn, " = ", base_expr, ".as.b");
+        } else if (ft == "str") {
             member = cat(".", ffn, " = ", base_expr, ".as.str");
         } else if (ft == "ptr") {
             member = cat(".", ffn, " = (void *)", base_expr, ".as.ival");
@@ -4492,7 +4495,9 @@ std::string Emitter::c_struct_to_val(const std::string &sname, const std::string
         std::string ft = sfield.ann.value_or("");
         const std::string fexpr = cat(cexpr, ".", ffi_c(f));
         std::string val;
-        if (ft == "str") {
+        if (ft == "bool") {
+            val = cat("vbool(", fexpr, ")");
+        } else if (ft == "str") {
             val = cat("vstr(", fexpr, ")");
         } else if (ft == "ptr") {
             val = cat("vint((int64_t)", fexpr, ")");
@@ -4577,6 +4582,34 @@ std::string Emitter::emit_program() {
     out.clear();
     run_pipeline();
     cb_wrappers.clear();
+    auto ffi_decl_type_impl = [&](auto &&self, const std::string &ann) -> std::string {
+        if (ann.empty() || ann == "none") return "void";
+        if (structs.count(ann)) return ffi_c(ann);
+        if (ann == "ptr") return "void *";
+        if (ann.rfind("fn", 0) == 0) {
+            auto sig = callback_signature(ann);
+            if (!sig) throw std::runtime_error("unsupported FFI callback type `" + ann + "`");
+            std::string params;
+            for (const auto &param : sig->first) {
+                if (!params.empty()) params += ", ";
+                params += self(self, param);
+            }
+            return self(self, sig->second) + " (*) (" + (params.empty() ? "void" : params) + ")";
+        }
+        if (ann.rfind("ptr[", 0) == 0 && ann.back() == ']') {
+            std::string elem = ann.substr(4, ann.size() - 5);
+            if (elem.rfind("fn", 0) == 0)
+                throw std::runtime_error("pointer to callback is not a supported FFI type");
+            return self(self, elem) + " *";
+        }
+        auto it = ffi_scalar_c().find(ann);
+        if (it == ffi_scalar_c().end())
+            throw std::runtime_error("unsupported FFI type `" + ann + "` in an extern declaration");
+        return it->second;
+    };
+    auto ffi_decl_type = [&](const std::string &ann) {
+        return ffi_decl_type_impl(ffi_decl_type_impl, ann);
+    };
     for (const auto &[cbname, info] : fns) {
         if (info.ctor || info.decl == nullptr) continue;
         bool ident = !cbname.empty() && (std::isalpha(static_cast<unsigned char>(cbname[0])) || cbname[0] == '_');
@@ -4598,13 +4631,9 @@ std::string Emitter::emit_program() {
                 ok = false;
                 break;
             }
-            if (structs.count(*ann)) {
-                t = ffi_c(*ann);
-            } else if (ann->rfind("ptr", 0) == 0 || ann->rfind("fn", 0) == 0) {
-                t = "void *";
-            } else if (ffi_scalar_c().count(*ann)) {
-                t = ffi_scalar_c().at(*ann);
-            } else {
+            try {
+                t = ffi_decl_type(*ann);
+            } catch (const std::runtime_error &) {
                 ok = false;
                 break;
             }
@@ -4612,15 +4641,9 @@ std::string Emitter::emit_program() {
         }
         if (!ok) continue;
         std::string cret;
-        if (!ret || *ret == "none") {
-            cret = "void";
-        } else if (structs.count(*ret)) {
-            cret = ffi_c(*ret);
-        } else if (ret->rfind("ptr", 0) == 0) {
-            cret = "void *";
-        } else if (ffi_scalar_c().count(*ret)) {
-            cret = ffi_scalar_c().at(*ret);
-        } else {
+        try {
+            cret = ffi_decl_type(ret ? *ret : std::string("none"));
+        } catch (const std::runtime_error &) {
             continue;
         }
         cb_wrappers.push_back(Cb{cbname, cret, cparams});
@@ -4671,6 +4694,7 @@ std::string Emitter::emit_program() {
     if (const char *e = std::getenv("BRAT_FFI_A8")) ffi_a8 = std::atoi(e);
     auto ffi_field_shape = [ffi_pw, ffi_a8](const std::string &t) -> std::optional<std::pair<int, int>> {
         static const std::map<std::string, std::pair<int, int>> shape = {
+            {"bool", {1, 1}},
             {"i8", {1, 1}}, {"u8", {1, 1}}, {"i16", {2, 2}}, {"u16", {2, 2}},
             {"i32", {4, 4}}, {"u32", {4, 4}}, {"f32", {4, 4}},
             {"i64", {8, 8}}, {"u64", {8, 8}}, {"f64", {8, 8}},
@@ -4732,7 +4756,9 @@ std::string Emitter::emit_program() {
             const std::string sty = sfld.ann.value_or("");
             std::string m;
             const std::string sfn = ffi_c(sf);
-            if (sty == "i64") {
+            if (sty == "bool") {
+                m = cat("_Bool ", sfn, ";");
+            } else if (sty == "i64") {
                 m = cat("int64_t ", sfn, ";");
             } else if (sty == "i32") {
                 m = cat("int ", sfn, ";");
@@ -4791,18 +4817,6 @@ std::string Emitter::emit_program() {
         }
     }
     ln("", "");
-    // C spelling of one declaration slot. A width that is not in the table is
-    // refused here rather than spelled as a machine word: an extern the emitter
-    // cannot spell is an ABI the program must not call.
-    auto ffi_decl_type = [&](const std::string &ann) -> std::string {
-        if (ann.empty() || ann == "none") return "void";
-        if (structs.count(ann)) return ffi_c(ann);
-        if (ann.rfind("ptr", 0) == 0 || ann.rfind("fn", 0) == 0) return "void *";
-        auto it = ffi_scalar_c().find(ann);
-        if (it == ffi_scalar_c().end())
-            throw std::runtime_error("unsupported FFI type `" + ann + "` in an extern declaration");
-        return it->second;
-    };
     for (const auto &e : externs) {
         if (e.lib.empty()) continue;
         if (e.lib.find("libc.so") != std::string::npos || e.lib == "libc") continue;
@@ -4849,6 +4863,8 @@ std::string Emitter::emit_program() {
             std::string arg = cat("a", i);
             if (ann && structs.count(*ann)) {
                 pushes.push_back(cat("vec_push(_a, ", c_struct_to_val(*ann, arg), ");"));
+            } else if (ann && *ann == "bool") {
+                pushes.push_back(cat("vec_push(_a, vbool(", arg, "));"));
             } else if (ann && *ann == "str") {
                 pushes.push_back(cat("vec_push(_a, vstr(", arg, "));"));
             } else if (ann && (*ann == "f32" || *ann == "f64")) {
@@ -4877,10 +4893,12 @@ std::string Emitter::emit_program() {
         ln("  ", "vcb_check(_r);");
         if (!ret || *ret == "none") {
             ln("  ", "(void)_r;");
+        } else if (*ret == "bool") {
+            ln("  ", "return _r.as.b;");
         } else if (*ret == "str") {
             ln("  ", "return _r.as.str;");
-        } else if (*ret == "ptr") {
-            ln("  ", "return (void *)_r.as.ival;");
+        } else if (ret->rfind("ptr", 0) == 0) {
+            ln("  ", cat("return (", ffi_decl_type(*ret), ")_r.as.ival;"));
         } else if (*ret == "f32" || *ret == "f64") {
             // BRAT has one float type; a `float` return read out of `ival` is
             // the float's bit pattern, which is how 3.5 became 4.6e18.
@@ -4910,7 +4928,10 @@ std::string Emitter::emit_program() {
         for (size_t i = 0; i < f.params.size(); i++) {
             const auto &ann = f.params[i].ann;
             std::string arg = cat("a", i);
-            if (ann && (*ann == "i64" || *ann == "i32")) {
+            if (ann && *ann == "bool") {
+                cparams.push_back(cat("_Bool ", arg));
+                pushes.push_back(cat("vec_push(_a, vbool(", arg, "));"));
+            } else if (ann && (*ann == "i64" || *ann == "i32")) {
                 cparams.push_back(cat(*ann == "i64" ? "int64_t" : "int", " ", arg));
                 pushes.push_back(cat("vec_push(_a, vint(", arg, "));"));
             } else if (ann && *ann == "u8") {
@@ -4947,6 +4968,8 @@ std::string Emitter::emit_program() {
         std::string cret;
         if (!ret || *ret == "none") {
             cret = "void";
+        } else if (*ret == "bool") {
+            cret = "_Bool";
         } else if (structs.count(*ret)) {
             cret = ffi_c(*ret);
         } else if (*ret == "i64" || *ret == "i32") {
@@ -4955,6 +4978,8 @@ std::string Emitter::emit_program() {
             cret = "double";
         } else if (*ret == "f32") {
             cret = "float";
+        } else if (*ret == "bool") {
+            ln("  ", "return _r.as.b;");
         } else if (*ret == "str") {
             cret = "const char *";
         } else if (*ret == "ptr") {
@@ -5047,14 +5072,24 @@ std::pair<std::vector<std::string>, std::string> Emitter::out_addr(const Expr &e
         throw EmitError("`&` is an out-parameter: write it where the extern takes a "
                         "`ptr[T]`, as in `fill(&n, 21)`");
     std::string el = (ann && ann->rfind("ptr[", 0) == 0) ? ann->substr(4, ann->size() - 5) : "";
-    int width = el == "u8" || el == "i8" ? 1 : el == "u16" || el == "i16" ? 2
+    int width = el == "bool" || el == "u8" || el == "i8" ? 1
+              : el == "u16" || el == "i16" ? 2
               : el == "i32" || el == "u32" || el == "f32" ? 4 : 8;
-    std::string ctype = width == 1 ? "unsigned char" : width == 2 ? "short"
+    std::string ctype = el == "bool" ? "_Bool" : el == "i8" ? "int8_t"
+                      : el == "u8" ? "uint8_t" : el == "i16" ? "int16_t"
+                      : el == "u16" ? "uint16_t" : el == "i32" ? "int32_t"
+                      : el == "u32" ? "uint32_t" : el == "i64" ? "int64_t"
+                      : el == "u64" ? "uint64_t" : el == "usize" ? "size_t"
+                      : el == "f32" ? "float" : el == "f64" ? "double"
+                      : width == 1 ? "unsigned char" : width == 2 ? "short"
                       : width == 4 ? "int" : "int64_t";
     std::string cn = var_ref(e.a);
     std::string scratch = new_tmp("out");
-    out_binds.push_back({e.a, cn, scratch, width});
-    return {{cat(ctype, " ", scratch, " = (", ctype, ")(", cn, ").as.ival;")},
+    std::string initial = el == "bool" ? cat("vis_true(", cn, ")")
+                        : (el == "f32" || el == "f64") ? cat("vnum(", cn, ")")
+                        : cat("(", cn, ").as.ival");
+    out_binds.push_back({e.a, cn, scratch, el});
+    return {{cat(ctype, " ", scratch, " = (", ctype, ")(", initial, ");")},
             cat("(void *)&", scratch)};
 }
 
@@ -5062,10 +5097,18 @@ std::vector<std::string> Emitter::out_flush() {
     std::vector<std::string> out;
     for (const auto &b : out_binds) {
         out.push_back(cat("vrc_dec(", b.cn, ");"));
-        std::string c = b.width == 1 ? cat("(int64_t)(unsigned char)", b.scratch)
-                      : b.width == 2 ? cat("(int64_t)(short)", b.scratch)
-                      : cat("(int64_t)", b.scratch);
-        out.push_back(cat(b.cn, " = vint(", c, ");"));
+        if (b.elem == "f32" || b.elem == "f64")
+            out.push_back(cat(b.cn, " = vfloat((double)", b.scratch, ");"));
+        else if (b.elem == "bool")
+            out.push_back(cat(b.cn, " = vbool(", b.scratch, ");"));
+        else {
+            bool is_unsigned = b.elem == "u8" || b.elem == "u16" || b.elem == "u32"
+                            || b.elem == "u64" || b.elem == "usize";
+            std::string c = is_unsigned
+                ? cat("(int64_t)(uint64_t)", b.scratch)
+                : cat("(int64_t)", b.scratch);
+            out.push_back(cat(b.cn, " = vint(", c, ");"));
+        }
     }
     return out;
 }
@@ -5443,7 +5486,9 @@ V Emitter::ex_call(const Expr &e) {
             pa_all.push_back(cat("Val ", t, " = ", v.val, ";"));
             std::string ok;
             bool var_slot = i >= x.params->size() && ann && *ann == "ptr";
-            if (ann && *ann == "str") {
+            if (ann && *ann == "bool") {
+                ok = cat(t, ".tag == V_BOOL");
+            } else if (ann && *ann == "str") {
                 ok = cat(t, ".tag == V_STR");
             } else if (var_slot) {
                 // A `str` fills a variadic `..ptr` slot as `const char *`,
@@ -5456,13 +5501,15 @@ V Emitter::ex_call(const Expr &e) {
                 if (ann && FFI_RANGE.count(*ann)) {
                     const auto &r = FFI_RANGE.at(*ann);
                     ok += cat(" && ", t, ".as.ival >= ", r.first, " && ", t, ".as.ival <= ", r.second);
-                } else if (ann && *ann == "ptr") {
+                } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
                     ok += cat(" && ", t, ".as.ival >= 0");   // negative pointers never reach C
                 }
             }
             pa_all.push_back(cat("if (!(", ok, ")) { vraise(\"ffi: arg ", i + 1, " of ", name, " wants ",
                                  ann.value_or("value"), "\"); ", err_bail(), " }"));
-            if (ann && *ann == "str") {
+            if (ann && *ann == "bool") {
+                cargs += cat(cargs.empty() ? "" : ", ", t, ".as.b");
+            } else if (ann && *ann == "str") {
                 cargs += cat(cargs.empty() ? "" : ", ", t, ".as.str");
             } else if (var_slot) {
                 cargs += cat(cargs.empty() ? "" : ", ", "(", t, ".tag == V_STR ? (void *)", t,
@@ -5496,6 +5543,7 @@ V Emitter::ex_call(const Expr &e) {
                                  err_bail(), " }"));
             return {pa_all, cat("vint(", r, ")")};
         }
+        if (ret == "bool") return {pa_all, cat("vbool(", call, ")")};
         if (ffi_int_result(ret)) {
             // The cast widens the width the header declared, so a `short` that
             // holds -1 arrives as -1 and not as 65535.

@@ -1765,10 +1765,10 @@ def _outer_writes(body, local):
 # else is refused here, at `check`, so `check` stays the verdict it claims to
 # be: a program whose signature the emitter cannot spell used to pass `check`
 # and die in `build`.
-FFI_SLOTS = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize",
+FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize",
              "f32", "f64", "str", "ptr"}
 
-FFI_HINT = ("a supported extern slot is i8..u64, usize, f32, f64, str, ptr, "
+FFI_HINT = ("a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
             "ptr[T], fn(...), an `extern struct`, or `none`")
 
 

@@ -685,6 +685,9 @@ def lock_path():
     return os.path.join(os.getcwd(), "brat.lock")
 
 
+MAX_PACKAGE_BYTES = 16 * 1024 * 1024
+
+
 def _valid_pkg_version(version):
     if not isinstance(version, str) or len(version) > 64:
         return False
@@ -755,12 +758,18 @@ def read_lock():
     pinned and stop honouring the hashes it exists to enforce.
     """
     try:
-        with open(lock_path(), encoding="utf-8") as f:
-            data = f.read()
+        with open(lock_path(), "rb") as f:
+            raw = f.read(MAX_PACKAGE_BYTES + 1)
     except FileNotFoundError:
         return []
     except OSError as e:
         raise SystemExit("brat pkg: cannot read %s: %s" % (lock_path(), e))
+    except UnicodeError as e:
+        raise SystemExit("brat pkg: %s is not valid UTF-8: %s" % (lock_path(), e))
+    if len(raw) > MAX_PACKAGE_BYTES:
+        raise SystemExit("brat pkg: %s exceeds 16 MiB" % lock_path())
+    try:
+        data = raw.decode("utf-8")
     except UnicodeError as e:
         raise SystemExit("brat pkg: %s is not valid UTF-8: %s" % (lock_path(), e))
     import json as _json
@@ -809,8 +818,8 @@ def fetch_url(url, allow_file=False):
     elif parsed.netloc not in ("", "localhost"):
         raise ValueError("invalid file URL")
     with _ur.urlopen(url, timeout=30) as r:
-        body = r.read(16 * 1024 * 1024 + 1)
-    if len(body) > 16 * 1024 * 1024:
+        body = r.read(MAX_PACKAGE_BYTES + 1)
+    if len(body) > MAX_PACKAGE_BYTES:
         raise ValueError("download exceeds 16 MiB")
     try:
         text = body.decode("utf-8")
@@ -849,11 +858,14 @@ def read_index():
             raise SystemExit("brat pkg: index %s: %s" % (path, e))
     else:
         try:
-            with open(path, encoding="utf-8") as f:
-                text = f.read()
+            with open(path, "rb") as f:
+                body = f.read(MAX_PACKAGE_BYTES + 1)
+            if len(body) > MAX_PACKAGE_BYTES:
+                raise ValueError("index exceeds 16 MiB")
+            text = body.decode("utf-8")
         except FileNotFoundError:
             return {}
-        except OSError as e:
+        except (OSError, UnicodeError, ValueError) as e:
             raise SystemExit("brat pkg: index %s: %s" % (path, e))
     try:
         data = _json.loads(text)
@@ -1341,11 +1353,13 @@ def do_pkg(args):
             i += 2
         try:
             with open(source, "rb") as f:
-                body = f.read()
+                body = f.read(MAX_PACKAGE_BYTES + 1)
+            if len(body) > MAX_PACKAGE_BYTES:
+                raise ValueError("package exceeds 16 MiB")
             text = body.decode("utf-8")
             brat = brat_mod()
             brat.parse_prog(brat.Cur(brat.lex(text)))
-        except (OSError, UnicodeError, SyntaxError, ImportError) as e:
+        except (OSError, UnicodeError, SyntaxError, ImportError, ValueError) as e:
             sys.stderr.write("brat pkg: cannot publish %s: %s\n" % (source, e))
             return 1
         digest = hashlib.sha256(body).hexdigest()

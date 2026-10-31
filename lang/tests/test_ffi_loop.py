@@ -50,9 +50,9 @@ void node_free(Node *n) { free(n); }
 double area(Vec2 v) { return (double)v.x * (double)v.y; }
 """
 
-PROGRAM = """extern "LIB" fn node_new(id: i64, x: f32, y: f32) -> ptr;
-extern "LIB" fn node_move(p: ptr, dx: f32);
-extern "LIB" fn node_free(p: ptr);
+PROGRAM = """extern "LIB" fn node_new(id: i64, x: f32, y: f32) -> ptr[Node];
+extern "LIB" fn node_move(p: ptr[Node], dx: f32);
+extern "LIB" fn node_free(p: ptr[Node]);
 extern struct Node { id: i64, pos: Vec2 }
 extern struct Vec2 { x: f32, y: f32 }
 

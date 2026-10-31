@@ -54,11 +54,11 @@ C_SCALARS = {
     # C's `_Bool` is one byte, not four. Claiming `i32` would have mis-laid any
     # `extern struct` holding one, and 1-byte integers already have a BRAT
     # spelling: `u8`. (A BRAT `bool` is not an extern slot yet -- see FFI_IDEAL.)
-    "bool": ("u8", 1), "_Bool": ("u8", 1),
+    "bool": ("bool", 1), "_Bool": ("bool", 1),
     "void": ("none", None),
 }
 
-_WIDTH = {"i8": 1, "u8": 1, "i16": 2, "u16": 2, "i32": 4, "u32": 4,
+_WIDTH = {"bool": 1, "i8": 1, "u8": 1, "i16": 2, "u16": 2, "i32": 4, "u32": 4,
           "i64": 8, "u64": 8, "usize": 8, "f32": 4, "f64": 8,
           "str": 8, "ptr": 8, "none": None}
 
@@ -203,6 +203,11 @@ QUALIFIERS = {"const", "volatile", "restrict", "register", "static", "extern",
 
 _COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 _DECL = re.compile(r"\b(?:extern\s+)?([A-Za-z_][\w\s\*]*?)\b([A-Za-z_]\w*)\s*\(([^;{}]*)\)\s*;")
+_ABI_CALLCONV = re.compile(
+    r"\b(?:__stdcall|stdcall|__cdecl|cdecl|__fastcall|fastcall|__vectorcall|vectorcall|"
+    r"__thiscall|thiscall|__regcall|regcall)\b|"
+    r"__attribute__\s*\(\(\s*(?:ms_abi|sysv_abi|regparm|pcs|preserve_most|"
+    r"preserve_all|interrupt|naked|vector_size|vectorcall|regcall)\b", re.I)
 
 
 def _balanced(src, start):
@@ -279,7 +284,7 @@ def _strip(text):
     out = []
     for line in text.splitlines():
         s = line.strip()
-        if s.startswith("#") or s.startswith("__attribute__"):
+        if s.startswith("#"):
             continue
         out.append(line)
     text = " ".join(out)
@@ -396,6 +401,8 @@ class CDecl:
         self.aliases = set()  # names a `typedef` introduced: spellable bare
         self.tags = set()     # names that exist only as `struct X`: need the keyword
         self.anon = set()     # records holding an anonymous union/struct member
+        self.arrays = set()   # records with inline array fields (not a pointer)
+        self.abi_unsupported = {}
 
     def c_name(self, name):
         """How C spells this record's type in *this* header.
@@ -468,6 +475,14 @@ def parse_header(text):
             packed.add(alias)
     src = _strip(text)
     out = CDecl()
+    uncommented = _COMMENT.sub(" ", text)
+    for declaration in uncommented.split(";"):
+        abi_attr = _ABI_CALLCONV.search(declaration)
+        if not abi_attr:
+            continue
+        parsed = _DECL.search(_strip(declaration) + ";")
+        if parsed:
+            out.abi_unsupported[parsed.group(2)] = abi_attr.group(0)
 
     # Record bodies are scanned, not matched: a body may hold a union, a nested
     # struct or an array of them, and `.*?` would stop at the inner brace and
@@ -480,6 +495,12 @@ def parse_header(text):
             # its own, so BRAT cannot declare the record field by field: the
             # offsets would depend on a member the header does not name. It is
             # skipped with a note rather than generated broken.
+            out.anon.add(alias or tag or "")
+        if re.search(r"\[[^\]]*\]", body):
+            # `_split_decl` treats parameter arrays as pointers because C adjusts
+            # them at a function boundary; an array member inside a record stays
+            # inline and changes size/offsets, so this layout is not representable.
+            out.arrays.add(alias or tag or "")
             out.anon.add(alias or tag or "")
         if alias:
             out.aliases.add(alias)
@@ -641,7 +662,7 @@ def brat_callback(ann):
     return (ret or "none", params)
 
 
-def same_callback(rep, name, where, brat_ann, ctype, cdecl, header_name):
+def same_callback(rep, name, where, brat_ann, ctype, cdecl, header_name, brat_structs):
     """Is a BRAT `fn(...)` the function pointer the header declares?
 
     Compared as widths, argument by argument, because that is what the call
@@ -656,6 +677,23 @@ def same_callback(rep, name, where, brat_ann, ctype, cdecl, header_name):
         return False
     bret, bparams = bcb
     cret, cparams = ccb
+
+    def pointer_match(brat_type, ctype, kind, extra):
+        elem = element_of(brat_type)
+        if brat_type == "str":
+            return kind == "str"
+        if brat_type == "ptr":
+            return kind == "ptr" and extra == "void" and not const_pointee(ctype)
+        if elem is None:
+            return None
+        if kind != "ptr" or const_pointee(ctype) or elem in brat_structs:
+            return False
+        words = set(_words(ctype.replace("*", " ")))
+        if elem in ("i8", "u8") and "char" in words and not words.intersection(
+                {"signed", "unsigned", "int8_t", "uint8_t"}):
+            return False
+        return pointee_ok(elem, extra, brat_structs)
+
     ok = True
     if len(bparams) != len(cparams):
         rep.error("extern fn %s: %s is declared `%s` (%d argument(s)), %s has `%s` (%d)"
@@ -663,8 +701,9 @@ def same_callback(rep, name, where, brat_ann, ctype, cdecl, header_name):
         ok = False
     for i, (bp, cp) in enumerate(zip(bparams, cparams)):
         kind, _extra = resolve(cdecl, cp)
+        pointer_ok = pointer_match(bp, cp, kind, _extra)
         if element_of(bp) is not None or bp in ("ptr", "str"):
-            if kind not in ("ptr", "str"):
+            if not pointer_ok:
                 rep.error("extern fn %s: %s argument %d is `%s`, %s has `%s`"
                           % (name, where, i + 1, bp, header_name, cp))
                 ok = False
@@ -678,7 +717,11 @@ def same_callback(rep, name, where, brat_ann, ctype, cdecl, header_name):
             rep.error("extern fn %s: %s returns `%s`, BRAT declares no result"
                       % (name, where, cret))
             ok = False
-    elif not same(bret, crkind):
+    elif pointer_match(bret, cret, crkind, _ccextra) is False:
+        rep.error("extern fn %s: %s returns `%s`, %s has `%s`"
+                  % (name, bret, header_name, cret))
+        ok = False
+    elif pointer_match(bret, cret, crkind, _ccextra) is None and not same(bret, crkind):
         rep.error("extern fn %s: %s returns `%s`, BRAT declares `%s`"
                   % (name, where, cret, bret))
         ok = False
@@ -716,11 +759,10 @@ def pointee_ok(elem, cextra, brat_structs):
         return True                      # `ptr`: no promise to keep
     if elem == cextra:
         return True
-    if _WIDTH.get(elem) is not None and _WIDTH.get(elem) == _WIDTH.get(cextra) \
-            and elem in ("i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize"):
-        # Compared by width, not by spelling: `unsigned char *` is `ptr[u8]`.
-        return True
-    if elem in ("i64", "u64", "usize") and cextra in ("i64", "u64", "usize"):
+    integer_types = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize"}
+    if elem in integer_types and cextra in integer_types \
+            and _abi_width(elem) == _abi_width(cextra):
+        # Corresponding signed/unsigned integers share an ABI representation.
         return True
     return elem in brat_structs and elem == cextra
 
@@ -739,16 +781,21 @@ def same(a, b):
         return True
     if a in ("ptr", "str") and b in ("ptr", "str"):
         return False      # `str` is `char *`; anything else must say `ptr`
-    if a == "i64" and b in ("usize", "u64"):
-        return True       # 8 bytes, sign is not an ABI property here
     if a in ("i64", "u64", "usize") and b in ("i64", "u64", "usize"):
-        return True
+        return _abi_width(a) == _abi_width(b)
     # A narrow register: `u8` beside `unsigned char` (which a header calls `i32`)
     # is the same byte as long as the width says so.
-    if _WIDTH.get(a) is not None and _WIDTH.get(a) == _WIDTH.get(b) \
+    if _abi_width(a) is not None and _abi_width(a) == _abi_width(b) \
             and a in ("u8", "u16", "i8", "i16", "i32", "u32"):
         return True
     return False
+
+
+def _abi_width(t):
+    """Width in the current target's ABI, not the host's default model."""
+    if t in ("usize", "str", "ptr"):
+        return ptr_width()
+    return _WIDTH.get(t)
 
 
 class Report:
@@ -781,6 +828,10 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
     brat_packed = {s[1] for s in prog_body
                    if s and s[0] == "externstruct" and len(s) > 3 and s[3]}
     for name, fields in sorted(brat_structs.items()):
+        if name in getattr(cdecl, "arrays", ()):
+            rep.error("extern struct %s: inline array fields in %s are not representable"
+                      % (name, header_name))
+            continue
         if name in getattr(cdecl, "packed", ()) and name not in brat_packed:
             rep.error("extern struct %s: %s declares it packed, BRAT does not "
                       "(write `extern packed struct`)" % (name, header_name))
@@ -808,8 +859,26 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 rep.error("extern struct %s.%s: BRAT declares `%s`, %s has `%s`"
                           % (name, bname, bann, header_name, cextra))
                 bad = True
-            elif cbt in ("ptr", "str") and bann in ("ptr", "str"):
-                if (cbt == "str") != (bann == "str"):
+            elif cbt == "ptr":
+                elem = element_of(bann)
+                if bann == "ptr" and _WIDTH.get(cextra) is not None:
+                    rep.error("extern struct %s.%s: erased `ptr` is incompatible with scalar `%s *`; use `ptr[T]`"
+                              % (name, bname, cextra))
+                    bad = True
+                elif bann == "str":
+                    rep.error("extern struct %s.%s: BRAT declares `%s`, %s has `%s`"
+                              % (name, bname, bann, header_name, ctype))
+                    bad = True
+                elif elem is not None and not pointee_ok(elem, cextra, brat_structs):
+                    rep.error("extern struct %s.%s: BRAT declares `%s`, %s has `%s`"
+                              % (name, bname, bann, header_name, ctype))
+                    bad = True
+                elif elem is None and bann != "ptr":
+                    rep.error("extern struct %s.%s: BRAT declares `%s`, %s has pointer `%s`"
+                              % (name, bname, bann, header_name, ctype))
+                    bad = True
+            elif cbt == "str":
+                if bann != "str":
                     rep.error("extern struct %s.%s: BRAT declares `%s`, %s has `%s`"
                               % (name, bname, bann, header_name, ctype))
                     bad = True
@@ -826,14 +895,15 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
             continue
         _kind, libname, name, params, ret, varargs = s[0], s[1], s[2], s[3], s[4], s[5]
         if name not in cdecl.fns:
-            if libname:
-                rep.warn("extern fn %s: not declared in %s (checked against the library only)"
-                         % (name, header_name))
-            else:
-                rep.warn("extern fn %s: not declared in %s" % (name, header_name))
+            rep.error("extern fn %s: not declared in %s; the ABI is unproven"
+                      % (name, header_name))
             continue
         cret, cparams, cvar = cdecl.fns[name]
         bad = False
+        if name in cdecl.abi_unsupported:
+            rep.error("extern fn %s: unsupported ABI calling convention `%s` in %s"
+                      % (name, cdecl.abi_unsupported[name], header_name))
+            bad = True
         if len(params) != len(cparams):
             rep.error("extern fn %s: BRAT takes %d argument(s), %s declares %d"
                       % (name, len(params), header_name, len(cparams)))
@@ -845,7 +915,8 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 # A callback is a pointer whose *pointee* is a signature: the
                 # header's `float (*cb)(float)` and BRAT's `fn(f32)->f32` are the
                 # same type or they are not, and "both are pointers" is not a proof.
-                if not same_callback(rep, name, where, bann, cp, cdecl, header_name):
+                if not same_callback(rep, name, where, bann, cp, cdecl, header_name,
+                                     brat_structs):
                     bad = True
                 continue
             kind, extra = resolve(cdecl, cp)
@@ -882,6 +953,14 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 elif want == "ptr" and not pointee_ok(elem, extra, brat_structs):
                     rep.error("extern fn %s: %s is declared `%s`, %s has `%s`"
                               % (name, where, bann, header_name, cp))
+                    bad = True
+                elif want == "ptr" and elem is None and _WIDTH.get(extra) is not None:
+                    rep.error("extern fn %s: %s uses erased `ptr`, incompatible with scalar `%s *`; use `ptr[T]`"
+                              % (name, where, extra))
+                    bad = True
+                elif want == "ptr" and elem is None and extra in cdecl.structs:
+                    rep.error("extern fn %s: %s uses erased `ptr` for `%s *`; use `ptr[%s]`"
+                              % (name, where, extra, extra))
                     bad = True
             elif kind == "none":
                 rep.error("extern fn %s: %s is `void`, which is not an argument"
@@ -921,6 +1000,14 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 rep.error("extern fn %s: BRAT returns `%s`, %s returns `%s`"
                           % (name, ret, header_name, cret))
                 bad = True
+            elif rkind == "ptr" and ret == "ptr" and _WIDTH.get(rextra) is not None:
+                rep.error("extern fn %s: BRAT returns erased `ptr`, incompatible with scalar `%s *`; use `ptr[T]`"
+                          % (name, rextra))
+                bad = True
+            elif rkind == "ptr" and ret == "ptr" and rextra in cdecl.structs:
+                rep.error("extern fn %s: BRAT returns erased `ptr` for `%s *`; use `ptr[%s]`"
+                          % (name, rextra, rextra))
+                bad = True
             elif rkind == "ptr" and ret not in ("ptr", "i64", "u64", "usize") \
                     and element_of(ret) is None:
                 rep.error("extern fn %s: BRAT returns `%s`, %s returns `%s`"
@@ -941,7 +1028,7 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
 
 
 def _size_note(t):
-    w = _WIDTH.get(t)
+    w = _abi_width(t)
     return "%d bytes" % w if w else "unknown width"
 
 
@@ -1226,8 +1313,34 @@ PLATFORM_WIDTH_C = {
 PRIM_C = {"i32": "int", "u32": "unsigned", "i64": "int64_t", "u64": "uint64_t",
           "usize": "size_t", "u8": "unsigned char", "u16": "unsigned short",
           "i8": "signed char", "i16": "short",
-          "f32": "float", "f64": "double", "str": "const char *",
+          "f32": "float", "f64": "double", "bool": "_Bool", "str": "const char *",
           "ptr": "void *", "none": "void"}
+
+
+def _brat_ffi_c_type(ann, structs):
+    """The C type the emitters declare, or None when it contains a record value."""
+    if not isinstance(ann, str):
+        return None
+    if ann in structs:
+        return None
+    if ann in PRIM_C:
+        return PRIM_C[ann]
+    if ann.startswith("ptr[") and ann.endswith("]"):
+        elem = _brat_ffi_c_type(ann[4:-1].strip(), structs)
+        if elem is None:
+            return None
+        return "void *" if elem == "void" else elem + " *"
+    if ann.startswith("fn"):
+        signature = brat_callback(ann)
+        if signature is None:
+            return None
+        result, params = signature[0], signature[1]
+        cret = _brat_ffi_c_type(result, structs)
+        cparams = [_brat_ffi_c_type(param, structs) for param in params]
+        if cret is None or any(param is None for param in cparams):
+            return None
+        return "%s (*) (%s)" % (cret, ", ".join(cparams) if cparams else "void")
+    return None
 
 
 def _scalar_spelling(t):
@@ -1267,22 +1380,17 @@ def platform_width_uses(cdecl):
 
 
 def probe_source(prog_body, header, cdecl=None):
-    """A C file whose compilation proves the two struct layouts are identical.
+    """A C file that checks target widths, record layouts, and symbol declarations.
 
-    A re-declaration of the prototypes would be too strict for BRAT on purpose:
-    C calls `long long` and `int64_t` conflicting types, and `float *` and
-    `void *` incompatible, while BRAT deliberately erases both differences (a
-    `ptr` is any raw pointer, and every 8-byte integer is `i64`). Prototypes are
-    therefore compared by width in `check`, where the ABI is what is compared.
-
-    What is left needs a compiler: a struct's size and its member offsets depend
-    on the target's alignment and padding rules, and no amount of reading the
-    text gets those right. `_Static_assert` asks the compiler to state them, and
-    a mismatch is a compile error in the compiler's own words.
+    `check` compares function ABI types. The compiler verifies the referenced
+    symbols and target layouts; explicit function-pointer casts keep compatible
+    C typedef spellings from becoming false ABI mismatches.
     """
     structs = {s[1]: s[2] for s in prog_body if s and s[0] == "externstruct"}
     widths = platform_width_uses(cdecl)
-    if not structs and not widths:
+    externs = [s for s in prog_body if s and s[0] == "extern" and cdecl
+               and s[2] in cdecl.fns]
+    if not structs and not widths and not externs:
         return None
     lines = ['#include <stddef.h>', '#include <stdint.h>',
              '#include "%s"' % header, ""]
@@ -1300,7 +1408,10 @@ def probe_source(prog_body, header, cdecl=None):
     for name, fields in structs.items():
         # The header's own spelling: `struct Foo` when there is no typedef.
         cname = cdecl.c_name(name) if cdecl is not None else name
-        members = " ".join("%s %s;" % (PRIM_C.get(fann, fann), fname) for fname, fann in fields)
+        members = " ".join(
+            "%s %s;" % ("void *" if isinstance(fann, str)
+                        and fann.startswith("ptr[") else PRIM_C.get(fann, fann), fname)
+            for fname, fann in fields)
         kw = "typedef struct __attribute__((packed)) { " if name in packed else "typedef struct { "
         lines.append("%s%s } bf_%s;" % (kw, members, name))
         lines.append('_Static_assert(sizeof(bf_%s) == sizeof(%s), '
@@ -1309,6 +1420,24 @@ def probe_source(prog_body, header, cdecl=None):
             lines.append('_Static_assert(offsetof(bf_%s, %s) == offsetof(%s, %s), '
                          '"extern struct %s.%s: offset differs from the header");'
                          % (name, fname, cname, fname, name, fname))
+        lines.append("")
+    probe_id = 0
+    for ext in externs:
+        name, params, ret, varargs = ext[2], ext[3], ext[4], ext[5]
+        cret = _brat_ffi_c_type(ret or "none", structs)
+        cparams = [_brat_ffi_c_type(
+            p[2] if isinstance(p, tuple) and len(p) > 2 else None, structs)
+            for p in params]
+        if cret is None or any(param is None for param in cparams):
+            continue
+        if varargs:
+            cparams.append("...")
+        signature = "%s (*)(%s)" % (cret, ", ".join(cparams) if cparams else "void")
+        lines.append("static %s (*brat_ffi_proto_probe_%d)(%s) = (%s)&%s;"
+                 % (cret, probe_id, ", ".join(cparams) if cparams else "void",
+                signature, name))
+        probe_id += 1
+    if probe_id:
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -1365,6 +1494,7 @@ _LANG_SCALAR = {
     "i64": ("c_int64", "int64_t", "i64"),
     "u64": ("c_uint64", "uint64_t", "u64"),
     "usize": ("c_size_t", "size_t", "usize"),
+    "bool": ("c_bool", "bool", "bool"),
     "f32": ("c_float", "float", "f32"),
     "f64": ("c_double", "double", "f64"),
     "str": ("c_char_p", "char*", "*const c_char"),
@@ -1520,11 +1650,24 @@ def emit_go(cdecl, header_name, lib=None):
     and the Go side only names them.
     """
     structs, notes = _lang_header(cdecl, header_name, "go", lib)
+    go_structs = {name for name, _, _ in structs}
     out = ["// Go bindings for %s" % os.path.basename(header_name or ""),
            "// Generated by brat bindgen from the same C view `brat ffi --header` proves.",
            "", "package bindings", "", "/*",
-           "#include <stdlib.h>", '#include "%s"' % (header_name or ""), "*/",
+           "#include <stdlib.h>", "#include <stdbool.h>",
+           '#include "%s"' % (header_name or ""), "*/",
            'import "C"', ""]
+    needs_unsafe = False
+
+    def go_type(ctype):
+        if ctype in go_structs:
+            return ctype
+        if ctype == "char*":
+            return "*C.char"
+        if ctype == "void*":
+            return "unsafe.Pointer"
+        return "C." + ctype
+
     out.append("type (")
     for name, rows, packed in structs:
         out.append("\t%s = C.struct_%s" % (name, name))
@@ -1538,6 +1681,7 @@ def emit_go(cdecl, header_name, lib=None):
             continue
         args = []
         bad = False
+        uses_unsafe = rt == "void*"
         for i, cp in enumerate(cparams):
             kind, extra = resolve(cdecl, cp)
             t = _lang_type(kind, extra, "go") if kind != "none" else None
@@ -1545,15 +1689,19 @@ def emit_go(cdecl, header_name, lib=None):
                 notes.append("%s: parameter `%s` has no go spelling" % (name, cp.strip()))
                 bad = True
                 break
-            args.append("a%d C.%s" % (i, t))
+            args.append("a%d %s" % (i, go_type(t)))
+            uses_unsafe = uses_unsafe or t == "void*"
         if bad:
             continue
-        rs = "" if rt is None else " C.%s" % rt
+        needs_unsafe = needs_unsafe or uses_unsafe
+        rs = "" if rt is None else " " + go_type(rt)
         call = "%sC.%s(%s)" % ("return " if rt else "", name,
                                ", ".join("a%d" % i for i in range(len(cparams))))
         out.append("// %s mirrors the C declaration; cgo checks the ABI." % name)
         out.append("func %sC(%s)%s { %s }" % (name, ", ".join(args), rs, call))
     out.append("")
+    if needs_unsafe:
+        out.insert(out.index('import "C"') + 1, 'import "unsafe"')
     for why in notes:
         out.insert(1, "// skipped: %s" % why)
     return "\n".join(out) + "\n", notes
@@ -1564,7 +1712,7 @@ LANG_EMITTERS = {"python": emit_python, "rust": emit_rust, "go": emit_go}
 
 BRAT_OF_C = {"i8": "i8", "u8": "u8", "i16": "i16", "u16": "u16",
              "i32": "i32", "u32": "u32", "i64": "i64", "u64": "u64", "usize": "usize",
-             "f32": "f32", "f64": "f64", "str": "str", "ptr": "ptr", "none": "none"}
+             "f32": "f32", "f64": "f64", "bool": "bool", "str": "str", "ptr": "ptr", "none": "none"}
 
 
 def _struct_order(cdecl):
@@ -1646,6 +1794,18 @@ def emit_bindings(prog_body, cdecl, header_name, lib=None):
         out.append("// library: %s" % lib)
 
     used = set()
+    pointer_structs = {name for name, fields in cdecl.structs.items()
+                       if fields and name not in getattr(cdecl, "anon", ())
+                       and bindgen_name_ok(name)}
+
+    def brat_pointer(extra):
+        if extra in ("i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
+                     "usize", "f32", "f64", "bool"):
+            return "ptr[%s]" % extra
+        if extra in pointer_structs:
+            return "ptr[%s]" % extra
+        return "ptr"
+
     struct_lines = []
     for name in _struct_order(cdecl):
         fields = cdecl.structs[name]
@@ -1656,6 +1816,9 @@ def emit_bindings(prog_body, cdecl, header_name, lib=None):
             skip("struct %s has no body in the header: declared as `ptr`" % name)
             continue
         if name in getattr(cdecl, "anon", ()):
+            if name in getattr(cdecl, "arrays", ()):
+                skip("struct %s has inline array fields: not representable as an extern struct" % name)
+                continue
             skip("struct %s holds an anonymous union or struct: no BRAT field name "
                  "for it, so the record is not declared" % name)
             continue
@@ -1671,7 +1834,8 @@ def emit_bindings(prog_body, cdecl, header_name, lib=None):
                 skip("%s.%s: a C member name the BRAT parser reads as a keyword"
                      % (name, fname))
                 continue
-            b = BRAT_OF_C.get(kind, extra if kind == "struct" else None)
+            b = brat_pointer(extra) if kind == "ptr" else \
+                BRAT_OF_C.get(kind, extra if kind == "struct" else None)
             if b is None:
                 skip("struct %s.%s: `%s` has no BRAT spelling" % (name, fname, ctype))
                 b = "ptr"
@@ -1693,6 +1857,8 @@ def emit_bindings(prog_body, cdecl, header_name, lib=None):
             skip("%s: result `%s` has no BRAT spelling" % (name, cret.strip()))
             continue
         ret = "none" if rkind == "none" else (rextra if rkind == "struct" else BRAT_OF_C[rkind])
+        if rkind == "ptr":
+            ret = brat_pointer(rextra)
         if rkind == "struct" and rextra not in used:
             skip("%s: returns `%s`, whose body is opaque" % (name, rextra))
             continue
@@ -1712,6 +1878,8 @@ def emit_bindings(prog_body, cdecl, header_name, lib=None):
                     bad = True
                     break
                 b = extra
+            elif kind == "ptr":
+                b = brat_pointer(extra)
             elif kind not in BRAT_OF_C:
                 skip("%s: parameter `%s` has no BRAT spelling" % (name, cp.strip()))
                 bad = True

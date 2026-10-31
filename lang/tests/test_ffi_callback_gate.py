@@ -25,12 +25,16 @@ import _scratch
 import os
 import subprocess
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENG = os.path.abspath(os.path.join(HERE, "..", "engine"))
 CLI = os.path.join(ENG, "cli.py")
 CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-ffi-cbgate-")
+version = tuple(int(part) for part in unicodedata.unidata_version.split("."))
+case_version = 1600 if version >= (16, 0) else 1500
+CXX_ENV = dict(os.environ, BRAT_CASE_MAP_VERSION=str(case_version))
 
 BODY = (
     'fn add_two(x: i64) -> i64 { return x + 2 }\n'
@@ -42,6 +46,8 @@ BODY = (
 # make needs a library that really exists and a symbol that really is there.
 # The emitters refuse before any of that, so they get a name that never loads.
 LIB_C = "int64_t call_cb(int64_t (*f)(int64_t), int64_t v) { return f(v); }\n"
+LIB_C += "int64_t call_ptr(int64_t (*f)(int32_t *), int32_t *p) { return f(p); }\n"
+LIB_C += "int32_t *call_ptr_ret(int32_t *(*f)(int32_t *), int32_t *p) { return f(p); }\n"
 
 # name -> (call written into main, the sentence every path must say)
 REFUSED = {
@@ -97,7 +103,8 @@ def main():
         ipath = write(name + "_interp", source(body, lib)) if lib else None
 
         # Both front ends, through the two doors that write C.
-        cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120)
+        cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120,
+                     env=CXX_ENV)
         py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
         ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", path],
                              capture_output=True, timeout=120, env=py_env)
@@ -127,7 +134,8 @@ def main():
     # The shape that works: a real callback still gets its wrapper.
     ok_src = source('print(call_cb("add_two", 40))', "libnosuch.so")
     path = write("cb_ok", ok_src)
-    cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120)
+    cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120,
+                         env=CXX_ENV)
     assert cxx.returncode == 0 and b"brat_cb_add_two" in cxx.stdout, (
         "cb_ok: a valid callback must emit its wrapper")
     py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
@@ -145,6 +153,35 @@ def main():
     assert ref_stdout == cxx.stdout, "cb_ok: the two emitters wrote different C"
     n += 1
     print("ffi cb gate ok: cb_ok (wrapper emitted, emitters byte-identical)")
+
+    ptr_src = (
+        'extern "%s" fn call_ptr(f: fn(ptr[i32]) -> i64, p: ptr[i32]) -> i64\n' % lib
+        + 'extern "%s" fn call_ptr_ret(f: fn(ptr[i32]) -> ptr[i32], p: ptr[i32]) -> ptr[i32]\n' % lib
+        + 'fn read_ptr(p: ptr[i32]) -> i64 { return p[0] }\n'
+        + 'fn return_ptr(p: ptr[i32]) -> ptr[i32] { return p }\n'
+        + 'fn main() -> i64 { call_ptr("read_ptr", ptr_null()); return call_ptr_ret("return_ptr", ptr_null()) }\n')
+    ptr_path = write("cb_ptr", ptr_src)
+    cxx = subprocess.run([CXX, "cc", ptr_path], capture_output=True, timeout=120,
+                         env=CXX_ENV)
+    assert cxx.returncode == 0, cxx.stderr.decode("utf-8", "replace")[-400:]
+    py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
+    ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", ptr_path],
+                         capture_output=True, timeout=120, env=py_env)
+    code, sep, _contract = ref.stdout.rpartition(b"\n/* BRAT FFI contract")
+    ref_stdout = code + b"\n" if sep else ref.stdout
+    assert ref.returncode == 0 and ref_stdout == cxx.stdout, (
+        "cb_ptr: typed pointer callback emitters disagree")
+    assert b"call_ptr(int64_t (*) (int *), int *)" in cxx.stdout, cxx.stdout[:300]
+    cfile = os.path.join(TMP, "cb_ptr.c")
+    obj = os.path.join(TMP, "cb_ptr.o")
+    with open(cfile, "wb") as f:
+        f.write(cxx.stdout)
+    cc = subprocess.run(["cc", "-std=c99", "-Werror=incompatible-pointer-types",
+                         "-I", ENG, "-c", cfile, "-o", obj],
+                        capture_output=True, timeout=120)
+    assert cc.returncode == 0, cc.stderr.decode("utf-8", "replace")[-600:]
+    n += 1
+    print("ffi cb gate ok: typed pointer callback is C-compatible")
 
     print("FFI CALLBACK GATE ALL GREEN (%d asserts)" % n)
 

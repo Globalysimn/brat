@@ -31,6 +31,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -53,6 +54,9 @@ CC = _load("agreement_codegen", os.path.join(ENGINE, "codegen_c.py"))
 TC = _load("agreement_toolchain", os.path.join(ENGINE, "toolchain.py"))
 
 CC_ARGS = ["-O2", "-w", "-I", ENGINE, "-lm", "-lpthread"]
+version = tuple(int(part) for part in unicodedata.unidata_version.split("."))
+case_version = 1600 if version >= (16, 0) else 1500
+CXX_ENV = dict(os.environ, BRAT_CASE_MAP_VERSION=str(case_version))
 
 # `brat-cxx cc --no-check` writes the same banner `brat emit-c --no-check` does;
 # the comparison here is between two emitters, so the banner is normalised away
@@ -138,7 +142,7 @@ def main():
         # tests go through. Without it the gate refuses five corpus programs and
         # this test cannot see the C at all.
         if have_cxx:
-            e = run([CXX, "cc", "--no-check", path])
+            e = run([CXX, "cc", "--no-check", path], env=CXX_ENV)
             if e.stdout.startswith(UNVERIFIED):
                 e = subprocess.CompletedProcess(e.args, e.returncode,
                                                 e.stdout[len(UNVERIFIED):], e.stderr)

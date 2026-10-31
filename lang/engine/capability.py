@@ -27,6 +27,7 @@ INSERT_METH = {"push", "ins", "set"}
 # argument names is written, even though no `let` in the program says so.
 PTR_WRITE = {"ptr_write_i64", "ptr_write_f64", "ptr_write_f32", "ptr_write_u8",
              "ptr_write_str", "ptr_write_ptr", "ptr_write_struct", "slice_set", "fill"}
+RESOURCE_CLOSE = {"tcp_close"}
 MUTATE_METH = {"pop", "sort", "sort_by", "del", "clear"}
 JOIN = "join_all"
 REPEATS = {"while", "forrange", "foriter"}
@@ -178,6 +179,11 @@ def touched(stmt, fns=None):
             elif n[0] == "call" and n[1] in PTR_WRITE:
                 # C is told to write through this pointer: two threads that call
                 # one of these on the same place are two writers of it.
+                args = n[2] or []
+                r = root(args[0]) if args else None
+                if r:
+                    write.add(r)
+            elif n[0] == "call" and n[1] in RESOURCE_CLOSE:
                 args = n[2] or []
                 r = root(args[0]) if args else None
                 if r:

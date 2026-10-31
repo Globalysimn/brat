@@ -23,32 +23,39 @@ import _scratch
 import os
 import subprocess
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CLI = os.path.join(ROOT, "lang", "engine", "cli.py")
 CXX = os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
 TMP = _scratch.mkdtemp(prefix="brat-widths")
+version = tuple(int(part) for part in unicodedata.unidata_version.split("."))
+case_version = 1600 if version >= (16, 0) else 1500
+CXX_ENV = dict(os.environ, BRAT_CASE_MAP_VERSION=str(case_version))
 
 HEADER = """short neg_short(void);
 signed char neg_char(void);
-long long widen(short a, signed char b);
+int64_t widen(short a, signed char b);
+_Bool apply_bool(_Bool x, _Bool (*cb)(_Bool));
 float apply_f32(float x, float (*cb)(float));
 typedef struct { int x; int y; } Pt;
 Pt apply_pt(Pt (*cb)(int), int n);
-long long sum_pts(int n, ...);
+int64_t sum_pts(int n, ...);
 """
 
 LIB_C = """#include <stdarg.h>
+#include <stdint.h>
 short neg_short(void) { return -3; }
 signed char neg_char(void) { return -7; }
-long long widen(short a, signed char b) { return (long long)a * 1000 + (long long)b; }
+int64_t widen(short a, signed char b) { return (int64_t)a * 1000 + (int64_t)b; }
+_Bool apply_bool(_Bool x, _Bool (*cb)(_Bool)) { return cb(x); }
 float apply_f32(float x, float (*cb)(float)) { return cb(x) * 2.0f; }
 typedef struct { int x; int y; } Pt;
 Pt apply_pt(Pt (*cb)(int), int n) { return cb(n); }
-long long sum_pts(int n, ...) {
+int64_t sum_pts(int n, ...) {
     va_list ap; va_start(ap, n);
-    long long s = 0;
+    int64_t s = 0;
     for (int i = 0; i < n; i++) { Pt p = va_arg(ap, Pt); s += p.x * 10 + p.y; }
     va_end(ap); return s;
 }
@@ -57,20 +64,23 @@ long long sum_pts(int n, ...) {
 DECLS = '''extern "LIB" fn neg_short() -> i16
 extern "LIB" fn neg_char() -> i8
 extern "LIB" fn widen(a: i16, b: i8) -> i64
+extern "LIB" fn apply_bool(x: bool, cb: fn(bool) -> bool) -> bool
 extern "LIB" fn apply_f32(x: f32, cb: fn(f32) -> f32) -> f32
 '''
 
 WIDTHS = DECLS + '''fn plus_one(x: f32) -> f32 { return x + 1.0 }
+fn identity_bool(x: bool) -> bool { return x }
 fn main() -> i64 {
   print(neg_short())
   print(neg_char())
   print(widen(-2, -3))
+    print(apply_bool(true, "identity_bool"))
   print(apply_f32(3.5, "plus_one"))
   return 0
 }
 '''
 
-WIDTHS_WANT = "-3\n-7\n-2003\n9.0\n"
+WIDTHS_WANT = "-3\n-7\n-2003\nTrue\n9.0\n"
 
 STRUCTS = '''extern struct Pt { x: i32, y: i32 }
 extern "LIB" fn apply_pt(cb: fn(i64) -> Pt, n: i64) -> Pt
@@ -213,10 +223,11 @@ def main():
     assert "extern short neg_short(void);" in out, out
     assert "extern signed char neg_char(void);" in out, out
     assert "extern int64_t widen(short, signed char);" in out, out
-    assert "extern float apply_f32(float, void *);" in out, out
+    assert "extern float apply_f32(float, float (*) (float));" in out, out
 
     # both front ends emit the same C for the same file
-    p = subprocess.run([CXX, "cc", widths], capture_output=True, text=True, timeout=600)
+    p = subprocess.run([CXX, "cc", widths], capture_output=True, text=True, timeout=600,
+                       env=CXX_ENV)
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == out, "the two emitters disagree on the extern declarations"
 
@@ -360,9 +371,7 @@ fn main() -> i64 {
     assert native(narrow, "narrow.exe") == want, "native disagrees with the interpreter"
     print("ffiw ok: fixed-width C types bind at their true width, both backends")
 
-    # `_Bool` is one byte. It used to be read as `i32`, so a struct holding one
-    # mis-laid, and a BRAT `bool` was not an extern slot at all: `u8` is the
-    # spelling that is one byte wide and range-checked.
+    # `_Bool` is a distinct one-byte ABI type, represented by BRAT `bool`.
     BOOL_HDR = write("bool.h", "_Bool flag(_Bool f);\nstruct Flags { _Bool on; int n; };\n")
     BOOL_LIB = write("bool.c", """#include <stdbool.h>
 bool flag(bool f) { return f ? false : true; }
@@ -373,13 +382,25 @@ struct Flags { _Bool on; int n; };
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     bgen = run(["bindgen", BOOL_HDR])
-    assert "extern struct Flags { on: u8, n: i32 }" in bgen.stdout, \
+    assert "extern struct Flags { on: bool, n: i32 }" in bgen.stdout, \
         "a `_Bool` field is one byte: %r" % bgen.stdout
-    assert "extern fn flag(f: u8) -> u8;" in bgen.stdout, \
-        "a `_Bool` parameter is one byte: %r" % bgen.stdout
-    bfile = write("bool_gen.brat", bgen.stdout)
+    assert "extern fn flag(f: bool) -> bool;" in bgen.stdout, \
+        "a `_Bool` slot keeps its boolean type: %r" % bgen.stdout
+    bfile = write("bool_gen.brat", bgen.stdout.replace(
+        "extern fn flag(f: bool) -> bool;",
+        'extern "%s" fn flag(f: bool) -> bool;' % blib)
+        + 'fn main() -> i64 { print(flag(true)); print(flag(false)); return 0 }\n')
     assert run(["ffi", "--header", BOOL_HDR, bfile]).returncode == 0, \
         "the `_Bool` binding must be proven by the compiler"
+    bi = run(["run", "--interp", bfile])
+    assert bi.returncode == 0 and bi.stdout == "False\nTrue\n", \
+        "interpreter bool FFI: %r" % (bi.stdout + bi.stderr)
+    bexe = os.path.join(TMP, "bool.exe")
+    bb = run(["build", bfile, "--header", BOOL_HDR, "-o", bexe])
+    assert bb.returncode == 0, bb.stdout + bb.stderr
+    bn = subprocess.run([bexe], capture_output=True, text=True, timeout=120)
+    assert (bn.returncode, bn.stdout) == (0, bi.stdout), \
+        "native bool FFI: %r" % (bn.stdout + bn.stderr)
     # A deliberately wrong width is refused by the layout proof, not by a crash.
     bad = write("bool_bad.brat", "extern struct Flags { on: i32, n: i32 }\n"
                                  "fn main() -> i64 { return 0 }\n")
@@ -403,7 +424,7 @@ struct Flags { _Bool on; int n; };
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     tgen = run(["bindgen", TAG_HDR])
-    assert "extern struct Tag { n: i32, on: u8 }" in tgen.stdout, tgen.stdout
+    assert "extern struct Tag { n: i32, on: bool }" in tgen.stdout, tgen.stdout
     tfile = write("tag_gen.brat", tgen.stdout)
     rt = run(["ffi", "--header", TAG_HDR, tfile])
     assert rt.returncode == 0, \

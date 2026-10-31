@@ -627,17 +627,6 @@ def _out_ctype(width):
     return {1: "unsigned char", 2: "unsigned short", 4: "int"}.get(width, "int64_t")
 
 
-def _out_cast(width, scratch):
-    """What the binding takes back after the callee wrote `scratch`."""
-    if width == 1:
-        return "(int64_t)(unsigned char)%s" % scratch
-    if width == 2:
-        return "(int64_t)(short)%s" % scratch
-    if width == 4:
-        return "(int64_t)%s" % scratch
-    return "(int64_t)%s" % scratch
-
-
 # One table for the whole FFI boundary: BRAT width -> C spelling, and the range
 # the value must sit in before a narrower C type may see it. Two ladders that
 # disagree (a declaration saying `int64_t`, a call site saying `short`) is how an
@@ -646,6 +635,7 @@ def _out_cast(width, scratch):
 # a machine word -- a silent `int64_t` for `i16` is the exact bug this table
 # exists to make impossible.
 _FFI_C = {
+    "bool": ("_Bool", None, None),
     "i8": ("signed char", "-128LL", "127LL"),
     "u8": ("unsigned char", "0LL", "255LL"),
     "i16": ("short", "-32768LL", "32767LL"),
@@ -1597,10 +1587,22 @@ class Emitter:
             return "void"
         if isinstance(ann, str) and ann in self.structs:
             return _ffi_c(ann)
-        if isinstance(ann, str) and ann.startswith("ptr"):
+        if isinstance(ann, str) and ann == "ptr":
             return "void *"
         if isinstance(ann, str) and ann.startswith("fn"):
-            return "void *"
+            _abi_type, callback_signature = _typer_abi()
+            signature = callback_signature(ann)
+            if signature is None:
+                raise SyntaxError("unsupported FFI callback type `%s`" % ann)
+            params, result = signature
+            cparams = [self._ffi_decl_type(param) for param in params]
+            return "%s (*) (%s)" % (self._ffi_decl_type(result),
+                                    ", ".join(cparams) if cparams else "void")
+        if isinstance(ann, str) and ann.startswith("ptr[") and ann.endswith("]"):
+            elem = ann[4:-1].strip()
+            if elem.startswith("fn"):
+                raise SyntaxError("pointer to callback is not a supported FFI type")
+            return self._ffi_decl_type(elem) + " *"
         ctype = _ffi_ctype(ann)
         if ctype is None:
             raise SyntaxError("unsupported FFI type `%s` in an extern declaration" % (ann,))
@@ -1616,14 +1618,22 @@ class Emitter:
         """
         if not (isinstance(e, tuple) and e[0] == "var"):
             raise SyntaxError("`&` takes a binding: `let mut p = &x`")
-        width = {"u8": 1, "i8": 1, "u16": 2, "i16": 2, "i32": 4, "u32": 4,
-                 "f32": 4, "usize": 8, "u64": 8, "i64": 8, "f64": 8}.get(ann or "", 8)
+        elem = ann or ""
+        width = {"bool": 1, "u8": 1, "i8": 1, "u16": 2, "i16": 2,
+                 "i32": 4, "u32": 4, "f32": 4, "usize": 8,
+                 "u64": 8, "i64": 8, "f64": 8}.get(elem, 8)
         _s = self.sym.get(e[1])
         cn = getattr(_s, "cn", None) or e[1]
         scratch = self.new_tmp("out")
-        self._out_binds.append((e[1], cn, scratch, width))
-        return (["%s %s = (%s)(%s).as.ival;" % (_out_ctype(width), scratch,
-                                                _out_ctype(width), cn)],
+        ctype = {"bool": "_Bool", "i8": "int8_t", "u8": "uint8_t",
+                 "i16": "int16_t", "u16": "uint16_t", "i32": "int32_t",
+                 "u32": "uint32_t", "i64": "int64_t", "u64": "uint64_t",
+                 "usize": "size_t", "f32": "float", "f64": "double"}.get(
+                     elem, _out_ctype(width))
+        initial = "vis_true(%s)" % cn if elem == "bool" else \
+            "vnum(%s)" % cn if elem in ("f32", "f64") else "(%s).as.ival" % cn
+        self._out_binds.append((e[1], cn, scratch, width, elem))
+        return (["%s %s = (%s)(%s);" % (ctype, scratch, ctype, initial)],
                 "(void *)&%s" % scratch)
 
     def _out_flush_stmts(self):
@@ -1633,9 +1643,16 @@ class Emitter:
         left behind leaves the binding as it was -- never a value nobody wrote.
         """
         out = []
-        for _name, cn, scratch, width in self._out_binds:
+        for _name, cn, scratch, width, elem in self._out_binds:
             out.append("vrc_dec(%s);" % cn)
-            out.append("%s = vint(%s);" % (cn, _out_cast(width, scratch)))
+            if elem in ("f32", "f64"):
+                out.append("%s = vfloat((double)%s);" % (cn, scratch))
+            elif elem == "bool":
+                out.append("%s = vbool(%s);" % (cn, scratch))
+            else:
+                cast = "(int64_t)(uint64_t)%s" % scratch if elem in (
+                    "u8", "u16", "u32", "u64", "usize") else "(int64_t)%s" % scratch
+                out.append("%s = vint(%s);" % (cn, cast))
         return out
 
     def ex(self, e):
@@ -2535,6 +2552,8 @@ class Emitter:
                 var_slot = i >= len(params) and ann == "ptr"
                 if ann == "str":
                     ok = "%s.tag == V_STR" % t
+                elif ann == "bool":
+                    ok = "%s.tag == V_BOOL" % t
                 elif var_slot:
                     # A `str` fills a variadic `..ptr` slot as `const char *`,
                     # which is what `%s` reads.
@@ -2552,6 +2571,8 @@ class Emitter:
                               % (ok, i + 1, name, ann or "value", self.err_bail()))
                 if ann == "str":
                     cargs.append("%s.as.str" % t)
+                elif ann == "bool":
+                    cargs.append("%s.as.b" % t)
                 elif var_slot:
                     cargs.append("(%s.tag == V_STR ? (void *)%s.as.str : (void *)%s.as.ival)"
                                  % (t, t, t))
@@ -2578,6 +2599,8 @@ class Emitter:
                 pa_all.append('if (%s == %s) { vraise_errno("%s"); %s }'
                               % (r, sentinel, name, self.err_bail()))
                 return (pa_all + _fl, "vint(%s)" % r)
+            if ret == "bool":
+                return (pa_all + _fl, "vbool(%s)" % call)
             if ret in _FFI_INT_RESULT:
                 # A scalar result goes into a temp before the flush, so a raise
                 # from the flush still leaves a value the call produced. The cast
@@ -4308,7 +4331,9 @@ class Emitter:
             _sfields = self.structs[_sname]
             _smembers = []
             for _sfn, _sty in _sfields:
-                if _sty == "i64":
+                if _sty == "bool":
+                    _smembers.append("_Bool %s;" % _ffi_c(_sfn))
+                elif _sty == "i64":
                     _smembers.append("int64_t %s;" % _ffi_c(_sfn))
                 elif _sty == "i32":
                     _smembers.append("int %s;" % _ffi_c(_sfn))
@@ -4406,7 +4431,9 @@ class Emitter:
             for _i, _p in enumerate(_cb_params):
                 _ann = _p[2] if isinstance(_p, tuple) and len(_p) > 2 else None
                 _arg = "a%d" % _i
-                if _ann in self.structs:
+                if _ann == "bool":
+                    _pushes.append("vec_push(_a, vbool(%s));" % _arg)
+                elif _ann in self.structs:
                     _pushes.append("vec_push(_a, %s);" % self._c_struct_to_val(_ann, _arg))
                 elif _ann == "str":
                     _pushes.append("vec_push(_a, vstr(%s));" % _arg)
@@ -4431,10 +4458,12 @@ class Emitter:
             self.out.append("  vcb_check(_r);")
             if _cb_ret in (None, "none"):
                 self.out.append("  (void)_r;")
+            elif _cb_ret == "bool":
+                self.out.append("  return _r.as.b;")
             elif _cb_ret == "str":
                 self.out.append("  return _r.as.str;")
-            elif _cb_ret == "ptr":
-                self.out.append("  return (void *)_r.as.ival;")
+            elif isinstance(_cb_ret, str) and _cb_ret.startswith("ptr"):
+                self.out.append("  return (%s)_r.as.ival;" % self._ffi_decl_type(_cb_ret))
             elif _cb_ret in ("f32", "f64"):
                 # BRAT has one float type; the union holds it in `fval`, and a
                 # `float` return read out of `ival` is the float's bits.
@@ -4463,7 +4492,10 @@ class Emitter:
             for _i, _p in enumerate(_ex_params):
                 _ann = _p[2] if isinstance(_p, tuple) and len(_p) > 2 else None
                 _arg = "a%d" % _i
-                if _ann in ("i64", "i32"):
+                if _ann == "bool":
+                    _cparams.append("_Bool " + _arg)
+                    _pushes.append("vec_push(_a, vbool(%s));" % _arg)
+                elif _ann in ("i64", "i32"):
                     _cparams.append(("int64_t" if _ann == "i64" else "int") + " " + _arg)
                     _pushes.append("vec_push(_a, vint(%s));" % _arg)
                 elif _ann == "f64":
@@ -4498,6 +4530,8 @@ class Emitter:
                 _cret = "float"
             elif _ex_ret == "str":
                 _cret = "const char *"
+            elif _ex_ret == "bool":
+                _cret = "_Bool"
             elif _ex_ret == "ptr":
                 _cret = "void *"
             else:
@@ -4513,6 +4547,8 @@ class Emitter:
                 self.out.append("  (void)_r;")
             elif _ex_ret == "str":
                 self.out.append("  return _r.as.str;")
+            elif _ex_ret == "bool":
+                self.out.append("  return _r.as.b;")
             elif _ex_ret == "ptr":
                 self.out.append("  return (void *)_r.as.ival;")
             elif _ex_ret == "f64":
@@ -4528,7 +4564,9 @@ class Emitter:
         _mems = []
         for _f, _ft in self.structs[sname]:
             _base = "(*map_get((%s).as.map, \"%s\"))" % (valexpr, _f)
-            if _ft == "str":
+            if _ft == "bool":
+                _mems.append(".%s = %s.as.b" % (_ffi_c(_f), _base))
+            elif _ft == "str":
                 _mems.append(".%s = %s.as.str" % (_ffi_c(_f), _base))
             elif _ft == "ptr":
                 _mems.append(".%s = (void *)%s.as.ival" % (_ffi_c(_f), _base))
@@ -4546,7 +4584,9 @@ class Emitter:
         _sets = []
         for _f, _ft in self.structs[sname]:
             _fexpr = "%s.%s" % (cexpr, _ffi_c(_f))
-            if _ft == "str":
+            if _ft == "bool":
+                _val = "vbool(%s)" % _fexpr
+            elif _ft == "str":
                 _val = "vstr(%s)" % _fexpr
             elif _ft == "ptr":
                 _val = "vint((int64_t)%s)" % _fexpr

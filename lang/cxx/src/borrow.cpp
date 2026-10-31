@@ -2068,12 +2068,12 @@ FnTable pub_sigs(const std::vector<StmtP> &body) {
 // else is refused here, at `check`, so `check` stays the verdict it claims to
 // be: a program whose signature the emitter cannot spell used to pass `check`
 // and die in `build`. Same text and order as `borrow.py`.
-const std::set<std::string> FFI_SLOTS = {"i8", "u8", "i16", "u16", "i32", "u32",
+const std::set<std::string> FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32",
                                          "i64", "u64", "usize", "f32", "f64",
                                          "str", "ptr"};
 
 const char *FFI_HINT =
-    "a supported extern slot is i8..u64, usize, f32, f64, str, ptr, "
+    "a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
     "ptr[T], fn(...), an `extern struct`, or `none`";
 
 bool ffi_slot_ok(const std::optional<std::string> &ann, const std::set<std::string> &structs) {

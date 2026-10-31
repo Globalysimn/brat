@@ -33,28 +33,47 @@ CLI = os.path.join(ROOT, "lang", "engine", "cli.py")
 CXX = os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
 TMP = _scratch.mkdtemp(prefix="brat-outs")
 
+#include <stddef.h>
+#include <stdint.h>
+
 HEADER = """int fill(int *n, int v);
-int divmod2(long long a, long long b, long long *q, long long *r);
+void fill_f32(float *out);
+void fill_bool(_Bool *out);
+void fill_size(size_t *out);
+void fill_scalars(signed char *small, unsigned short *medium, unsigned int *wide);
+int divmod2(int64_t a, int64_t b, int64_t *q, int64_t *r);
 void narrow_down(unsigned char *small, short *med, int *big);
-long long sum_bytes(const unsigned char *p, int n);
+int64_t sum_bytes(unsigned char *p, int n);
 void *malloc(unsigned long n);
 void free(void *p);
 """
 
 LIB_C = """#include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
 int fill(int *n, int v) { if (n) *n = v * 2; return 7; }
-int divmod2(long long a, long long b, long long *q, long long *r) {
+void fill_f32(float *out) { *out = 3.5f; }
+void fill_bool(_Bool *out) { *out = 1; }
+void fill_size(size_t *out) { *out = 1234567; }
+void fill_scalars(signed char *small, unsigned short *medium, unsigned int *wide) {
+  *small = -7; *medium = 40000; *wide = 3000000000U;
+}
+int divmod2(int64_t a, int64_t b, int64_t *q, int64_t *r) {
     *q = a / b; *r = a % b; return 0;
 }
 void narrow_down(unsigned char *small, short *med, int *big) {
     *small = 200; *med = -3; *big = 123456;
 }
-long long sum_bytes(const unsigned char *p, int n) {
-    long long s = 0; for (int i = 0; i < n; i++) s += p[i]; return s;
+int64_t sum_bytes(unsigned char *p, int n) {
+  int64_t s = 0; for (int i = 0; i < n; i++) s += p[i]; return s;
 }
 """
 
 CDECLS = '''extern "LIB" fn fill(out: ptr[i32], v: i32) -> i32
+extern "LIB" fn fill_f32(out: ptr[f32])
+extern "LIB" fn fill_bool(out: ptr[bool])
+extern "LIB" fn fill_size(out: ptr[usize])
+extern "LIB" fn fill_scalars(small: ptr[i8], medium: ptr[u16], wide: ptr[u32])
 extern "LIB" fn divmod2(a: i64, b: i64, q: ptr[i64], r: ptr[i64]) -> i32
 extern "LIB" fn narrow_down(small: ptr[u8], med: ptr[i16], big: ptr[i32])
 extern "LIB" fn sum_bytes(p: ptr[u8], n: i32) -> i64
@@ -67,6 +86,26 @@ fn main() -> i64 {
   let rc = fill(&n, 21)
   print(rc)
   print(n)
+
+  let mut f = 1.25
+  fill_f32(&f)
+  print(f)
+
+  let mut b = false
+  fill_bool(&b)
+  print(b)
+
+  let mut size = 0
+  fill_size(&size)
+  print(size)
+
+  let mut small = 0
+  let mut medium = 0
+  let mut wide = 0
+  fill_scalars(&small, &medium, &wide)
+  print(small)
+  print(medium)
+  print(wide)
 
   // two at once, in one call
   let mut q = 0
@@ -92,7 +131,7 @@ fn main() -> i64 {
 }
 '''
 
-WANT = "7\n42\n3\n2\n200\n-3\n123456\n20\n"
+WANT = "7\n42\n3.5\nTrue\n1234567\n-7\n40000\n3000000000\n3\n2\n200\n-3\n123456\n20\n"
 
 # Memory the program owns: malloc returns `ptr[u8]`, a `u8` window fills it, and
 # C reads back exactly the bytes the program wrote.
@@ -177,6 +216,18 @@ def main():
     got = native(prog, "outs.bin")
     assert got == WANT, "native:\n%r\nwant %r" % (got, WANT)
 
+    target_c = run(["emit-c", "--target", "i686-linux-gnu", prog])
+    assert target_c.returncode == 0, target_c.stdout + target_c.stderr
+    assert "size_t _out" in target_c.stdout, \
+      "usize out-parameter scratch must follow the target's size_t"
+    sys.path.insert(0, os.path.dirname(CLI))
+    import codegen_c
+    codegen_c.set_ffi_target("i686-linux-gnu")
+    python_c = codegen_c.emit_file(prog)
+    native_c, sep, _contract = target_c.stdout.rpartition("\n/* BRAT FFI contract")
+    assert sep and native_c + "\n" == python_c, \
+      "the target-aware Python and C++ emitters must agree"
+
     p = run(["run", "--interp", buf])
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == BUFFER_WANT, "interp buffer:\n%r" % p.stdout
@@ -211,8 +262,8 @@ fn main() -> i64 {
     p = run(["check", expr])
     assert p.returncode != 0 and "takes a binding" in (p.stdout + p.stderr), p.stdout + p.stderr
 
-    print("OUT PARAMS ALL GREEN (%d asserts: &out at 3 widths, 2 at once, "
-          "malloc'd buffer, 4 refusals)" % 18)
+    print("OUT PARAMS ALL GREEN (integer, float, bool and size_t outputs; "
+          "both backends and target-aware emitter parity)")
 
 
 main()

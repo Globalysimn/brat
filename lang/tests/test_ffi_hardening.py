@@ -36,7 +36,7 @@ def build_mini(cc, text, flag):
 
 
 NEG_PTR = (
-    'extern fn free(move p: ptr);\n'
+    'extern fn free(move p: ptr[i32]);\n'
     'fn main() -> i64 {\n'
     '    try {\n'
     '        free(-5)\n'
@@ -153,7 +153,7 @@ def main():
     n = 0
 
     # Negative pointer: same message on both backends, no segfault.
-    want = b"ffi: arg 1 of free wants ptr\n"
+    want = b"ffi: arg 1 of free wants ptr[i32]\n"
     path = write("neg_ptr", NEG_PTR)
     ri = run(["run", "--interp", path], 120)
     assert ri.returncode == 0 and ri.stdout == want, "neg_ptr interp rc=%d out=%r" % (ri.returncode, ri.stdout)
@@ -530,6 +530,21 @@ def main():
     n += 1
     print("ffihard ok: size_t/usize agree on every data model")
 
+    body_i64_size = [("extern", None, "g", [("n", "ref", "i64", None)], "i64",
+                      None, False, False)]
+    try:
+        for triple, want_errors in ((None, 0), ("i686-linux-gnu", 2),
+                                    ("x86_64-w64-windows-gnu", 0)):
+            fm.set_target(triple)
+            rep = fm.check(body_i64_size, sz_c, "sz.h")
+            assert rep.errors == want_errors, \
+                "i64/size_t on %r: expected %d error(s), got %r" % (
+                    triple, want_errors, rep.lines[:2])
+    finally:
+        fm.set_target(None)
+    n += 1
+    print("ffihard ok: i64 does not match 32-bit size_t")
+
     # Mutability at the boundary. Two claims are proven here and each one is
     # refused by *both* checkers with the same sentence:
     #   `&x` is an exclusive loan (C gets a writable pointer), so two of them in
@@ -591,9 +606,9 @@ def main():
                 "void blank(const unsigned char *b);\n")
     gen = run(["bindgen", hdr], 120).stdout.decode()
     assert "extern fn show(s: str)" in gen, "a `const char *` is a `str`: %r" % gen
-    assert "extern fn fill(buf: ptr)" in gen, \
+    assert "extern fn fill(buf: ptr[u8])" in gen, \
         "a writable `char *` is a buffer, not a `str`: %r" % gen
-    assert "extern fn blank(b: ptr)" in gen, \
+    assert "extern fn blank(b: ptr[u8])" in gen, \
         "`const unsigned char *` is bytes, never text: %r" % gen
 
     prog = write("str_to_writable", 'extern fn fill(buf: str)\n'

@@ -6,8 +6,8 @@ Each case names the failure it prevents:
 * `arena { }` programs must not reach the interpreter when the ownership
   checker rejects them -- the gate pattern used to be double-escaped and never
   matched, so `brat run` ran what `brat build` refused;
-* `BRAT_FILES=0` must leave the sandbox on: any non-empty value used to
-  disable it;
+* `BRAT_FILES` must parse the same exact, trimmed, case-insensitive allowlist
+    in both backends; a value beginning with `1` is not an opt-out;
 * a path with more components than the normaliser holds must be refused, not
   silently truncated to a different path;
 * the MCP server must not allocate whatever body size a client claims;
@@ -109,19 +109,27 @@ def test_brat_files_off():
     src = ('fn main() -> i64 {\n'
            '  print(write_file("../escaped.txt", "x"))\n  return 0\n}\n')
     path = write('fs_off.brat', src)
-    env = dict(ENV)
-    env['BRAT_FILES'] = '0'
-    rc, out = cli(['build', path, '-o', os.path.join(TMP, 'fs_off')], env=env)
-    if rc != 0:
-        check(False, 'brat_files_off: build failed (%r)' % out[:200])
-        return
-    r = subprocess.run([os.path.join(TMP, 'fs_off')], capture_output=True,
-                       text=True, env=env, cwd=TMP, timeout=120)
-    check("'err'" in r.stdout, 'brat_files_off: BRAT_FILES=0 must keep the '
-          'sandbox on, got %r' % r.stdout)
-    check(not os.path.exists(os.path.join(os.path.dirname(TMP),
-                                          'escaped.txt')),
-          'brat_files_off: a file escaped the program directory')
+    escaped = os.path.join(os.path.dirname(TMP), 'escaped.txt')
+    for value, allow in (('0', False), ('1no', False), (' YES ', True)):
+        env = dict(ENV)
+        env['BRAT_FILES'] = value
+        exe = os.path.join(TMP, 'fs_off_' + value)
+        rc, out = cli(['build', path, '-o', exe], env=env)
+        if rc != 0:
+            check(False, 'brat_files_off: build failed (%r)' % out[:200])
+            return
+        r = subprocess.run([exe], capture_output=True, text=True, env=env,
+                           cwd=TMP, timeout=120)
+        ri, oi = cli(['run', '--interp', path], env=env)
+        expected = "'ok'" if allow else "'err'"
+        check(expected in r.stdout and expected in oi and r.stdout == oi,
+              'brat_files: BRAT_FILES=%r diverged, got %r / %r'
+              % (value, r.stdout, oi))
+        check(os.path.exists(escaped) == allow,
+              'brat_files: BRAT_FILES=%r outside file exists=%r' %
+              (value, os.path.exists(escaped)))
+        if os.path.exists(escaped):
+            os.unlink(escaped)
 
 
 def test_vnorm_cap():
@@ -159,6 +167,35 @@ int main(void) {
           'vnorm: ordinary normalisation broke, got %r' % b.stdout)
 
 
+def test_vlong_range():
+    src = r'''
+#include "crt.h"
+BFN Val vcall_any(Val fn, Vec *a) { (void)fn; (void)a; return vnil(); }
+static int rejected(double value) {
+    (void)vlong(vfloat(value));
+    if (!verr_pending()) return 0;
+    vdrop(verr_take());
+    return 1;
+}
+int main(void) {
+    return rejected(1e300) && rejected(-1e300) && rejected(INFINITY) && rejected(NAN)
+        ? 0 : 1;
+}
+'''
+    cf = write('vlong.c', src)
+    exe = os.path.join(TMP, 'vlong')
+    r = subprocess.run(['cc', '-std=c11', '-O1', '-fsanitize=undefined,float-cast-overflow',
+                        '-fno-sanitize-recover=all', '-I', ENGINE, cf, '-o', exe,
+                        '-lpthread', '-ldl', '-lm'], capture_output=True, text=True)
+    check(r.returncode == 0, 'vlong: sanitizer build failed (%r)' % (r.stderr or '')[-300:])
+    if r.returncode != 0:
+        return
+    b = subprocess.run([exe], capture_output=True, text=True)
+    check(b.returncode == 0 and 'runtime error' not in b.stderr,
+          'vlong: out-of-range float conversion must be rejected before cast, got %r'
+          % (b.stdout + b.stderr))
+
+
 def test_mcp_body_cap():
     import importlib.util
     import io
@@ -167,11 +204,11 @@ def test_mcp_body_cap():
     spec.loader.exec_module(mcp)
     sess = mcp.Server(io.BytesIO(b'Content-Length: 999999999\r\n\r\n'),
                        io.BytesIO())
-    check(sess.read_message() is None,
+    check(sess.read_message() is mcp._INVALID,
           'mcp: a 1 GB Content-Length must be refused, not allocated')
     long_header = b'X-Pad: ' + b'a' * (mcp.MAX_HEADER_LINE + 10) + b'\r\n\r\n'
     sess = mcp.Server(io.BytesIO(long_header), io.BytesIO())
-    check(sess.read_message() is None, 'mcp: an over-long header line must be '
+    check(sess.read_message() is mcp._INVALID, 'mcp: an over-long header line must be '
           'refused')
     body = b'{"method": "ping"}'
     good = b'Content-Length: %d\r\n\r\n' % len(body) + body
@@ -246,14 +283,17 @@ def test_read_file_nul_rejected():
 def test_env_get_credentials_refused():
     path = write('env_cred.brat',
                  'print(env_get("DATABASE_URL"))\n'
-                 'print(env_get("PLAIN_URI"))\n')
+                 'print(env_get("PLAIN_URI"))\n'
+                 'print(env_get(1))\n')
     env = dict(ENV,
                DATABASE_URL='postgres://admin:supersecret@db:5432/prod',
-               PLAIN_URI='redis://user:pass@host:6379/0')
+               PLAIN_URI='redis://user:pass@host:6379/0',
+               **{'1': 'numeric-key-value'})
     rc_i, out_i = cli(['run', '--interp', path], env=env)
     rc_n, out_n = cli(['run', path], env=env)
-    check('supersecret' not in out_n and 'env_get refused' in out_n and out_i == out_n,
-          'env_get: DATABASE_URL and credential URIs must be refused (%r vs %r)'
+    check('supersecret' not in out_n and 'env_get refused' in out_n
+          and 'numeric-key-value' not in out_i and out_i == out_n,
+          'env_get: credential values and non-string keys must agree (%r vs %r)'
           % (out_i, out_n))
 
 
@@ -281,7 +321,7 @@ def test_fast_shortcircuit_And_or_multi_source_borrow():
 
 def main():
     for fn in (test_trigraph, test_arena_gate, test_brat_files_off,
-               test_vnorm_cap, test_mcp_body_cap, test_fetch_url_file_scheme,
+               test_vnorm_cap, test_vlong_range, test_mcp_body_cap, test_fetch_url_file_scheme,
                test_unsafe_is_not_a_switch, test_write_file_symlink_escape,
                test_read_file_nul_rejected, test_env_get_credentials_refused,
                test_fast_shortcircuit_And_or_multi_source_borrow):

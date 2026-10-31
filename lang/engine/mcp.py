@@ -118,6 +118,8 @@ def call_tool(name, args):
 MAX_HEADER_LINE = 8 * 1024
 MAX_HEADERS = 64
 MAX_BODY = 16 * 1024 * 1024
+_EOF = object()
+_INVALID = object()
 
 
 class Server:
@@ -147,33 +149,42 @@ class Server:
         while True:
             line = self.rfile.readline(MAX_HEADER_LINE + 1)
             if not line:
-                return None
+                return _EOF
             if len(line) > MAX_HEADER_LINE:
-                return None
+                return _INVALID
             if line in (b"\r\n", b"\n"):
                 break
             try:
                 k, v = line.decode("ascii").split(":", 1)
             except (ValueError, UnicodeDecodeError):
-                return None
+                return _INVALID
             headers[k.strip().lower()] = v.strip()
             if len(headers) > MAX_HEADERS:
                 return None
         try:
             length = int(headers.get("content-length", "0"))
         except ValueError:
-            return None
+            return _INVALID
         if length <= 0 or length > MAX_BODY:
-            return None
+            return _INVALID
         try:
             return json.loads(self.rfile.read(length).decode("utf-8"))
         except Exception:
-            return None
+            return _INVALID
 
     def handle(self, msg):
+        if not isinstance(msg, dict):
+            self.error(None, -32600, "invalid request")
+            return
         method = msg.get("method")
         msg_id = msg.get("id")
+        if msg.get("jsonrpc") != "2.0" or not isinstance(method, str):
+            self.error(msg_id, -32600, "invalid request")
+            return
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            self.error(msg_id, -32602, "params must be an object")
+            return
         if method == "initialize":
             self.ready = True
             self.reply(msg_id, {
@@ -230,13 +241,16 @@ class Server:
     def run(self):
         while True:
             msg = self.read_message()
-            if msg is None:
+            if msg is _EOF:
                 return 0
+            if msg is _INVALID:
+                self.error(None, -32700, "parse error")
+                continue
             try:
                 self.handle(msg)
             except Exception as e:
                 log("crash: %s" % e)
-                if msg.get("id") is not None:
+                if isinstance(msg, dict) and msg.get("id") is not None:
                     self.error(msg["id"], -32603, "%s: %s" % (type(e).__name__, e))
 
 

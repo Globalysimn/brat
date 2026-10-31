@@ -72,6 +72,9 @@ lib.make.restype = P
 lib.make.argtypes = [ctypes.c_longlong, ctypes.c_double]
 p = lib.make(7, 2.25)
 assert p.x == 7 and abs(p.y - 2.25) < 1e-9, "make: %r" % ((p.x, p.y),)
+lib.echo_bool.restype = ctypes.c_bool
+lib.echo_bool.argtypes = [ctypes.c_bool]
+assert lib.echo_bool(True) is True and lib.echo_bool(False) is False, "echo_bool"
 """
 
 
@@ -180,6 +183,7 @@ def main():
     src = (
         'export fn add(a: i64, b: i64) -> i64 { return a + b; }\n'
         'export fn make(x: i64, y: f64) -> Point { return Point { x: x, y: y }; }\n'
+        'export fn echo_bool(x: bool) -> bool { return x; }\n'
         'extern struct Point { x: i64, y: f64 }\n'
         'fn main() -> i32 { return 0; }\n'
     )

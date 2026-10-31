@@ -18,6 +18,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
+CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-sock-")
 
 n = 0
@@ -112,6 +113,32 @@ native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
 check(native.returncode == 0 and native.stdout == interp.stdout,
       "native: %r vs %r" % (native.stdout, interp.stdout))
 
+BAD_TYPES = '''fn main() -> i64 {
+  let l = tcp_listen("127.0.0.1:47377")
+  match l {
+    Ok(s) => {
+      print(tcp_recv(s, 1.5))
+      print(tcp_close(1.5))
+      print(tcp_close(s))
+    },
+    Err(e) => { print(e) }
+  }
+  return 0
+}
+'''
+path = write("bad_types.brat", BAD_TYPES)
+interp = run(["run", "--interp", path])
+exe = os.path.join(TMP, "bad_types.exe")
+built = run(["build", path, "-o", exe])
+check(built.returncode == 0, "bad socket types build: %r" % (built.stdout + built.stderr))
+native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+check(interp.returncode == 0 and native.returncode == 0
+      and interp.stdout == native.stdout
+      and "recv wants 0 <= n <= 1048576" in native.stdout
+      and "bad socket slot" in native.stdout,
+      "fractional counts/handles must be refused identically: %r vs %r"
+      % (interp.stdout, native.stdout))
+
 # The runtime is still the second line of defence: a program that builds today
 # and closes twice through a call gets an error value, not a crash.
 RUNTIME = '''fn close_twice(s: i64) -> i64 {
@@ -172,5 +199,29 @@ path = write("branch.brat", BRANCH)
 r = run(["check", path])
 check(r.returncode == 0 and "0 error(s)" in r.stdout,
       "close on a returning branch then at the end: %r" % r.stdout)
+
+RACE = '''fn main() -> i64 {
+  let l = tcp_listen("127.0.0.1:47376")
+  match l {
+    Ok(s) => {
+      spawn { tcp_recv(s, 1) }
+      tcp_close(s)
+      join_all()
+    },
+    Err(_) => {}
+  }
+  return 0
+}
+'''
+path = write("close_race.brat", RACE)
+r = run(["check", path])
+check(r.returncode != 0 and "tcp" in r.stdout and "join_all" in r.stdout,
+      "close racing a socket operation must be refused: %r" % r.stdout)
+if os.path.isfile(CXX):
+    native_check = subprocess.run([CXX, "check", path], capture_output=True,
+                                  text=True, timeout=300)
+    check(native_check.returncode != 0 and "tcp" in native_check.stdout
+          and "join_all" in native_check.stdout,
+          "C++ checker allowed socket close race: %r" % native_check.stdout)
 
 print("SOCK LINEAR ALL GREEN (%d asserts)" % n)

@@ -134,5 +134,22 @@ check(open(os.path.join(tmp, 'vendor', 'mymod.brat'), encoding='utf-8').read()
 check(not os.path.exists(os.path.join(tmp, 'vendor', 'other.brat')),
       'failed multi-package install left a partial package')
 
+limit = 16 * 1024 * 1024
+with open(os.path.join(tmp, 'brat.lock'), 'wb') as f:
+    f.truncate(limit + 1)
+r = subprocess.run([sys.executable, CLI, 'pkg', 'list'], capture_output=True,
+                   text=True, timeout=60, cwd=tmp)
+check(r.returncode == 1 and 'exceeds 16 MiB' in r.stderr,
+      'oversized local lockfile must be refused before JSON parsing: ' + r.stderr)
+
+large_index = os.path.join(tmp, 'brat-index.json')
+with open(large_index, 'wb') as f:
+    f.truncate(limit + 1)
+env = dict(os.environ, BRAT_INDEX=large_index)
+r = subprocess.run([sys.executable, CLI, 'pkg', 'add', 'owner/package'],
+                   capture_output=True, text=True, timeout=60, cwd=tmp, env=env)
+check(r.returncode == 1 and 'exceeds 16 MiB' in r.stderr,
+      'oversized local package index must be bounded: ' + r.stderr)
+
 shutil.rmtree(tmp, ignore_errors=True)
 print('PKG ALL GREEN (%d asserts)' % n)

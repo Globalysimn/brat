@@ -114,7 +114,7 @@ def main():
     gen = subprocess.run([sys.executable, CLI, "bindgen", hdr], capture_output=True,
                          text=True, timeout=300)
     assert gen.returncode == 0, "bindgen failed: %r" % (gen.stdout + gen.stderr)
-    assert "extern fn dup_str(s: str) -> ptr;" in gen.stdout, \
+    assert "extern fn dup_str(s: str) -> ptr[u8];" in gen.stdout, \
         "an unannotated header yields a plain ptr, not a guess: %r" % gen.stdout
     assert "extern fn release(p: ptr) -> none;" in gen.stdout, \
         "the release side is a plain ptr too: %r" % gen.stdout
@@ -134,7 +134,7 @@ def main():
 
     # Same header, same types: only the modes are added, and `ffi --header` still
     # proves the binding against C -- ownership is a mode, not a different type.
-    OWNED = ('extern "%s" fn dup_str(s: str) -> move ptr\n'
+    OWNED = ('extern "%s" fn dup_str(s: str) -> move ptr[u8]\n'
              'extern "%s" fn release(move p: ptr)\n' % (LIB, LIB))
     OK = OWNED + ('fn main() -> i64 {\n'
                   '  let p = dup_str("owned")\n'

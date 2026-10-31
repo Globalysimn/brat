@@ -363,6 +363,8 @@ def _bstr(v):
     repr escapes control characters and non-printables C cannot reproduce."""
     if isinstance(v, str):
         return v
+    if _too_deep(v):
+        raise RuntimeError('recursion too deep')
     return _brepr(v)
 
 
@@ -1486,11 +1488,13 @@ def _ffi_invoke(name, info, vals, funcs):
         if ty in _FFI_INT:
             return getattr(ctypes, _FFI_INT[ty][0])
         return {'f64': ctypes.c_double, 'f32': ctypes.c_float, 'str': ctypes.c_char_p,
-                'ptr': ctypes.c_void_p}.get(ty, _struct_class(ty) if ty in _STRUCTS else None)
+            'ptr': ctypes.c_void_p, 'bool': ctypes.c_bool}.get(
+                ty, _struct_class(ty) if ty in _STRUCTS else None)
 
     boxes = []
 
     def to_c(ty, v, i, variadic_slot=False):
+        ptr_name = ty if isinstance(ty, str) and ty.startswith('ptr[') else 'ptr'
         if isinstance(ty, str) and ty.startswith('ptr['):
             ty = 'ptr'      # the element is a promise to BRAT, not to C
         if isinstance(ty, str) and ty.startswith('fn'):
@@ -1507,6 +1511,10 @@ def _ffi_invoke(name, info, vals, funcs):
             return inst
         if ty is None:
             return v   # untyped `...` argument
+        if ty == 'bool':
+            if not isinstance(v, bool):
+                raise RuntimeError('ffi: arg %d of %s wants bool' % (i, name))
+            return ctypes.c_bool(v)
         if ty in _FFI_INT:
             _, lo, hi = _FFI_INT[ty]
             if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
@@ -1539,7 +1547,7 @@ def _ffi_invoke(name, info, vals, funcs):
                   'i32': ctypes.c_int, 'u32': ctypes.c_uint,
                   'f32': ctypes.c_float, 'f64': ctypes.c_double,
                   'i64': ctypes.c_longlong, 'u64': ctypes.c_ulonglong,
-                  'usize': ctypes.c_size_t}.get(
+                'usize': ctypes.c_size_t, 'bool': ctypes.c_bool}.get(
                       _pointee[4:-1] if isinstance(_pointee, str) and _pointee.startswith('ptr[') else '',
                       ctypes.c_longlong)
             cur = _scope.get(oname, 0) if _scope else 0
@@ -1554,7 +1562,7 @@ def _ffi_invoke(name, info, vals, funcs):
                 # A `str` fills a variadic `..ptr` slot as `const char *`.
                 return ctypes.c_char_p(v.encode('utf-8'))
             if not isinstance(v, int) or isinstance(v, bool) or v < 0:
-                raise RuntimeError('ffi: arg %d of %s wants ptr' % (i, name))
+                raise RuntimeError('ffi: arg %d of %s wants %s' % (i, name, ptr_name))
             return ctypes.c_void_p(v)
         raise RuntimeError('ffi: unsupported type %s in extern %s' % (ty, name))
 
@@ -1569,7 +1577,9 @@ def _ffi_invoke(name, info, vals, funcs):
                  for p in params]
         if all(t is not None for t in fixed):
             fn.argtypes = fixed
-    if ret in _FFI_INT:
+    if ret == 'bool':
+        fn.restype = ctypes.c_bool
+    elif ret in _FFI_INT:
         fn.restype = scalar_ctype(ret)
     elif ret == 'str':
         fn.restype = ctypes.c_char_p
@@ -1628,6 +1638,8 @@ def _ffi_invoke(name, info, vals, funcs):
         _FFI_RETS.append(None)
     if ret in _STRUCTS:
         return _struct_val(ret, r)
+    if ret == 'bool':
+        return bool(r)
     if ret in _FFI_INT:
         if r > 2**63 - 1:
             raise RuntimeError('ffi: result of %s does not fit i64' % name)
@@ -2113,7 +2125,7 @@ def call(name, args, env, funcs):
         if len(vals) != 2:
             raise TypeError('tcp_recv wants 2 args')
         n = vals[1]
-        if not isinstance(n, int) or not 0 <= n <= _RECV_MAX:
+        if type(n) is not int or not 0 <= n <= _RECV_MAX:
             return ('err', 'recv wants 0 <= n <= 1048576')
         s_ = _sock_get(vals[0])
         if s_ is None:
@@ -2580,7 +2592,9 @@ def call(name, args, env, funcs):
     if name == 'env_get':
         if len(vals) != 1:
             raise TypeError('env_get wants 1 arg')
-        key = str(vals[0])
+        if not isinstance(vals[0], str):
+            return None
+        key = vals[0]
         allow = os.environ.get('BRAT_ENV_ALLOW', '')
         allowed = {x.strip() for x in allow.split(',') if x.strip()} if allow else None
         if allowed is not None and key not in allowed:
@@ -2866,6 +2880,7 @@ _CALLBACK_REFS = []
 # backend was right, so the two implementations disagreed on a value -- the
 # failure this file exists to prevent.
 _STRUCT_CTYPES = {
+    'bool': 'c_bool',
     'i8': 'c_int8', 'u8': 'c_ubyte', 'i16': 'c_int16', 'u16': 'c_ushort',
     'i32': 'c_int', 'u32': 'c_uint', 'i64': 'c_longlong', 'u64': 'c_ulonglong',
     'usize': 'c_size_t', 'f32': 'c_float', 'f64': 'c_double',
@@ -2931,7 +2946,7 @@ def _parse_cb_sig(sig):
     return params, ret
 
 
-_CB_SCALARS = {'i8': 'c_byte', 'u8': 'c_ubyte', 'i16': 'c_short',
+_CB_SCALARS = {'bool': 'c_bool', 'i8': 'c_byte', 'u8': 'c_ubyte', 'i16': 'c_short',
                'u16': 'c_ushort', 'i32': 'c_int', 'u32': 'c_uint',
                'i64': 'c_longlong', 'u64': 'c_ulonglong', 'usize': 'c_size_t',
                'f32': 'c_float', 'f64': 'c_double', 'str': 'c_char_p',
@@ -3229,6 +3244,8 @@ def _callback_ptr(sig, fname, funcs, pos=None, where=None):
         r = _cb_run(fname, brat_args, funcs)
         if ret in _STRUCTS:
             return _filled_struct(ret, r)
+        if ret == 'bool':
+            return bool(r)
         if ret in ('i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'usize', 'ptr'):
             return int(r) if not isinstance(r, bool) else int(r)
         if ret in ('f32', 'f64'):

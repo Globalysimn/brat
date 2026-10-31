@@ -14,6 +14,7 @@ const std::set<std::string> kInsert{"push", "ins", "set"};
 const std::set<std::string> kPtrWrite{"ptr_write_i64", "ptr_write_f64", "ptr_write_f32",
                                       "ptr_write_u8", "ptr_write_str", "ptr_write_ptr",
                                       "ptr_write_struct", "slice_set", "fill"};
+const std::set<std::string> kResourceClose{"tcp_close"};
 const std::set<std::string> kMutate{"pop", "sort", "sort_by", "del", "clear"};
 const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
@@ -143,6 +144,11 @@ Access touched(const Stmt &s, const FnSummaries *fns = nullptr) {
             if (!n->kids.empty()) {
                 std::string ar = root(n->kids[0].get());
                 if (!ar.empty()) out.write.insert(ar);   // C writes through it
+            }
+        } else if (n->k == EK::Call && kResourceClose.count(n->a)) {
+            if (!n->kids.empty()) {
+                std::string ar = root(n->kids[0].get());
+                if (!ar.empty()) out.write.insert(ar);
             }
         } else if (n->k == EK::Move) {
             std::string r = root(n);

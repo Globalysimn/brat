@@ -167,6 +167,29 @@ check(r.get("error", {}).get("code") == -32601, "unknown method: %r" % r)
 r = c.request("ping")
 check(r["result"] == {}, "ping: %r" % r)
 
+# A valid JSON document with the wrong root type is an invalid request, not a
+# server crash; the same session must still be able to answer the next ping.
+invalid = Client()
+try:
+    invalid.send([])
+    r = invalid.read()
+    check(r.get("error", {}).get("code") == -32600,
+        "non-object JSON-RPC request: %r" % r)
+    invalid.send(None)
+    r = invalid.read()
+    check(r.get("error", {}).get("code") == -32600,
+          "JSON null is a valid JSON but invalid request: %r" % r)
+    body = b"{"
+    invalid.p.stdin.write(b"Content-Length: 1\r\n\r\n" + body)
+    invalid.p.stdin.flush()
+    r = invalid.read()
+    check(r.get("error", {}).get("code") == -32700,
+          "malformed JSON must produce a parse error: %r" % r)
+    r = invalid.request("ping")
+    check(r.get("result") == {}, "invalid JSON-RPC root killed the session: %r" % r)
+finally:
+    invalid.close()
+
 c.close()
 
 # stdout carried only protocol: every line of it parsed above. A separate
