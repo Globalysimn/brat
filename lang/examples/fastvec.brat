@@ -1,0 +1,47 @@
+fn vsum(v: mut vec[i64]) -> i64 {
+  let mut t = 0
+  for x in v {
+    t += x
+  }
+  return t
+}
+assert(vsum([1, 2, 3, 4]) == 10)
+assert(vsum([]) == 0)
+fn dotp(a: vec[i64], b: vec[i64]) -> i64 {
+  let mut t = 0
+  for i in 0..len(a) {
+    t += a[i] * b[i]
+  }
+  return t
+}
+assert(dotp([1, 2, 3], [4, 5, 6]) == 32)
+fn scale(v: mut vec[i64], k: i64) -> i64 {
+  for i in 0..len(v) {
+    v[i] = v[i] * k
+  }
+  return 0
+}
+let mut w = [1, 2, 3]
+scale(w, 10)
+assert(w == [10, 20, 30])
+fn maxv(v: vec[i64]) -> i64 {
+  let mut m = v[0]
+  for x in v {
+    if x > m {
+      m = x
+    }
+  }
+  return m
+}
+assert(maxv([3, 9, 4]) == 9)
+fn count_pos(v: vec[i64]) -> i64 {
+  let mut n = 0
+  for x in v {
+    if x > 0 {
+      n += 1
+    }
+  }
+  return n
+}
+assert(count_pos([-1, 2, -3, 4, 0]) == 2)
+print("fastvec ok")

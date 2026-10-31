@@ -1,0 +1,27 @@
+enum Box {
+  Has(Ok),
+  Empty
+}
+fn open(b) -> i64 {
+  match b {
+    Has(Ok(v)) => {
+      return v
+    },
+    Has(_) => {
+      return 0
+    },
+    Empty => {
+      return 0
+    },
+    _ => {
+      return 0
+    }
+  }
+  return 0
+}
+fn main() -> i64 {
+  print(open(Has(Ok(9))))
+  print(open(Has(Err("x"))))
+  print(open(Empty))
+  return 0
+}

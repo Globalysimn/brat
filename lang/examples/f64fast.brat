@@ -1,0 +1,46 @@
+fn dist2(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+  let dx = bx - ax
+  let dy = by - ay
+  return dx * dx + dy * dy
+}
+assert(dist2(0.0, 0.0, 3.0, 4.0) == 25.0)
+fn lerp(a: f64, b: f64, t: f64) -> f64 {
+  return a + (b - a) * t
+}
+assert(lerp(10.0, 20.0, 0.5) == 15.0)
+fn newton(n: f64) -> f64 {
+  let mut x = n
+  let mut i = 0
+  while i < 12 {
+    x = 0.5 * (x + n / x)
+    i = i + 1
+  }
+  return x
+}
+let r = newton(2.0)
+assert(r > 1.4142 && r < 1.4143)
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+  if x < lo {
+    return lo
+  }
+  if x > hi {
+    return hi
+  }
+  return x
+}
+assert(clamp(5.0, 0.0, 1.0) == 1.0)
+assert(clamp(-5.0, 0.0, 1.0) == 0.0)
+assert(clamp(0.5, 0.0, 1.0) == 0.5)
+fn poly(x: f64) -> f64 {
+  return 3.0 * x * x - 2.0 * x + 1.0
+}
+assert(poly(2.0) == 9.0)
+fn sum_to_f(n: f64) -> f64 {
+  let mut t = 0.0
+  for i in 0..10 {
+    t = t + 0.5
+  }
+  return t + n
+}
+assert(sum_to_f(1.0) == 6.0)
+print("f64 ok")

@@ -1,0 +1,35 @@
+fn main() -> i64 {
+  assert(true || false && false)
+  assert(false && false || true)
+  assert(false && false || false == false)
+  assert(1 + 2 * 3 == 7)
+  assert((1 + 2) * 3 == 9)
+  assert(10 / 3 * 3 == 9)
+  assert(2 * 3 % 4 == 2)
+  assert(8 - 4 - 2 == 2)
+  assert(-2 * 3 == -6)
+  assert(!true == false)
+  assert(2 + 3 <= 4 + 1)
+  assert(2 + 3 < 4 + 2)
+  assert(1 < 2 == true)
+  assert("a" + "b" == "ab")
+  assert(1 == 1 && 2 == 2 || false)
+  assert(!(1 == 1 && false || true) == false)
+  let mut hits = 0
+  let none_v = None
+  assert((none_v or 7) == 7)
+  assert((none_v or 0 || 5) == 5)
+  assert((7 or 0 || 5) == 7)
+  let mut v = [1, 2, 3]
+  assert(2 in v && 1 in v)
+  assert(!(2 in v) == false)
+  assert(9 in v || false == false)
+  for i in 0..3 {
+    if i > 0 && i < 3 || i == 0 {
+      hits = hits + 1
+    }
+  }
+  assert(hits == 3)
+  print("precedence ok")
+  return 0
+}

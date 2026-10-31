@@ -1,0 +1,61 @@
+fn fetch(fail: i64) -> i64 {
+  if fail != 0 {
+    return Err("net down")
+  }
+  return Ok(42)
+}
+let mut got = 0
+try {
+  let r = fetch(1)?
+  got = r
+} catch e {
+  got = -1
+  print("caught: {e}")
+}
+assert(got == -1)
+fn early() -> i64 {
+  try {
+    return 7
+  } catch e {
+    return -1
+  }
+  return 0
+}
+assert(early() == 7)
+let mut i = 0
+while true {
+  try {
+    i += 1
+    break
+  } catch e {
+    i = -99
+  }
+}
+assert(i == 1)
+let mut emsg = ""
+try {
+  let z = 1 / 0
+} catch e {
+  emsg = e
+}
+assert(emsg == "div by zero")
+let mut oob = ""
+try {
+  let v = [1]
+  print(v[5])
+} catch e {
+  oob = e
+}
+assert(oob == "index out of range")
+try {
+  let r2 = fetch(0)?
+  assert(r2 == 42)
+} catch e {
+  assert(false, "unreachable")
+}
+try {
+  print("body")
+} catch {
+  assert(false, "unreachable")
+}
+print("try ok")

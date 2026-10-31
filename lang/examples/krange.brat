@@ -1,0 +1,25 @@
+fn first_hit(limit: i64) -> i64 {
+  for i in 0..limit {
+    if i == 3 {
+      break
+    }
+    if i == 1 {
+      continue
+    }
+    print(i)
+  }
+  let mut total = 0
+  for x in [10, 20, 30] {
+    if x == 20 {
+      continue
+    }
+    total = total + x
+  }
+  print(total)
+  return total
+}
+fn main() -> i64 {
+  let r = first_hit(10)?
+  print(r)
+  return 0
+}

@@ -1,0 +1,43 @@
+let mut m = {"a": 1, "b": 2}
+assert(len(m) == 2)
+assert(m["a"] == 1)
+m["c"] = 3
+assert(len(m) == 3)
+assert(m.has("c"))
+assert(!m.has("zz"))
+assert(m.get("b") == 2)
+assert(is_none(m.get("zz")))
+assert(m.set("d", 4) == 4)
+assert(m["d"] == 4)
+let ks = m.keys()
+assert(len(ks) == 4)
+assert(m.del("d"))
+assert(!m.has("d"))
+let mut total = 0
+for k in m {
+  total = total + m[k]
+}
+assert(total == 6)
+let e = {}
+assert(len(e) == 0)
+let mut v = [10, 20, 30]
+v[1] = 99
+assert(v[1] == 99)
+assert(len(v) == 3)
+let mut deep = {"cfg": {"port": 8080}}
+assert(deep["cfg"]["port"] == 8080)
+deep["cfg"]["port"] = 9090
+assert(deep["cfg"]["port"] == 9090)
+let mut p = Point { x: 1, y: 2 }
+p.x = 41
+assert(p.x == 41)
+assert(p.y == 2)
+fn bump(mut m) {
+  m["n"] = m["n"] + 1
+}
+let mut counts = {"n": 0}
+for i in 0..5 {
+  bump(counts)
+}
+assert(counts["n"] == 5)
+print("map ok")

@@ -1,0 +1,18 @@
+{
+  "name": "BRAT",
+  "scopeName": "source.brat",
+  "fileTypes": ["brat"],
+  "patterns": [
+    { "match": "//.*$", "name": "comment.line.brat" },
+    { "match": "\"(?:\\\\.|[^\"\\\\])*\"", "name": "string.quoted.brat" },
+    {
+      "match": "\\b(let|mut|fn|if|else|while|return|true|false|or|try|catch|spawn|match|for|in|import|defer|move|break|continue|impl|self|trait|enum|const)\\b",
+      "name": "keyword.control.brat"
+    },
+    { "match": "\\b\\d+\\.\\d+|\\b\\d+\\b", "name": "constant.numeric.brat" },
+    { "match": "\\b[A-Z][A-Za-z0-9_]*\\b", "name": "entity.name.type.brat" },
+    { "match": "\\b[a-z_][a-zA-Z0-9_]*(?=\\s*\\()", "name": "entity.name.function.brat" },
+    { "match": "=>|->|==|!=|<=|>=|&&|\\|\\||\\.\\.", "name": "keyword.operator.brat" },
+    { "match": "@[a-z]+[0-9]+", "name": "variable.language.brat" }
+  ]
+}

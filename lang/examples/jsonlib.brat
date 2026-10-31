@@ -1,0 +1,162 @@
+pub fn jskip(s: str, i: mut i64) -> i64 {
+  while i < len(s) && (s[i] == " " || s[i] == "\t" || s[i] == "\n" || s[i] == "\r") {
+    i += 1
+  }
+  return i
+}
+fn jbad(i: mut i64) {
+  return Err("bad json at " + str(i))
+}
+pub fn jparse_val(s: str, i: mut i64) {
+  i = jskip(s, i)
+  if i >= len(s) {
+    return jbad(i)
+  }
+  let ch = s[i]
+  if ch == "{" {
+    return jparse_obj(s, i + 1)
+  }
+  if ch == "[" {
+    return jparse_arr(s, i + 1)
+  }
+  if ch == "\"" {
+    return jparse_str(s, i + 1)
+  }
+  if s.slice(i, i + 4) == "true" {
+    return [Ok(true), i + 4]
+  }
+  if s.slice(i, i + 5) == "false" {
+    return [Ok(false), i + 5]
+  }
+  if s.slice(i, i + 4) == "null" {
+    return [Ok(None), i + 4]
+  }
+  return jparse_num(s, i)
+}
+pub fn jparse_num(s: str, i: mut i64) {
+  let mut j = i
+  while j < len(s) && (s[j] == "-" || s[j] == "+" || s[j] == "." || s[j] == "e" || s[j] == "E" || re_match(s[j], "[0-9]")) {
+    j += 1
+  }
+  if j == i {
+    return jbad(i)
+  }
+  let text = s.slice(i, j)
+  if text.contains(".") || text.contains("e") || text.contains("E") {
+    let f = text.parse_float()
+    if is_err(f) {
+      return jbad(i)
+    }
+    return [Ok(unwrap(f)), j]
+  }
+  let n = text.parse_int()
+  if is_err(n) {
+    return jbad(i)
+  }
+  return [Ok(unwrap(n)), j]
+}
+pub fn jparse_str(s: str, i: mut i64) {
+  let mut out = ""
+  while i < len(s) {
+    let ch = s[i]
+    if ch == "\"" {
+      return [Ok(out), i + 1]
+    }
+    if ch == "\\" {
+      let n = s[i + 1]
+      if n == "n" {
+        out += "\n"
+      } else {
+        if n == "t" {
+          out += "\t"
+        } else {
+          if n == "r" {
+            out += "\r"
+          } else {
+            out += n
+          }
+        }
+      }
+      i += 2
+    } else {
+      out += ch
+      i += 1
+    }
+  }
+  return jbad(i)
+}
+pub fn jparse_arr(s: str, i: mut i64) {
+  let mut items = []
+  i = jskip(s, i)
+  if i < len(s) && s[i] == "]" {
+    return [Ok(items), i + 1]
+  }
+  while i < len(s) {
+    let r = jparse_val(s, i)
+    if is_err(r) {
+      return r
+    }
+    items.push(unwrap(r[0]))
+    i = jskip(s, r[1])
+    if i >= len(s) {
+      return jbad(i)
+    }
+    if s[i] == "]" {
+      return [Ok(items), i + 1]
+    }
+    if s[i] != "," {
+      return jbad(i)
+    }
+    i = jskip(s, i + 1)
+  }
+  return jbad(i)
+}
+pub fn jparse_obj(s: str, i: mut i64) {
+  let mut m = {}
+  i = jskip(s, i)
+  if i < len(s) && s[i] == "}" {
+    return [Ok(m), i + 1]
+  }
+  while i < len(s) {
+    i = jskip(s, i)
+    if i >= len(s) || s[i] != "\"" {
+      return jbad(i)
+    }
+    let k = jparse_str(s, i + 1)
+    if is_err(k) {
+      return k
+    }
+    i = jskip(s, k[1])
+    if i >= len(s) || s[i] != ":" {
+      return jbad(i)
+    }
+    let v = jparse_val(s, i + 1)
+    if is_err(v) {
+      return v
+    }
+    m[unwrap(k[0])] = unwrap(v[0])
+    i = jskip(s, v[1])
+    if i >= len(s) {
+      return jbad(i)
+    }
+    if s[i] == "}" {
+      return [Ok(m), i + 1]
+    }
+    if s[i] != "," {
+      return jbad(i)
+    }
+    i += 1
+  }
+  return jbad(i)
+}
+pub fn json_parse(s: str) {
+  let r = jparse_val(s, 0)
+  if is_err(r) {
+    return r
+  }
+  let mut end = jskip(s, r[1])
+  if end != len(s) {
+    return jbad(end)
+  }
+  return r[0]
+}

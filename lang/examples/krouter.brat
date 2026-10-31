@@ -1,0 +1,26 @@
+fn route(code: i64) -> i64 {
+  match code {
+    200 => {
+      return 1
+    },
+    404 => {
+      return 0
+    },
+    500 => {
+      return 0
+    },
+    _ => {
+      return 0
+    }
+  }
+  return 0
+}
+fn main() -> i64 {
+  let codes = [200, 404, 200, 500, 200]
+  let mut ok = 0
+  for c in codes {
+    ok = ok + route(c)
+  }
+  print(ok)
+  return 0
+}

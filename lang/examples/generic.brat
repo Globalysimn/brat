@@ -1,0 +1,16 @@
+fn first<T>(v) -> i64 {
+  return v[0]
+}
+fn ident<T>(x: T) -> i64 {
+  return x
+}
+fn wrap2<T>(a: T, b: T) -> i64 {
+  return a
+}
+fn main() -> i64 {
+  print(first([7, 8]))
+  print(first("ab"))
+  print(ident(42))
+  print(wrap2(1, 2))
+  return 0
+}

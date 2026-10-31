@@ -1,0 +1,16 @@
+fn work() -> i64 {
+  defer log.info("third")
+  defer log.info("second")
+  log.info("first")
+  return 7
+}
+fn main() -> i64 {
+  let parts = "a,b,c".split(",")
+  print(parts[1])
+  print("  hi ".trim().upper())
+  print("8080".parse_int()?)
+  print([1, 2].join("-"))
+  let r = work()?
+  print(r)
+  return 0
+}

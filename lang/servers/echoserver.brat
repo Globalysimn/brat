@@ -1,0 +1,61 @@
+// Echo server. The point of this example is that nothing in it needs a
+// permission model, a runtime, or an interpreter: it builds to one native
+// binary with `brat build` and needs nothing else on the target machine.
+fn handle(conn: i64) -> i64 {
+  let mut line = ""
+  let mut running = true
+  while running {
+    let got = tcp_recv(conn, 1)
+    match got {
+      Ok(chunk) => {
+        if chunk == "" {
+          // orderly close: the peer is done, so are we
+          running = false
+        } else {
+          line = line + chunk
+          if chunk == "\n" {
+            tcp_send(conn, line)
+            line = ""
+          }
+        }
+      },
+      Err(reason) => {
+        log.warn("recv failed: {reason}")
+        running = false
+      }
+    }
+  }
+  tcp_close(conn)
+  return 0
+}
+
+fn main() -> i64 {
+  let addr = "127.0.0.1:8099"
+  let srv = tcp_listen(addr)
+  match srv {
+    Ok(fd) => {
+      log.info("listening {addr}")
+      let mut up = true
+      while up {
+        let acc = tcp_accept(fd)
+        match acc {
+          Ok(conn) => {
+            log.info("connection {conn}")
+            handle(conn)
+          },
+          Err(reason) => {
+            log.error("accept failed: {reason}")
+            up = false
+          }
+        }
+      }
+      tcp_close(fd)
+      return 0
+    },
+    Err(reason) => {
+      log.error("cannot listen {addr}: {reason}")
+      return 1
+    }
+  }
+  return 0
+}

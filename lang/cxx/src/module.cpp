@@ -1,0 +1,624 @@
+// The loader and the mangler: `brat/modules.py` in C++.
+//
+// Two views of one program come out of here. `files` is what the checker wants —
+// every file on its own, unmangled, with its own source. `flat` is what the
+// emitter wants — the root's body with every `import` spliced in place and every
+// name qualified, so two modules can define `helper` without colliding.
+#include "module.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+
+#include "parser.h"
+
+namespace fs = std::filesystem;
+
+namespace {
+
+bool confined(const fs::path &base, const fs::path &path) {
+    auto b = base.begin();
+    auto p = path.begin();
+    for (; b != base.end(); ++b, ++p) {
+        if (b->empty()) continue;                  // trailing separator
+        if (p == path.end() || *b != *p) return false;
+    }
+    return true;
+}
+
+std::string read_all(const fs::path &p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + p.string());
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// `a.b` -> {"a", "b"}; anything that could climb out is rejected first.
+std::vector<std::string> split_name(const std::string &name) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : name) {
+        if (c == '.') {
+            parts.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    parts.push_back(cur);
+    for (const auto &p : parts) {
+        if (p.empty() || p == "." || p == ".." || p.find('/') != std::string::npos ||
+            p.find('\\') != std::string::npos) {
+            throw ModuleError("invalid module name " + name);
+        }
+    }
+    return parts;
+}
+
+std::string module_namespace(const fs::path &base, const fs::path &path) {
+    fs::path rel = fs::relative(path, base);
+    std::string text = rel.string();
+    if (text.size() > 5 && text.compare(text.size() - 5, 5, ".brat") == 0) {
+        text.resize(text.size() - 5);
+    }
+    std::string out;
+    for (char c : text) {
+        if (c == '/') {
+            out += "__";
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// Dotted name of a var/field chain, or nothing when `e` computes a value.
+std::optional<std::string> name_path(const Expr *e) {
+    if (!e) return std::nullopt;
+    if (e->k == EK::Var) return e->a;
+    if (e->k == EK::Field) {
+        auto base = name_path(e->kids[0].get());
+        if (!base) return std::nullopt;
+        return *base + "." + e->b;
+    }
+    return std::nullopt;
+}
+
+const Stmt *inner(const Stmt &s) {
+    if (s.k == SK::Pub && !s.body.empty()) return s.body[0].get();
+    return &s;
+}
+
+std::string param_ann(const Param &p) {
+    if (p.ann && !p.ann->empty()) return *p.ann;
+    return "none";
+}
+
+std::string fn_ret(const FnDecl &f) {
+    if (f.ret && !f.ret->empty()) return *f.ret;
+    return "none";
+}
+
+
+// Each `fn name(params) -> type` line is parsed with a body appended, so the
+// signature syntax is the same one an implementation uses.
+std::map<std::string, std::pair<std::vector<std::string>, std::string>>
+parse_interface(const fs::path &path) {
+    std::map<std::string, std::pair<std::vector<std::string>, std::string>> sigs;
+    std::string src = read_all(path);
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : src) {
+        if (c == '\n') {
+            lines.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    lines.push_back(cur);
+    int number = 0;
+    for (const std::string &raw : lines) {
+        number++;
+        size_t b = raw.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        size_t e = raw.find_last_not_of(" \t\r\n");
+        std::string text = raw.substr(b, e - b + 1);
+        if (text.compare(0, 2, "//") == 0) continue;
+        std::vector<StmtP> body;
+        try {
+            body = parse(text + " { return 0 }").body;
+        } catch (ParseError &err) {
+            throw ModuleError(path.string() + ":" + std::to_string(number) +
+                              ": bad interface line: " + err.what());
+        }
+        bool ok = body.size() == 1 && inner(*body[0])->k == SK::Fn;
+        if (ok) {
+            const FnDecl &f = inner(*body[0])->fns[0];
+            std::vector<std::string> anns;
+            for (const Param &p : f.params) anns.push_back(param_ann(p));
+            sigs[f.name.value_or("")] = {anns, fn_ret(f)};
+        } else {
+            throw ModuleError(path.string() + ":" + std::to_string(number) +
+                              ": bad interface line: expected `fn name(params) -> type`");
+        }
+    }
+    return sigs;
+}
+
+
+struct Loader {
+    fs::path base;
+    ModuleSet set;
+    std::map<std::string, size_t> by_path;
+
+    size_t visit(const fs::path &raw, bool root, const std::string &import_name,
+                 const std::string *root_source = nullptr) {
+        fs::path path = fs::weakly_canonical(raw);
+        std::string key = path.string();
+        auto seen = by_path.find(key);
+        if (seen != by_path.end()) return seen->second;
+        if (!confined(base, path) || !fs::is_regular_file(path)) {
+            if (root) throw std::runtime_error("cannot read " + key);
+            throw ModuleError("no module " + import_name);
+        }
+        SourceFile f;
+        f.path = key;
+        f.src = root && root_source ? *root_source : read_all(path);
+        try {
+            ParseOut parsed = parse(f.src);
+            f.body = std::move(parsed.body);
+            f.stray = std::move(parsed.stray);
+        } catch (ParseError &e) {
+            if (root) throw;
+            throw ParseError(std::string(e.what()) + " (module " + import_name + ")", e.line);
+        }
+        if (!root) f.ns = module_namespace(base, path);
+        set.files.push_back(std::move(f));
+        size_t idx = set.files.size() - 1;
+        by_path[key] = idx;
+        scan_imports(idx);
+        return idx;
+    }
+
+    void scan_imports(size_t idx) {
+        fs::path dir = fs::path(set.files[idx].path).parent_path();
+        std::vector<std::string> names;
+        for (const auto &sp : set.files[idx].body) {
+            if (sp->k == SK::Import) {
+                bool seen = false;
+                for (const auto &kv : set.files[idx].imports) seen = seen || kv.first == sp->a;
+                if (!seen) names.push_back(sp->a);
+            }
+        }
+        for (const auto &name : names) {
+            std::string joined;
+            for (const auto &part : split_name(name)) {
+                if (!joined.empty()) joined += "/";
+                joined += part;
+            }
+            fs::path target;
+            bool found = false;
+            std::vector<std::string> tried_paths;
+            for (const fs::path &cand :
+                 {dir / (joined + ".brat"), dir / "vendor" / (joined + ".brat")}) {
+                fs::path real = fs::weakly_canonical(cand);
+                tried_paths.push_back(fs::relative(real, base).generic_string());
+                if (confined(base, real) && fs::is_regular_file(real)) {
+                    target = real;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::string dirrel = fs::relative(dir, base).generic_string();
+                std::string where = dirrel == "." || dirrel.empty() ? "the program root" : dirrel;
+                std::string tried;
+                for (const auto &cand : tried_paths) {
+                    if (!tried.empty()) tried += "`, `";
+                    tried += cand;
+                }
+                throw ModuleError("no module " + name + " (tried `" + tried + "` from " + where +
+                                  "; imports are relative to the importing file, so a module "
+                                  "next to it is imported by its short name)");
+            }
+            size_t child = visit(target, false, name);
+            set.files[idx].imports.emplace_back(name, child);
+        }
+    }
+};
+
+
+struct Mangler {
+    explicit Mangler(ModuleSet &s) : set(s) {}
+
+    ModuleSet &set;
+    std::map<std::string, std::vector<std::pair<size_t, std::string>>> public_names;
+    std::map<std::string, std::pair<size_t, std::string>> private_names;
+    std::map<std::string, std::vector<std::optional<std::string>>> callback_params;
+
+    std::string mangle(size_t cur, const std::string &name) {
+        const SourceFile &f = set.files[cur];
+        if (!f.ns) return name;
+        return *f.ns + "__" + name;
+    }
+
+    std::string module_name(size_t cur) {
+        const std::string &ns = *set.files[cur].ns;
+        std::string out;
+        for (size_t i = 0; i < ns.size(); i++) {
+            if (ns.compare(i, 2, "__") == 0) {
+                out.push_back('.');
+                i++;
+            } else {
+                out.push_back(ns[i]);
+            }
+        }
+        return out;
+    }
+
+    std::optional<std::string> resolve_qualified(const std::string &name, size_t cur) {
+        size_t dot = name.rfind('.');
+        std::string qualifier = name.substr(0, dot);
+        std::string fn = name.substr(dot + 1);
+        std::vector<size_t> targets;
+        for (const auto &[imported, target] : set.files[cur].imports) {
+            bool match = qualifier == imported;
+            if (!match) {
+                size_t tail = imported.rfind('.');
+                match = qualifier == (tail == std::string::npos ? imported
+                                                               : imported.substr(tail + 1));
+            }
+            if (match && std::find(targets.begin(), targets.end(), target) == targets.end()) {
+                targets.push_back(target);
+            }
+        }
+        if (targets.empty()) return std::nullopt;
+        if (targets.size() != 1) {
+            throw ModuleError("ambiguous module qualifier `" + qualifier + "`");
+        }
+        size_t target = targets[0];
+        auto it = set.files[target].functions.find(fn);
+        if (it == set.files[target].functions.end()) {
+            throw ModuleError("module `" + qualifier + "` has no function `" + fn + "`");
+        }
+        if (target != cur && !set.files[target].pub.count(fn)) {
+            throw ModuleError("function `" + fn + "` is private in module `" +
+                              module_name(target) + "`");
+        }
+        return it->second;
+    }
+
+    std::string resolve_call(const std::string &name, size_t cur) {
+        if (name.find('.') != std::string::npos) {
+            auto got = resolve_qualified(name, cur);
+            return got ? *got : name;
+        }
+        auto own = set.files[cur].functions.find(name);
+        if (own != set.files[cur].functions.end()) return own->second;
+        auto priv = private_names.find(name);
+        if (priv != private_names.end() && priv->second.first != cur) {
+            throw ModuleError("function `" + priv->second.second + "` is private in module `" +
+                              module_name(priv->second.first) + "`");
+        }
+        auto pub = public_names.find(name);
+        if (pub == public_names.end()) return name;
+        std::vector<std::string> unique;
+        for (const auto &[owner, full] : pub->second) {
+            if (std::find(unique.begin(), unique.end(), full) == unique.end()) {
+                unique.push_back(full);
+            }
+        }
+        if (unique.size() == 1) return unique[0];
+        if (unique.size() > 1) {
+            throw ModuleError("ambiguous unqualified name `" + name + "`: defined in both " +
+                              set.files[pub->second[0].first].path + " and " +
+                              set.files[pub->second[1].first].path + "; qualify the call");
+        }
+        return name;
+    }
+
+
+    void resolve_callback_args(std::vector<ExprP> &args, const std::string &original,
+                               const std::string &resolved, size_t cur) {
+        auto local = set.files[cur].callback_params.find(original);
+        const std::vector<std::optional<std::string>> *params = nullptr;
+        if (local != set.files[cur].callback_params.end()) {
+            params = &local->second;
+        } else {
+            auto global = callback_params.find(resolved);
+            if (global != callback_params.end()) params = &global->second;
+        }
+        if (!params) return;
+        for (size_t i = 0; i < params->size() && i < args.size(); i++) {
+            const auto &ann = (*params)[i];
+            if (ann && ann->rfind("fn", 0) == 0 && args[i]->k == EK::Str) {
+                args[i]->a = resolve_call(args[i]->a, cur);
+            }
+        }
+    }
+
+    ExprP walk_expr(ExprP e, size_t cur) {
+        if (!e) return e;
+        if (e->k == EK::Call) {
+            for (auto &k : e->kids) k = walk_expr(std::move(k), cur);
+            const std::string original = e->a;
+            e->a = resolve_call(e->a, cur);
+            resolve_callback_args(e->kids, original, e->a, cur);
+            return e;
+        }
+        if (e->k == EK::MCall) {
+            auto path = name_path(e->kids[0].get());
+            if (path) {
+                const std::string original = *path + "." + e->b;
+                auto name = resolve_qualified(original, cur);
+                if (name) {
+                    // `mod.f(x)` becomes `call mod.f [x]`: the receiver is the
+                    // module qualifier, not a value.
+                    e->k = EK::Call;
+                    e->a = *name;
+                    e->b.clear();
+                    e->kids.erase(e->kids.begin());
+                    for (auto &k : e->kids) k = walk_expr(std::move(k), cur);
+                    resolve_callback_args(e->kids, original, e->a, cur);
+                    return e;
+                }
+            }
+        }
+        for (auto &k : e->kids) k = walk_expr(std::move(k), cur);
+        if (e->k == EK::Closure && e->fn) {
+            for (auto &p : e->fn->params) {
+                if (p.def) p.def = walk_expr(std::move(p.def), cur);
+            }
+            walk_body(e->fn->body, cur);
+        }
+        return e;
+    }
+
+    void walk_body(std::vector<StmtP> &body, size_t cur) {
+        for (auto &s : body) walk_stmt(*s, cur);
+    }
+
+    void walk_stmt(Stmt &s, size_t cur) {
+        s.e1 = walk_expr(std::move(s.e1), cur);
+        s.e2 = walk_expr(std::move(s.e2), cur);
+        s.e3 = walk_expr(std::move(s.e3), cur);
+        for (auto &p : s.params) {
+            if (p.def) p.def = walk_expr(std::move(p.def), cur);
+        }
+        for (auto &p : s.ext.params) {
+            if (p.def) p.def = walk_expr(std::move(p.def), cur);
+        }
+        for (auto &f : s.fns) {
+            for (auto &p : f.params) {
+                if (p.def) p.def = walk_expr(std::move(p.def), cur);
+            }
+            walk_body(f.body, cur);
+        }
+        walk_body(s.body, cur);
+        walk_body(s.body2, cur);
+        if (s.els) walk_stmt(*s.els, cur);
+    }
+
+    void transform_top(Stmt &s, size_t cur) {
+        walk_stmt(s, cur);
+        Stmt *fn = nullptr;
+        if (s.k == SK::Fn) fn = &s;
+        if (s.k == SK::Pub && !s.body.empty() && s.body[0]->k == SK::Fn) fn = s.body[0].get();
+        if (!fn) return;
+        const std::string original = fn->fns[0].name.value_or("");
+        auto it = set.files[cur].functions.find(original);
+        if (it != set.files[cur].functions.end()) fn->fns[0].name = it->second;
+    }
+
+
+    void check_interface(size_t cur,
+                         const std::vector<std::pair<std::string, std::pair<std::vector<std::string>,
+                                                                        std::string>>> &arity) {
+        const SourceFile &f = set.files[cur];
+        if (!f.iface) return;
+        std::string where = module_name(cur);
+        auto find = [&](const std::string &name) -> const std::pair<std::vector<std::string>,
+                                                                   std::string> * {
+            for (const auto &kv : arity) {
+                if (kv.first == name) return &kv.second;
+            }
+            return nullptr;
+        };
+        for (const auto &[name, want] : *f.iface) {
+            const auto *got = find(name);
+            if (!got) {
+                throw ModuleError("The implementation of module `" + where +
+                                  "` does not match its interface: `" + name +
+                                  "` is declared in the interface but not defined");
+            }
+            const std::vector<std::string> &params = got->first;
+            const std::vector<std::string> &want_params = want.first;
+            if (params.size() != want_params.size()) {
+                throw ModuleError(
+                    "The implementation of module `" + where +
+                    "` does not match its interface: `" + name + "` takes " +
+                    std::to_string(params.size()) + " parameter(s) in the implementation, " +
+                    std::to_string(want_params.size()) + " in the interface");
+            }
+            for (size_t i = 0; i < params.size(); i++) {
+                if (params[i] != want_params[i]) {
+                    throw ModuleError("The implementation of module `" + where +
+                                      "` does not match its interface: `" + name + "` parameter " +
+                                      std::to_string(i + 1) + " is `" + want_params[i] +
+                                      "` in the interface, `" + params[i] +
+                                      "` in the implementation");
+                }
+            }
+            if (got->second != want.second) {
+                throw ModuleError("The implementation of module `" + where +
+                                  "` does not match its interface: `" + name + "` returns `" +
+                                  want.second + "` in the interface, `" + got->second +
+                                  "` in the implementation");
+            }
+        }
+    }
+
+    void resolve_uses(size_t cur) {
+        for (const auto &sp : set.files[cur].body) {
+            if (sp->k != SK::PubUse) continue;
+            const std::string &target_name = sp->a;
+            size_t dot = target_name.rfind('.');
+            std::string qualifier = dot == std::string::npos ? "" : target_name.substr(0, dot);
+            std::string fn = dot == std::string::npos ? target_name : target_name.substr(dot + 1);
+            std::vector<size_t> targets;
+            for (const auto &[imported, target] : set.files[cur].imports) {
+                if (!qualifier.empty()) {
+                    size_t tail = imported.rfind('.');
+                    std::string last = tail == std::string::npos ? imported
+                                                                 : imported.substr(tail + 1);
+                    if (imported == qualifier || last == qualifier) targets.push_back(target);
+                }
+            }
+            if (targets.empty()) {
+                throw ModuleError("`pub use " + target_name + "`: module `" + qualifier +
+                                  "` is not imported");
+            }
+            size_t target = targets[0];
+            auto it = set.files[target].functions.find(fn);
+            if (it == set.files[target].functions.end()) {
+                throw ModuleError("module `" + qualifier + "` has no function `" + fn + "`");
+            }
+            if (target != cur && !set.files[target].pub.count(fn)) {
+                throw ModuleError("function `" + fn + "` is private in module `" +
+                                  module_name(target) + "`");
+            }
+            auto source = std::make_pair(module_name(target), fn);
+            auto known = set.files[cur].reexports.find(fn);
+            if (known != set.files[cur].reexports.end() && known->second != source) {
+                throw ModuleError("`" + fn + "` is re-exported from two modules: `" +
+                                  known->second.first + "` and `" + source.first + "`");
+            }
+            set.files[cur].reexports[fn] = source;
+            set.files[cur].functions[fn] = it->second;
+            set.files[cur].pub.insert(fn);
+        }
+    }
+
+    // A module's re-exports may name another module's re-exports, so a module is
+    // resolved after the ones it imports: `facade -> mid -> base` is three levels
+    // and one pass in load order reached `mid` too late.
+    std::set<size_t> resolved;
+    void resolve_module(size_t cur, std::vector<size_t> stack) {
+        if (resolved.count(cur)) return;
+        resolved.insert(cur);
+        for (size_t s : stack)
+            if (s == cur) return;   // an import cycle of re-exports
+        stack.push_back(cur);
+        for (const auto &kv : set.files[cur].imports) resolve_module(kv.second, stack);
+        resolve_uses(cur);
+    }
+
+    void run() {
+        for (size_t i = 0; i < set.files.size(); i++) {
+            SourceFile &f = set.files[i];
+            if (!f.ns) continue;
+            std::string bri = f.path.substr(0, f.path.size() - 5) + ".bri";
+            std::error_code ec;
+            if (fs::is_regular_file(bri, ec)) f.iface = parse_interface(bri);
+        }
+        for (size_t i = 0; i < set.files.size(); i++) {
+            std::vector<std::pair<std::string, std::pair<std::vector<std::string>, std::string>>>
+                arity;
+            for (const auto &sp : set.files[i].body) {
+                const Stmt *node = inner(*sp);
+                if (node->k == SK::Extern) {
+                    std::vector<std::optional<std::string>> params;
+                    for (const Param &p : node->ext.params) params.push_back(p.ann);
+                    set.files[i].callback_params[node->ext.name] = params;
+                    callback_params[node->ext.name] = std::move(params);
+                    continue;
+                }
+                if (node->k != SK::Fn) continue;
+                const FnDecl &fn = node->fns[0];
+                const std::string original = fn.name.value_or("");
+                const std::string full = mangle(i, original);
+                set.files[i].functions[original] = full;
+                std::vector<std::optional<std::string>> params;
+                for (const Param &p : fn.params) params.push_back(p.ann);
+                set.files[i].callback_params[original] = params;
+                set.files[i].callback_params[full] = params;
+                callback_params[full] = std::move(params);
+                std::vector<std::string> anns;
+                for (const Param &p : fn.params) anns.push_back(param_ann(p));
+                arity.emplace_back(original, std::make_pair(anns, fn_ret(fn)));
+                bool exported = set.files[i].iface ? set.files[i].iface->count(original) > 0
+                                                   : sp->k == SK::Pub;
+                if (exported) {
+                    set.files[i].pub.insert(original);
+                    public_names[original].emplace_back(i, full);
+                } else if (set.files[i].ns) {
+                    private_names[full] = {i, original};
+                }
+            }
+            check_interface(i, arity);
+        }
+        for (size_t i = 0; i < set.files.size(); i++) resolve_module(i, {});
+        for (size_t i = 0; i < set.files.size(); i++) {
+            for (auto &sp : set.files[i].body) transform_top(*sp, i);
+        }
+    }
+};
+
+}  // namespace
+
+ModuleSet load_modules(const std::string &path) {
+    fs::path abs = fs::weakly_canonical(fs::absolute(path));
+    Loader l;
+    l.base = abs.parent_path();
+    if (l.base.empty()) l.base = ".";
+    l.visit(abs, true, "");
+    return std::move(l.set);
+}
+
+ModuleSet load_modules(const std::string &path, const std::string &root_source) {
+    fs::path abs = fs::weakly_canonical(fs::absolute(path));
+    Loader l;
+    l.base = abs.parent_path();
+    if (l.base.empty()) l.base = ".";
+    l.visit(abs, true, "", &root_source);
+    return std::move(l.set);
+}
+
+void flatten(ModuleSet &set) {
+    Mangler m{set};
+    m.run();
+    std::set<std::string> expanded;
+    std::vector<StmtP> flat;
+    // A module's statements land where its `import` sits in the importer, not
+    // at the end: the reference splices depth first, each module once.
+    struct Walk {
+        ModuleSet &set;
+        std::set<std::string> &expanded;
+        std::vector<StmtP> &out;
+
+        void go(size_t idx) {
+            const std::string &path = set.files[idx].path;
+            if (expanded.count(path)) return;
+            expanded.insert(path);
+            for (auto &sp : set.files[idx].body) {
+                if (sp->k == SK::Import) {
+                    for (const auto &[name, target] : set.files[idx].imports) {
+                        if (name == sp->a) {
+                            go(target);
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (sp->k == SK::PubUse) continue;
+                out.push_back(std::move(sp));
+            }
+        }
+    } walk{set, expanded, flat};
+    walk.go(0);
+    set.flat = std::move(flat);
+}

@@ -1,0 +1,44 @@
+enum Color {
+  Red,
+  Green(r),
+  Blue(r, g)
+}
+enum Res {
+  Ok(v),
+  Err(e)
+}
+fn describe(c) -> i64 {
+  match c {
+    Red => {
+      return 1
+    },
+    Green(v) => {
+      return v
+    },
+    _ => {
+      return 0
+    }
+  }
+  return 0
+}
+fn total(r) -> i64 {
+  match r {
+    Ok(v) => {
+      return v
+    },
+    Err(e) => {
+      log.warn("bad {e}")
+      return 0
+    }
+  }
+  return 0
+}
+fn main() -> i64 {
+  print(describe(Red))
+  print(describe(Green(7)))
+  print(describe(Blue(1, 2)))
+  print(total(Ok(40)))
+  print(total(Err("x")))
+  print(tagof(Red))
+  return 0
+}

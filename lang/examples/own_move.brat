@@ -1,0 +1,17 @@
+fn take(a) {
+  print(a)
+}
+fn main() -> i64 {
+  let h = "hi"
+  let m = move h
+  print(h)
+  let k = "yo"
+  let r = k
+  let m2 = move k
+  take(move m2)
+  let p = Point { x: 1 }
+  let q = move p
+  print(p.x)
+  print("done")
+  return 0
+}

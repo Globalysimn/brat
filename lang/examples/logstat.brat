@@ -1,0 +1,74 @@
+fn main() -> i64 {
+  let argv = args()
+  if len(argv) < 1 {
+    eprint("usage: logstat.brat <access.log>")
+    return 2
+  }
+  let path = argv[0]
+  let got = read_file(path)
+  match got {
+    Ok(text) => {
+      return analyze(text)
+    },
+    Err(e) => {
+      eprint("cannot read {path}: {e}")
+      return 1
+    }
+  }
+  return 0
+}
+fn analyze(text: str) -> i64 {
+  let mut status_counts = {}
+  let mut path_hits = {}
+  let mut total_bytes = 0
+  let mut requests = 0
+  let mut bad_lines = 0
+  for line in text.lines() {
+    let ln = line.trim()
+    if ln == "" {
+      continue
+    }
+    let fields = ln.split(" ")
+    if len(fields) < 10 {
+      bad_lines = bad_lines + 1
+      continue
+    }
+    let p = fields[6]
+    let status = fields[8]
+    let nbytes = fields[9]
+    requests = requests + 1
+    status_counts.set(status, status_counts.get_or(status, 0) + 1)
+    path_hits.set(p, path_hits.get_or(p, 0) + 1)
+    let sz = nbytes.parse_int()
+    match sz {
+      Ok(v) => {
+        total_bytes = total_bytes + v
+      },
+      Err(_) => {}
+    }
+  }
+  print("requests: {requests}")
+  print("bad lines: {bad_lines}")
+  print("bytes: {total_bytes}")
+  print("status codes:")
+  for code in status_counts.keys() {
+    print("  {code}: {status_counts.get_or(code, 0)}")
+  }
+  print("top paths:")
+  let mut rows = []
+  for p2 in path_hits.keys() {
+    rows.push([path_hits.get_or(p2, 0), p2])
+  }
+  rows.sort()
+  rows.rev()
+  let mut n = len(rows)
+  if n > 5 {
+    n = 5
+  }
+  let mut i = 0
+  while i < n {
+    print("  {rows[i][1]}: {rows[i][0]}")
+    i = i + 1
+  }
+  return 0
+}

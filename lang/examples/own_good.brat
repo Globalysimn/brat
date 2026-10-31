@@ -1,0 +1,13 @@
+fn add(a: i64, b: i64) -> i64 {
+  return a + b
+}
+fn show(a) {
+  let r = a
+  print(r)
+  return a
+}
+let host: str = "127.0.0.1:9001"
+print(host)
+let x = add(40, 2)?
+print(x)
+print(show(7))

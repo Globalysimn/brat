@@ -1,0 +1,16 @@
+fn minmax(v) {
+  return [v.min(), v.max()]
+}
+let [lo, hi] = minmax([3, 1, 9])
+assert(lo == 1)
+assert(hi == 9)
+let [a, _, c] = [10, 20, 30]
+assert(a == 10)
+assert(c == 30)
+let pair = "k=42".split("=")
+let [k, n] = pair
+assert(k == "k")
+assert(n == "42")
+let [x] = [7]
+assert(x == 7)
+print("destruct ok")

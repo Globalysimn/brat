@@ -1,0 +1,22 @@
+fn work(n: i64) -> i64 {
+  let mut t = 0
+  for i in 1..n {
+    t = t + i
+  }
+  return t
+}
+fn main() -> i64 {
+  let cfg = Host { name: "up1" }
+  log.info("routing to {cfg.name}")
+  trace.span("boot") {
+    log.info("warming up")
+  }
+  let r = trace.span("sum") {
+    return work(10)
+  }
+  print("r is {r}")
+  assert(r == 45)
+  trace.span("plain")
+  print("span ok {r} {cfg.name}")
+  return 0
+}

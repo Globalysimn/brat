@@ -1,0 +1,19 @@
+fn double(x: i64) -> i64 {
+  return x * 2
+}
+fn main() -> i64 {
+  let add3 = fn(a) { return a + 3 }
+  print(add3(10))
+  let fib = fn fib(n) {
+    if n < 2 {
+      return n
+    }
+    return fib(n - 1) + fib(n - 2)
+  }
+  print(fib(15))
+  let v = [1, 2, 3, 4]
+  print(v.map(double))
+  print(v.map(fn(x) { return x * 10 }))
+  print(v.filter(fn(x) { return x - 2 }))
+  return 0
+}

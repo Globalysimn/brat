@@ -1,0 +1,144 @@
+import strlib
+import veclib
+fn main() -> i64 {
+  if is_empty("") {
+    print("ok is_empty empty")
+  } else {
+    print("FAIL is_empty empty")
+    return 1
+  }
+  if is_empty("x") {
+    print("FAIL is_empty nonempty")
+    return 1
+  } else {
+    print("ok is_empty nonempty")
+  }
+  if repeat("ab", 3) == "ababab" {
+    print("ok repeat")
+  } else {
+    print("FAIL repeat")
+    return 1
+  }
+  if repeat("ab", 0) == "" {
+    print("ok repeat zero")
+  } else {
+    print("FAIL repeat zero")
+    return 1
+  }
+  if pad_left("7", 3) == "  7" {
+    print("ok pad_left")
+  } else {
+    print("FAIL pad_left")
+    return 1
+  }
+  if pad_left("abcd", 3) == "abcd" {
+    print("ok pad_left wide")
+  } else {
+    print("FAIL pad_left wide")
+    return 1
+  }
+  if after_colon("key: value") == "value" {
+    print("ok after_colon")
+  } else {
+    print("FAIL after_colon")
+    return 1
+  }
+  if after_colon("nocolon") == "" {
+    print("ok after_colon missing")
+  } else {
+    print("FAIL after_colon missing")
+    return 1
+  }
+  if after_colon("a:b:c") == "b:c" {
+    print("ok after_colon first")
+  } else {
+    print("FAIL after_colon first")
+    return 1
+  }
+  if csv_first("a,b,c") == "a" {
+    print("ok csv_first")
+  } else {
+    print("FAIL csv_first")
+    return 1
+  }
+  if csv_first("solo") == "solo" {
+    print("ok csv_first solo")
+  } else {
+    print("FAIL csv_first solo")
+    return 1
+  }
+  if csv_first("  hi ,x") == "hi" {
+    print("ok csv_first trim")
+  } else {
+    print("FAIL csv_first trim")
+    return 1
+  }
+  if sum([1, 2, 3]) == 6 {
+    print("ok sum")
+  } else {
+    print("FAIL sum")
+    return 1
+  }
+  if sum([]) == 0 {
+    print("ok sum empty")
+  } else {
+    print("FAIL sum empty")
+    return 1
+  }
+  if contains([1, 2, 3], 2) {
+    print("ok contains hit")
+  } else {
+    print("FAIL contains hit")
+    return 1
+  }
+  if contains([1, 2, 3], 9) {
+    print("FAIL contains miss")
+    return 1
+  } else {
+    print("ok contains miss")
+  }
+  if contains([], 1) {
+    print("FAIL contains empty")
+    return 1
+  } else {
+    print("ok contains empty")
+  }
+  let t = take([1, 2, 3], 2)
+  if len(t) == 2 {
+    if t[0] == 1 {
+      if t[1] == 2 {
+        print("ok take")
+      } else {
+        print("FAIL take elem")
+        return 1
+      }
+    } else {
+      print("FAIL take elem")
+      return 1
+    }
+  } else {
+    print("FAIL take len")
+    return 1
+  }
+  let t2 = take([1, 2], 9)
+  if len(t2) == 2 {
+    print("ok take clamp")
+  } else {
+    print("FAIL take clamp")
+    return 1
+  }
+  let t3 = take([1, 2, 3], 0)
+  if len(t3) == 0 {
+    print("ok take zero")
+  } else {
+    print("FAIL take zero")
+    return 1
+  }
+  if last([1, 2, 3]) == 3 {
+    print("ok last")
+  } else {
+    print("FAIL last")
+    return 1
+  }
+  return 0
+}

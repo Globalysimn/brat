@@ -1,0 +1,40 @@
+# Нормализация текста в репозитории.
+# Проблема, которую это решает: проект собирается и на Windows, и на Linux.
+# Раньше .brat-файлы приходили с CRLF, и дифференциальный сьют падал на
+# нормализации, а .pem писался с CRLF и не грузился.
+
+* text=auto
+
+# Исходники: LF в репозитории, переводы при выгрузке
+*.py      text eol=lf
+*.brat    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.toml    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.h       text eol=lf
+*.c       text eol=lf diff=cpp
+*.txt     text eol=lf
+
+# Сертификаты — всегда LF, они чувствительны к переводам строк
+*.pem     text eol=lf
+*.key     text eol=lf
+*.crt     text eol=lf
+
+# Бинарное — не трогать никогда
+*.exe     binary
+*.so      binary
+*.dylib   binary
+*.dll     binary
+*.o       binary
+*.obj     binary
+*.a       binary
+*.lib     binary
+*.zip     binary
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.pdf     binary

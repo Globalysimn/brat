@@ -1,0 +1,34 @@
+fn main() -> i64 {
+  let mut i = 0
+  while i < 2 {
+    scope {
+      defer print("scope defer {i}")
+      spawn {
+        sleep_ms(50)
+        print("scope child {i}")
+      }
+      if true {
+        defer print("if defer {i}")
+        i = i + 1
+        continue
+      }
+    }
+  }
+
+  while true {
+    scope {
+      defer print("break scope defer")
+      spawn {
+        sleep_ms(50)
+        print("break child")
+      }
+      if true {
+        defer print("break if defer")
+        break
+      }
+    }
+  }
+
+  print("done")
+  return 0
+}

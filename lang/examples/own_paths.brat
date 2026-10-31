@@ -1,0 +1,11 @@
+let mut p = Point { x: 1, y: 2 }
+let a = move p.x
+print(a)
+print(p.y)
+p.x = 9
+print(p.x)
+let cfg = App { net: Net { host: "h", port: 80 }, name: "a" }
+let h = move cfg.net.host
+print(h)
+print(cfg.net.port)
+print(cfg.name)

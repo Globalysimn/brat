@@ -1,0 +1,29 @@
+fn status(code: i64) -> i64 {
+  match code {
+    200 => {
+      return 1
+    },
+    404 => {
+      return 0
+    },
+    _ => {
+      return 0
+    }
+  }
+  return 0
+}
+fn main() -> i64 {
+  let codes = [200, 404, 500]
+  let mut ok = 0
+  for c in codes {
+    let r = status(c)?
+    ok = ok + r
+    log.info("hit {c} {r}")
+  }
+  match ok {
+    1 => log.info("one ok"),
+    _ => log.warn("other")
+  }
+  print(ok)
+  return 0
+}

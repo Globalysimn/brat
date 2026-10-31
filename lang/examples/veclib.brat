@@ -1,0 +1,29 @@
+pub fn sum(v: vec[i64]) -> i64 {
+  let mut t = 0
+  for x in v {
+    t = t + x
+  }
+  return t
+}
+pub fn contains(v: vec[i64], x: i64) -> bool {
+  for e in v {
+    if e == x {
+      return true
+    }
+  }
+  return false
+}
+pub fn take(v: vec[i64], n: i64) -> vec[i64] {
+  let mut out = []
+  let mut lim = n
+  if lim > len(v) {
+    lim = len(v)
+  }
+  for i in 0..lim {
+    out.push(v[i])
+  }
+  return out
+}
+pub fn last(v: vec[i64]) -> i64 {
+  return v[len(v) - 1]
+}
