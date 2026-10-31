@@ -1,0 +1,23 @@
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.exe binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.o binary
+*.obj binary
+*.a binary
+*.lib binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+
+lang/engine/crt.h linguist-language=C
+lang/engine/crt/*.h linguist-language=C
+examples/*.h linguist-language=C
+lang/tests/** linguist-vendored
+scripts/** linguist-vendored
+editors/** linguist-vendored

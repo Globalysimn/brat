@@ -1,0 +1,83 @@
+# Generated binaries, caches, and scratch outputs are never tracked.
+
+# Python bytecode and virtual environments.
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Native build products.
+/bin/
+lang/cxx/bin/
+*.exe
+*.out
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.dSYM/
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Generated code and local run output.
+*.tmp
+*.bak
+*.orig
+*.log
+*.jsonl
+*.trace
+/tmp/
+/out/
+/build/
+/dist/
+
+# Local credentials and environment files.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+.env
+.env.*
+secrets/
+certs/
+# Public trust bundle and documentation examples are source inputs.
+!lang/engine/cacert.pem
+!docs/**/*.example.pem
+!.env.example
+
+# Tool and editor state.
+.cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# Stray directories created by legacy Windows path handling.
+C\:*/
+*C\:*
+
+# Downloaded archives are reproducible from their URLs and hashes.
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
