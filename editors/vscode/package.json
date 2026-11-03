@@ -1,0 +1,67 @@
+{
+  "name": "brat-lang",
+  "displayName": "BRAT Language Support",
+  "description": "Syntax highlighting, language configuration, and native brat-cxx LSP integration for BRAT (.brat, .bri).",
+  "version": "0.7.0",
+  "publisher": "brat-lang",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Syntax support works in Restricted Mode. A workspace-contained language server is started only after trust is granted; a globally configured server may be used."
+    }
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:brat"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "brat",
+        "aliases": [
+          "BRAT",
+          "brat"
+        ],
+        "extensions": [
+          ".brat",
+          ".bri"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "brat",
+        "scopeName": "source.brat",
+        "path": "./syntaxes/brat.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "brat.restartServer",
+        "title": "BRAT: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "BRAT",
+      "properties": {
+        "brat.lsp.path": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "description": "Explicit path to the brat-cxx or brat executable. When empty, searches a trusted workspace's lang/cxx/bin/brat-cxx and PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
