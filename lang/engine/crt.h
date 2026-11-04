@@ -2375,11 +2375,6 @@ BFN void vplugin_release(bint owner) {
     if (error[0]) vraise(error);
 }
 
-BFN Val vcall_str(const char *p) {
-    if (!p) { vraise("call: NULL str result"); return vunwind; }
-    return vstr(p);
-}
-
 /* String from an explicit (pointer, length) pair. C buffers carry their own
  * length; trusting strlen there is how a NUL in the middle silently truncates.
  * Rejects NUL and invalid UTF-8 so the byte string means the same thing in both
@@ -2408,6 +2403,51 @@ BFN int utf8_valid(const char *s, bint n) {
         i += need + 1;
     }
     return 1;
+}
+
+/* A NUL-terminated C string becomes a BRAT string only after the cap and
+ * UTF-8 checks. The scan stops one byte past the cap, so a string with no
+ * terminator in range is refused instead of copied without bound. */
+static Val vstr_c_checked(const char *s, const char *null_msg, const char *bad_msg) {
+    size_t n = 0;
+    if (!s) { vraise(null_msg); return vnil(); }
+    while (n <= BRAT_MAX_STR && s[n]) n++;
+    if (n > BRAT_MAX_STR) { vraise("out of memory"); return vnil(); }
+    if (!utf8_valid(s, (bint)n)) { vraise(bad_msg); return vnil(); }
+    return vstrn(s, (bint)n);
+}
+
+static const char *_verror_text(const char *msg) {
+    size_t n = 0;
+    if (!msg) return "";
+    while (n <= BRAT_MAX_STR && msg[n]) n++;
+    if (n > BRAT_MAX_STR || !utf8_valid(msg, (bint)n))
+        return "invalid utf-8 in error message";
+    return msg;
+}
+
+BFN Val vcall_str(const char *p) {
+    return vstr_c_checked(p, "call: NULL str result", "call: invalid UTF-8 str result");
+}
+
+BFN Val vstr_ffi(const char *s) {
+    return vstr_c_checked(s, "ffi: C returned NULL where str expected",
+                          "ffi: C returned invalid UTF-8 where str expected");
+}
+
+BFN Val vstr_ffi_arg(const char *s) {
+    return vstr_c_checked(s, "ffi: C passed NULL where str expected",
+                          "ffi: C passed invalid UTF-8 where str expected");
+}
+
+BFN Val vstr_ffi_field(const char *s) {
+    if (!s) return vnil();
+    return vstr_c_checked(s, "ffi: C string field is NULL",
+                          "ffi: C string field has invalid UTF-8");
+}
+
+BFN Val vstr_ptr_read(const char *s) {
+    return vstr_c_checked(s, "null pointer dereference", "ptr_read_str: invalid UTF-8");
 }
 
 BFN Val vstr_from_ptr(Val p, Val n) {
@@ -2739,8 +2779,9 @@ BFN char vquote(const char *s) {
 
 BFN bint vrepr_slen(const char *s) {
     bint n = 0;
+    char quote = vquote(s);
     for (const char *p = s; *p; p++) {
-        if (*p == '\'' || *p == '\\' || *p == '\n' || *p == '\r' || *p == '\t') n += 2;
+        if (*p == quote || *p == '\\' || *p == '\n' || *p == '\r' || *p == '\t') n += 2;
         else n += 1;
     }
     return n;
@@ -3463,15 +3504,15 @@ BFN const char *vtxt(Val v) {
     bint nn = vsprint_len_q(v, 0);
     if (verr_pending()) return "";
     if (nn < 511) {
-        vsprint_q(v, b, 0);
-        b[nn] = 0;
+        bint wrote = vsprint_q(v, b, 0);
+        b[wrote] = 0;
         return b;
     }
 
     char *heap = (char *)malloc((size_t)nn + 1);
     if (!heap) vfatal_oom();
-    vsprint_q(v, heap, 0);
-    heap[nn] = 0;
+    bint wrote = vsprint_q(v, heap, 0);
+    heap[wrote] = 0;
     static BTLS char *keep[VTXT_SLOTS];
     bint k = vtxt_next % VTXT_SLOTS;
     free(keep[k]);
@@ -3959,7 +4000,7 @@ BFN void vraise(const char *msg) {
     int saved = barena_depth;
     barena_depth = 0;
     Vec *a = vvec();
-    vec_push(a, vstr(msg));
+    vec_push(a, vstr(_verror_text(msg)));
     vunwind = vtagv("err", a);
     barena_depth = saved;
     _verr_line = _btrace_cur_line;
@@ -4531,8 +4572,34 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
 #endif
 }
 BFN Val vargs(void) {
+    for (bint i = 1; i < vargc_g; i++) {
+        const char *a = vargv_g[i] ? vargv_g[i] : "";
+        if (!utf8_valid(a, (bint)strlen(a))) {
+            char m[96];
+            snprintf(m, sizeof m, "invalid utf-8 in argument %lld; use args_bytes()",
+                     (long long)i);
+            vraise(m);
+            return vunwind;
+        }
+    }
     Vec *o = vvec();
-    for (bint i = 1; i < vargc_g; i++) vec_push(o, vstr(vargv_g[i]));
+    for (bint i = 1; i < vargc_g; i++) vec_push(o, vstr(vargv_g[i] ? vargv_g[i] : ""));
+    return vvecv(o);
+}
+BFN Val vargs_bytes(void) {
+    Vec *o = vvec();
+    for (bint i = 1; i < vargc_g; i++) {
+        const unsigned char *a = (const unsigned char *)(vargv_g[i] ? vargv_g[i] : "");
+        size_t n = strlen((const char *)a);
+        if (n > BRAT_MAX_BYTE_VEC) {
+            vrc_dec(vvecv(o));
+            vraise("args_bytes: argument exceeds 16 MiB byte vector limit");
+            return vunwind;
+        }
+        Vec *b = vvec_cap((bint)n);
+        for (size_t j = 0; j < n; j++) vec_push(b, vint((bint)a[j]));
+        vec_push(o, vvecv(b));
+    }
     return vvecv(o);
 }
 #define BEXIT_ROOTS_MAX 128
@@ -4645,11 +4712,23 @@ static int _venv_val_secret(const char *r) {
     return 0;
 }
 
-BFN Val venv_get(Val v) {
-    if (v.tag != V_STR) return vnil();
+static Val _venv_err(Val v, const char *prefix) {
     const char *key = vstr_c(&v);
-    /* Mirror brat/runtime.py: `BRAT_ENV_ALLOW=""` enforces strict default-deny
-     * (zero allowed variables), and credential-shaped names/values are refused. */
+    char *o = (char *)malloc(strlen(key) * 2 + strlen(prefix) + 32);
+    if (!o) vfatal_oom();
+    bint n = vput(o, prefix);
+    n += vsprint_q(v, o + n, 1);
+    o[n] = 0;
+    Vec *e = vvec();
+    vec_push(e, vstrn(o, n));
+    free(o);
+    return vtagv("err", e);
+}
+
+static Val _venv_lookup(Val v, int want_bytes) {
+    if (v.tag != V_STR || vstr_has_nul(&v)) return vnil();
+    const char *key = vstr_c(&v);
+    if (strchr(key, '=')) return vnil();
     int blocked = 0;
     const char *deny_all = getenv("BRAT_ENV_DENY_ALL");
     if (deny_all && (strcmp(deny_all, "1") == 0 || strcmp(deny_all, "true") == 0))
@@ -4690,19 +4769,24 @@ BFN Val venv_get(Val v) {
     free(upper);
     const char *r = blocked ? NULL : getenv(key);
     if (!blocked && _venv_val_secret(r)) blocked = 1;
-    if (blocked) {
-        char *o = (char *)malloc(strlen(key) * 2 + 32);
-        if (!o) vfatal_oom();
-        bint n = vput(o, "env_get refused: ");
-        n += vsprint_q(v, o + n, 1);
-        o[n] = 0;
-        Vec *e = vvec();
-        vec_push(e, vstrn(o, n));
-        free(o);
-        return vtagv("err", e);
+    if (blocked) return _venv_err(v, "env_get refused: ");
+    if (!r) return vnil();
+    if (want_bytes) {
+        size_t n = strlen(r);
+        if (n > BRAT_MAX_BYTE_VEC) {
+            vraise("env_get_bytes: value exceeds 16 MiB byte vector limit");
+            return vunwind;
+        }
+        Vec *o = vvec_cap((bint)n);
+        for (size_t j = 0; j < n; j++) vec_push(o, vint((bint)(unsigned char)r[j]));
+        return vvecv(o);
     }
-    return r ? vstr(r) : vnil();
+    if (!utf8_valid(r, (bint)strlen(r))) return _venv_err(v, "env_get invalid utf-8: ");
+    return vstr(r);
 }
+
+BFN Val venv_get(Val v) { return _venv_lookup(v, 0); }
+BFN Val venv_get_bytes(Val v) { return _venv_lookup(v, 1); }
 
 typedef struct { char kind; char q; char ch; const char *body; } RTok;
 
@@ -4729,10 +4813,12 @@ static int rtok_match(RTok *t, char ch) {
 }
 
 
-typedef struct { char op; char q; char ch; char owned; const char *body; bint x, y; } RInst;
+typedef struct { char op; char q; char ch; const char *body; bint x, y; } RInst;
 typedef struct {
     RInst *p;
     bint n, cap;
+    char **bodies;
+    bint nbodies, bodies_cap;
     const char *pat;
     bint i, plen;
     bint ngroups;
@@ -4751,19 +4837,25 @@ static bint r_emit(RProg *g, char op, bint x, bint y) {
         g->p = (RInst *)bgrow(g->p, sizeof(RInst) * (size_t)g->cap);
     }
     RInst *in = &g->p[g->n];
-    in->op = op; in->q = 0; in->ch = 0; in->owned = 0; in->body = NULL; in->x = x; in->y = y;
+    in->op = op; in->q = 0; in->ch = 0; in->body = NULL; in->x = x; in->y = y;
     return g->n++;
 }
 
-static void r_truncate(RProg *g, bint to) {
-    while (g->n > to) {
-        g->n--;
-        if (g->p[g->n].owned) {
-            free((void *)g->p[g->n].body);
-            g->p[g->n].owned = 0;
-            g->p[g->n].body = NULL;
-        }
+static const char *r_body_copy(RProg *g, const char *src, bint len) {
+    if (g->nbodies >= g->bodies_cap) {
+        g->bodies_cap = g->bodies_cap ? g->bodies_cap * 2 : 16;
+        g->bodies = (char **)bgrow(g->bodies, sizeof(char *) * (size_t)g->bodies_cap);
     }
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (!buf) vfatal_oom();
+    memcpy(buf, src, (size_t)len);
+    buf[len] = 0;
+    g->bodies[g->nbodies++] = buf;
+    return buf;
+}
+
+static void r_truncate(RProg *g, bint to) {
+    g->n = to;
 }
 
 static bint r_emit_tpl(RProg *g, const RInst *tpl, bint tpl_len, bint body, bint body_end) {
@@ -4773,16 +4865,7 @@ static bint r_emit_tpl(RProg *g, const RInst *tpl, bint tpl_len, bint body, bint
         if (g->err) return -1;
         g->p[idx].q = tpl[k].q;
         g->p[idx].ch = tpl[k].ch;
-        if (tpl[k].owned && tpl[k].body) {
-            size_t bl = strlen(tpl[k].body) + 1;
-            char *cp = (char *)malloc(bl);
-            if (!cp) vfatal_oom();
-            memcpy(cp, tpl[k].body, bl);
-            g->p[idx].owned = 1;
-            g->p[idx].body = cp;
-        } else {
-            g->p[idx].body = tpl[k].body;
-        }
+        g->p[idx].body = tpl[k].body;
         if (tpl[k].op == 'j' && tpl[k].x >= body && tpl[k].x <= body_end)
             g->p[idx].x = tpl[k].x + delta;
         else if (tpl[k].op == 's') {
@@ -4855,16 +4938,10 @@ static bint r_atom(RProg *g) {
         bint m = j;
         while (m < g->plen && g->pat[m] != ']') m++;
         if (m >= g->plen) { g->err = 1; return -1; }
-        char *buf = (char *)malloc((size_t)(m - j + 2));
-        if (!buf) vfatal_oom();
-        int k = 0;
-        if (j < g->plen && g->pat[j] == '^') buf[k++] = g->pat[j++];
-        while (j < g->plen && g->pat[j] != ']') buf[k++] = g->pat[j++];
-        buf[k] = 0;
-        g->i = j + 1;
+        const char *buf = r_body_copy(g, g->pat + j, m - j);
+        g->i = m + 1;
         body = r_emit(g, 'c', 0, 0);
         g->p[body].q = 's';
-        g->p[body].owned = 1;
         g->p[body].body = buf;
     } else if (c == '.') {
         g->i++;
@@ -4911,16 +4988,7 @@ static bint r_atom(RProg *g) {
         bint tpl_len = body_end - body;
         RInst *tpl = (RInst *)malloc(sizeof(RInst) * (size_t)(tpl_len > 0 ? tpl_len : 1));
         if (!tpl) vfatal_oom();
-        for (bint k = 0; k < tpl_len; k++) {
-            tpl[k] = g->p[body + k];
-            if (tpl[k].owned && tpl[k].body) {
-                size_t bl = strlen(tpl[k].body) + 1;
-                char *cp = (char *)malloc(bl);
-                if (!cp) vfatal_oom();
-                memcpy(cp, tpl[k].body, bl);
-                tpl[k].body = cp;
-            }
-        }
+        if (tpl_len > 0) memcpy(tpl, &g->p[body], sizeof(RInst) * (size_t)tpl_len);
         r_truncate(g, sp);
         bint entry = r_emit(g, 'j', 0, 0);
         g->p[entry].x = g->n;
@@ -4945,7 +5013,6 @@ static bint r_atom(RProg *g) {
                 g->p[opt_sp].y = g->n;
             }
         }
-        for (bint k = 0; k < tpl_len; k++) if (tpl[k].owned) free((void *)tpl[k].body);
         free(tpl);
         return g->err ? -1 : entry;
     }
@@ -5037,16 +5104,22 @@ static bint r_alt(RProg *g) {
 }
 
 static void r_free(RProg *g) {
-    for (bint k = 0; k < g->n; k++) if (g->p[k].owned) free((void *)g->p[k].body);
+    for (bint k = 0; k < g->nbodies; k++) free(g->bodies[k]);
+    free(g->bodies);
+    g->bodies = NULL;
+    g->nbodies = 0;
+    g->bodies_cap = 0;
     free(g->p);
     g->p = NULL;
     g->n = 0;
+    g->cap = 0;
 }
 
 typedef struct { bint pc; bint slot; bint prev; } REpsItem;
 
 static int r_compile_prog(RProg *g, const char *pat, bint *start_out) {
     g->p = NULL; g->n = 0; g->cap = 0;
+    g->bodies = NULL; g->nbodies = 0; g->bodies_cap = 0;
     g->pat = pat; g->i = 0; g->plen = (bint)strlen(pat);
     g->ngroups = 0; g->err = 0; g->empty_seq = 0;
     bint sv0 = r_emit(g, 'v', 0, 0);
@@ -5118,56 +5191,57 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
     bint *list_pcs = (bint *)malloc(sizeof(bint) * (size_t)(nprog + 1));
     bint *next_pcs = (bint *)malloc(sizeof(bint) * (size_t)(nprog + 1));
     bint *seen = (bint *)malloc(sizeof(bint) * (size_t)(nprog + 1));
+    bint *next_seen = (bint *)malloc(sizeof(bint) * (size_t)(nprog + 1));
     size_t slot_elems = (size_t)(nprog + 1) * (size_t)(nslots > 0 ? nslots : 1);
     bint *list_slots = (bint *)malloc(sizeof(bint) * slot_elems);
     bint *next_slots = (bint *)malloc(sizeof(bint) * slot_elems);
     bint *work_slots = (bint *)malloc(sizeof(bint) * (size_t)(nslots > 0 ? nslots : 1));
     REpsItem *stk = (REpsItem *)malloc(sizeof(REpsItem) * (size_t)stk_cap);
-    if (!list_pcs || !next_pcs || !seen || !list_slots || !next_slots || !work_slots || !stk) {
-        free(list_pcs); free(next_pcs); free(seen);
+    if (!list_pcs || !next_pcs || !seen || !next_seen || !list_slots || !next_slots || !work_slots || !stk) {
+        free(list_pcs); free(next_pcs); free(seen); free(next_seen);
         free(list_slots); free(next_slots); free(work_slots); free(stk);
         vfatal_oom();
     }
     int matched = 0;
-    for (bint from = min_from; from <= slen && !matched; from++) {
-        bint nlist = 0;
-        for (bint z = 0; z < nslots; z++) work_slots[z] = -1;
-        memset(seen, 0, sizeof(bint) * (size_t)(nprog + 1));
-        re_pike_add(g->p, start, s, from, list_pcs, list_slots, &nlist,
-                    seen, work_slots, nslots, stk, stk_cap);
-        for (bint si = from; nlist > 0; si++) {
-            bint nn = 0;
-            memset(seen, 0, sizeof(bint) * (size_t)(nprog + 1));
-            for (bint k = 0; k < nlist; k++) {
-                bint pc = list_pcs[k];
-                RInst *in = &g->p[pc];
-                if (in->op == 'm') {
-                    matched = 1;
-                    if (nslots > 0 && best_slots)
-                        memcpy(best_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
-                    /* Lower-priority threads after 'm' are cut off at this si,
-                     * while higher-priority threads before 'm' may still extend greedily! */
-                    break;
-                }
-                if (si >= slen || in->op != 'c') continue;
-                if (in->q == 'l') { if (s[si] != in->ch) continue; }
-                else if (in->q == 'd') { }
-                else {
-                    RTok t; t.kind = 's'; t.q = 0; t.ch = 0; t.body = in->body;
-                    if (!rtok_match(&t, s[si])) continue;
-                }
-                if (nslots > 0)
-                    memcpy(work_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
-                re_pike_add(g->p, pc + 1, s, si + 1, next_pcs, next_slots, &nn,
-                            seen, work_slots, nslots, stk, stk_cap);
-            }
-            bint *tp = list_pcs; list_pcs = next_pcs; next_pcs = tp;
-            bint *ts = list_slots; list_slots = next_slots; next_slots = ts;
-            nlist = nn;
-            if (si >= slen) break;
+    bint nlist = 0;
+    memset(seen, 0, sizeof(bint) * (size_t)(nprog + 1));
+    for (bint si = min_from; si <= slen; si++) {
+        if (!matched) {
+            for (bint z = 0; z < nslots; z++) work_slots[z] = -1;
+            re_pike_add(g->p, start, s, si, list_pcs, list_slots, &nlist,
+                        seen, work_slots, nslots, stk, stk_cap);
         }
+        bint nn = 0;
+        memset(next_seen, 0, sizeof(bint) * (size_t)(nprog + 1));
+        for (bint k = 0; k < nlist; k++) {
+            bint pc = list_pcs[k];
+            RInst *in = &g->p[pc];
+            if (in->op == 'm') {
+                matched = 1;
+                if (nslots > 0 && best_slots)
+                    memcpy(best_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
+                break;
+            }
+            if (si >= slen || in->op != 'c') continue;
+            if (in->q == 'l') { if (s[si] != in->ch) continue; }
+            else if (in->q == 'd') { }
+            else {
+                RTok t; t.kind = 's'; t.q = 0; t.ch = 0; t.body = in->body;
+                if (!rtok_match(&t, s[si])) continue;
+            }
+            if (nslots > 0)
+                memcpy(work_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
+            re_pike_add(g->p, pc + 1, s, si + 1, next_pcs, next_slots, &nn,
+                        next_seen, work_slots, nslots, stk, stk_cap);
+        }
+        if (si >= slen) break;
+        bint *tp = list_pcs; list_pcs = next_pcs; next_pcs = tp;
+        bint *ts = list_slots; list_slots = next_slots; next_slots = ts;
+        bint *tv = seen; seen = next_seen; next_seen = tv;
+        nlist = nn;
+        if (matched && nlist == 0) break;
     }
-    free(list_pcs); free(next_pcs); free(seen);
+    free(list_pcs); free(next_pcs); free(seen); free(next_seen);
     free(list_slots); free(next_slots); free(work_slots); free(stk);
     return matched;
 }
@@ -5466,13 +5540,15 @@ BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
 
 BFN Val verr(const char *msg) {
     Vec *e = vvec();
-    vec_push(e, vstr(msg));
+    vec_push(e, vstr(_verror_text(msg)));
     return vtagv("err", e);
 }
 
 BFN Val verr_os(const char *rp) {
     char m[9000];
-    snprintf(m, sizeof m, "[Errno %d] %s: '%s'", errno, strerror(errno), rp);
+    int e = errno;
+    snprintf(m, sizeof m, "[Errno %d] %s: '%s'", e, strerror(e), rp ? rp : "");
+    if (!utf8_valid(m, (bint)strlen(m))) snprintf(m, sizeof m, "[Errno %d] os error", e);
     return verr(m);
 }
 BFN Val vok1(const char *s) {
@@ -5484,10 +5560,39 @@ BFN const char *vconfine_val(const Val *p) {
     if (!p || p->tag != V_STR || vstr_has_nul(p)) return NULL;
     return vconfine(vstr_c(p));
 }
+static int _vpath_bytes(const Val *p, char *buf, size_t cap, const char **out) {
+    if (p->tag == V_STR) {
+        if (vstr_has_nul(p)) return 2;
+        *out = vstr_c(p);
+        return 0;
+    }
+    if (p->tag != V_VEC) return 1;
+    Vec *v = p->as.vec;
+    if (!v || v->len < 0) return 1;
+    if ((size_t)v->len >= cap) return 3;
+    for (bint i = 0; i < v->len; i++) {
+        Val el = v->items[i];
+        if (el.tag != V_INT || el.as.ival < 0 || el.as.ival > 255) return 4;
+        if (el.as.ival == 0) return 2;
+        buf[i] = (char)el.as.ival;
+    }
+    buf[v->len] = 0;
+    *out = buf;
+    return 0;
+}
+static const char *_vconfine_path(const Val *p, char *buf, size_t cap, int *bad) {
+    const char *raw = NULL;
+    *bad = _vpath_bytes(p, buf, cap, &raw);
+    if (*bad) return NULL;
+    return vconfine(raw);
+}
 BFN Val vreadfile(Val p) {
-    if (p.tag != V_STR) return verr("read_file wants a string path");
-    if (vstr_has_nul(&p)) return verr("embedded NUL in file path");
-    const char *rp = vconfine_val(&p);
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("read_file wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("read_file byte out of range 0..255");
     if (!rp) return verr("path outside the program directory");
     int escaped = 0, too_large = 0;
     FILE *f = _vopen_confined_stream(rp, 0, BRAT_MAX_FILE_BYTES, &escaped, &too_large);
@@ -5558,14 +5663,24 @@ static bmutex_t _vsk_mu = BMUTEX_INIT;
 static void _vsk_lock(void) { BMUTEX_LOCK(&_vsk_mu); }
 static void _vsk_unlock(void) { BMUTEX_UNLOCK(&_vsk_mu); }
 
-#define _VSK_MAX 64
 #ifndef _VSK_TIMEOUT_S
 #define _VSK_TIMEOUT_S 30        /* connected sockets have a fixed lifetime */
 #endif
 #define _VRECV_MAX (1L << 20)    /* one tcp_recv returns at most 1 MiB */
 
-static bsock_t _vsk[_VSK_MAX];
-static uint64_t _vsk_deadline_ms[_VSK_MAX];
+typedef struct {
+    bsock_t fd;
+    bint id;
+    bint free_next;
+    bint refs;
+    bint closing;
+    uint64_t deadline_ms;
+} VSock;
+static VSock *_vsk;
+static bint _vsk_cap;
+static bint _vsk_len = 1;
+static bint _vsk_free;
+static bint _vsk_next_id = 1;
 static int _vsk_ready = 0;
 
 static uint64_t _vsk_now_ms(void) {
@@ -5585,7 +5700,6 @@ static int _vsk_ensure(void) {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
 #endif
-    for (int i = 0; i < _VSK_MAX; i++) _vsk[i] = BSOCK_INVALID;
     _vsk_ready = 1;
     return 1;
 }
@@ -5596,8 +5710,10 @@ static int _vsk_init_net(void) {
     return ok;
 }
 /* Descriptor confinement: raw OS socket descriptors/SOCKET handles never leave
- * `_vsk[]` as BRAT values (programs see only slot IDs 1..63) and are marked
- * non-inheritable so child processes spawned by `proc_run` cannot touch them. */
+ * `_vsk[]` as BRAT values. Programs see fresh, monotonically increasing IDs,
+ * so a copied stale handle cannot alias the next socket in a reused table
+ * slot. Descriptors are marked non-inheritable so child processes spawned by
+ * `proc_run` cannot touch them. */
 static void _vsk_confine(bsock_t fd) {
 #if defined(_WIN32)
     SetHandleInformation((HANDLE)fd, HANDLE_FLAG_INHERIT, 0);
@@ -5606,40 +5722,128 @@ static void _vsk_confine(bsock_t fd) {
     if (fl >= 0) fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
 #endif
 }
-static int _vsk_put(bsock_t fd) {
-    int slot = -1;
+static bint _vsk_find_locked(bint id) {
+    if (id < 1) return -1;
+    for (bint i = 1; i < _vsk_len; i++) {
+        if (_vsk[i].fd != BSOCK_INVALID && !_vsk[i].closing && _vsk[i].id == id) return i;
+    }
+    return -1;
+}
+static bint _vsk_put(bsock_t fd) {
+    bint id = -1;
+    _vsk_lock();
+    if (_vsk_ensure() && _vsk_next_id >= 1) {
+        bint slot = 0;
+        if (_vsk_free) {
+            slot = _vsk_free;
+            _vsk_free = _vsk[slot].free_next;
+        } else {
+            if (_vsk_len >= _vsk_cap) {
+                bint nc = _vsk_cap ? _vsk_cap * 2 : 64;
+                VSock *nt = NULL;
+                if (nc >= _vsk_cap && (uint64_t)nc <= (uint64_t)SIZE_MAX / sizeof(VSock))
+                    nt = (VSock *)realloc(_vsk, (size_t)nc * sizeof(VSock));
+                if (nt) {
+                    for (bint i = _vsk_cap; i < nc; i++) {
+                        nt[i].fd = BSOCK_INVALID;
+                        nt[i].id = 0;
+                        nt[i].free_next = 0;
+                        nt[i].refs = 0;
+                        nt[i].closing = 0;
+                        nt[i].deadline_ms = 0;
+                    }
+                    _vsk = nt;
+                    _vsk_cap = nc;
+                }
+            }
+            if (_vsk_len < _vsk_cap) slot = _vsk_len++;
+        }
+        if (slot) {
+            _vsk[slot].fd = fd;
+            _vsk[slot].id = _vsk_next_id;
+            _vsk[slot].free_next = 0;
+            _vsk[slot].refs = 0;
+            _vsk[slot].closing = 0;
+            _vsk[slot].deadline_ms = _vsk_now_ms() + (uint64_t)_VSK_TIMEOUT_S * 1000;
+            id = _vsk_next_id;
+            _vsk_next_id = (_vsk_next_id == INT64_MAX) ? 0 : _vsk_next_id + 1;
+        }
+    }
+    _vsk_unlock();
+    return id;
+}
+static void _vsk_free_locked(bint slot) {
+    _vsk[slot].fd = BSOCK_INVALID;
+    _vsk[slot].id = 0;
+    _vsk[slot].refs = 0;
+    _vsk[slot].closing = 0;
+    _vsk[slot].deadline_ms = 0;
+    _vsk[slot].free_next = _vsk_free;
+    _vsk_free = slot;
+}
+static void _vsk_shutdown(bsock_t fd) {
+#if defined(_WIN32)
+    shutdown(fd, SD_BOTH);
+#else
+    shutdown(fd, SHUT_RDWR);
+#endif
+}
+static bsock_t _vsk_acquire(bint id, bint *slot_out, uint64_t *deadline_out) {
+    bsock_t fd = BSOCK_INVALID;
+    *slot_out = -1;
+    if (deadline_out) *deadline_out = 0;
     _vsk_lock();
     if (_vsk_ensure()) {
-        for (int i = 1; i < _VSK_MAX; i++) {
-            if (_vsk[i] == BSOCK_INVALID) {
-                _vsk[i] = fd;
-                _vsk_deadline_ms[i] = _vsk_now_ms() + (uint64_t)_VSK_TIMEOUT_S * 1000;
-                slot = i;
-                break;
+        bint slot = _vsk_find_locked(id);
+        if (slot >= 0) {
+            fd = _vsk[slot].fd;
+            _vsk[slot].refs++;
+            *slot_out = slot;
+            if (deadline_out) *deadline_out = _vsk[slot].deadline_ms;
+        }
+    }
+    _vsk_unlock();
+    return fd;
+}
+static int _vsk_release(bint slot) {
+    if (slot < 0) return 0;
+    bsock_t close_fd = BSOCK_INVALID;
+    int closing = 0;
+    _vsk_lock();
+    if (slot < _vsk_len && _vsk[slot].refs > 0) {
+        closing = _vsk[slot].closing != 0;
+        _vsk[slot].refs--;
+        if (closing && _vsk[slot].refs == 0) {
+            close_fd = _vsk[slot].fd;
+            _vsk_free_locked(slot);
+        }
+    }
+    _vsk_unlock();
+    if (close_fd != BSOCK_INVALID) bsock_close(close_fd);
+    return closing;
+}
+static int _vsk_close_id(bint id) {
+    bsock_t close_fd = BSOCK_INVALID;
+    bsock_t shutdown_fd = BSOCK_INVALID;
+    int found = 0;
+    _vsk_lock();
+    if (_vsk_ensure()) {
+        bint slot = _vsk_find_locked(id);
+        if (slot >= 0) {
+            found = 1;
+            if (_vsk[slot].refs == 0) {
+                close_fd = _vsk[slot].fd;
+                _vsk_free_locked(slot);
+            } else {
+                _vsk[slot].closing = 1;
+                shutdown_fd = _vsk[slot].fd;
             }
         }
     }
     _vsk_unlock();
-    return slot;
-}
-static bsock_t _vsk_get(bint slot) {
-    bsock_t fd = BSOCK_INVALID;
-    _vsk_lock();
-    if (_vsk_ensure() && slot >= 1 && slot < _VSK_MAX) fd = _vsk[slot];
-    _vsk_unlock();
-    return fd;
-}
-/* Takes the fd out of its slot atomically; the caller closes it. */
-static bsock_t _vsk_take(bint slot) {
-    bsock_t fd = BSOCK_INVALID;
-    _vsk_lock();
-    if (_vsk_ensure() && slot >= 1 && slot < _VSK_MAX && _vsk[slot] != BSOCK_INVALID) {
-        fd = _vsk[slot];
-        _vsk[slot] = BSOCK_INVALID;
-        _vsk_deadline_ms[slot] = 0;
-    }
-    _vsk_unlock();
-    return fd;
+    if (shutdown_fd != BSOCK_INVALID) _vsk_shutdown(shutdown_fd);
+    if (close_fd != BSOCK_INVALID) bsock_close(close_fd);
+    return found;
 }
 static int _vsk_slot_id(Val slot, bint *id) {
     if (slot.tag != V_INT) return 0;
@@ -5677,12 +5881,7 @@ static void _vsk_timeouts(bsock_t fd) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 #endif
 }
-static int _vsk_apply_deadline(bsock_t fd, bint slot, int receive) {
-    uint64_t deadline = 0;
-    _vsk_lock();
-    if (slot >= 1 && slot < _VSK_MAX && _vsk[slot] == fd)
-        deadline = _vsk_deadline_ms[slot];
-    _vsk_unlock();
+static int _vsk_apply_deadline(bsock_t fd, uint64_t deadline, int receive) {
     uint64_t now = _vsk_now_ms();
     if (!deadline || now >= deadline) return 0;
     uint64_t left = deadline - now;
@@ -5801,7 +6000,7 @@ static int _vsk_connect_timeout(bsock_t fd, const struct sockaddr *addr,
 }
 
 static Val _vok_int(bint n) { Vec *a = vvec(); vec_push(a, vint(n)); return vtagv("ok", a); }
-static Val _verr_c(const char *m) { Vec *a = vvec(); vec_push(a, vstr(m)); return vtagv("err", a); }
+static Val _verr_c(const char *m) { Vec *a = vvec(); vec_push(a, vstr(_verror_text(m))); return vtagv("err", a); }
 
 /* "host:port". Returns 0 for anything malformed: a host that does not fit is
  * refused, not cut short; the port must be decimal digits giving 1..65535. */
@@ -5955,7 +6154,7 @@ BFN Val vtcp_listen(Val addr) {
     sa.sin_addr.s_addr = (bin_addr_t)ip;
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) { bsock_close(fd); return _verr_c("bind failed"); }
     if (listen(fd, 16) != 0) { bsock_close(fd); return _verr_c("listen failed"); }
-    int slot = _vsk_put(fd);
+    bint slot = _vsk_put(fd);
     if (slot < 0) { bsock_close(fd); return _verr_c("too many sockets"); }
     return _vok_int(slot);
 }
@@ -5981,21 +6180,23 @@ BFN Val vtcp_connect(Val addr) {
         bsock_close(fd);
         return _verr_c("connect failed");
     }
-    int slot = _vsk_put(fd);
+    bint slot = _vsk_put(fd);
     if (slot < 0) { bsock_close(fd); return _verr_c("too many sockets"); }
     return _vok_int(slot);
 }
 BFN Val vtcp_accept(Val slot) {
     bint id;
     if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
-    bsock_t lfd = _vsk_get(id);
+    bint at;
+    bsock_t lfd = _vsk_acquire(id, &at, NULL);
     if (lfd == BSOCK_INVALID) return _verr_c("bad socket slot");
     bsock_t fd = accept(lfd, NULL, NULL);
+    _vsk_release(at);
     if (fd == BSOCK_INVALID) return _verr_c("accept failed");
     _vsk_confine(fd);
     _vsk_nosigpipe(fd);
     _vsk_timeouts(fd);
-    int ns = _vsk_put(fd);
+    bint ns = _vsk_put(fd);
     if (ns < 0) { bsock_close(fd); return _verr_c("too many sockets"); }
     return _vok_int(ns);
 }
@@ -6006,9 +6207,14 @@ BFN Val vtcp_recv(Val slot, Val n) {
     if (want < 0 || want > _VRECV_MAX) return _verr_c("recv wants 0 <= n <= 1048576");
     bint id;
     if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
-    bsock_t fd = _vsk_get(id);
+    bint at;
+    uint64_t deadline;
+    bsock_t fd = _vsk_acquire(id, &at, &deadline);
     if (fd == BSOCK_INVALID) return _verr_c("bad socket slot");
-    if (!_vsk_apply_deadline(fd, id, 1)) return _verr_c("socket deadline exceeded");
+    if (!_vsk_apply_deadline(fd, deadline, 1)) {
+        _vsk_release(at);
+        return _verr_c("socket deadline exceeded");
+    }
     char *buf = (char *)malloc((size_t)want + 1);
     if (!buf) vfatal_oom();
 #if defined(_WIN32)
@@ -6016,10 +6222,15 @@ BFN Val vtcp_recv(Val slot, Val n) {
 #else
     bint got = (bint)recv(fd, buf, (size_t)want, 0);
 #endif
+    int timed_out = got < 0 ? _vsk_timed_out() : 0;
+    int closing = _vsk_release(at);
     if (got < 0) {
-        int timed_out = _vsk_timed_out();
         free(buf);
         return _verr_c(timed_out ? "socket deadline exceeded" : "recv failed");
+    }
+    if (got == 0 && closing) {
+        free(buf);
+        return _verr_c("recv failed");
     }
     buf[got] = 0;
     if (!utf8_valid(buf, got) || memchr(buf, 0, (size_t)got) != NULL) {
@@ -6035,39 +6246,50 @@ BFN Val vtcp_send(Val slot, Val data) {
     if (data.tag != V_STR) return _verr_c("tcp_send wants string data");
     bint id;
     if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
-    bsock_t fd = _vsk_get(id);
+    bint at;
+    uint64_t deadline;
+    bsock_t fd = _vsk_acquire(id, &at, &deadline);
     if (fd == BSOCK_INVALID) return _verr_c("bad socket slot");
     const char *p = vstr_c(&data);
     size_t left = vstr_len_fast(&data);
     size_t done = 0;
     while (left > 0) {
-        if (!_vsk_apply_deadline(fd, id, 0)) return _verr_c("socket deadline exceeded");
+        if (!_vsk_apply_deadline(fd, deadline, 0)) {
+            _vsk_release(at);
+            return _verr_c("socket deadline exceeded");
+        }
 #if defined(_WIN32)
         int chunk = left > 0x7fffffff ? 0x7fffffff : (int)left;
         int k = send(fd, p + done, chunk, 0);
         if (k == SOCKET_ERROR) {
             if (WSAGetLastError() == WSAEINTR) continue;
-            return _verr_c(_vsk_timed_out() ? "socket deadline exceeded" : "send failed");
+            int timed_out = _vsk_timed_out();
+            _vsk_release(at);
+            return _verr_c(timed_out ? "socket deadline exceeded" : "send failed");
         }
 #else
         ssize_t k = send(fd, p + done, left, _VSEND_FLAGS);
         if (k < 0) {
             if (errno == EINTR) continue;
-            return _verr_c(_vsk_timed_out() ? "socket deadline exceeded" : "send failed");
+            int timed_out = _vsk_timed_out();
+            _vsk_release(at);
+            return _verr_c(timed_out ? "socket deadline exceeded" : "send failed");
         }
 #endif
-        if (k == 0) return _verr_c("send made no progress");
+        if (k == 0) {
+            _vsk_release(at);
+            return _verr_c("send made no progress");
+        }
         done += (size_t)k;
         left -= (size_t)k;
     }
+    _vsk_release(at);
     return _vok_int((bint)done);
 }
 BFN Val vtcp_close(Val slot) {
     bint id;
     if (!_vsk_slot_id(slot, &id)) return _verr_c("bad socket slot");
-    bsock_t fd = _vsk_take(id);
-    if (fd == BSOCK_INVALID) return _verr_c("bad socket slot");
-    bsock_close(fd);
+    if (!_vsk_close_id(id)) return _verr_c("bad socket slot");
     return _vok_int(0);
 }
 /* own(x): a deep copy that lives on the heap, so it survives the arena that
@@ -6156,9 +6378,13 @@ BFN Val vown(Val v) {
 }
 
 BFN Val vwritefile(Val p, Val t) {
-    if (p.tag != V_STR || t.tag != V_STR) return verr("write_file wants string path and text");
-    if (vstr_has_nul(&p)) return verr("embedded NUL in file path");
-    const char *rp = vconfine_val(&p);
+    if (t.tag != V_STR) return verr("write_file wants string path and text");
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("write_file wants string path and text");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("write_file byte out of range 0..255");
     if (!rp) return verr("path outside the program directory");
     int escaped = 0;
     FILE *f = _vopen_confined_stream(rp, 1, 0, &escaped, NULL);
@@ -6183,9 +6409,12 @@ BFN Val vwritefile(Val p, Val t) {
 }
 
 BFN Val vreadbytes(Val p) {
-    if (p.tag != V_STR) return verr("read_bytes wants a string path");
-    if (vstr_has_nul(&p)) return verr("embedded NUL in file path");
-    const char *rp = vconfine_val(&p);
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("read_bytes wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("read_bytes byte out of range 0..255");
     if (!rp) return verr("path outside the program directory");
     int escaped = 0, too_large = 0;
     FILE *f = _vopen_confined_stream(rp, 0, BRAT_MAX_READ_BYTES, &escaped, &too_large);
@@ -6269,13 +6498,19 @@ BFN Val vutf8_str(Val b) {
 }
 
 BFN Val vfs_rename(Val src, Val dst) {
-    if (src.tag != V_STR || dst.tag != V_STR) return verr("fs_rename wants string paths");
-    if (vstr_has_nul(&src) || vstr_has_nul(&dst)) return verr("embedded NUL in file path");
-    const char *rp1 = vconfine_val(&src);
+    char pbuf1[8192], pbuf2[8192];
+    const char *raw1 = NULL, *raw2 = NULL;
+    int pbad1 = _vpath_bytes(&src, pbuf1, sizeof pbuf1, &raw1);
+    int pbad2 = _vpath_bytes(&dst, pbuf2, sizeof pbuf2, &raw2);
+    if (pbad1 == 1 || pbad2 == 1) return verr("fs_rename wants string paths");
+    if (pbad1 == 2 || pbad2 == 2) return verr("embedded NUL in file path");
+    if (pbad1 == 4 || pbad2 == 4) return verr("fs_rename byte out of range 0..255");
+    if (pbad1 || pbad2) return verr("path outside the program directory");
+    const char *rp1 = vconfine(raw1);
     if (!rp1) return verr("path outside the program directory");
     char sbuf[8192];
     snprintf(sbuf, sizeof sbuf, "%s", rp1);
-    const char *rp2 = vconfine_val(&dst);
+    const char *rp2 = vconfine(raw2);
     if (!rp2) return verr("path outside the program directory");
     char dbuf[8192];
     snprintf(dbuf, sizeof dbuf, "%s", rp2);
@@ -6322,9 +6557,12 @@ BFN Val vfs_rename(Val src, Val dst) {
 }
 
 BFN Val vfs_remove(Val p) {
-    if (p.tag != V_STR) return verr("fs_remove wants a string path");
-    if (vstr_has_nul(&p)) return verr("embedded NUL in file path");
-    const char *rp = vconfine_val(&p);
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_remove wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_remove byte out of range 0..255");
     if (!rp) return verr("path outside the program directory");
     errno = 0;
 #if defined(_WIN32)
@@ -6518,6 +6756,8 @@ typedef struct _BOsslApi {
     void (*SSL_CTX_free)(void *);
     int (*SSL_CTX_set_default_verify_paths)(void *);
     int (*SSL_CTX_load_verify_locations)(void *, const char *, const char *);
+    intptr_t (*SSL_CTX_ctrl)(void *, int, intptr_t, void *);
+    intptr_t (*SSL_CTX_set_options)(void *, intptr_t);
     void (*SSL_CTX_set_verify)(void *, int, void *);
     void *(*SSL_new)(void *);
     void (*SSL_free)(void *);
@@ -6529,6 +6769,7 @@ typedef struct _BOsslApi {
     intptr_t (*SSL_get_verify_result)(const void *);
     int (*SSL_write)(void *, const void *, int);
     int (*SSL_read)(void *, void *, int);
+    int (*SSL_get_error)(const void *, int);
     int (*SSL_shutdown)(void *);
     int (*X509_VERIFY_PARAM_set1_ip_asc)(void *, const char *);
 } BOsslApi;
@@ -6557,6 +6798,8 @@ static int _bossl_init(void) {
     *(void **)&_bossl.SSL_CTX_free = dlsym(hssl, "SSL_CTX_free");
     *(void **)&_bossl.SSL_CTX_set_default_verify_paths = dlsym(hssl, "SSL_CTX_set_default_verify_paths");
     *(void **)&_bossl.SSL_CTX_load_verify_locations = dlsym(hssl, "SSL_CTX_load_verify_locations");
+    *(void **)&_bossl.SSL_CTX_ctrl = dlsym(hssl, "SSL_CTX_ctrl");
+    *(void **)&_bossl.SSL_CTX_set_options = dlsym(hssl, "SSL_CTX_set_options");
     *(void **)&_bossl.SSL_CTX_set_verify = dlsym(hssl, "SSL_CTX_set_verify");
     *(void **)&_bossl.SSL_new = dlsym(hssl, "SSL_new");
     *(void **)&_bossl.SSL_free = dlsym(hssl, "SSL_free");
@@ -6568,13 +6811,16 @@ static int _bossl_init(void) {
     *(void **)&_bossl.SSL_get_verify_result = dlsym(hssl, "SSL_get_verify_result");
     *(void **)&_bossl.SSL_write = dlsym(hssl, "SSL_write");
     *(void **)&_bossl.SSL_read = dlsym(hssl, "SSL_read");
+    *(void **)&_bossl.SSL_get_error = dlsym(hssl, "SSL_get_error");
     *(void **)&_bossl.SSL_shutdown = dlsym(hssl, "SSL_shutdown");
     *(void **)&_bossl.X509_VERIFY_PARAM_set1_ip_asc = dlsym(hcry, "X509_VERIFY_PARAM_set1_ip_asc");
     if (!_bossl.TLS_client_method || !_bossl.SSL_CTX_new || !_bossl.SSL_CTX_free ||
+        !_bossl.SSL_CTX_set_default_verify_paths || !_bossl.SSL_CTX_load_verify_locations ||
+        (!_bossl.SSL_CTX_set_options && !_bossl.SSL_CTX_ctrl) ||
         !_bossl.SSL_CTX_set_verify || !_bossl.SSL_new || !_bossl.SSL_free ||
         !_bossl.SSL_set_fd || !_bossl.SSL_set1_host || !_bossl.SSL_connect ||
         !_bossl.SSL_get_verify_result || !_bossl.SSL_write || !_bossl.SSL_read ||
-        !_bossl.SSL_shutdown) {
+        !_bossl.SSL_get_error || !_bossl.SSL_shutdown) {
         _bossl.ready = -1;
         BMUTEX_UNLOCK(&_bossl_mu);
         return 0;
@@ -6633,6 +6879,10 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
     if (fd == BSOCK_INVALID) return _verr_c("TLS TCP connect failed");
     void *ctx = _bossl.SSL_CTX_new(_bossl.TLS_client_method());
     if (!ctx) { bsock_close(fd); return _verr_c("SSL_CTX_new failed"); }
+    if (_bossl.SSL_CTX_set_options)
+        _bossl.SSL_CTX_set_options(ctx, 0x80 /* SSL_OP_IGNORE_UNEXPECTED_EOF */);
+    else
+        _bossl.SSL_CTX_ctrl(ctx, 32 /* SSL_CTRL_OPTIONS */, 0x80, NULL);
     if (ca_conf[0] != 0) {
         struct stat ca_st;
         if (lstat(ca_conf, &ca_st) != 0 || !S_ISREG(ca_st.st_mode) ||
@@ -6714,11 +6964,18 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
         errno = 0;
         int nr = _bossl.SSL_read(ssl, rbuf + len, 4096);
         if (nr > 0) { len += (size_t)nr; continue; }
-        if (nr < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)) {
+        int read_errno = errno;
+        int ssl_err = _bossl.SSL_get_error(ssl, nr);
+        if ((ssl_err == 2 || ssl_err == 3) && read_errno == EINTR) continue;
+        if (read_errno == EAGAIN || read_errno == EWOULDBLOCK || read_errno == ETIMEDOUT) {
             free(rbuf); _bossl.SSL_free(ssl); _bossl.SSL_CTX_free(ctx); bsock_close(fd);
             return _verr_c("TLS read timed out");
         }
-        break;
+        /* Only clean close_notify (6) or a ragged transport EOF (5, ret 0)
+         * ends the response. Record/protocol errors must discard partial data. */
+        if (ssl_err == 6 || (ssl_err == 5 && nr == 0)) break;
+        free(rbuf); _bossl.SSL_free(ssl); _bossl.SSL_CTX_free(ctx); bsock_close(fd);
+        return _verr_c("TLS read/write failed");
     }
     _bossl.SSL_shutdown(ssl);
     _bossl.SSL_free(ssl);
@@ -6740,6 +6997,7 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
 typedef struct _BSqlApi {
     int ready;
     int (*open)(const char *, void **);
+    int (*busy_timeout)(void *, int);
     int (*close_v2)(void *);
     int (*prepare_v2)(void *, const char *, int, void **, const char **);
     int (*bind_int64)(void *, int, int64_t);
@@ -6835,6 +7093,7 @@ static int _bsql_init(void) {
         return 0;
     }
     *(void **)&_bsql.open = dlsym(h, "sqlite3_open");
+    *(void **)&_bsql.busy_timeout = dlsym(h, "sqlite3_busy_timeout");
     *(void **)&_bsql.close_v2 = dlsym(h, "sqlite3_close_v2");
     *(void **)&_bsql.prepare_v2 = dlsym(h, "sqlite3_prepare_v2");
     *(void **)&_bsql.bind_int64 = dlsym(h, "sqlite3_bind_int64");
@@ -6855,8 +7114,12 @@ static int _bsql_init(void) {
     *(void **)&_bsql.free_mem = dlsym(h, "sqlite3_free");
     *(void **)&_bsql.errmsg = dlsym(h, "sqlite3_errmsg");
     *(void **)&_bsql.changes = dlsym(h, "sqlite3_changes");
-    if (!_bsql.open || !_bsql.close_v2 || !_bsql.prepare_v2 || !_bsql.step ||
-        !_bsql.finalize || !_bsql.exec || !_bsql.errmsg) {
+    if (!_bsql.open || !_bsql.busy_timeout || !_bsql.close_v2 || !_bsql.prepare_v2 ||
+        !_bsql.bind_int64 || !_bsql.bind_double || !_bsql.bind_text || !_bsql.bind_null ||
+        !_bsql.step || !_bsql.column_count || !_bsql.column_name || !_bsql.column_type ||
+        !_bsql.column_int64 || !_bsql.column_double || !_bsql.column_text ||
+        !_bsql.column_blob || !_bsql.column_bytes || !_bsql.finalize || !_bsql.exec ||
+        !_bsql.free_mem || !_bsql.errmsg || !_bsql.changes) {
         _bsql.ready = -1;
         BMUTEX_UNLOCK(&_bsql_mu);
         return 0;
@@ -6865,19 +7128,46 @@ static int _bsql_init(void) {
     BMUTEX_UNLOCK(&_bsql_mu);
     return 1;
 }
+static int _bsql_tail_empty(const char *p) {
+    if (!p) return 1;
+    while (*p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' || c == ';') {
+            p++;
+            continue;
+        }
+        if (c == '-' && p[1] == '-') {
+            p += 2;
+            while (*p && *p != '\n') p++;
+            continue;
+        }
+        if (c == '/' && p[1] == '*') {
+            p += 2;
+            while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+            if (*p) p += 2;
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
 #endif
 
 BFN Val vsql_open(Val pv) {
-    if (pv.tag != V_STR) return verr("sql_open wants string path");
+    char pbuf[8192];
+    const char *raw = NULL;
+    int pbad = _vpath_bytes(&pv, pbuf, sizeof pbuf, &raw);
+    if (pbad == 1) return verr("sql_open wants string path");
 #if defined(_WIN32)
     return verr("sqlite3 unavailable on this target");
 #else
-    if (vstr_has_nul(&pv)) return verr("embedded NUL in database path");
-    const char *raw = vstr_c(&pv);
+    if (pbad == 2) return verr("embedded NUL in database path");
+    if (pbad == 4) return verr("sql_open byte out of range 0..255");
+    if (pbad) return verr("path outside the program directory");
     const char *use_path = ":memory:";
     char conf_buf[8192];
     if (strcmp(raw, ":memory:") != 0) {
-        const char *rp = vconfine_val(&pv);
+        const char *rp = vconfine(raw);
         if (!rp) return verr("path outside the program directory");
         snprintf(conf_buf, sizeof conf_buf, "%s", rp);
         if (!_vfiles_free()) {
@@ -6920,6 +7210,11 @@ BFN Val vsql_open(Val pv) {
         const char *em = db ? _bsql.errmsg(db) : "sqlite3_open failed";
         Val r = verr(em);
         if (db) _bsql.close_v2(db);
+        return r;
+    }
+    if (_bsql.busy_timeout(db, 5000) != 0) {
+        Val r = verr(_bsql.errmsg(db));
+        _bsql.close_v2(db);
         return r;
     }
     if (strcmp(use_path, ":memory:") != 0 && !_vfiles_free()) {
@@ -7025,10 +7320,16 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
     if (!slot) return verr("bad sqlite handle");
     void *db = slot->db;
     void *stmt = NULL;
-    if (_bsql.prepare_v2(db, vstr_c(&sqlv), (int)sql_len, &stmt, NULL) != 0 || !stmt) {
+    const char *tail = NULL;
+    if (_bsql.prepare_v2(db, vstr_c(&sqlv), (int)sql_len, &stmt, &tail) != 0 || !stmt) {
         Val errv = verr(_bsql.errmsg(db));
         _vsql_release(slot);
         return errv;
+    }
+    if (!_bsql_tail_empty(tail)) {
+        _bsql.finalize(stmt);
+        _vsql_release(slot);
+        return verr("sql_query wants one statement");
     }
     Vec *pv = paramv.as.vec;
     for (bint i = 0; i < pv->len; i++) {
@@ -7162,8 +7463,14 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
 }
 
 BFN Val vwritebytes(Val p, Val d) {
-    if (p.tag != V_STR || d.tag != V_VEC) return verr("write_bytes wants string path and byte vec");
-    if (vstr_has_nul(&p)) return verr("embedded NUL in file path");
+    if (d.tag != V_VEC) return verr("write_bytes wants string path and byte vec");
+    char pbuf[8192];
+    const char *praw = NULL;
+    int pbad = _vpath_bytes(&p, pbuf, sizeof pbuf, &praw);
+    if (pbad == 1) return verr("write_bytes wants string path and byte vec");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("write_bytes byte out of range 0..255");
+    if (pbad) return verr("path outside the program directory");
     Vec *bv = d.as.vec;
     bint n = bv->len;
     unsigned char *raw = n > 0 ? (unsigned char *)malloc((size_t)n) : NULL;
@@ -7176,7 +7483,7 @@ BFN Val vwritebytes(Val p, Val d) {
         }
         raw[i] = (unsigned char)el.as.ival;
     }
-    const char *rp = vconfine_val(&p);
+    const char *rp = vconfine(praw);
     if (!rp) { free(raw); return verr("path outside the program directory"); }
     int escaped = 0;
     FILE *f = _vopen_confined_stream(rp, 1, 0, &escaped, NULL);
@@ -7259,6 +7566,14 @@ static uint64_t _vproc_mono_ms(void) {
 #endif
 }
 
+static char *_vbytes_to_cstr(Vec *v) {
+    char *s = (char *)malloc((size_t)v->len + 1);
+    if (!s) return NULL;
+    for (bint i = 0; i < v->len; i++) s[i] = (char)v->items[i].as.ival;
+    s[v->len] = 0;
+    return s;
+}
+
 BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     if (cmd.tag != V_STR || vstr_empty(cmd)) return verr("proc_run wants non-empty command string");
     if (vstr_has_nul(&cmd)) return verr("embedded NUL in command string");
@@ -7270,8 +7585,21 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     if (timeout_ms > 3600000) timeout_ms = 3600000;
     Vec *av = argv.as.vec;
     for (bint i = 0; i < av->len; i++) {
-        if (av->items[i].tag != V_STR) return verr("proc_run wants vec[str] args");
-        if (vstr_has_nul(&av->items[i])) return verr("embedded NUL in command argument");
+        Val it = av->items[i];
+        if (it.tag == V_STR) {
+            if (vstr_has_nul(&it)) return verr("embedded NUL in command argument");
+        } else if (it.tag == V_VEC) {
+            Vec *bv = it.as.vec;
+            if (!bv) return verr("proc_run wants vec[str] args");
+            for (bint j = 0; j < bv->len; j++) {
+                Val el = bv->items[j];
+                if (el.tag != V_INT || el.as.ival < 0 || el.as.ival > 255)
+                    return verr("proc_run byte out of range 0..255");
+                if (el.as.ival == 0) return verr("embedded NUL in command argument");
+            }
+        } else {
+            return verr("proc_run wants vec[str] args");
+        }
     }
     /* Parent enforces the capability policy (`BRAT_EXEC` / `BRAT_EXEC_ALLOW`)
      * before forking; the child then invokes `execve` directly, skipping empty
@@ -7299,13 +7627,41 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
         vraise("out of memory");
         return vunwind;
     }
+    char **cowned = (char **)calloc((size_t)av->len + 1, sizeof(char *));
+    if (!cowned) {
+        free(cargv);
+        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+        close(ex_p[0]); close(ex_p[1]);
+        vraise("out of memory");
+        return vunwind;
+    }
     cargv[0] = (char *)vstr_c(&cmd);
-    for (bint i = 0; i < av->len; i++) cargv[i + 1] = (char *)vstr_c(&av->items[i]);
+    int cargv_oom = 0;
+    for (bint i = 0; i < av->len; i++) {
+        if (av->items[i].tag == V_STR) {
+            cargv[i + 1] = (char *)vstr_c(&av->items[i]);
+        } else {
+            cowned[i] = _vbytes_to_cstr(av->items[i].as.vec);
+            if (!cowned[i]) { cargv_oom = 1; break; }
+            cargv[i + 1] = cowned[i];
+        }
+    }
+    if (cargv_oom) {
+        for (bint i = 0; i < av->len; i++) free(cowned[i]);
+        free(cowned);
+        free(cargv);
+        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+        close(ex_p[0]); close(ex_p[1]);
+        vraise("out of memory");
+        return vunwind;
+    }
     cargv[av->len + 1] = NULL;
 
     pid_t pid = fork();
     if (pid < 0) {
         int e = errno;
+        for (bint i = 0; i < av->len; i++) free(cowned[i]);
+        free(cowned);
         free(cargv);
         close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
         close(ex_p[0]); close(ex_p[1]);
@@ -7357,6 +7713,8 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
         _exit(127);
     }
     setpgid(pid, pid);
+    for (bint i = 0; i < av->len; i++) free(cowned[i]);
+    free(cowned);
     free(cargv);
     close(out_p[1]);
     close(err_p[1]);
@@ -7440,6 +7798,21 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     }
     close(out_p[0]);
     close(err_p[0]);
+    if (!reaped && !over && !timed_out) {
+        for (;;) {
+            pid_t wr = waitpid(pid, &status, WNOHANG);
+            if (wr == pid) { reaped = 1; break; }
+            if (wr < 0) {
+                if (errno == EINTR) continue;
+                reaped = 1;
+                break;
+            }
+            uint64_t now = _vproc_mono_ms();
+            if (now >= deadline) { timed_out = 1; break; }
+            uint64_t rem = deadline - now;
+            poll(NULL, 0, rem > 50ULL ? 50 : (int)rem);
+        }
+    }
     if (over || timed_out) {
         if (kill(-pid, SIGKILL) != 0 && !reaped) kill(pid, SIGKILL);
     }
@@ -7486,20 +7859,15 @@ BFN void vraise_errno(const char *fn) {
     vraise(m);
 }
 
-BFN Val vstr_ffi(const char *s) {
-    if (!s) { vraise("ffi: C returned NULL where str expected"); return vnil(); }
-    return vstr(s);
-}
-
 BFN Val vstr_of(Val v) {
     if (v.tag == V_STR) return v.sso ? v : vstr(v.as.str);
     bint n = vsprint_len_q(v, 0);
     if (verr_pending()) return vunwind;
     char *b = (char *)malloc(n + 1);
     if (!b) vfatal_oom();
-    vsprint_q(v, b, 0);
-    b[n] = 0;
-    Val r = vstrn(b, n);
+    bint wrote = vsprint_q(v, b, 0);
+    b[wrote] = 0;
+    Val r = vstrn(b, wrote);
     free(b);
     return r;
 }
@@ -9142,10 +9510,10 @@ BFN Val vsort_by(Val v, Val fn) {
  * Slots are process-wide like sockets. A closed slot is reused once it has
  * drained; a handle to a reused slot then reads as None instead of reaching
  * into somebody else's queue. */
-#define _VCH_MAX 64
 typedef struct {
     Val *buf;
     bint cap, len, head, used, closed, inited, waiters;
+    bint slot, free_next;
     uint32_t gen;
 #if defined(_WIN32)
     SRWLOCK lk;
@@ -9155,7 +9523,10 @@ typedef struct {
     pthread_cond_t rcv, snd;
 #endif
 } VChan;
-static VChan _vch[_VCH_MAX];
+static VChan **_vch;
+static bint _vch_cap;
+static bint _vch_len = 1;
+static bint _vch_free;
 
 #if defined(_WIN32)
 static SRWLOCK _vch_tab = SRWLOCK_INIT;
@@ -9199,11 +9570,15 @@ static void _vch_wake_all(VChan *c) {
 
 static VChan *_vch_acquire(Val h) {
     if (h.tag != V_INT || h.as.ival <= 0) return NULL;
-    bint i = h.as.ival & 0xFFFF;
-    uint32_t g = (uint32_t)((uint64_t)h.as.ival >> 16);
-    if (i < 1 || i >= _VCH_MAX || g == 0) return NULL;
+    bint i = (bint)(uint32_t)h.as.ival;
+    uint32_t g = (uint32_t)((uint64_t)h.as.ival >> 32);
+    if (i < 1 || g == 0) return NULL;
     _vch_tab_lock();
-    VChan *c = (_vch[i].used && _vch[i].gen == g) ? &_vch[i] : NULL;
+    VChan *c = NULL;
+    if (i < _vch_len) {
+        c = _vch[i];
+        if (!c || !c->used || c->gen != g) c = NULL;
+    }
     if (c) c->waiters++;
     _vch_tab_unlock();
     return c;
@@ -9221,13 +9596,15 @@ static bint _vch_total_slots = 0;
 static void _vch_put(VChan *c) {
     _vch_tab_lock();
     c->waiters--;
-    if (c->used && c->closed && c->len == 0 && c->waiters == 0) {
+    if (c->waiters == 0 && c->used && c->closed && c->len == 0) {
         if (_vch_total_slots >= c->cap) _vch_total_slots -= c->cap;
         else _vch_total_slots = 0;
         c->cap = 0;
         c->used = 0;
         free(c->buf);
         c->buf = NULL;
+        c->free_next = _vch_free;
+        _vch_free = c->slot;
     }
     _vch_tab_unlock();
 }
@@ -9242,22 +9619,43 @@ BFN Val vchan_new(Val cap) {
         _vch_tab_unlock();
         return _verr_c("chan: total channel capacity budget exceeded");
     }
-    for (int i = 1; i < _VCH_MAX; i++) {
-        VChan *c = &_vch[i];
-        if (c->used || c->waiters > 0) continue;
-        c->buf = (Val *)calloc((size_t)n, sizeof(Val));
-        if (!c->buf) { _vch_tab_unlock(); vfatal_oom(); }
-        if (!c->inited) { _vch_init(c); c->inited = 1; }
-        c->gen = (c->gen >= 0x7fffffffU) ? 1U : (c->gen + 1U);
-        c->cap = n; c->len = 0; c->head = 0; c->closed = 0;
-        c->used = 1;
-        _vch_total_slots += n;
-        bint handle = ((bint)c->gen << 16) | i;
-        _vch_tab_unlock();
-        return vint(handle);
+    bint i = 0;
+    VChan *c = NULL;
+    if (_vch_free) {
+        i = _vch_free;
+        c = _vch[i];
+        _vch_free = c->free_next;
+        c->free_next = 0;
+    } else {
+        if (_vch_len >= _vch_cap) {
+            bint nc = _vch_cap ? _vch_cap * 2 : 64;
+            if (nc < _vch_cap || (uint64_t)nc > (uint64_t)SIZE_MAX / sizeof(VChan *)) {
+                _vch_tab_unlock();
+                vfatal_oom();
+            }
+            VChan **nt = (VChan **)realloc(_vch, (size_t)nc * sizeof(VChan *));
+            if (!nt) { _vch_tab_unlock(); vfatal_oom(); }
+            for (bint j = _vch_cap; j < nc; j++) nt[j] = NULL;
+            _vch = nt;
+            _vch_cap = nc;
+        }
+        i = _vch_len++;
+        c = (VChan *)calloc(1, sizeof(VChan));
+        if (!c) { _vch_tab_unlock(); vfatal_oom(); }
+        c->slot = i;
+        _vch[i] = c;
+        _vch_init(c);
+        c->inited = 1;
     }
+    c->buf = (Val *)calloc((size_t)n, sizeof(Val));
+    if (!c->buf) { _vch_tab_unlock(); vfatal_oom(); }
+    c->gen = (c->gen >= 0x7fffffffU) ? 1U : (c->gen + 1U);
+    c->cap = n; c->len = 0; c->head = 0; c->closed = 0;
+    c->used = 1;
+    _vch_total_slots += n;
+    bint handle = ((bint)c->gen << 32) | (bint)(uint32_t)i;
     _vch_tab_unlock();
-    return _verr_c("too many channels");
+    return vint(handle);
 }
 
 BFN Val vchan_send(Val h, Val v) {
@@ -9450,8 +9848,8 @@ static DWORD WINAPI bpool_worker(void *p);
 static void *bpool_worker(void *p);
 #endif
 
-static void bpool_start_locked(void) {
-    if (g_pool_n) return;
+static int bpool_start_locked(void) {
+    if (g_pool_n) return 1;
     int n = bpool_ncpu();
     if (n > BPOOL_MAX) n = BPOOL_MAX;
     if (n < 1) n = 1;
@@ -9463,7 +9861,7 @@ static void bpool_start_locked(void) {
     for (int i = 0; i < n; i++) {
 #if defined(_WIN32)
         g_pool[i] = CreateThread(NULL, 0, bpool_worker, NULL, 0, NULL);
-        if (!g_pool[i]) { g_pool_n = i; return; }
+        if (!g_pool[i]) { g_pool_n = i; return i > 0; }
 #else
         if (pthread_create(&g_pool[i], NULL, bpool_worker, NULL) != 0) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -9471,10 +9869,11 @@ static void bpool_start_locked(void) {
 #else
             g_pool_n = i;
 #endif
-            return;
+            return i > 0;
         }
 #endif
     }
+    return 1;
 }
 
 BFN Val verr_own(Val v) {
@@ -9514,10 +9913,18 @@ static void btask_run(BTask *t) {
     int outer = g_btask_self;
     int outer_arena = barena_depth;
     VScope *outer_scope = _vscope_top;
+    int outer_pending = _verr_pending;
+    int outer_exc = _verr_exc;
+    bint outer_line = _verr_line;
+    bint outer_trace_line = _btrace_cur_line;
+    Val outer_unwind = outer_pending ? vunwind : vnil();
     g_btask_self = 1;
     barena_depth = 0;
     _vscope_top = t->scope;
-    verr_clear();
+    _verr_pending = 0;
+    _verr_exc = 0;
+    _verr_line = 0;
+    vunwind = vnil();
     Vec *a = vvec();
     if (t->has_arg) {
         vec_push(a, t->arg);     /* the task owns this reference */
@@ -9544,6 +9951,11 @@ static void btask_run(BTask *t) {
         }
         t->result = vnil();
     }
+    vunwind = outer_unwind;
+    _verr_pending = outer_pending;
+    _verr_exc = outer_exc;
+    _verr_line = outer_line;
+    _btrace_cur_line = outer_trace_line;
     g_btask_self = outer;
     barena_depth = outer_arena;
     _vscope_top = outer_scope;
@@ -9605,14 +10017,23 @@ BFN void vspawn(Val clo) {
     t->clo = clo;
     t->qnext = 0;
     t->next = 0;
+    btask_lock();
+    int started = bpool_start_locked();
+    btask_unlock();
+    if (!started) {
+        free(t);
+        vrc_dec(clo);
+        vraise("spawn failed: could not start worker thread");
+        return;
+    }
     if (_vscope_top) vscope_attach(_vscope_top, t);
     btask_lock();
-    bpool_start_locked();
     if (g_q_tail) g_q_tail->qnext = t;
     else g_q_head = t;
     g_q_tail = t;
     g_q_nleft++;
     bpool_wake();
+    bpool_idle_wake();
     btask_unlock();
 }
 
@@ -9733,6 +10154,7 @@ BFN Val vparfor(Val vec, Val clo, Val unit, Val op) {
         g_q_tail = t;
         g_q_nleft++;
         bpool_wake();
+        bpool_idle_wake();
         btask_unlock();
     }
     _vscope_drain(&pf_sc);
@@ -9776,7 +10198,7 @@ BFN Val vparfor(Val vec, Val clo, Val unit, Val op) {
 
 BFN Val vscope_begin(void) {
     VScope *sc = (VScope *)calloc(1, sizeof(VScope));
-    if (!sc) { vraise("scope: out of memory"); return vunwind; }
+    if (!sc) { vraise("scope: out of memory"); return vint(0); }
     sc->errv = vnil();
     sc->up = _vscope_top;
     _vscope_top = sc;

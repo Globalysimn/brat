@@ -21,7 +21,8 @@ FIXTURE = os.path.join(HERE, "fixtures", "scope_unwind.brat")
 TMP = _scratch.mkdtemp(prefix="brat-scope-unwind-")
 WANT = (b"if defer 0\nscope defer 0\nscope child 0\n"
         b"if defer 1\nscope defer 1\nscope child 1\n"
-        b"break if defer\nbreak scope defer\nbreak child\ndone\n")
+        b"break if defer\nbreak scope defer\nbreak child\n"
+        b"error child\nparent\nchild\ndone\n")
 
 try:
     sys.path.insert(0, ENGINE)

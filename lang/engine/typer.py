@@ -266,8 +266,10 @@ BRES = {
     "sql_open": "tag", "sql_close": "tag", "sql_exec": "tag", "sql_query": "tag",
     "is_vec": "bool", "is_str": "bool", "is_map": "bool",
     "join_all": "int", "Ok": "tag", "Err": "tag", "Some": "tag",
-    "args": ("vec", "str"), "exit": "dyn", "eprint": "dyn", "raise": "dyn",
+    "args": ("vec", "str"), "args_bytes": ("vec", ("vec", "int")),
+    "exit": "dyn", "eprint": "dyn", "raise": "dyn",
     "time_ms": "int", "mono_ns": "int", "sleep_ms": "dyn", "env_get": "dyn",
+    "env_get_bytes": "dyn",
     "$arena_enter": "int", "$arena_leave": "int",
     "re_match": "bool", "re_find": "dyn", "re_captures": "dyn", "re_replace": "str",
     "tcp_listen": "tag", "tcp_connect": "tag", "tcp_accept": "tag",
@@ -1102,7 +1104,7 @@ class FnTyper:
                         gt = self.expr(e[2][i])
                         self._amp_ok = _prev
                         if isinstance(pt, tuple) and pt[0] == "cb":
-                            self.check_cb(pt, e[2][i], name, i + 1)
+                            self.check_cb(pt, e[2][i], name, i + 1, gt)
                             continue
                         if not ok(pt, gt):
                             self.errs.note("arg %d of `%s`: want %s, got %s" % (i + 1, name, tname(pt), tname(gt)))
@@ -1349,9 +1351,18 @@ class FnTyper:
             self.errs.note("slice_set: want %s, got %s" % (tname(e), tname(got)))
         return "int"
 
-    def check_cb(self, pt, arg, name, pos):
+    def check_cb(self, pt, arg, name, pos, got=None):
         """A callback argument is the name of a function with the declared arity."""
         if not (isinstance(arg, tuple) and arg and arg[0] == "str"):
+            sentinel = False
+            if isinstance(arg, tuple) and arg:
+                if arg[0] == "num":
+                    sentinel = type(arg[1]) is int and arg[1] == 0
+                elif arg[0] == "un" and arg[1] == "-" and isinstance(arg[2], tuple) and arg[2]:
+                    sentinel = (arg[2][0] == "num" and type(arg[2][1]) is int
+                                and arg[2][1] == 1)
+            if sentinel:
+                return
             self.errs.note("arg %d of `%s`: callback must be a function name" % (pos, name))
             return
         fname = arg[1]

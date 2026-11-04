@@ -43,6 +43,8 @@ void fill_size(size_t *out);
 void fill_scalars(signed char *small, unsigned short *medium, unsigned int *wide);
 int divmod2(int64_t a, int64_t b, int64_t *q, int64_t *r);
 void narrow_down(unsigned char *small, short *med, int *big);
+void fill_ptr(void **out, int v);
+int read_ptr(int *p);
 int64_t sum_bytes(unsigned char *p, int n);
 void *malloc(unsigned long n);
 void free(void *p);
@@ -64,6 +66,9 @@ int divmod2(int64_t a, int64_t b, int64_t *q, int64_t *r) {
 void narrow_down(unsigned char *small, short *med, int *big) {
     *small = 200; *med = -3; *big = 123456;
 }
+static int ptr_slot;
+void fill_ptr(void **out, int v) { ptr_slot = v; *out = &ptr_slot; }
+int read_ptr(int *p) { return p ? *p : -1; }
 int64_t sum_bytes(unsigned char *p, int n) {
   int64_t s = 0; for (int i = 0; i < n; i++) s += p[i]; return s;
 }
@@ -76,6 +81,8 @@ extern "LIB" fn fill_size(out: ptr[usize])
 extern "LIB" fn fill_scalars(small: ptr[i8], medium: ptr[u16], wide: ptr[u32])
 extern "LIB" fn divmod2(a: i64, b: i64, q: ptr[i64], r: ptr[i64]) -> i32
 extern "LIB" fn narrow_down(small: ptr[u8], med: ptr[i16], big: ptr[i32])
+extern "LIB" fn fill_ptr(out: ptr[ptr], v: i32)
+extern "LIB" fn read_ptr(p: ptr[i32]) -> i32
 extern "LIB" fn sum_bytes(p: ptr[u8], n: i32) -> i64
 '''
 
@@ -127,11 +134,15 @@ fn main() -> i64 {
   let mut again = 0
   fill(&again, 5)
   print(again * 2)
+
+  let mut p = 0
+  fill_ptr(&p, 77)
+  print(read_ptr(p))
   return 0
 }
 '''
 
-WANT = "7\n42\n3.5\nTrue\n1234567\n-7\n40000\n3000000000\n3\n2\n200\n-3\n123456\n20\n"
+WANT = "7\n42\n3.5\nTrue\n1234567\n-7\n40000\n3000000000\n3\n2\n200\n-3\n123456\n20\n77\n"
 
 # Memory the program owns: malloc returns `ptr[u8]`, a `u8` window fills it, and
 # C reads back exactly the bytes the program wrote.
@@ -220,6 +231,8 @@ def main():
     assert target_c.returncode == 0, target_c.stdout + target_c.stderr
     assert "size_t _out" in target_c.stdout, \
       "usize out-parameter scratch must follow the target's size_t"
+    assert "void* _out" in target_c.stdout, \
+      "ptr out-parameter scratch must be pointer-sized"
     p = run(["run", "--interp", buf])
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == BUFFER_WANT, "interp buffer:\n%r" % p.stdout

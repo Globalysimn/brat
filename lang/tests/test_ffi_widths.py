@@ -282,6 +282,84 @@ fn main() -> i64 { return 0 }
     assert p.returncode != 0, p.stdout + p.stderr
     assert "f16" in (p.stdout + p.stderr), p.stdout + p.stderr
 
+    # Fixed-width C spellings copied from a header mean the BRAT width of the
+    # same size, including inside a record and a callback. Target-dependent
+    # spellings and names nested inside `ptr[...]`/`fn(...)` are still refused
+    # by both checkers instead of passing `check` and failing in the emitter.
+    CSP_C = write("cspell.c", """#include <stdint.h>
+struct CRec { unsigned long long a; int16_t b; };
+unsigned long long add_u64(unsigned long long a, signed short int b) {
+    return a + (unsigned long long)b;
+}
+signed short int dec_short(signed short int x) { return (signed short int)(x - 1); }
+float add_f32(float a, float b) { return a + b; }
+_Bool flip_bool(_Bool x) { return x ? 0 : 1; }
+const char *echo_str(const char *s) { return s; }
+unsigned long long apply_u64(unsigned long long x,
+                             signed short int (*cb)(unsigned long long)) {
+    return x + (unsigned long long)cb(x);
+}
+struct CRec bump_rec(struct CRec r) { r.a += 1; r.b += 1; return r; }
+""")
+    csp_lib = os.path.join(TMP, "libcspell.so")
+    r = subprocess.run(["cc", "-shared", "-fPIC", "-o", csp_lib, CSP_C],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    CSP = '''extern struct CRec { a: unsigned long long, b: int16_t }
+extern "LIB" fn add_u64(a: unsigned long long, b: signed short int) -> unsigned long long
+extern "LIB" fn dec_short(x: signed short int) -> signed short int
+extern "LIB" fn add_f32(a: float, b: float) -> float
+extern "LIB" fn flip_bool(x: _Bool) -> _Bool
+extern "LIB" fn echo_str(s: const char *) -> const char *
+extern "LIB" fn apply_u64(x: unsigned long long,
+                          cb: fn(unsigned long long) -> signed short int) -> unsigned long long
+extern "LIB" fn bump_rec(r: CRec) -> CRec
+
+fn short_cb(x: u64) -> i16 { return 5 }
+
+fn main() -> i64 {
+  print(add_u64(40, 2))
+  print(dec_short(-3))
+  print(add_f32(1.5, 2.25))
+  print(flip_bool(true))
+  print(echo_str("text"))
+  print(apply_u64(10, "short_cb"))
+  let got = bump_rec(CRec { a: 7, b: -2 })
+  print(got.a)
+  print(got.b)
+  return 0
+}
+'''.replace('"LIB"', '"%s"' % csp_lib)
+    csp = write("cspell.brat", CSP)
+    csp_want = "42\n-4\n3.75\nFalse\ntext\n15\n8\n-1\n"
+    py_check = subprocess.run([sys.executable, CLI, "check", csp], capture_output=True,
+                              text=True, timeout=120,
+                              env=dict(os.environ, BRAT_NO_NATIVE_CLI="1"))
+    assert py_check.returncode == 0, py_check.stdout + py_check.stderr
+    native_check = subprocess.run([CXX, "check", csp], capture_output=True, text=True,
+                                  timeout=120, env=CXX_ENV)
+    assert native_check.returncode == 0, native_check.stdout + native_check.stderr
+    assert interp(csp) == csp_want, interp(csp)
+    assert native(csp, "cspell.bin") == csp_want
+
+    unsupported_slots = {
+        "direct_isize": 'extern "x.so" fn f(x: isize) -> isize\n',
+        "struct_isize": 'extern struct BadRec { a: isize }\n',
+        "ptr_unknown": 'extern "x.so" fn f(p: ptr[bogus_t]) -> none\n',
+        "callback_unknown": 'extern "x.so" fn f(cb: fn(bogus_t) -> i64) -> none\n',
+        "callback_bad_result": 'extern "x.so" fn f(cb: fn(i64) -> bogus_t) -> none\n',
+    }
+    for label, decl in unsupported_slots.items():
+        path = write(label + ".brat", decl + "fn main() -> i64 { return 0 }\n")
+        for cmd, env in (
+                ([sys.executable, CLI, "check", path],
+                 dict(os.environ, BRAT_NO_NATIVE_CLI="1")),
+                ([CXX, "check", path], CXX_ENV)):
+            got = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+            assert got.returncode != 0 and "unsupported FFI type" in (got.stdout + got.stderr), \
+                "%s must be refused at check: %r" % (label, got.stdout + got.stderr)
+    print("ffiw ok: fixed-width C spellings canonicalize, nested bad slots fail check")
+
     # a projection move is counted, not leaked
     proj = write("projection.brat", PROJECTION)
     assert interp(proj) == PROJECTION_WANT, interp(proj)

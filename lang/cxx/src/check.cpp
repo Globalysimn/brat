@@ -735,10 +735,11 @@ static const std::map<std::string, Ty> BRES = {
     {"is_vec", Ty::of(Ty::Bool)}, {"is_str", Ty::of(Ty::Bool)},
     {"is_map", Ty::of(Ty::Bool)}, {"join_all", Ty::of(Ty::Int)},
     {"Ok", Ty::of(Ty::Tag)}, {"Err", Ty::of(Ty::Tag)}, {"Some", Ty::of(Ty::Tag)},
-    {"args", Ty::wrap(Ty::Vec, Ty::of(Ty::Str))}, {"exit", Ty::dyn()},
-    {"eprint", Ty::dyn()}, {"raise", Ty::dyn()},
+    {"args", Ty::wrap(Ty::Vec, Ty::of(Ty::Str))},
+    {"args_bytes", Ty::wrap(Ty::Vec, Ty::wrap(Ty::Vec, Ty::of(Ty::Int)))},
+    {"exit", Ty::dyn()}, {"eprint", Ty::dyn()}, {"raise", Ty::dyn()},
     {"time_ms", Ty::of(Ty::Int)}, {"mono_ns", Ty::of(Ty::Int)},
-    {"sleep_ms", Ty::dyn()}, {"env_get", Ty::dyn()},
+    {"sleep_ms", Ty::dyn()}, {"env_get", Ty::dyn()}, {"env_get_bytes", Ty::dyn()},
     {"$arena_enter", Ty::of(Ty::Int)}, {"$arena_leave", Ty::of(Ty::Int)},
     {"re_match", Ty::of(Ty::Bool)}, {"re_find", Ty::dyn()},
     {"re_captures", Ty::dyn()}, {"re_replace", Ty::of(Ty::Str)},
@@ -1740,6 +1741,12 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
 
 void FnTyper::check_cb(const Ty &pt, const Expr &arg, const std::string &name, int pos) {
     if (arg.k != EK::Str) {
+        bool sentinel = (arg.k == EK::Num && !arg.is_float && arg.i == 0) ||
+                        (arg.k == EK::Un && arg.a == "-" && arg.kids.size() == 1 &&
+                         arg.kids[0] && arg.kids[0]->k == EK::Num &&
+                         !arg.kids[0]->is_float && arg.kids[0]->i == 1);
+        if (sentinel) return;
+        expr(arg);
         note("arg " + std::to_string(pos) + " of `" + name + "`: callback must be a function name");
         return;
     }

@@ -34,7 +34,12 @@ whose width BRAT already has are read as that width, so `size_t` is `usize`,
 spelling still reaches the emitted C unchanged (`size_t` stays `size_t`, which
 matters on a 32-bit target). A fixed-width type is the width it names:
 `int8_t` is `i8`, `int16_t` is `i16`, `uint8_t`/`uint16_t` are `u8`/`u16`, and
-`short`/`unsigned short` are `i16`/`u16` in every data model. They used to be
+`short`/`unsigned short` are `i16`/`u16` in every data model. The same
+canonicalization accepts the other target-independent C spellings
+(`unsigned long long`, `signed short int`, `float`, `double`, `_Bool` and
+`const char *` for `str`), including inside `ptr[...]` and callback slots. It
+does not guess C `long`, whose width belongs to the target: write the BRAT
+width for that target, or let `bindgen --target` choose it. They used to be
 widened to `i32`, which is two bytes short of the truth in both directions: a
 generated `extern struct` holding an `int8_t` was refused by the layout proof
 that generated it, and a narrow *result* was read as four bytes out of a
@@ -116,9 +121,12 @@ are compile time only: they add no code, no data and no run-time cost (the
 `text`/`data`/`rodata` sections are byte-identical with and without them).
 
 Every slot of an `extern` declaration is checked at `brat check`, not at build
-time: a parameter, a result, a variadic tail and an `extern struct` field. A
-type the emitter cannot spell is `F0001` with the line and a list of what is
-supported, so a program cannot pass `check` and then fail to build.
+time: a parameter, a result, a variadic tail and an `extern struct` field.
+The check is recursive through a pointee and through a callback's parameters
+and result. A type the emitter cannot spell is `F0001` with the line and a
+list of what is supported. This catches unsupported FFI type spellings before
+C generation. Passing `check` does not guarantee a successful build: headers,
+libraries, symbols and target ABI compatibility still have to match.
 
 `f32` is a boundary type, not a second float type: BRAT has one float, and the
 value narrows once on the way into C and widens once on the way back. It exists
@@ -200,8 +208,13 @@ pointer is still the same one -- so it is refused.
 BRAT strings are NUL-terminated in both backends, so they pass to C as
 `const char *`. A C string returned as `str` is copied into BRAT memory, so the C
 side keeps owning its buffer. A NULL return is an error value, catchable with
-`try`/`catch`, not a crash. A string literal containing a NUL byte is a parse
-error.
+`try`/`catch`, not a crash. The bytes must be valid UTF-8 and within BRAT's
+string cap; otherwise the conversion raises instead of manufacturing a string
+the interpreter cannot hold. That rule covers extern returns, `str` fields in
+extern structs, dynamic `call` results, callback and exported-function
+parameters, and `ptr_read_str`. A NULL `str` field in an extern struct becomes
+`None`; the other non-nullable slots reject NULL. A string literal containing a
+NUL byte is a parse error.
 
 ## Structs
 
@@ -231,7 +244,10 @@ with an empty stdout rather than write C for a wrapper that does not exist, and
 the interpreter stops with the same sentence instead of letting a `ctypes`
 traceback out of a call C is in the middle of. A closure or a bare fn name is
 refused too -- the slot takes a name, and `arg N of `f`: callback must be a
-function name` says which one. A trailing
+function name` says which one. The literals `0` and `-1` in the same slot are
+passed as the function-pointer bits themselves: NULL, and the all-ones sentinel
+used for values such as `SQLITE_TRANSIENT`. No BRAT wrapper is made for either.
+A trailing
 `ptr` in the signature is the C `void *user_data` and is passed through to the
 BRAT function. Callback names in imported modules are resolved to the same
 flattened, mangled function name in both front ends.
@@ -266,7 +282,8 @@ native backend needs none of this: it emits the callback with its true prototype
 A `raise` inside a callback cannot unwind through the C frames in between: the
 wrapper prints `unhandled: ('err', ...)` and exits 1, the same as an uncaught
 error at the top level, in both backends. A `try`/`catch` around the extern call
-does not see it.
+does not see it. The same stop happens before the BRAT body runs if C passes
+NULL or invalid UTF-8 for a callback's `str` parameter.
 
 ## Out-parameters
 
@@ -297,6 +314,16 @@ narrow_down(&s, &m, &b)       // one byte, two bytes, four
 An `i16 *` gets two bytes of storage. Everything narrower than a word used to be
 written as a word, which is how an out-parameter corrupts the variable beside
 it.
+
+A handle factory takes `T **`; spell it `ptr[ptr]`. The storage is one pointer,
+and the binding comes back holding the handle:
+
+```brat
+extern "libsqlite3.so.0" fn sqlite3_open(path: str, db: ptr[ptr]) -> i32
+
+let mut db = 0
+sqlite3_open("app.db", &db)
+```
 
 What `&` is not:
 
@@ -345,7 +372,8 @@ A slice is a window, not a copy, checked at both ends: `slice_get(s, 2)` raises
 Builtins: `ptr_null`, `ptr_is_null`, `ptr_offset`, `ptr_read_i64`/`f64`/`ptr`,
 `ptr_write_*`, `ptr_read_str`, `ptr_of_str`, `ptr_write_str`. Any of them given a
 zero address raises `null pointer dereference` and a negative one raises
-`pointer is negative`, in both backends.
+`pointer is negative`, in both backends. `ptr_read_str` also raises
+`ptr_read_str: invalid UTF-8` for bytes that are not a BRAT string.
 
 ## C buffers
 
@@ -545,6 +573,41 @@ emitter writes them as `bf_count`, `bf_do`.
 `export fn name(...)` in BRAT produces a C-callable function, and
 `brat build lib.brat --shared -o libbrat.so` a shared library. Exported
 signatures may use `i32`, `i64`, `f64`, `str`, `ptr` and `extern struct`.
+
+## A direct SQLite binding
+
+[examples/sqlite_ffi.brat](../../examples/sqlite_ffi.brat) is a small inventory
+tool that binds the system `libsqlite3` directly. It does not use `std.sqlite`
+or the `sql_*` builtins. The shapes that carry it are the ordinary ones:
+
+```brat
+extern "libsqlite3.so.0" {
+  extern fn sqlite3_open(path: str, db: ptr[ptr]) -> i32
+  extern fn sqlite3_prepare_v2(db: ptr, sql: str, n: i32, stmt: ptr[ptr], tail: ptr) -> i32
+  extern fn sqlite3_bind_text(stmt: ptr, idx: i32, text: str, n: i32, destructor: fn(ptr)) -> i32
+  extern fn sqlite3_column_text(stmt: ptr, col: i32) -> ptr[u8]
+}
+```
+
+`sqlite3_bind_text` is called with `-1` for both the byte count and the
+destructor: the second `-1` is `SQLITE_TRANSIENT`, so SQLite copies the text
+during the call instead of retaining a borrowed BRAT string. `sqlite3_column_text`
+returns `const unsigned char *`, so it is declared `ptr[u8]` and read back with
+`ptr_read_str`.
+
+```sh
+brat ffi examples/sqlite_ffi.brat --header /usr/include/sqlite3.h
+brat run --interp examples/sqlite_ffi.brat --header /usr/include/sqlite3.h
+brat build examples/sqlite_ffi.brat --header /usr/include/sqlite3.h -o sqlite_ffi
+./sqlite_ffi inventory.db add kiwi 1.5 30 sour
+./sqlite_ffi inventory.db list
+```
+
+With no arguments the tool seeds an in-memory database and lists it. The native
+verifier wants `--preprocess` on this header (`brat-cxx ffi ... --preprocess`);
+the build gate falls back to the preprocessor when the raw header will not
+parse. `test_ffi_sqlite.py` runs the whole path on both backends and under
+ASan/UBSan/LSan.
 
 ## Safety
 

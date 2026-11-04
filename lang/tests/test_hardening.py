@@ -297,6 +297,153 @@ def test_env_get_credentials_refused():
           % (out_i, out_n))
 
 
+def test_os_bytes_argv_env():
+    raw = b'A\xffB'
+    raw_text = raw.decode('utf-8', 'surrogateescape')
+    env = dict(ENV)
+    env['BRAT_TEST_RAW'] = raw_text
+    bytes_path = write('os_bytes.brat',
+                       'import std.env\n'
+                       'print(args_bytes())\n'
+                       'print(env_get_bytes("BRAT_TEST_RAW"))\n'
+                       'print(std.env.get_bytes("BRAT_TEST_RAW"))\n'
+                       'print(utf8_str(env_get_bytes("BRAT_TEST_RAW")))\n'
+                       'print(env_get("BRAT_TEST_RAW"))\n')
+    expected = (b'[[65, 255, 66], [111, 107]]\n'
+                b'[65, 255, 66]\n'
+                b"('ok', [65, 255, 66])\n"
+                b"('err', 'invalid utf-8')\n"
+                b"('err', \"env_get invalid utf-8: 'BRAT_TEST_RAW'\")\n")
+    ri = subprocess.run([sys.executable, '-X', 'utf8', CLI, 'run', '--interp',
+                         bytes_path, '--', raw, 'ok'],
+                        capture_output=True, timeout=300, env=env)
+    check(ri.returncode == 0 and ri.stdout == expected,
+          'os bytes: interpreter argv/env bytes diverged (rc=%d, out=%r, err=%r)'
+          % (ri.returncode, ri.stdout, ri.stderr[-300:]))
+    exe = os.path.join(TMP, 'os_bytes')
+    rc_b, out_b = cli(['build', bytes_path, '-o', exe], env=env)
+    check(rc_b == 0, 'os bytes: native build failed (%r)' % out_b[:300])
+    if rc_b == 0:
+        rn = subprocess.run([exe, raw, 'ok'], capture_output=True, timeout=120, env=env)
+        check(rn.returncode == 0 and rn.stdout == expected,
+              'os bytes: native argv/env bytes diverged (rc=%d, out=%r, err=%r)'
+              % (rn.returncode, rn.stdout, rn.stderr[-300:]))
+    str_path = write('os_args_str.brat', 'print(args())\n')
+    ri = subprocess.run([sys.executable, '-X', 'utf8', CLI, 'run', '--interp',
+                         str_path, '--', raw],
+                        capture_output=True, timeout=300, env=env)
+    out_i = ri.stdout + ri.stderr
+    check(ri.returncode != 0 and b'invalid utf-8 in argument 1; use args_bytes()' in out_i,
+          'os bytes: interpreter args() accepted invalid UTF-8 (rc=%d, out=%r)'
+          % (ri.returncode, out_i[-300:]))
+    exe_s = os.path.join(TMP, 'os_args_str')
+    rc_b, out_b = cli(['build', str_path, '-o', exe_s], env=env)
+    check(rc_b == 0, 'os bytes: native args build failed (%r)' % out_b[:300])
+    if rc_b == 0:
+        rn = subprocess.run([exe_s, raw], capture_output=True, timeout=120, env=env)
+        out_n = rn.stdout + rn.stderr
+        check(rn.returncode != 0 and b'invalid utf-8 in argument 1; use args_bytes()' in out_n,
+              'os bytes: native args() accepted invalid UTF-8 (rc=%d, out=%r)'
+              % (rn.returncode, out_n[-300:]))
+    bad_src = os.path.join(TMP, 'bad_utf8.brat')
+    with open(bad_src, 'wb') as f:
+        f.write(b'print("\xff")\n')
+    rb = subprocess.run([sys.executable, BRAT, bad_src], capture_output=True, timeout=120, env=ENV)
+    out_bad = rb.stdout + rb.stderr
+    check(rb.returncode != 0 and b'is not valid UTF-8' in out_bad and b'Traceback' not in out_bad,
+          'os bytes: bare brat.py traceback on invalid UTF-8 source (rc=%d, out=%r)'
+          % (rb.returncode, out_bad[-300:]))
+    bad_link = os.path.join(TMP, 'badlink')
+    try:
+        os.symlink(b'bad\xff', bad_link)
+    except FileExistsError:
+        pass
+    link_path = write('os_badlink.brat', 'print(read_file("badlink"))\n')
+    rc_i, out_i = cli(['run', '--interp', link_path], env=env)
+    rc_n, out_n = cli(['run', link_path], env=env)
+    expected_link = "('err', '[Errno 2] os error')\n"
+    check(out_i == expected_link and out_i == out_n,
+          'os bytes: non-UTF-8 path leaked into Err string (%r vs %r)' % (out_i, out_n))
+
+
+def test_os_bytes_egress():
+    if os.name == 'nt':
+        return
+    fs_path = write('os_egress_fs.brat',
+                    'let bname = [98, 255, 46, 116, 120, 116]\n'
+                    'print(write_bytes(bname, [104, 105]))\n'
+                    'print(read_bytes(bname))\n'
+                    'print(write_file(bname, "yo"))\n'
+                    'print(read_file(bname))\n'
+                    'let bname2 = [98, 254, 46, 116, 120, 116]\n'
+                    'print(fs_rename(bname, bname2))\n'
+                    'print(read_file(bname2))\n'
+                    'print(fs_remove(bname2))\n'
+                    'print(read_bytes(bname2))\n'
+                    'print(write_bytes([98, 0, 99], [1]))\n'
+                    'print(write_bytes([98, 300], [1]))\n')
+    expected_fs = ("('ok', 2)\n"
+                   "('ok', [104, 105])\n"
+                   "('ok', 2)\n"
+                   "('ok', 'yo')\n"
+                   "('ok', 0)\n"
+                   "('ok', 'yo')\n"
+                   "('ok', 0)\n"
+                   "('err', '[Errno 2] os error')\n"
+                   "('err', 'embedded NUL in file path')\n"
+                   "('err', 'write_bytes byte out of range 0..255')\n")
+    rc_i, out_i = cli(['run', '--interp', fs_path])
+    check(rc_i == 0 and out_i == expected_fs,
+          'os egress: interpreter byte paths diverged (rc=%d, out=%r)' % (rc_i, out_i))
+    rc_n, out_n = cli(['run', fs_path])
+    check(rc_n == 0 and out_n == expected_fs,
+          'os egress: native byte paths diverged (rc=%d, out=%r)' % (rc_n, out_n))
+    check(os.path.exists(os.path.join(os.fsencode(TMP), b'b\xff.txt')) is False
+          and os.listdir(os.fsencode(TMP)).count(b'b\xfe.txt') == 0,
+          'os egress: byte-named file left behind')
+
+    db_raw = os.path.join(os.fsencode(TMP), b'd\xff.db')
+    sql_path = write('os_egress_sql.brat',
+                     'let h = unwrap(sql_open([100, 255, 46, 100, 98]))\n'
+                     'print(sql_close(h))\n')
+    for args in (['run', '--interp', sql_path], ['run', sql_path]):
+        if os.path.exists(db_raw):
+            os.unlink(db_raw)
+        rc, out = cli(args)
+        check(rc == 0 and out == "('ok', 0)\n" and os.path.exists(db_raw),
+              'os egress: sql_open byte path failed %r (rc=%d, out=%r)' % (args[1], rc, out))
+
+    env = dict(ENV)
+    env['BRAT_EXEC'] = '1'
+    proc_path = write('os_egress_proc.brat',
+                      'match proc_run("/bin/echo", [[104, 105], "yo"]) {\n'
+                      '  Ok(m) => { print(m.get("out")) },\n'
+                      '  Err(e) => { print("bad:{e}") }\n'
+                      '}\n'
+                      'print(proc_run("/bin/echo", [[65, 255]]))\n'
+                      'print(proc_run("/bin/echo", [[65, 300]]))\n'
+                      'print(proc_run("/bin/echo", [5]))\n')
+    expected_proc = ('hi yo\n\n'
+                     "('err', 'invalid utf-8')\n"
+                     "('err', 'proc_run byte out of range 0..255')\n"
+                     "('err', 'proc_run wants vec[str] args')\n")
+    rc_i, out_i = cli(['run', '--interp', proc_path], env=env)
+    check(rc_i == 0 and out_i == expected_proc,
+          'os egress: interpreter byte argv diverged (rc=%d, out=%r)' % (rc_i, out_i))
+    rc_n, out_n = cli(['run', proc_path], env=env)
+    check(rc_n == 0 and out_n == expected_proc,
+          'os egress: native byte argv diverged (rc=%d, out=%r)' % (rc_n, out_n))
+
+    nul_path = write('os_egress_proc_nul.brat',
+                     'print(proc_run("/bin/echo", [[65, 0]]))\n')
+    rc_i, out_i = cli(['run', '--interp', nul_path], env=env)
+    check(rc_i == 0 and out_i == "('err', 'proc_run nul byte in argument')\n",
+          'os egress: interpreter byte argv NUL accepted (rc=%d, out=%r)' % (rc_i, out_i))
+    rc_n, out_n = cli(['run', nul_path], env=env)
+    check(rc_n == 0 and out_n == "('err', 'embedded NUL in command argument')\n",
+          'os egress: native byte argv NUL accepted (rc=%d, out=%r)' % (rc_n, out_n))
+
+
 def test_fast_shortcircuit_And_or_multi_source_borrow():
     sc = write('fast_sc.brat',
                'fn tick(x: i64) -> i64 {\n  print(x)\n  return x\n}\n'
@@ -324,6 +471,7 @@ def main():
                test_vnorm_cap, test_vlong_range, test_mcp_body_cap, test_fetch_url_file_scheme,
                test_unsafe_is_not_a_switch, test_write_file_symlink_escape,
                test_read_file_nul_rejected, test_env_get_credentials_refused,
+               test_os_bytes_argv_env, test_os_bytes_egress,
                test_fast_shortcircuit_And_or_multi_source_borrow):
         try:
             fn()

@@ -33,7 +33,7 @@ const std::set<std::string> BUILTINS = {
     "utf8_bytes", "utf8_str", "fs_rename", "fs_remove", "assert",
     "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
-    "args", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get",
+    "args", "args_bytes", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get", "env_get_bytes",
     "ptr_null", "ptr_is_null", "ptr_offset", "ptr_read_i64", "ptr_write_i64",
     "ptr_read_f64", "ptr_write_f64", "ptr_read_f32", "ptr_write_f32",
     "ptr_read_struct", "ptr_write_struct",
@@ -2175,26 +2175,81 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
 // be: a program whose signature the emitter cannot spell used to pass `check`
 // and die in `build`. Same text and order as `borrow.py`.
 const std::set<std::string> FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32",
-                                         "i64", "u64", "usize", "isize", "f32", "f64",
+                                         "i64", "u64", "usize", "f32", "f64",
                                          "str", "ptr"};
 
 const char *FFI_HINT =
     "a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
     "ptr[T], fn(...), an `extern struct`, or `none`";
 
-bool valid_cb_slot(const std::string &a) {
-    size_t i = 2;
-    while (i < a.size() && std::isspace(static_cast<unsigned char>(a[i]))) i++;
-    if (i >= a.size() || a[i] != '(') return false;
+std::string trim_ffi_type(const std::string &text) {
+    size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::vector<std::string> split_ffi_types(const std::string &text) {
+    std::vector<std::string> parts;
+    size_t start = 0;
     int depth = 0;
-    for (; i < a.size(); i++) {
-        if (a[i] == '(') depth++;
-        else if (a[i] == ')') {
-            depth--;
-            if (depth < 0) return false;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (text[i] == '(' || text[i] == '[') depth++;
+        else if (text[i] == ')' || text[i] == ']') depth--;
+        else if (text[i] == ',' && depth == 0) {
+            std::string part = trim_ffi_type(text.substr(start, i - start));
+            if (!part.empty()) parts.push_back(part);
+            start = i + 1;
         }
     }
-    return depth == 0;
+    std::string tail = trim_ffi_type(text.substr(start));
+    if (!tail.empty()) parts.push_back(tail);
+    return parts;
+}
+
+std::optional<std::pair<std::vector<std::string>, std::string>> callback_parts(const std::string &ann) {
+    std::string text = trim_ffi_type(ann);
+    if (text.rfind("fn", 0) != 0) return std::nullopt;
+    size_t open_at = 2;
+    while (open_at < text.size() && std::isspace(static_cast<unsigned char>(text[open_at]))) open_at++;
+    if (open_at >= text.size() || text[open_at] != '(') return std::nullopt;
+    int depth = 0;
+    size_t close_at = std::string::npos;
+    for (size_t i = open_at; i < text.size(); i++) {
+        if (text[i] == '(') depth++;
+        else if (text[i] == ')' && --depth == 0) {
+            close_at = i;
+            break;
+        }
+    }
+    if (close_at == std::string::npos) return std::nullopt;
+    auto params = split_ffi_types(text.substr(open_at + 1, close_at - open_at - 1));
+    std::string tail = trim_ffi_type(text.substr(close_at + 1));
+    if (tail.empty()) return std::make_pair(params, std::string("none"));
+    if (tail.rfind("->", 0) == 0) {
+        std::string result = trim_ffi_type(tail.substr(2));
+        if (!result.empty()) return std::make_pair(params, result);
+    }
+    return std::nullopt;
+}
+
+bool ffi_nested_ok(const std::string &ann, const std::set<std::string> &structs,
+                   bool allow_none = false, bool allow_fn = true) {
+    std::string a = trim_ffi_type(ann);
+    if (a == "none") return allow_none;
+    if (FFI_SLOTS.count(a) || structs.count(a)) return true;
+    if (a.rfind("ptr[", 0) == 0 && a.size() >= 5 && a.back() == ']') {
+        std::string inner = trim_ffi_type(a.substr(4, a.size() - 5));
+        return !inner.empty() && ffi_nested_ok(inner, structs, false, false);
+    }
+    if (allow_fn && a.rfind("fn", 0) == 0) {
+        auto parts = callback_parts(a);
+        if (!parts) return false;
+        for (const auto &param : parts->first)
+            if (!ffi_nested_ok(param, structs, false, false)) return false;
+        return ffi_nested_ok(parts->second, structs, true, false);
+    }
+    return false;
 }
 
 bool ffi_slot_ok(const std::optional<std::string> &ann, const std::set<std::string> &structs,
@@ -2215,13 +2270,7 @@ bool ffi_slot_ok(const std::optional<std::string> &ann, const std::set<std::stri
             if (n >= 1 && n <= 1048576) return FFI_SLOTS.count(elem) > 0 || structs.count(elem) > 0;
         }
     }
-    if (FFI_SLOTS.count(a) || structs.count(a)) return true;
-    if (a.rfind("ptr[", 0) == 0 && a.back() == ']') {
-        std::string inner = a.substr(4, a.size() - 5);
-        return inner.find_first_not_of(" \t") != std::string::npos;
-    }
-    if (a.rfind("fn", 0) == 0) return valid_cb_slot(a);
-    return false;
+    return ffi_nested_ok(a, structs, true);
 }
 
 void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {

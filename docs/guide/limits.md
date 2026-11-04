@@ -224,8 +224,13 @@ no key [1]
 ## Strings are code points
 
 `len` and indexing count code points, not bytes and not grapheme clusters. Case mapping is the full
-Unicode one. The checker refuses a NUL in a string literal and `utf8_str` refuses the bytes; I did
-not look at every other way a string can be made.
+Unicode one. The checker refuses a NUL in a string literal and `utf8_str` refuses the bytes. OS
+strings cross the same line: `args()` and `env_get` reject non-UTF-8 bytes, and `args_bytes()` /
+`env_get_bytes` return the raw octets for programs that need them. The way back out is symmetric:
+file functions (`read_file`, `read_bytes`, `write_file`, `write_bytes`, `fs_rename`, `fs_remove`,
+`sql_open`) accept a byte vector wherever they take a path, and `proc_run` accepts byte vectors as
+argv elements, so a name read via `args_bytes()` can be opened or passed on byte-for-byte. A zero
+byte or a value outside 0..255 in such a vector is an `Err`, never a truncated path.
 
 ```brat run
 fn main() -> i64 {

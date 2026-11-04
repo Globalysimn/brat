@@ -619,8 +619,8 @@ const std::set<std::string> HEAP_METHODS = {
 const std::string LOCAL_BINDING_PREFIX = "\x01local:";
 
 const std::set<std::string> HEAP_CALLS = {
-    "str", "own", "str_from_ptr", "args", "read_file", "write_file",
-    "read_bytes", "write_bytes", "proc_run", "env_get",
+    "str", "own", "str_from_ptr", "args", "args_bytes", "read_file", "write_file",
+    "read_bytes", "write_bytes", "proc_run", "env_get", "env_get_bytes",
     "utf8_bytes", "utf8_str", "fs_rename", "fs_remove",
     "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
@@ -680,6 +680,7 @@ struct Emitter {
     std::vector<std::pair<size_t, size_t>> loop_exit_depths;
     std::string fin = "__fin_top";
     std::optional<std::string> err_goto, err_base;
+    size_t err_scope_depth = 0;
     std::map<std::string, FnEntry> fast;
     std::map<std::string, std::string> fastc, fastkinds;
     std::set<std::string> fails;
@@ -782,6 +783,7 @@ struct Emitter {
             throw EmitError(cat("callback `", a.a, "` has signature ", actual,
                                 ", expected ", want));
     }
+    std::string err_scope_unwind();
     std::string err_bail();
     std::string err_check_line(const std::vector<std::string> &drops = {});
     void emit_err_check(const std::string &ind, const std::vector<std::string> &drops = {});
@@ -4179,8 +4181,10 @@ V Emitter::ex_fused_stream(const Expr &obj, const std::string &meth, const ExprL
 
     auto saved_goto = err_goto;
     auto saved_base = err_base;
+    size_t saved_scope_depth = err_scope_depth;
     err_goto = err_lbl;
     err_base.reset();
+    err_scope_depth = scopes.size();
 
     for (const auto &[smeth, sfn] : stages) {
         const std::string &pname = sfn->fn->params[0].name;
@@ -4246,6 +4250,7 @@ V Emitter::ex_fused_stream(const Expr &obj, const std::string &meth, const ExprL
     loop_lines.push_back("}");
     err_goto = saved_goto;
     err_base = saved_base;
+    err_scope_depth = saved_scope_depth;
 
     bool used_err = false;
     for (const auto &l : loop_lines) {
@@ -5305,6 +5310,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ubf_assign(tgt, e, ind);
             return;
         }
+        if (e.k == EK::Var && e.a == tgt) {
+            assigned.insert(tgt);
+            return;
+        }
         auto d = sym.find(tgt);
         bool self_concat = reclaim.count(tgt) && d != sym.end() &&
                            !moved.count(tgt) && !dropped.count(tgt) &&
@@ -5428,7 +5437,12 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         emit_err_check(ind);
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
             ln(ind, cat("vscope_end(vint(", *it, "));"));
-        if (!scopes.empty()) emit_err_check(ind);
+        if (!scopes.empty()) {
+            size_t saved_scope_depth = err_scope_depth;
+            err_scope_depth = scopes.size();
+            emit_err_check(ind);
+            err_scope_depth = saved_scope_depth;
+        }
         // The value leaves with the caller; the exit drops must not free it.
         // `a[i]` already hands back a reference the holder owns (vat_owned), so
         // the container can just be dropped at the exit like any other local;
@@ -5652,14 +5666,17 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         std::string catch_lbl = cat("__catch", n), after_lbl = cat("__after_try", n);
         auto saved_goto = err_goto;
         auto saved_base = err_base;
+        size_t saved_scope_depth = err_scope_depth;
         std::string b = new_tmp("dfb");
         ln(ind, "{");
         ln(ind + "  ", cat("int64_t ", b, " = vdfsp;"));
         err_goto = catch_lbl;
         err_base = b;
+        err_scope_depth = scopes.size();
         emit_block(view(s.body), ind + "  ");
         err_goto = saved_goto;
         err_base = saved_base;
+        err_scope_depth = saved_scope_depth;
         ln(ind + "  ", cat("goto ", after_lbl, ";"));
         ln(ind, cat(catch_lbl, ":;"));
         for (const auto &nm : try_let_names(view(s.body))) {
@@ -5704,6 +5721,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         std::string sc = new_tmp("sc");
         ln(ind, cat("int64_t ", sc, " = vscope_begin().as.ival;"));
         scopes.push_back(sc);
+        emit_err_check(ind);
         emit_block(view(s.body), ind);
         scopes.pop_back();
         ln(ind, cat("vscope_end(vint(", sc, "));"));
@@ -5738,6 +5756,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind, cat("vec_push(_cb", n, ", vint(", code, "));"));
         ln(ind, cat("{ Val _cv = vstruct(_cm", n, "); vec_push(_cb", n, ", _cv); }"));
         ln(ind, cat("vspawn(vtagv(\"closure\", _cb", n, "));"));
+        emit_err_check(ind);
         return;
     }
     case SK::Defer:
@@ -5782,7 +5801,9 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
 
 
 bool reclaimable_rhs(const Expr &e, const std::set<std::string> &heap) {
-    return dec_able(e, heap) || e.k == EK::Field;
+    const Expr *cur = &e;
+    while (cur->k == EK::Move && !cur->kids.empty()) cur = cur->kids[0].get();
+    return dec_able(*cur, heap) || cur->k == EK::Field || cur->k == EK::Var;
 }
 
 std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
@@ -5881,6 +5902,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     auto saved_cap_slots = cap_slots;
     auto saved_dfb = dfb;
     auto saved_fin = fin;
+    auto saved_scopes = scopes;
+    size_t saved_err_scope_depth = err_scope_depth;
     // A top-level `let` is a file-scope Val; a function that reads it resolves
     // the name through the same table as its own locals. A name this closure
     // captured is the exception: it resolves through the capture map, because
@@ -5900,6 +5923,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     }
     std::string dfbname = cat("__vdf_", cn);
     dfb.clear();
+    scopes.clear();
+    err_scope_depth = 0;
     fin = cat("__fin_", cn);
     if (positional) {
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
@@ -6122,6 +6147,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     cap_slots = saved_cap_slots;
     dfb = saved_dfb;
     fin = saved_fin;
+    scopes = saved_scopes;
+    err_scope_depth = saved_err_scope_depth;
     dfb_locals = saved_locals;
     ub_ints = saved_ub;
     ub_floats = saved_ubf;
@@ -6378,6 +6405,8 @@ void Emitter::emit_main_open() {
     cap.reset();
     cap_slots.clear();
     dfb.clear();
+    scopes.clear();
+    err_scope_depth = 0;
     fin = "__fin_top";
     if (codes.count("fn:main")) {
         ln("", "static const char *__brat_tagname(Val v) {");
@@ -6583,7 +6612,7 @@ std::vector<std::string> Emitter::emit_struct_conv(const std::string &sname) {
     lines.push_back(cat("  Val _v = vstruct(vmap(\"", sname, "\"));"));
     auto conv_c_to_val = [&](const std::string &ft, const std::string &src) -> std::string {
         if (ft == "bool") return cat("vbool(", src, ")");
-        if (ft == "str") return cat("(", src, " ? vstr(", src, ") : vnil())");
+        if (ft == "str") return cat("vstr_ffi_field(", src, ")");
         if (ft == "ptr" || ft.rfind("ptr[", 0) == 0 || ft.rfind("fn", 0) == 0)
             return cat("vint((int64_t)(intptr_t)", src, ")");
         if (ft == "f64") return cat("vfloat(", src, ")");
@@ -6782,6 +6811,7 @@ std::string Emitter::emit_program() {
     call_cleanup.clear();
     scalar_vars.clear();
     scopes.clear();
+    err_scope_depth = 0;
     emit_prelude_headers();
     ln("", "#include <stdlib.h>");
     ln("", "#include <string.h>");
@@ -7109,7 +7139,7 @@ std::string Emitter::emit_program() {
             } else if (ann && *ann == "bool") {
                 pushes.push_back(cat("vec_push(_a, vbool(", arg, "));"));
             } else if (ann && *ann == "str") {
-                pushes.push_back(cat("vec_push(_a, vstr(", arg, "));"));
+                pushes.push_back(cat("vec_push(_a, vstr_ffi_arg(", arg, "));"));
             } else if (ann && (*ann == "f32" || *ann == "f64")) {
                 // `f32` arrives as a C float: widen once, here, because BRAT has
                 // a single float type and the callee expects one.
@@ -7129,6 +7159,7 @@ std::string Emitter::emit_program() {
         ln("", cat(cb.ret, " brat_cb_", cb.name, "(", joined, ") {"));
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
+        ln("  ", "vcb_check(vnil());");
         ln("  ", cat("Val _r = ", cfn("fn:" + cb.name), "(NULL, _a);"));
         // The packed arguments belong to this call: C holds nothing from them,
         // so a wrapper that skips this leaks a Vec per callback invocation.
@@ -7206,7 +7237,7 @@ std::string Emitter::emit_program() {
                 abi_ps.push_back("f32");
             } else if (ann && *ann == "str") {
                 cparams.push_back(cat("const char * ", arg));
-                pushes.push_back(cat("vec_push(_a, vstr(", arg, "));"));
+                pushes.push_back(cat("vec_push(_a, vstr_ffi_arg(", arg, "));"));
                 abi_ps.push_back("str");
             } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
                 cparams.push_back(cat("void * ", arg));
@@ -7272,6 +7303,7 @@ std::string Emitter::emit_program() {
         ln("", cat(cret, " ", exname, "(", joined, ") {"));
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
+        ln("  ", "vcb_check(vnil());");
         ln("  ", cat("Val _r = ", cfn("fn:" + exname), "(NULL, _a);"));
         ln("  ", "vargs_drop(_a);");
         ln("  ", "vcb_check(_r);");
@@ -7342,17 +7374,25 @@ bool Emitter::booly(const Expr &e) {
                                e.a == ">=" || e.a == "&&" || e.a == "||"));
 }
 
+std::string Emitter::err_scope_unwind() {
+    std::string out;
+    for (size_t i = scopes.size(); i > err_scope_depth; --i)
+        out += cat("vscope_end(vint(", scopes[i - 1], ")); ");
+    return out;
+}
+
 std::string Emitter::err_bail() {
     std::string rel;
     for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it)
         rel += cat("vdrop_temp(", *it, "); ");
+    std::string unwind = err_scope_unwind();
     if (err_goto)
-        return cat("{ ", rel, err_base ? cat("vdfreset(", *err_base, "); ") : std::string(), "goto ",
-                   *err_goto, "; }");
+        return cat("{ ", rel, err_base ? cat("vdfreset(", *err_base, "); ") : std::string(), unwind,
+                   "goto ", *err_goto, "; }");
     if (fin == "__fin_top")
-        return cat("{ ", rel, "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
+        return cat("{ ", rel, unwind, "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
                    "fprintf(stderr, \"\\n\"); return 1; }");
-    return cat("{ ", rel, "__ret = verr_leave(); goto ", fin, "; }");
+    return cat("{ ", rel, unwind, "__ret = verr_leave(); goto ", fin, "; }");
 }
 
 std::string Emitter::err_check_line(const std::vector<std::string> &drops) {
@@ -7366,16 +7406,18 @@ std::string Emitter::err_check_line(const std::vector<std::string> &drops) {
     for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it) {
         if (seen.insert(*it).second) rel += cat("vdrop_temp(", *it, "); ");
     }
+    std::string unwind = err_scope_unwind();
     if (err_goto) {
         if (err_base)
-            return cat("if (verr_pending()) { ", rel, "vdfreset(", *err_base, "); goto ", *err_goto, "; }");
-        return cat("if (verr_pending()) { ", rel, "goto ", *err_goto, "; }");
+            return cat("if (verr_pending()) { ", rel, "vdfreset(", *err_base, "); ", unwind, "goto ",
+                       *err_goto, "; }");
+        return cat("if (verr_pending()) { ", rel, unwind, "goto ", *err_goto, "; }");
     }
     if (fin == "__fin_top")
-        return cat("if (verr_pending()) { ", rel,
+        return cat("if (verr_pending()) { ", rel, unwind,
                    "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
                    "fprintf(stderr, \"\\n\"); return 1; }");
-    return cat("if (verr_pending()) { ", rel, "__ret = verr_leave(); goto ", fin, "; }");
+    return cat("if (verr_pending()) { ", rel, unwind, "__ret = verr_leave(); goto ", fin, "; }");
 }
 
 void Emitter::emit_err_check(const std::string &ind, const std::vector<std::string> &drops) {
@@ -7403,13 +7445,14 @@ std::pair<std::vector<std::string>, std::string> Emitter::out_addr(const Expr &e
                       : el == "u16" ? "uint16_t" : el == "i32" ? "int32_t"
                       : el == "u32" ? "uint32_t" : el == "i64" ? "int64_t"
                       : el == "u64" ? "uint64_t" : el == "usize" ? "size_t"
-                      : el == "f32" ? "float" : el == "f64" ? "double"
+                      : el == "ptr" ? "void*" : el == "f32" ? "float" : el == "f64" ? "double"
                       : width == 1 ? "unsigned char" : width == 2 ? "short"
                       : width == 4 ? "int" : "int64_t";
     std::string cn = var_ref(e.a);
     std::string scratch = new_tmp("out");
     std::string initial = el == "bool" ? cat("vis_true(", cn, ")")
                         : (el == "f32" || el == "f64") ? cat("vnum(", cn, ")")
+                        : el == "ptr" ? cat("(intptr_t)(", cn, ").as.ival")
                         : cat("(", cn, ").as.ival");
     out_binds.push_back({e.a, cn, scratch, el});
     return {{cat(ctype, " ", scratch, " = (", ctype, ")(", initial, ");")},
@@ -7424,6 +7467,8 @@ std::vector<std::string> Emitter::out_flush() {
             out.push_back(cat(b.cn, " = vfloat((double)", b.scratch, ");"));
         else if (b.elem == "bool")
             out.push_back(cat(b.cn, " = vbool(", b.scratch, ");"));
+        else if (b.elem == "ptr")
+            out.push_back(cat(b.cn, " = vint((int64_t)(intptr_t)", b.scratch, ");"));
         else {
             bool is_unsigned = b.elem == "u8" || b.elem == "u16" || b.elem == "u32"
                             || b.elem == "u64" || b.elem == "usize";
@@ -7557,7 +7602,7 @@ V Emitter::ex_call(const Expr &e) {
         name == "tcp_listen" || name == "tcp_connect" ||
         name == "tcp_accept" || name == "tcp_close" || name == "sbuf" || name == "sbuf_add" ||
         name == "sbuf_len" || name == "sbuf_str" || name == "tcp_recv" || name == "tcp_send" ||
-        name == "chan" || name == "join_all" || name == "args" || name == "exit" || name == "eprint" ||
+        name == "chan" || name == "join_all" || name == "args" || name == "args_bytes" || name == "exit" || name == "eprint" ||
         name == "raise" || name == "own" || name == "$arena_enter" || name == "$arena_leave" ||
         name == "time_ms" || name == "mono_ns" || name == "sleep_ms") {
         static const std::map<std::string, std::string> BORROW_1 = {
@@ -7611,6 +7656,10 @@ V Emitter::ex_call(const Expr &e) {
         if (name == "args") {
             need_arity(args, 0, name);
             return {{}, "vargs()"};
+        }
+        if (name == "args_bytes") {
+            need_arity(args, 0, name);
+            return {{}, "vargs_bytes()"};
         }
         if (name == "exit") {
             need_arity(args, 1, name);
@@ -7749,7 +7798,7 @@ V Emitter::ex_call(const Expr &e) {
         if (name == "ptr_read_i64") deref = cat("vint(*(int64_t *)(", a.val, ").as.ival)");
         else if (name == "ptr_read_f64") deref = cat("vfloat(*(double *)(", a.val, ").as.ival)");
         else if (name == "ptr_read_ptr") deref = cat("vint((int64_t)*(void **)(", a.val, ").as.ival)");
-        else deref = cat("vstr((const char *)(", a.val, ").as.ival)");
+        else deref = cat("vstr_ptr_read((const char *)(", a.val, ").as.ival)");
         return {a.pre, cat("((vptr_live(", a.val, ")) ? ", deref, " : vunwind)")};
     }
     if (name == "ptr_write_i64" || name == "ptr_write_f64" || name == "ptr_write_ptr" ||
@@ -7782,11 +7831,13 @@ V Emitter::ex_call(const Expr &e) {
     if (name == "strerror") {
         need_arity(args, 1, name);
         V a = ex(*args[0]);
-        return {a.pre, cat("vstr(strerror((int)(", a.val, ").as.ival))")};
+        return {a.pre, cat("vstr_c_checked(strerror((int)(", a.val,
+                            ").as.ival), \"strerror: NULL message\", "
+                            "\"strerror: invalid UTF-8\")")};
     }
-    if (name == "env_get") {
+    if (name == "env_get" || name == "env_get_bytes") {
         need_arity(args, 1, name);
-        return borrow_builtin("venv_get", args);
+        return borrow_builtin(name == "env_get" ? "venv_get" : "venv_get_bytes", args);
     }
     if (name == "re_match" || name == "re_find" || name == "re_captures" || name == "re_replace") {
         int want_n = (name == "re_replace") ? 3 : 2;
@@ -7855,9 +7906,15 @@ V Emitter::ex_call(const Expr &e) {
             }
             const Expr &a = *args[i];
             if (ann && ann->rfind("fn", 0) == 0) {
-                check_cb_arg(*ann, a, name, static_cast<int>(i) + 1);
-                cargs += cat(cargs.empty() ? "" : ", ", "brat_cb_", a.a);
-                continue;
+                bool sentinel = (a.k == EK::Num && !a.is_float && a.i == 0) ||
+                                (a.k == EK::Un && a.a == "-" && a.kids.size() == 1 &&
+                                 a.kids[0] && a.kids[0]->k == EK::Num &&
+                                 !a.kids[0]->is_float && a.kids[0]->i == 1);
+                if (!sentinel) {
+                    check_cb_arg(*ann, a, name, static_cast<int>(i) + 1);
+                    cargs += cat(cargs.empty() ? "" : ", ", "brat_cb_", a.a);
+                    continue;
+                }
             }
             if (ann && !FFI_TYPES.count(*ann) && !structs.count(*ann) && ann->rfind("fn", 0) != 0 &&
                 ann->rfind("ptr[", 0) != 0)
@@ -7920,6 +7977,8 @@ V Emitter::ex_call(const Expr &e) {
             } else if (var_slot) {
                 cargs += cat(cargs.empty() ? "" : ", ", "(", t, ".tag == V_STR ? (void *)vstr_pin(", t,
                              ") : (void *)", t, ".as.ival)");
+            } else if (ann && ann->rfind("fn", 0) == 0) {
+                cargs += cat(cargs.empty() ? "" : ", ", "(void *)(intptr_t)", t, ".as.ival");
             } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
                 cargs += cat(cargs.empty() ? "" : ", ", "(void *)", t, ".as.ival");
             } else if (ann && *ann == "f64") {

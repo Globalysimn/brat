@@ -1133,7 +1133,7 @@ static ResolvedCType base_c_type(std::string_view raw, const TargetModel &tm) {
             if (sc && *sc == "none") return {"ptr", {}, {}, {}, 0, true};
             if (!cleaned.empty()) return {"ptr", cleaned, {}, {}, 0};
         }
-        return {"ptr", {}, {}, {}, 0};
+        return {"ptr", "ptr", {}, {}, 0};
     }
 
     if (!named.empty()) {

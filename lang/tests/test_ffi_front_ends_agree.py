@@ -93,6 +93,15 @@ PINNED = [
     ("typed_ptr_needs_a_known_pointee", False,
      "extern \"libz.so\" fn f(p: ptr[i64]) -> none",
      "void f(void *p);"),
+    ("ptr_to_ptr_out", True,
+     "extern \"libz.so\" fn f(p: ptr[ptr]) -> i32",
+     "typedef struct sqlite3 sqlite3;\nint f(sqlite3 **p);"),
+    ("ptr_to_ptr_wrong_elem", False,
+     "extern \"libz.so\" fn f(p: ptr[i64]) -> i32",
+     "typedef struct sqlite3 sqlite3;\nint f(sqlite3 **p);"),
+    ("ptr_to_ptr_needs_second_star", False,
+     "extern \"libz.so\" fn f(p: ptr[ptr]) -> i32",
+     "typedef struct sqlite3 sqlite3;\nint f(sqlite3 *p);"),
 ]
 
 

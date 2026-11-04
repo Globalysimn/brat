@@ -28,7 +28,7 @@ CASES = {
                     '  print(write_file(1, "RAW\\n"))\n  print("AFTER")\n  0\n}\n',
                     b"BEFORE\n('err', 'write_file wants string path and text')\nAFTER\n", 0),
     'fs_write_list': ('fn main() -> i64 {\n  print(write_file([1,2], "x"))\n  0\n}\n',
-                      b"('err', 'write_file wants string path and text')\n", 0),
+                      b"('ok', 1)\n", 0),
     'fs_write_int': ('fn main() -> i64 {\n  print(write_file("o.txt", 5))\n  0\n}\n',
                      b"('err', 'write_file wants string path and text')\n", 0),
     'fs_roundtrip': ('fn main() -> i64 {\n  print(write_file("round.txt", "hi"))\n'

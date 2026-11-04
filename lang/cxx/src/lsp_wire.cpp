@@ -423,6 +423,42 @@ namespace {
 
 constexpr int kMaxJsonDepth = 200;
 
+bool valid_json_utf8(std::string_view text) {
+    for (size_t i = 0; i < text.size();) {
+        // Most protocol strings are ASCII. Skip whole words without alignment
+        // assumptions or reading beyond the string view.
+        while (text.size() - i >= sizeof(uint64_t)) {
+            uint64_t word;
+            std::memcpy(&word, text.data() + i, sizeof(word));
+            if (word & UINT64_C(0x8080808080808080)) break;
+            i += sizeof(word);
+        }
+        if (i == text.size()) break;
+        const auto lead = static_cast<unsigned char>(text[i++]);
+        if (lead < 0x80u) continue;
+        size_t tail;
+        uint32_t cp, minimum;
+        if (lead >= 0xc2u && lead <= 0xdfu) {
+            tail = 1; cp = lead & 0x1fu; minimum = 0x80u;
+        } else if (lead >= 0xe0u && lead <= 0xefu) {
+            tail = 2; cp = lead & 0x0fu; minimum = 0x800u;
+        } else if (lead >= 0xf0u && lead <= 0xf4u) {
+            tail = 3; cp = lead & 0x07u; minimum = 0x10000u;
+        } else {
+            return false;
+        }
+        if (text.size() - i < tail) return false;
+        for (size_t k = 0; k < tail; ++k) {
+            const auto c = static_cast<unsigned char>(text[i++]);
+            if ((c & 0xc0u) != 0x80u) return false;
+            cp = (cp << 6) | (c & 0x3fu);
+        }
+        if (cp < minimum || cp > 0x10ffffu || (cp >= 0xd800u && cp <= 0xdfffu))
+            return false;
+    }
+    return true;
+}
+
 class TapeParser {
 public:
     TapeParser(std::string_view src, std::vector<TapeNode> &nodes, std::string &arena)
@@ -484,6 +520,10 @@ private:
         ++at_;  // consume opening '"'
         const size_t str_start = at_;
         const size_t safe_len = simd_scan_json_str_safe(p_ + at_, n_ - at_);
+        if (!valid_json_utf8(src_.substr(at_, safe_len))) {
+            err_ = "invalid UTF-8 in JSON string";
+            return 0;
+        }
         at_ += safe_len;
         if (at_ < n_ && p_[at_] == '"') {
             // Fast path: unescaped string slice referencing `src_` directly.
@@ -511,6 +551,10 @@ private:
             if (ch < 0x20u) return 0;
             if (ch != '\\') {
                 const size_t run = simd_scan_json_str_safe(p_ + at_, n_ - at_);
+                if (!valid_json_utf8(src_.substr(at_, run))) {
+                    err_ = "invalid UTF-8 in JSON string";
+                    return 0;
+                }
                 arena_.append(p_ + at_, run);
                 at_ += run;
                 continue;

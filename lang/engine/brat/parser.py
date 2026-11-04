@@ -509,19 +509,112 @@ def ann_text(toks):
 
 # C spellings for a slot whose width BRAT already names, so a signature copied
 # out of a header is accepted as written instead of being refused for its
-# spelling. Only names where both tables agree on the width are here: a
-# `int16_t` is deliberately absent, because `brat bindgen` widens it to `i32`
-# and a hand-written `i16` would then disagree with a generated one.
+# spelling. `ann_text` glues tokens, so multi-word C types are keyed by that
+# glued form. Only target-independent widths are here: C `long` is deliberately
+# absent because the data model, not the spelling, decides whether it is four
+# or eight bytes.
 C_FFI_ALIAS = {
+    "bool": "bool", "_Bool": "bool",
+    "char": "u8", "signedchar": "i8", "unsignedchar": "u8",
+    "short": "i16", "shortint": "i16", "signedshort": "i16",
+    "signedshortint": "i16", "unsignedshort": "u16", "unsignedshortint": "u16",
+    "int": "i32", "signed": "i32", "signedint": "i32",
+    "unsigned": "u32", "unsignedint": "u32",
+    "longlong": "i64", "longlongint": "i64", "signedlonglong": "i64",
+    "signedlonglongint": "i64", "unsignedlonglong": "u64",
+    "unsignedlonglongint": "u64",
+    "float": "f32", "double": "f64", "void": "none",
+    "int8_t": "i8", "uint8_t": "u8", "int16_t": "i16", "uint16_t": "u16",
+    "int32_t": "i32", "uint32_t": "u32", "int64_t": "i64", "uint64_t": "u64",
     "size_t": "usize",
     "ssize_t": "i64", "ptrdiff_t": "i64", "intptr_t": "i64", "uintptr_t": "u64",
-    "int64_t": "i64", "uint64_t": "u64", "int32_t": "i32", "uint32_t": "u32",
 }
+
+_C_FFI_CONTRACTS = ("thread(same)", "thread(any)", "reenter(yes)", "reenter(no)")
+
+
+def _canon_scalar(ann):
+    core = ann
+    while True:
+        for qualifier in ("const", "volatile", "restrict"):
+            if core.startswith(qualifier) and len(core) > len(qualifier):
+                core = core[len(qualifier):]
+                break
+        else:
+            break
+    return C_FFI_ALIAS.get(core)
+
+
+def _matching_delim(text, open_at, opener, closer):
+    depth = 0
+    for index in range(open_at, len(text)):
+        if text[index] == opener:
+            depth += 1
+        elif text[index] == closer:
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def _split_type_list(text):
+    parts = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(text):
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _canon_type(ann):
+    scalar = _canon_scalar(ann)
+    if scalar is not None:
+        return scalar
+    if ann in ("constchar*", "charconst*", "constchar*const"):
+        return "str"
+    if ann.startswith("ptr["):
+        close = _matching_delim(ann, 3, "[", "]")
+        if close == len(ann) - 1:
+            return "ptr[" + _canon_type(ann[4:close].strip()) + "]"
+    if ann.startswith("fn("):
+        close = _matching_delim(ann, 2, "(", ")")
+        if close >= 0:
+            params = [_canon_type(part) for part in _split_type_list(ann[3:close])]
+            tail = ann[close + 1:].strip()
+            if not tail:
+                return "fn(" + ",".join(params) + ")"
+            if tail.startswith("->"):
+                return "fn(" + ",".join(params) + ")->" + _canon_type(tail[2:].strip())
+    bracket = ann.rfind("[")
+    if bracket > 0 and ann.endswith("]") and ann[bracket + 1:-1].isdigit():
+        return _canon_type(ann[:bracket].strip()) + ann[bracket:]
+    return ann
 
 
 def canon_ann(ann):
     """C spelling -> the BRAT name for the same width (`size_t` -> `usize`)."""
-    return C_FFI_ALIAS.get(ann, ann) if isinstance(ann, str) else ann
+    if not isinstance(ann, str):
+        return ann
+    contracts = []
+    core = ann
+    while True:
+        for suffix in _C_FFI_CONTRACTS:
+            if core.endswith(suffix):
+                contracts.append(suffix)
+                core = core[:-len(suffix)]
+                break
+        else:
+            break
+    return _canon_type(core) + "".join(reversed(contracts))
 
 
 def parse_params(c, allow_varargs=False):

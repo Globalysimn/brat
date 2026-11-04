@@ -136,13 +136,13 @@ check(r3.returncode == 0, "a pruned entry must fall back to compiling")
 for name in os.listdir(cache):
     os.unlink(os.path.join(cache, name))
 for i in range(4):
-    p_i = os.path.join(cache, "entry%d" % i)
+    p_i = os.path.join(cache, "%064x" % i)
     with open(p_i, "wb") as f:
         f.write(b"x" * 4096)
     os.utime(p_i, (1000 + i, 1000 + i))
 freed = tc.prune_cache(limit=9000)
 check(freed == 8192, "prune freed %d, want 8192" % freed)
-check(sorted(os.listdir(cache)) == ["entry2", "entry3"],
+check(sorted(os.listdir(cache)) == ["%064x" % 2, "%064x" % 3],
       "prune must drop the oldest first, left %r" % (sorted(os.listdir(cache)),))
 check(tc.prune_cache(limit=9000) == 0, "prune under the limit must free nothing")
 

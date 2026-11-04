@@ -138,6 +138,174 @@ check(interp.returncode == 0 and native.returncode == 0
       "fractional counts/handles must be refused identically: %r vs %r"
       % (interp.stdout, native.stdout))
 
+# A stale integer copy must not alias the next socket. Native table slots are
+# reused, so the public handle has to be fresh every time.
+STALE = '''fn close_it(s: i64) -> i64 {
+  print(tcp_close(s))
+  return 0
+}
+
+fn main() -> i64 {
+  let first = tcp_listen("127.0.0.1:47378")
+  match first {
+    Ok(s) => {
+      let stale = s + 0
+      print(tcp_close(s))
+      let second = tcp_listen("127.0.0.1:47379")
+      match second {
+        Ok(t) => {
+          print(t)
+          close_it(stale)
+          print(tcp_close(t))
+        },
+        Err(e) => { print(e) }
+      }
+    },
+    Err(e) => { print(e) }
+  }
+  return 0
+}
+'''
+path = write("stale.brat", STALE)
+want_stale = "('ok', 0)\n2\n('err', 'bad socket slot')\n('ok', 0)\n"
+interp = run(["run", "--interp", path])
+check(interp.returncode == 0 and interp.stdout == want_stale,
+      "stale handle interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+exe = os.path.join(TMP, "stale.exe")
+built = run(["build", path, "-o", exe])
+check(built.returncode == 0, "stale handle build: %r" % (built.stdout + built.stderr))
+native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+check(native.returncode == 0 and native.stdout == want_stale,
+      "stale handle native: rc=%d %r" % (native.returncode, native.stdout + native.stderr))
+
+MANY = '''fn main() -> i64 {
+  let l = tcp_listen("127.0.0.1:47380")
+  match l {
+    Ok(s) => {
+      let mut clients = []
+      let mut servers = []
+      for i in 0..50 {
+        let c = tcp_connect("127.0.0.1:47380")
+        match c {
+          Ok(cf) => { clients.push(cf) },
+          Err(e) => {
+            print(e)
+            return 1
+          }
+        }
+        let a = tcp_accept(s)
+        match a {
+          Ok(af) => { servers.push(af) },
+          Err(e) => {
+            print(e)
+            return 1
+          }
+        }
+      }
+      print(len(clients) + len(servers) + 1)
+      for cf in clients {
+        tcp_close(cf)
+      }
+      for af in servers {
+        tcp_close(af)
+      }
+      tcp_close(s)
+      print("done")
+    },
+    Err(e) => { print(e) }
+  }
+  return 0
+}
+'''
+path = write("many.brat", MANY)
+want_many = "101\ndone\n"
+interp = run(["run", "--interp", path])
+check(interp.returncode == 0 and interp.stdout == want_many,
+      "many sockets interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+exe = os.path.join(TMP, "many.exe")
+built = run(["build", path, "-o", exe])
+check(built.returncode == 0, "many sockets build: %r" % (built.stdout + built.stderr))
+native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+check(native.returncode == 0 and native.stdout == want_many,
+      "many sockets native: rc=%d %r" % (native.returncode, native.stdout + native.stderr))
+
+CLOSE_RACE_RUNTIME = '''fn recv_it(s: i64, ready: i64) -> i64 {
+  ready.send(1)
+  print(tcp_recv(s, 16))
+  return 0
+}
+
+fn close_it(s: i64) -> i64 {
+  print(tcp_close(s))
+  return 0
+}
+
+fn main() -> i64 {
+  let ready = chan(1)
+  let l = tcp_listen("127.0.0.1:47381")
+  match l {
+    Ok(s) => {
+      let c = tcp_connect("127.0.0.1:47381")
+      match c {
+        Ok(cf) => {
+          let a = tcp_accept(s)
+          match a {
+            Ok(af) => {
+              let stale = cf + 0
+              spawn {
+                recv_it(cf, ready)
+              }
+              print(ready.recv())
+              sleep_ms(100)
+              close_it(stale)
+              print(tcp_send(af, "x"))
+              join_all()
+              tcp_close(af)
+            },
+            Err(e) => { print(e) }
+          }
+        },
+        Err(e) => { print(e) }
+      }
+      tcp_close(s)
+    },
+    Err(e) => { print(e) }
+  }
+  print("done")
+  return 0
+}
+'''
+path = write("close_race_runtime.brat", CLOSE_RACE_RUNTIME)
+def valid_close_race_output(output):
+    # The main thread prints close before send; the receiving thread can wake
+    # before either print. Assert that partial order, not a scheduler choice.
+    lines = output.splitlines()
+    close, send, recv = "('ok', 0)", "('ok', 1)", "('err', 'recv failed')"
+    return (len(lines) == 5 and lines[0] == "1" and lines[-1] == "done"
+            and sorted(lines[1:-1]) == sorted([close, send, recv])
+            and lines.index(close) < lines.index(send))
+
+
+for middle in (("('ok', 0)", "('ok', 1)", "('err', 'recv failed')"),
+               ("('ok', 0)", "('err', 'recv failed')", "('ok', 1)"),
+               ("('err', 'recv failed')", "('ok', 0)", "('ok', 1)")):
+    check(valid_close_race_output("1\n" + "\n".join(middle) + "\ndone\n"),
+          "valid close/recv scheduling rejected")
+check(not valid_close_race_output("1\n('ok', 1)\n('ok', 0)\n('err', 'recv failed')\ndone\n"),
+      "main-thread send-before-close must be rejected")
+check(not valid_close_race_output("1\n('ok', 0)\n('ok', 1)\n('ok', 'x')\ndone\n"),
+      "a successful stale receive must be rejected")
+
+interp = run(["run", "--interp", path])
+check(interp.returncode == 0 and valid_close_race_output(interp.stdout),
+      "close race interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+exe = os.path.join(TMP, "close_race_runtime.exe")
+built = run(["build", path, "-o", exe])
+check(built.returncode == 0, "close race build: %r" % (built.stdout + built.stderr))
+native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+check(native.returncode == 0 and valid_close_race_output(native.stdout),
+      "close race native: rc=%d %r" % (native.returncode, native.stdout + native.stderr))
+
 # The runtime is still the second line of defence: a program that builds today
 # and closes twice through a call gets an error value, not a crash.
 RUNTIME = '''fn close_twice(s: i64) -> i64 {

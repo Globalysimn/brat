@@ -148,6 +148,13 @@ fn main() -> i64 {
   return 0
 }
 '''),
+    'repr_quote_str_len': ({}, '''fn main() -> i64 {
+  let s = str(["'"])
+  print(len(s))
+  print(s)
+  return 0
+}
+'''),
     'repr_mixed_values': ({}, '''fn main() -> i64 {
   let p = Point { x: 1, y: "s" }
   print(p)

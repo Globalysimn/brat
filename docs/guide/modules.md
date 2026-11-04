@@ -45,7 +45,7 @@ program without copying files or running `brat pkg`:
 - `std.csv` — RFC 4180 `parse(s)`, `parse_records(s)`, and `dump(rows)`
 - `std.json` — RFC 8259 `parse(s)` and `stringify(v)`
 - `std.http` — HTTP/1.1 + HTTPS `parse_url`, `request`, `get`, `post`, `post_json`, `Session` keep-alive pooling, `get_stream`, and loopback `serve_once`/`serve_n`
-- `std.env` — `get`, `get_or`, `has`, `flag`
+- `std.env` — `get`, `get_bytes`, `get_or`, `has`, `flag`
 - `std.proc` — `run`, `status`, `output` (capability-gated via `BRAT_EXEC=1` or `BRAT_EXEC_ALLOW`, `execvp` without a shell)
 - `std.bytes` — confined `read`, `write`, `eq`, `starts_with`, `concat`, `to_hex`, `from_hex`, `to_base64`, `from_base64`
 - `std.time` — `now_ms`, `monotonic_ns`, `sleep_ms`, UTC ISO-8601 `format_utc` and `parse_utc`

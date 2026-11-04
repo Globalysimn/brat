@@ -54,7 +54,7 @@ BUILTINS = {
     "utf8_bytes", "utf8_str", "fs_rename", "fs_remove", "assert",
     "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
-    "args", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get",
+    "args", "args_bytes", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get", "env_get_bytes",
     "ptr_null", "ptr_is_null", "ptr_offset", "ptr_read_i64", "ptr_write_i64",
     "ptr_read_f64", "ptr_write_f64", "ptr_read_f32", "ptr_write_f32",
     "ptr_read_struct", "ptr_write_struct",
@@ -1893,26 +1893,80 @@ def _outer_writes(body, local, funcs=None):
 # else is refused here, at `check`, so `check` stays the verdict it claims to
 # be: a program whose signature the emitter cannot spell used to pass `check`
 # and die in `build`.
-FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
+FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize",
              "f32", "f64", "str", "ptr"}
 
 FFI_HINT = ("a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
             "ptr[T], fn(...), an `extern struct`, or `none`")
 
 
-def _valid_cb_slot(ann):
-    rest = ann[2:].lstrip()
-    if not rest.startswith("("):
-        return False
+def _split_type_list(text):
+    parts = []
+    start = 0
     depth = 0
-    for ch in rest:
-        if ch == "(":
+    for index, char in enumerate(text):
+        if char in "([":
             depth += 1
-        elif ch == ")":
+        elif char in ")]":
             depth -= 1
-            if depth < 0:
-                return False
-    return depth == 0
+        elif char == "," and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _callback_parts(ann):
+    text = ann.strip()
+    if not text.startswith("fn"):
+        return None
+    open_at = 2
+    while open_at < len(text) and text[open_at].isspace():
+        open_at += 1
+    if open_at >= len(text) or text[open_at] != "(":
+        return None
+    depth = 0
+    close_at = -1
+    for index in range(open_at, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                close_at = index
+                break
+    if close_at < 0:
+        return None
+    params = _split_type_list(text[open_at + 1:close_at])
+    tail = text[close_at + 1:].strip()
+    if not tail:
+        return params, "none"
+    if tail.startswith("->") and tail[2:].strip():
+        return params, tail[2:].strip()
+    return None
+
+
+def _ffi_nested_ok(ann, structs, allow_none=False, allow_fn=True):
+    if not isinstance(ann, str):
+        return False
+    ann = ann.strip()
+    if ann == "none":
+        return allow_none
+    if ann in FFI_SLOTS or ann in structs:
+        return True
+    if ann.startswith("ptr[") and ann.endswith("]"):
+        inner = ann[4:-1].strip()
+        return bool(inner) and _ffi_nested_ok(inner, structs, allow_fn=False)
+    if allow_fn and ann.startswith("fn"):
+        parts = _callback_parts(ann)
+        if parts is None:
+            return False
+        params, result = parts
+        return all(_ffi_nested_ok(param, structs, allow_fn=False) for param in params) \
+            and _ffi_nested_ok(result, structs, allow_none=True, allow_fn=False)
+    return False
 
 
 def ffi_slot_ok(ann, structs, allow_array=False):
@@ -1925,13 +1979,7 @@ def ffi_slot_ok(ann, structs, allow_array=False):
         elem, cnt = ann[:lb].strip(), ann[lb + 1:-1].strip()
         if cnt.isdigit() and len(cnt) <= 7 and 1 <= int(cnt) <= 1048576:
             return elem in FFI_SLOTS or elem in structs
-    if ann in FFI_SLOTS or ann in structs:
-        return True
-    if ann.startswith("ptr[") and ann.endswith("]"):
-        return bool(ann[4:-1].strip())
-    if ann.startswith("fn"):
-        return _valid_cb_slot(ann)
-    return False
+    return _ffi_nested_ok(ann, structs, allow_none=True)
 
 
 def ffi_signatures(prog, errs):

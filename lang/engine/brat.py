@@ -117,6 +117,10 @@ def run_file(path, args=None):
     except OSError as e:
         _s.stderr.write('brat: cannot read %s: %s\n' % (path, e))
         return 1
+    except UnicodeDecodeError as e:
+        _s.stderr.write('brat: %s is not valid UTF-8: byte 0x%02x at offset %d\n'
+                        % (path, e.object[e.start], e.start))
+        return 1
     argv = list(args or ())
     if argv and argv[0] == '--':
         argv = argv[1:]

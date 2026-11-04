@@ -416,9 +416,7 @@ def _base_type(t):
     if stars:
         base = cleaned.replace("unsigned", "").replace("signed", "").strip()
         if stars > 1:
-            # `char **`, `void **`: a pointer to a pointer. Erased, because the
-            # element is itself a pointer and `ptr[T]` names a word or a record.
-            return ("ptr", None)
+            return ("ptr", "ptr")
         if base == "char" and not named:
             # `const char *` is a string, and only it is: `str` is BRAT's
             # read-only view, so handing one to a parameter that may write would
@@ -1650,7 +1648,7 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 bad = True
             elif cbt == "ptr":
                 elem = element_of(bann)
-                if bann == "ptr" and _WIDTH.get(cextra) is not None:
+                if bann == "ptr" and cextra not in ("ptr", "str") and _WIDTH.get(cextra) is not None:
                     rep.error("extern struct %s.%s: erased `ptr` is incompatible with scalar `%s *`; use `ptr[T]`"
                               % (name, bname, cextra))
                     bad = True
@@ -1788,7 +1786,8 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                     rep.error("extern fn %s: %s is declared `%s`, %s has `%s`"
                               % (name, where, bann, header_name, cp))
                     bad = True
-                elif not _is_plugin and want == "ptr" and elem is None and _WIDTH.get(extra) is not None:
+                elif (not _is_plugin and want == "ptr" and elem is None
+                        and extra not in ("ptr", "str") and _WIDTH.get(extra) is not None):
                     rep.error("extern fn %s: %s uses erased `ptr`, incompatible with scalar `%s *`; use `ptr[T]`"
                               % (name, where, extra))
                     bad = True
@@ -1835,7 +1834,8 @@ def check(prog_body, cdecl, header_name="<header>", lib=None):
                 rep.error("extern fn %s: BRAT returns `%s`, %s returns `%s`"
                           % (name, ret, header_name, cret))
                 bad = True
-            elif not _is_plugin and rkind == "ptr" and ret == "ptr" and _WIDTH.get(rextra) is not None:
+            elif (not _is_plugin and rkind == "ptr" and ret == "ptr"
+                    and rextra not in ("ptr", "str") and _WIDTH.get(rextra) is not None):
                 rep.error("extern fn %s: BRAT returns erased `ptr`, incompatible with scalar `%s *`; use `ptr[T]`"
                           % (name, rextra))
                 bad = True

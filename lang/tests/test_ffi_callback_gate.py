@@ -51,11 +51,16 @@ BODY = (
 LIB_C = "int64_t call_cb(int64_t (*f)(int64_t), int64_t v) { return f(v); }\n"
 LIB_C += "int64_t call_ptr(int64_t (*f)(int32_t *), int32_t *p) { return f(p); }\n"
 LIB_C += "int32_t *call_ptr_ret(int32_t *(*f)(int32_t *), int32_t *p) { return f(p); }\n"
+LIB_C += "int64_t call_maybe(int64_t (*f)(int64_t), int64_t v) { return f ? f(v) : -7; }\n"
+LIB_C += "int64_t check_dtor(void (*d)(void *)) { intptr_t x = (intptr_t)d; return x == -1 ? 5 : (x == 0 ? 3 : 1); }\n"
 
 # name -> (call written into main, the sentence every path must say)
 REFUSED = {
     "cb_closure": (
         'print(call_cb(fn(x) { return x + 2 }, 40))',
+        "arg 1 of `call_cb`: callback must be a function name"),
+    "cb_int": (
+        'print(call_cb(5, 40))',
         "arg 1 of `call_cb`: callback must be a function name"),
     "cb_unknown": (
         'print(call_cb("nope", 40))',
@@ -154,6 +159,34 @@ def main():
     assert ref_stdout == cxx.stdout, "cb_ok: the CLI doors wrote different C"
     n += 1
     print("ffi cb gate ok: cb_ok (wrapper emitted, CLI doors byte-identical)")
+
+    raw_lib = lib or "libnosuch.so"
+    raw_src = (
+        'extern "%s" fn call_maybe(f: fn(i64) -> i64, v: i64) -> i64\n' % raw_lib
+        + 'extern "%s" fn check_dtor(d: fn(ptr)) -> i64\n' % raw_lib
+        + 'fn main() -> i64 {\n'
+        + '  print(call_maybe(0, 40))\n'
+        + '  print(check_dtor(0))\n'
+        + '  print(check_dtor(-1))\n'
+        + '  return 0\n}\n')
+    raw_path = write("cb_raw", raw_src)
+    cxx = subprocess.run([CXX, "cc", raw_path], capture_output=True, timeout=120,
+                         env=CXX_ENV)
+    assert cxx.returncode == 0, cxx.stderr.decode("utf-8", "replace")[-400:]
+    assert b"(void *)(intptr_t)" in cxx.stdout, cxx.stdout[:300]
+    ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", raw_path],
+                         capture_output=True, timeout=120, env=CLI_ENV)
+    code, sep, _contract = ref.stdout.rpartition(b"\n/* BRAT FFI contract")
+    ref_stdout = code + b"\n" if sep else ref.stdout
+    assert ref.returncode == 0 and ref_stdout == cxx.stdout, (
+        "cb_raw: raw function pointer CLI doors disagree")
+    if lib is not None:
+        run = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", raw_path],
+                             capture_output=True, timeout=120)
+        assert run.returncode == 0, run.stderr.decode("utf-8", "replace")[-400:]
+        assert run.stdout == b"-7\n3\n5\n", run.stdout
+    n += 1
+    print("ffi cb gate ok: cb_raw (null and sentinel)")
 
     ptr_src = (
         'extern "%s" fn call_ptr(f: fn(ptr[i32]) -> i64, p: ptr[i32]) -> i64\n' % lib

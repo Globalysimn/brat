@@ -478,6 +478,9 @@ typedef uintptr_t SOCKET;
 #define WSAEALREADY 10037
 #define WSAETIMEDOUT 10060
 #define SO_ERROR 0x1007
+#define SD_RECEIVE 0
+#define SD_SEND 1
+#define SD_BOTH 2
 #define FIONBIO 0x8004667e
 #define MAKEWORD(a, b) ((uint16_t)(((uint8_t)(a)) | ((uint16_t)((uint8_t)(b))) << 8))
 typedef unsigned long u_long;
@@ -505,6 +508,7 @@ int select(int, fd_set *, fd_set *, fd_set *, const struct timeval *);
 int getsockopt(SOCKET, int, int, char *, int *);
 int recv(SOCKET, char *, int, int);
 int send(SOCKET, const char *, int, int);
+int shutdown(SOCKET, int);
 int closesocket(SOCKET);
 ''')
 with open(os.path.join(win_inc, "ws2tcpip.h"), "w", encoding="utf-8") as f:

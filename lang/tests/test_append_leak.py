@@ -6,8 +6,8 @@ temp only on the error path (`if (verr_pending()) { vdrop_temp(_c4); ... }`), so
 every append of a call or of a `+` result leaked one allocation per iteration --
 12028 bytes over 181 allocations for `lang/examples/csv.brat`.
 
-The three shapes below are the ones that leaked: a call in a loop, a
-concatenation in a loop, and a single append. The native emitter's C is
+The shapes below are the ones that leaked: a call in a loop, a
+concatenation in a loop, a single append, and a branch-seeded row. The native emitter's C is
 compiled and run under AddressSanitizer for each one.
 """
 
@@ -59,6 +59,44 @@ fn main() -> i64 {
   return 0
 }
 """, "[x]\n"),
+    # A row seeded from a variable on one branch and concatenated on the
+    # other: the Var assignment used to poison `reclaim` for the name, so
+    # no reassignment in the loop released the previous string.
+    "branch_seed_concat": ("""fn field() -> str {
+  return "field-0123456789abcdef"
+}
+fn main() -> i64 {
+  let mut i = 0
+  while i < 3 {
+    let mut line = ""
+    let mut j = 0
+    while j < 3 {
+      let f = field()
+      if j > 0 {
+        line = line + "\\t" + f
+      } else {
+        line = f
+      }
+      j = j + 1
+    }
+    print(len(line))
+    i = i + 1
+  }
+  return 0
+}
+""", "68\n68\n68\n"),
+    # `x = x` stored a fresh `vrc_inc` of itself with no matching release.
+    "self_assign": ("""fn main() -> i64 {
+  let mut line = "field-0123456789abcdef"
+  let mut i = 0
+  while i < 3 {
+    line = line
+    i = i + 1
+  }
+  print(line)
+  return 0
+}
+""", "field-0123456789abcdef\n"),
 }
 
 

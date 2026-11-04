@@ -176,6 +176,62 @@ def wrap64(n):
     return n - (1 << 64) if n >= _I64 else n
 
 
+def _os_arg_bytes(v):
+    if isinstance(v, bytes):
+        return v
+    return os.fsencode(v)
+
+
+def _os_text(raw):
+    try:
+        s = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
+    return None if '\x00' in s else s
+
+
+def _valid_text(msg):
+    if re.search(r'\\udc[0-9a-fA-F]{2}', msg):
+        return False
+    try:
+        raw = msg.encode('utf-8', 'surrogateescape')
+    except UnicodeEncodeError:
+        return False
+    return _os_text(raw) is not None
+
+
+def _err_text(msg):
+    if _valid_text(msg):
+        return msg
+    m = re.match(r'^\[Errno (\d+)\]', msg)
+    return '[Errno %s] os error' % m.group(1) if m else 'os error'
+
+
+def _os_error_text(e):
+    msg = str(e)
+    if _valid_text(msg):
+        return msg
+    err_no = getattr(e, 'errno', None)
+    return '[Errno %s] os error' % (err_no if err_no is not None else 0)
+
+
+def _fs_path(v, fname):
+    if isinstance(v, str):
+        if '\x00' in v:
+            return None, 'embedded NUL in file path'
+        return v, None
+    if isinstance(v, list):
+        raw = bytearray()
+        for b in v:
+            if isinstance(b, bool) or not isinstance(b, int) or b < 0 or b > 255:
+                return None, '%s byte out of range 0..255' % fname
+            if b == 0:
+                return None, 'embedded NUL in file path'
+            raw.append(b)
+        return bytes(raw).decode('utf-8', 'surrogateescape'), None
+    return None, ''
+
+
 _CASE_GROUP = ('upper', 'lower')
 _AFFIX_GROUP = ('contains', 'starts_with', 'ends_with')
 
@@ -1464,41 +1520,40 @@ def _re_pike_search(prog, start, sb: bytes, min_from: int, nslots: int):
     nprog = len(prog)
     best_slots = None
     matched = False
-    for frm in range(min_from, slen + 1):
-        if matched:
-            break
-        cur = []
-        seen = [False] * (nprog + 1)
-        work_slots = [-1] * nslots
-        _re_pike_add(prog, start, sb, slen, frm, cur, seen, work_slots, nslots)
-        si = frm
-        while cur:
-            nxt = []
-            seen = [False] * (nprog + 1)
-            for pc, tslots in cur:
-                op, q, ch, body, _x, _y = prog[pc]
-                if op == 'm':
-                    matched = True
-                    if nslots > 0 and tslots is not None:
-                        best_slots = tslots[:]
-                    break
-                if si >= slen or op != 'c':
-                    continue
-                b = sb[si]
-                if q == 'l':
-                    if b != ch:
-                        continue
-                elif q == 'd':
-                    pass
-                else:
-                    if not _re_set_match(body, b):
-                        continue
-                ws = tslots[:] if (nslots > 0 and tslots is not None) else []
-                _re_pike_add(prog, pc + 1, sb, slen, si + 1, nxt, seen, ws, nslots)
-            cur = nxt
-            if si >= slen:
+    cur = []
+    seen = [False] * (nprog + 1)
+    for si in range(min_from, slen + 1):
+        if not matched:
+            work_slots = [-1] * nslots
+            _re_pike_add(prog, start, sb, slen, si, cur, seen, work_slots, nslots)
+        nxt = []
+        next_seen = [False] * (nprog + 1)
+        for pc, tslots in cur:
+            op, q, ch, body, _x, _y = prog[pc]
+            if op == 'm':
+                matched = True
+                if nslots > 0 and tslots is not None:
+                    best_slots = tslots[:]
                 break
-            si += 1
+            if si >= slen or op != 'c':
+                continue
+            b = sb[si]
+            if q == 'l':
+                if b != ch:
+                    continue
+            elif q == 'd':
+                pass
+            else:
+                if not _re_set_match(body, b):
+                    continue
+            ws = tslots[:] if (nslots > 0 and tslots is not None) else []
+            _re_pike_add(prog, pc + 1, sb, slen, si + 1, nxt, next_seen, ws, nslots)
+        if si >= slen:
+            break
+        cur = nxt
+        seen = next_seen
+        if matched and not cur:
+            break
     return matched, best_slots
 
 
@@ -2068,6 +2123,36 @@ _FFI_INT = {
 }
 
 
+def _ffi_decode_str(raw, null_msg, bad_msg):
+    if raw is None:
+        raise RuntimeError(null_msg)
+    if isinstance(raw, bytes):
+        if len(raw) > MAX_STR:
+            raise RuntimeError('out of memory')
+        try:
+            return raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise RuntimeError(bad_msg) from None
+    return raw
+
+
+def _ffi_returned_str(raw):
+    return _ffi_decode_str(raw, 'ffi: C returned NULL where str expected',
+                           'ffi: C returned invalid UTF-8 where str expected')
+
+
+def _ffi_passed_str(raw):
+    return _ffi_decode_str(raw, 'ffi: C passed NULL where str expected',
+                           'ffi: C passed invalid UTF-8 where str expected')
+
+
+def _ffi_field_str(raw):
+    if raw is None:
+        return None
+    return _ffi_decode_str(raw, 'ffi: C string field is NULL',
+                           'ffi: C string field has invalid UTF-8')
+
+
 _OUT_NAMES = []          # one stack of {name: True} per frame that has an `&`
 
 
@@ -2193,7 +2278,8 @@ def _ffi_invoke(name, info, vals, funcs):
                   'i32': ctypes.c_int, 'u32': ctypes.c_uint,
                   'f32': ctypes.c_float, 'f64': ctypes.c_double,
                   'i64': ctypes.c_longlong, 'u64': ctypes.c_ulonglong,
-                'usize': ctypes.c_size_t, 'bool': ctypes.c_bool}.get(
+                  'usize': ctypes.c_size_t, 'bool': ctypes.c_bool,
+                  'ptr': ctypes.c_void_p}.get(
                       _pointee[4:-1] if isinstance(_pointee, str) and _pointee.startswith('ptr[') else '',
                       ctypes.c_longlong)
             cur = _scope.get(oname, 0) if _scope else 0
@@ -2248,7 +2334,7 @@ def _ffi_invoke(name, info, vals, funcs):
     for oenv, oname, box in boxes:
         # The name is the only way back to the value; a `f32`/`f64` binding
         # takes a float, everything else an integer.
-        oenv[oname] = box.value
+        oenv[oname] = (box.value or 0) if isinstance(box, ctypes.c_void_p) else box.value
     if checked:
         # NULL for ptr, -1 for integers: same sentinels as the native backend.
         failed = (r is None or r == 0) if ret == 'ptr' else r == -1
@@ -2270,7 +2356,7 @@ def _ffi_invoke(name, info, vals, funcs):
             elif ft in _STRUCTS:
                 out[f] = _struct_val(ft, val)
             elif ft == 'str':
-                out[f] = val.decode('utf-8') if isinstance(val, bytes) else val
+                out[f] = _ffi_field_str(val)
             elif ft == 'ptr':
                 out[f] = val.value if hasattr(val, 'value') else (val or 0)
             elif hasattr(val, 'value'):
@@ -2294,9 +2380,7 @@ def _ffi_invoke(name, info, vals, funcs):
             raise RuntimeError('ffi: result of %s does not fit i64' % name)
         return r
     if ret == 'str':
-        if r is None:
-            raise RuntimeError('ffi: C returned NULL where str expected')
-        return r.decode('utf-8') if isinstance(r, bytes) else r
+        return _ffi_returned_str(r)
     if ret == 'ptr' or (isinstance(ret, str) and ret.startswith('ptr[')):
         if hasattr(r, 'value'):
             return r.value or 0
@@ -2679,9 +2763,8 @@ def _plugin(name, vals, funcs=None):
         if ret == 'f32':
             return float(r)
         if ret == 'str':
-            if r is None:
-                raise RuntimeError('call: NULL str result')
-            return r.decode('utf-8', 'replace') if isinstance(r, bytes) else r
+            return _ffi_decode_str(r, 'call: NULL str result',
+                                   'call: invalid UTF-8 str result')
         if ret in ('ptr', 'own ptr'):
             return r or 0
         return r
@@ -2792,16 +2875,15 @@ def call(name, args, env, funcs):
     if name == 'read_file':
         if len(vals) != 1:
             raise TypeError('read_file wants 1 arg')
-        if not isinstance(vals[0], str):
-            return ('err', 'read_file wants a string path')
-        if '\x00' in vals[0]:
-            return ('err', 'embedded NUL in file path')
-        path = confined_path(vals[0])
+        p0, perr = _fs_path(vals[0], 'read_file')
+        if perr is not None:
+            return ('err', perr or 'read_file wants a string path')
+        path = confined_path(p0)
         if path is None:
             return ('err', 'path outside the program directory')
         fd, ferr = _open_confined_fd(path, False, _MAX_FILE_BYTES, 'file exceeds 64 MiB limit')
         if fd < 0:
-            return ('err', ferr)
+            return ('err', _err_text(ferr))
         try:
             chunks = []
             total = 0
@@ -2821,20 +2903,19 @@ def call(name, args, env, funcs):
         except UnicodeDecodeError:
             return ('err', 'invalid utf-8')
         except OSError as e:
-            return ('err', str(e))
+            return ('err', _os_error_text(e))
     if name == 'read_bytes':
         if len(vals) != 1:
             raise TypeError('read_bytes wants 1 arg')
-        if not isinstance(vals[0], str):
-            return ('err', 'read_bytes wants a string path')
-        if '\x00' in vals[0]:
-            return ('err', 'embedded NUL in file path')
-        path = confined_path(vals[0])
+        p0, perr = _fs_path(vals[0], 'read_bytes')
+        if perr is not None:
+            return ('err', perr or 'read_bytes wants a string path')
+        path = confined_path(p0)
         if path is None:
             return ('err', 'path outside the program directory')
         fd, ferr = _open_confined_fd(path, False, _MAX_READ_BYTES, 'file exceeds 16 MiB byte vector limit')
         if fd < 0:
-            return ('err', ferr)
+            return ('err', _err_text(ferr))
         try:
             chunks = []
             total = 0
@@ -2849,7 +2930,7 @@ def call(name, args, env, funcs):
                     chunks.append(chunk)
             return ('ok', list(b''.join(chunks)))
         except OSError as e:
-            return ('err', str(e))
+            return ('err', _os_error_text(e))
     if name == 'utf8_bytes':
         if len(vals) != 1:
             raise TypeError('utf8_bytes wants 1 arg')
@@ -2878,31 +2959,32 @@ def call(name, args, env, funcs):
     if name == 'fs_rename':
         if len(vals) != 2:
             raise TypeError('fs_rename wants 2 args')
-        if not isinstance(vals[0], str) or not isinstance(vals[1], str):
-            return ('err', 'fs_rename wants string paths')
-        if '\x00' in vals[0] or '\x00' in vals[1]:
-            return ('err', 'embedded NUL in file path')
-        src = confined_path(vals[0])
-        dst = confined_path(vals[1])
+        p0, perr = _fs_path(vals[0], 'fs_rename')
+        if perr is not None:
+            return ('err', perr or 'fs_rename wants string paths')
+        p1, perr = _fs_path(vals[1], 'fs_rename')
+        if perr is not None:
+            return ('err', perr or 'fs_rename wants string paths')
+        src = confined_path(p0)
+        dst = confined_path(p1)
         if src is None or dst is None:
             return ('err', 'path outside the program directory')
         rerr = _confined_rename(src, dst)
         if rerr is not None:
-            return ('err', rerr)
+            return ('err', _err_text(rerr))
         return ('ok', 0)
     if name == 'fs_remove':
         if len(vals) != 1:
             raise TypeError('fs_remove wants 1 arg')
-        if not isinstance(vals[0], str):
-            return ('err', 'fs_remove wants a string path')
-        if '\x00' in vals[0]:
-            return ('err', 'embedded NUL in file path')
-        path = confined_path(vals[0])
+        p0, perr = _fs_path(vals[0], 'fs_remove')
+        if perr is not None:
+            return ('err', perr or 'fs_remove wants a string path')
+        path = confined_path(p0)
         if path is None:
             return ('err', 'path outside the program directory')
         rerr = _confined_remove(path)
         if rerr is not None:
-            return ('err', rerr)
+            return ('err', _err_text(rerr))
         return ('ok', 0)
     if name == 'sbuf':
         if len(vals) != 0:
@@ -3046,46 +3128,48 @@ def call(name, args, env, funcs):
     if name == 'write_file':
         if len(vals) != 2:
             raise TypeError('write_file wants 2 args')
-        if not isinstance(vals[0], str) or not isinstance(vals[1], str):
+        if not isinstance(vals[1], str):
             return ('err', 'write_file wants string path and text')
-        if '\x00' in vals[0]:
-            return ('err', 'embedded NUL in file path')
-        path = confined_path(vals[0])
+        p0, perr = _fs_path(vals[0], 'write_file')
+        if perr is not None:
+            return ('err', perr or 'write_file wants string path and text')
+        path = confined_path(p0)
         if path is None:
             return ('err', 'path outside the program directory')
         enc = vals[1].encode('utf-8')
         fd, ferr = _open_confined_fd(path, True, 0, '')
         if fd < 0:
-            return ('err', ferr)
+            return ('err', _err_text(ferr))
         try:
             with os.fdopen(fd, 'wb') as f:
                 f.write(enc)
             return ('ok', len(enc))
         except OSError as e:
-            return ('err', str(e))
+            return ('err', _os_error_text(e))
     if name == 'write_bytes':
         if len(vals) != 2:
             raise TypeError('write_bytes wants 2 args')
-        if not isinstance(vals[0], str) or not isinstance(vals[1], list):
+        if not isinstance(vals[1], list):
             return ('err', 'write_bytes wants string path and byte vec')
-        if '\x00' in vals[0]:
-            return ('err', 'embedded NUL in file path')
+        p0, perr = _fs_path(vals[0], 'write_bytes')
+        if perr is not None:
+            return ('err', perr or 'write_bytes wants string path and byte vec')
         for b in vals[1]:
             if isinstance(b, bool) or not isinstance(b, int) or b < 0 or b > 255:
                 return ('err', 'write_bytes byte out of range 0..255')
-        path = confined_path(vals[0])
+        path = confined_path(p0)
         if path is None:
             return ('err', 'path outside the program directory')
         raw = bytes(vals[1])
         fd, ferr = _open_confined_fd(path, True, 0, '')
         if fd < 0:
-            return ('err', ferr)
+            return ('err', _err_text(ferr))
         try:
             with os.fdopen(fd, 'wb') as f:
                 f.write(raw)
             return ('ok', len(raw))
         except OSError as e:
-            return ('err', str(e))
+            return ('err', _os_error_text(e))
     if name == 'proc_run':
         if len(vals) not in (2, 3):
             raise TypeError('proc_run wants 2-3 args')
@@ -3093,12 +3177,35 @@ def call(name, args, env, funcs):
         tmo_arg = vals[2] if len(vals) == 3 else 0
         if not isinstance(cmd, str) or not cmd:
             return ('err', 'proc_run wants non-empty command string')
-        if not isinstance(argv, list) or any(not isinstance(x, str) for x in argv):
+        if not isinstance(argv, list):
             return ('err', 'proc_run wants vec[str] args')
         if type(tmo_arg) is not int:
             return ('err', 'proc_run timeout must be an integer (ms)')
-        if '\x00' in cmd or any('\x00' in x for x in argv):
+        if '\x00' in cmd:
             return ('err', 'proc_run nul byte in argument')
+        argv_exec = []
+        for x in argv:
+            if isinstance(x, str):
+                if '\x00' in x:
+                    return ('err', 'proc_run nul byte in argument')
+                argv_exec.append(x)
+            elif isinstance(x, list):
+                raw = bytearray()
+                for b in x:
+                    if isinstance(b, bool) or not isinstance(b, int) or b < 0 or b > 255:
+                        return ('err', 'proc_run byte out of range 0..255')
+                    if b == 0:
+                        return ('err', 'proc_run nul byte in argument')
+                    raw.append(b)
+                if os.name == 'nt':
+                    try:
+                        argv_exec.append(bytes(raw).decode('utf-8'))
+                    except UnicodeDecodeError:
+                        return ('err', 'proc_run invalid utf-8 in argument')
+                else:
+                    argv_exec.append(bytes(raw).decode('utf-8', 'surrogateescape'))
+            else:
+                return ('err', 'proc_run wants vec[str] args')
         if tmo_arg <= 0:
             env_tmo = os.environ.get('BRAT_PROC_TIMEOUT_MS', '').strip()
             try:
@@ -3140,7 +3247,7 @@ def call(name, args, env, funcs):
             if resolved is None:
                 return ('err', 'proc_run executable not found: ' + cmd)
             exe_path = resolved
-        return _run_proc_bounded([exe_path] + list(argv), exe_path, timeout_ms)
+        return _run_proc_bounded([exe_path] + argv_exec, exe_path, timeout_ms)
     if name in funcs and isinstance(funcs[name], tuple) and funcs[name] and funcs[name][0] == 'ctor':
         _, tag, arity = funcs[name]
         if len(vals) != arity:
@@ -3225,7 +3332,24 @@ def call(name, args, env, funcs):
             raise TypeError('join_all wants 0 args')
         return join_all()
     if name == 'args':
-        return list(_ARGS[0])
+        if vals:
+            raise TypeError('args wants 0 args')
+        out = []
+        for i, raw in enumerate(_ARGS_BYTES[0]):
+            s = _os_text(raw)
+            if s is None:
+                raise RuntimeError('invalid utf-8 in argument %d; use args_bytes()' % (i + 1))
+            out.append(s)
+        return out
+    if name == 'args_bytes':
+        if vals:
+            raise TypeError('args_bytes wants 0 args')
+        out = []
+        for raw in _ARGS_BYTES[0]:
+            if len(raw) > _MAX_BYTE_VEC:
+                raise RuntimeError('args_bytes: argument exceeds 16 MiB byte vector limit')
+            out.append(list(raw))
+        return out
     if name == 'exit':
         code = vals[0] if vals else 0
         if not isinstance(code, (int, float)):
@@ -3348,11 +3472,11 @@ def call(name, args, env, funcs):
     if name == 'sql_open':
         if len(vals) != 1:
             raise TypeError('sql_open wants 1 arg')
-        pv = vals[0]
-        if not isinstance(pv, str):
-            return ('err', 'sql_open wants string path')
-        if '\x00' in pv:
-            return ('err', 'path outside the program directory')
+        pv, perr = _fs_path(vals[0], 'sql_open')
+        if perr is not None:
+            if perr == 'embedded NUL in file path':
+                return ('err', 'path outside the program directory')
+            return ('err', perr or 'sql_open wants string path')
         if pv == ':memory:':
             use_path = ':memory:'
         else:
@@ -3361,11 +3485,11 @@ def call(name, args, env, funcs):
                 return ('err', 'path outside the program directory')
             serr = _verify_sqlite_confined(use_path)
             if serr is not None:
-                return ('err', serr)
+                return ('err', _err_text(serr))
         try:
-            conn = sqlite3.connect(use_path, isolation_level=None, check_same_thread=False)
+            conn = sqlite3.connect(use_path, timeout=5.0, isolation_level=None, check_same_thread=False)
         except Exception as e:
-            return ('err', str(e))
+            return ('err', _err_text(str(e)))
         if use_path != ':memory:' and not (_FILES_FREE or _is_files_free()):
             try:
                 pst = os.lstat(use_path)
@@ -3512,7 +3636,10 @@ def call(name, args, env, funcs):
                     rows.append(m)
             return ('ok', rows)
         except Exception as e:
-            return ('err', str(e))
+            msg = str(e)
+            if msg == 'You can only execute one statement at a time.':
+                msg = 'sql_query wants one statement'
+            return ('err', msg)
         finally:
             if cur is not None:
                 try:
@@ -3776,7 +3903,8 @@ def call(name, args, env, funcs):
         import ctypes
         if vals[0] <= 0:
             raise RuntimeError('null pointer dereference' if vals[0] == 0 else 'pointer is negative')
-        return ctypes.cast(vals[0], ctypes.c_char_p).value.decode('utf-8')
+        return _ffi_decode_str(ctypes.cast(vals[0], ctypes.c_char_p).value,
+                               'null pointer dereference', 'ptr_read_str: invalid UTF-8')
     if name == 'ptr_of_str':
         if len(vals) != 1:
             raise TypeError('ptr_of_str wants 1 arg')
@@ -3807,34 +3935,18 @@ def call(name, args, env, funcs):
     if name == 'strerror':
         if len(vals) != 1:
             raise TypeError('strerror wants 1 arg')
-        return os.strerror(int(vals[0]))
+        msg = os.strerror(int(vals[0]))
+        if not _valid_text(msg):
+            raise RuntimeError('strerror: invalid UTF-8')
+        return msg
     if name == 'env_get':
         if len(vals) != 1:
             raise TypeError('env_get wants 1 arg')
-        if not isinstance(vals[0], str):
-            return None
-        key = vals[0]
-        if os.environ.get('BRAT_ENV_DENY_ALL', '').strip().lower() in ('1', 'true'):
-            return ('err', 'env_get refused: %r' % key)
-        if 'BRAT_ENV_ALLOW' in os.environ:
-            allow_raw = os.environ['BRAT_ENV_ALLOW']
-            allowed = {x.strip() for x in allow_raw.split(',') if x.strip()}
-            if key not in allowed:
-                return ('err', 'env_get refused: %r' % key)
-        upper = key.upper()
-        for bad in ("SECRET", "KEY", "TOKEN", "PASS", "PASSWORD", "CREDENTIAL",
-                    "PRIVATE", "DATABASE", "DB_", "AUTH", "DSN", "CONN", "COOKIE",
-                    "SESSION", "BEARER", "REDIS", "MONGO", "POSTGRES", "MYSQL",
-                    "AMQP", "AWS_", "GCP_", "AZURE_", "GITHUB_", "GITLAB_",
-                    "OPENAI_", "ANTHROPIC_", "STRIPE_", "SLACK_", "CLOUDFLARE_",
-                    "VAULT_", "KUBECONFIG", "WEBHOOK", "SIGNING", "CERT",
-                    "SALT", "SEED"):
-            if bad in upper:
-                return ('err', 'env_get refused: %r' % key)
-        val = os.environ.get(key)
-        if val is not None and _env_val_is_secret(val):
-            return ('err', 'env_get refused: %r' % key)
-        return val
+        return _env_lookup(vals[0], False)
+    if name == 'env_get_bytes':
+        if len(vals) != 1:
+            raise TypeError('env_get_bytes wants 1 arg')
+        return _env_lookup(vals[0], True)
     if name == 're_match':
         if len(vals) != 2:
             raise TypeError('re_match wants 2 args')
@@ -3896,6 +4008,51 @@ def _env_val_is_secret(val):
     if ('://' in val and '@' in val) or '-----BEGIN' in val:
         return True
     return _SECRET_VAL_RE.search(val) is not None
+
+
+def _env_refused(key):
+    return ('err', 'env_get refused: %r' % key)
+
+
+def _env_raw(key):
+    if hasattr(os, 'environb'):
+        return os.environb.get(os.fsencode(key))
+    val = os.environ.get(key)
+    return None if val is None else val.encode('utf-8', 'surrogateescape')
+
+
+def _env_lookup(key, want_bytes):
+    if not isinstance(key, str) or '\x00' in key or '=' in key:
+        return None
+    if os.environ.get('BRAT_ENV_DENY_ALL', '').strip().lower() in ('1', 'true'):
+        return _env_refused(key)
+    if 'BRAT_ENV_ALLOW' in os.environ:
+        allowed = {x.strip() for x in os.environ['BRAT_ENV_ALLOW'].split(',') if x.strip()}
+        if key not in allowed:
+            return _env_refused(key)
+    upper = key.upper()
+    for bad in ("SECRET", "KEY", "TOKEN", "PASS", "PASSWORD", "CREDENTIAL",
+                "PRIVATE", "DATABASE", "DB_", "AUTH", "DSN", "CONN", "COOKIE",
+                "SESSION", "BEARER", "REDIS", "MONGO", "POSTGRES", "MYSQL",
+                "AMQP", "AWS_", "GCP_", "AZURE_", "GITHUB_", "GITLAB_",
+                "OPENAI_", "ANTHROPIC_", "STRIPE_", "SLACK_", "CLOUDFLARE_",
+                "VAULT_", "KUBECONFIG", "WEBHOOK", "SIGNING", "CERT",
+                "SALT", "SEED"):
+        if bad in upper:
+            return _env_refused(key)
+    raw = _env_raw(key)
+    if raw is None:
+        return None
+    if _env_val_is_secret(raw.decode('latin-1')):
+        return _env_refused(key)
+    if want_bytes:
+        if len(raw) > _MAX_BYTE_VEC:
+            raise RuntimeError('env_get_bytes: value exceeds 16 MiB byte vector limit')
+        return list(raw)
+    val = _os_text(raw)
+    if val is None:
+        return ('err', 'env_get invalid utf-8: %r' % key)
+    return val
 
 
 def _open_parent_dir_fd(path):
@@ -4095,7 +4252,7 @@ def _run_proc_bounded(argv_full, exe_path, timeout_ms):
             proc.wait()
             return ('err', 'proc_run timed out')
         except OSError as e:
-            return ('err', str(e))
+            return ('err', _os_error_text(e))
         if len(out_b) + len(err_b) > max_total:
             return ('err', 'proc_run output exceeded 16 MiB limit')
         if b'\x00' in out_b or b'\x00' in err_b:
@@ -4111,7 +4268,7 @@ def _run_proc_bounded(argv_full, exe_path, timeout_ms):
             start_new_session=True,
         )
     except OSError as e:
-        return ('err', str(e))
+        return ('err', _os_error_text(e))
     out_fd = proc.stdout.fileno()
     err_fd = proc.stderr.fileno()
     os.set_blocking(out_fd, False)
@@ -4159,6 +4316,12 @@ def _run_proc_bounded(argv_full, exe_path, timeout_ms):
             break
     proc.stdout.close()
     proc.stderr.close()
+    rc = proc.poll()
+    if rc is None and not (over or timed_out):
+        try:
+            rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except _subp.TimeoutExpired:
+            timed_out = True
     if over or timed_out:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -4167,7 +4330,8 @@ def _run_proc_bounded(argv_full, exe_path, timeout_ms):
                 proc.kill()
             except OSError:
                 pass
-    rc = proc.wait()
+    if rc is None:
+        rc = proc.wait()
     if timed_out:
         return ('err', 'proc_run timed out')
     if over:
@@ -4196,6 +4360,7 @@ def confined_path(p):
     return None
 
 _ARGS = [[]]
+_ARGS_BYTES = [[]]
 
 _SOCKETS = {}
 _SOCKET_DEADLINES = {}
@@ -4359,7 +4524,8 @@ def _run_task(task):
         _CURRENT.scope = outer_scope
         with _POOL['cond']:
             _POOL['active'] -= 1
-            _POOL['done'].append(handle)
+            if scope is None:
+                _POOL['done'].append(handle)
             _POOL['cond'].notify_all()
         handle.done.set()
 
@@ -4368,11 +4534,17 @@ def _ensure_workers():
     global _SPAWN_WORKERS
     if _SPAWN_WORKERS is None:
         n = min(2 * (os.cpu_count() or 1), 32)
-        _SPAWN_WORKERS = []
+        workers = []
         for _ in range(n):
             t = threading.Thread(target=_spawn_worker, daemon=True)
-            t.start()
-            _SPAWN_WORKERS.append(t)
+            try:
+                t.start()
+            except RuntimeError:
+                break
+            workers.append(t)
+        if not workers:
+            raise RuntimeError('spawn failed: could not start worker thread')
+        _SPAWN_WORKERS = workers
 
 
 def _spawn(block, snap, funcs):
@@ -4389,11 +4561,6 @@ def _spawn(block, snap, funcs):
 
 
 def _scope_join(handles):
-    """Wait for every task this scope started and re-raise its first error.
-
-    The list can grow while we wait: a spawned block that spawns again runs in
-    a thread that inherited the same scope.
-    """
     err = None
     i = 0
     while i < len(handles):
@@ -4402,8 +4569,7 @@ def _scope_join(handles):
         h.done.wait()
         if err is None and h.err is not None:
             err = h.err
-    if err is not None:
-        raise err
+    return err
 
 
 def join_all():
@@ -4498,6 +4664,8 @@ def _struct_ctype(ty):
 def _read_struct_elem(v, elem):
     if elem in _STRUCTS:
         return _read_struct(v, elem)
+    if elem == 'str':
+        return _ffi_field_str(v)
     if isinstance(v, bytes):
         return v.decode('utf-8')
     if hasattr(v, 'value'):
@@ -4515,6 +4683,8 @@ def _read_struct(inst, tname_):
             got[f] = [_read_struct_elem(v[k], arr[0]) for k in range(arr[1])]
         elif ft in _STRUCTS:
             got[f] = _read_struct(v, ft)
+        elif ft == 'str':
+            got[f] = _ffi_field_str(v)
         elif isinstance(v, bytes):
             got[f] = v.decode('utf-8')
         elif hasattr(v, 'value'):
@@ -4612,6 +4782,12 @@ def _filled_struct(name, v):
             fv = fv.value
         setattr(inst, f, fv)
     return inst
+
+
+def _cb_die(msg):
+    sys.stderr.write("unhandled: ('err', %r)\n" % (msg,))
+    sys.stderr.flush()
+    os._exit(1)
 
 
 def _cb_run(fname, brat_args, funcs):
@@ -4835,23 +5011,25 @@ def _callback_ptr_struct(fname, funcs, ptypes, ret):
     FILL = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
 
     def wrapper(outp, inp):     # pragma: no cover - exercised from C
-        brat_args = []
-        for t, (o, size, _big) in zip(ptypes, slots):
-            raw = _cb_ctype(t).from_buffer_copy(ctypes.string_at(inp + o, size))
-            if isinstance(t, str) and t in _STRUCTS:
-                brat_args.append(('num', _read_struct(raw, t)))
-            elif t == 'str':
-                v = raw.value
-                brat_args.append(('str', v.decode('utf-8') if isinstance(v, bytes) else (v or '')))
-            elif t == 'ptr':
-                brat_args.append(('num', raw.value if hasattr(raw, 'value') else (raw or 0)))
-            else:
-                brat_args.append(('num', raw.value if hasattr(raw, 'value') else raw))
-        inst = _filled_struct(ret, _cb_run(fname, brat_args, funcs))
-        ctypes.memmove(outp, ctypes.byref(inst), ctypes.sizeof(inst))
-        # A `str` field is a pointer into a bytes object: keep the object alive
-        # until C has read the record it points at.
-        _CALLBACK_REFS.append(inst)
+        try:
+            brat_args = []
+            for t, (o, size, _big) in zip(ptypes, slots):
+                raw = _cb_ctype(t).from_buffer_copy(ctypes.string_at(inp + o, size))
+                if isinstance(t, str) and t in _STRUCTS:
+                    brat_args.append(('num', _read_struct(raw, t)))
+                elif t == 'str':
+                    brat_args.append(('str', _ffi_passed_str(raw.value)))
+                elif t == 'ptr':
+                    brat_args.append(('num', raw.value if hasattr(raw, 'value') else (raw or 0)))
+                else:
+                    brat_args.append(('num', raw.value if hasattr(raw, 'value') else raw))
+            inst = _filled_struct(ret, _cb_run(fname, brat_args, funcs))
+            ctypes.memmove(outp, ctypes.byref(inst), ctypes.sizeof(inst))
+            # A `str` field is a pointer into a bytes object: keep the object alive
+            # until C has read the record it points at.
+            _CALLBACK_REFS.append(inst)
+        except Exception as e:   # noqa: B902 - a callback cannot unwind through C
+            _cb_die(str(e))
 
     ptr = FILL(wrapper)
     _CALLBACK_REFS.append(ptr)
@@ -4862,6 +5040,8 @@ def _callback_ptr_struct(fname, funcs, ptypes, ret):
 
 def _callback_ptr(sig, fname, funcs, pos=None, where=None):
     import ctypes
+    if isinstance(fname, int) and not isinstance(fname, bool) and fname in (0, -1):
+        return ctypes.c_void_p(fname)
     _check_cb_value(sig, fname, funcs, pos, where)
     ptypes, ret = _parse_cb_sig(sig)
     argtypes = [_cb_ctype(t) for t in ptypes]
@@ -4874,33 +5054,36 @@ def _callback_ptr(sig, fname, funcs, pos=None, where=None):
 
     def _c_to_brat(ty, cv):
         if ty == 'str':
-            return cv.decode('utf-8') if isinstance(cv, bytes) else cv
+            return _ffi_passed_str(cv)
         if ty == 'ptr':
             return cv.value if hasattr(cv, 'value') else (cv or 0)
         return cv
 
     def wrapper(*cvals):
-        brat_args = []
-        for t, cv in zip(ptypes, cvals):
-            v = _c_to_brat(t, cv)
-            if t == 'str':
-                brat_args.append(('str', v))
-            elif t in _STRUCTS:
-                brat_args.append(('num', _read_struct(cv, t)))
-            else:
-                brat_args.append(('num', v))
-        r = _cb_run(fname, brat_args, funcs)
-        if ret in _STRUCTS:
-            return _filled_struct(ret, r)
-        if ret == 'bool':
-            return bool(r)
-        if ret in ('i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'usize', 'ptr'):
-            return int(r) if not isinstance(r, bool) else int(r)
-        if ret in ('f32', 'f64'):
-            return float(r)
-        if ret == 'str':
-            return r.encode('utf-8') if isinstance(r, str) else r
-        return None
+        try:
+            brat_args = []
+            for t, cv in zip(ptypes, cvals):
+                v = _c_to_brat(t, cv)
+                if t == 'str':
+                    brat_args.append(('str', v))
+                elif t in _STRUCTS:
+                    brat_args.append(('num', _read_struct(cv, t)))
+                else:
+                    brat_args.append(('num', v))
+            r = _cb_run(fname, brat_args, funcs)
+            if ret in _STRUCTS:
+                return _filled_struct(ret, r)
+            if ret == 'bool':
+                return bool(r)
+            if ret in ('i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'usize', 'ptr'):
+                return int(r) if not isinstance(r, bool) else int(r)
+            if ret in ('f32', 'f64'):
+                return float(r)
+            if ret == 'str':
+                return r.encode('utf-8') if isinstance(r, str) else r
+            return None
+        except Exception as e:   # noqa: B902 - a callback cannot unwind through C
+            _cb_die(str(e))
 
     if argtypes:
         CFUNCTYPE = ctypes.CFUNCTYPE(restype, *argtypes)
@@ -5145,7 +5328,10 @@ def _run_stmt(s, env, funcs):
             run_block(s[1], env, funcs)
         finally:
             _CURRENT.scope = outer
-            _scope_join(handles)
+            err = _scope_join(handles)
+            active = sys.exception()
+            if err is not None and (active is None or isinstance(active, (Ret, LoopBreak, LoopCont))):
+                raise err
     elif k == 'spawn':
         snap = [dict(f) for f in env]
         _spawn(s[1], snap, funcs)
@@ -5174,7 +5360,9 @@ def _run_stmt(s, env, funcs):
 def run(src, base='.', argv=None):
     _MOD_BASE[0] = base
     _MOD_BASE_SET[0] = True
-    _ARGS[0] = list(argv) if argv else []
+    raw_argv = list(argv) if argv else []
+    _ARGS_BYTES[0] = [_os_arg_bytes(v) for v in raw_argv]
+    _ARGS[0] = raw_argv
     _TRAITS.clear()
     _VARIANTS.clear()
     prog = load_source(src, base).prog

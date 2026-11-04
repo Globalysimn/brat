@@ -18,7 +18,7 @@ IO_CALLS = {"print", "eprint", "log.info", "log.warn", "log.error", "trace.span"
             "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
             "fs_rename", "fs_remove", "random_bytes", "https_request_raw",
             "sql_open", "sql_close", "sql_exec", "sql_query",
-            "args", "env_get", "time_ms", "mono_ns", "sleep_ms",
+            "args", "args_bytes", "env_get", "env_get_bytes", "time_ms", "mono_ns", "sleep_ms",
             "tcp_listen", "tcp_connect", "tcp_send", "tcp_recv", "tcp_close"}
 IO_HEADS = {"tcp", "log", "trace"}
 PLUGIN_FFI_CALLS = {"lib_open", "lib_sym", "lib_close", "call",

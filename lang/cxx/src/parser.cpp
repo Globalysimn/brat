@@ -34,20 +34,136 @@ std::optional<std::string> ann_text(std::vector<std::string> toks) {
 
 // C spellings for a slot whose width BRAT already names, so a signature copied
 // out of a header is accepted as written instead of being refused for its
-// spelling. Only names where both tables agree on the width are here: a
-// `int16_t` is deliberately absent, because `brat bindgen` widens it to `i32`
-// and a hand-written `i16` would then disagree with a generated one.
+// spelling. `ann_text` glues tokens, so multi-word C types are keyed by that
+// glued form. Only target-independent widths are here: C `long` is deliberately
+// absent because the data model, not the spelling, decides whether it is four
+// or eight bytes.
 const std::map<std::string, std::string> C_FFI_ALIAS = {
+    {"bool", "bool"}, {"_Bool", "bool"},
+    {"char", "u8"}, {"signedchar", "i8"}, {"unsignedchar", "u8"},
+    {"short", "i16"}, {"shortint", "i16"}, {"signedshort", "i16"},
+    {"signedshortint", "i16"}, {"unsignedshort", "u16"}, {"unsignedshortint", "u16"},
+    {"int", "i32"}, {"signed", "i32"}, {"signedint", "i32"},
+    {"unsigned", "u32"}, {"unsignedint", "u32"},
+    {"longlong", "i64"}, {"longlongint", "i64"}, {"signedlonglong", "i64"},
+    {"signedlonglongint", "i64"}, {"unsignedlonglong", "u64"},
+    {"unsignedlonglongint", "u64"},
+    {"float", "f32"}, {"double", "f64"}, {"void", "none"},
+    {"int8_t", "i8"}, {"uint8_t", "u8"}, {"int16_t", "i16"}, {"uint16_t", "u16"},
+    {"int32_t", "i32"}, {"uint32_t", "u32"}, {"int64_t", "i64"}, {"uint64_t", "u64"},
     {"size_t", "usize"},
     {"ssize_t", "i64"}, {"ptrdiff_t", "i64"}, {"intptr_t", "i64"}, {"uintptr_t", "u64"},
-    {"int64_t", "i64"}, {"uint64_t", "u64"}, {"int32_t", "i32"}, {"uint32_t", "u32"},
 };
+
+std::string trim_ann(const std::string &text) {
+    size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::optional<std::string> canon_scalar(const std::string &ann) {
+    std::string core = ann;
+    for (;;) {
+        bool stripped = false;
+        for (const std::string qualifier : {"const", "volatile", "restrict"}) {
+            if (core.rfind(qualifier, 0) == 0 && core.size() > qualifier.size()) {
+                core = core.substr(qualifier.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) break;
+    }
+    auto it = C_FFI_ALIAS.find(core);
+    if (it == C_FFI_ALIAS.end()) return std::nullopt;
+    return it->second;
+}
+
+std::optional<size_t> matching_delim(const std::string &text, size_t open_at, char opener, char closer) {
+    int depth = 0;
+    for (size_t i = open_at; i < text.size(); i++) {
+        if (text[i] == opener) depth++;
+        else if (text[i] == closer && --depth == 0) return i;
+    }
+    return std::nullopt;
+}
+
+std::vector<std::string> split_type_list(const std::string &text) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    int depth = 0;
+    for (size_t i = 0; i < text.size(); i++) {
+        if (text[i] == '(' || text[i] == '[') depth++;
+        else if (text[i] == ')' || text[i] == ']') depth--;
+        else if (text[i] == ',' && depth == 0) {
+            std::string part = trim_ann(text.substr(start, i - start));
+            if (!part.empty()) parts.push_back(part);
+            start = i + 1;
+        }
+    }
+    std::string tail = trim_ann(text.substr(start));
+    if (!tail.empty()) parts.push_back(tail);
+    return parts;
+}
+
+std::string canon_type(const std::string &ann) {
+    if (auto scalar = canon_scalar(ann)) return *scalar;
+    if (ann == "constchar*" || ann == "charconst*" || ann == "constchar*const") return "str";
+    if (ann.rfind("ptr[", 0) == 0) {
+        auto close = matching_delim(ann, 3, '[', ']');
+        if (close && *close + 1 == ann.size())
+            return "ptr[" + canon_type(trim_ann(ann.substr(4, *close - 4))) + "]";
+    }
+    if (ann.rfind("fn(", 0) == 0) {
+        auto close = matching_delim(ann, 2, '(', ')');
+        if (close) {
+            std::string out = "fn(";
+            bool first = true;
+            for (const auto &part : split_type_list(ann.substr(3, *close - 3))) {
+                if (!first) out += ",";
+                first = false;
+                out += canon_type(part);
+            }
+            out += ")";
+            std::string tail = trim_ann(ann.substr(*close + 1));
+            if (tail.empty()) return out;
+            if (tail.rfind("->", 0) == 0) return out + "->" + canon_type(trim_ann(tail.substr(2)));
+        }
+    }
+    size_t bracket = ann.rfind('[');
+    if (bracket != std::string::npos && bracket > 0 && !ann.empty() && ann.back() == ']') {
+        std::string count = ann.substr(bracket + 1, ann.size() - bracket - 2);
+        bool digits = !count.empty();
+        for (char c : count) if (!std::isdigit(static_cast<unsigned char>(c))) digits = false;
+        if (digits) return canon_type(trim_ann(ann.substr(0, bracket))) + ann.substr(bracket);
+    }
+    return ann;
+}
 
 std::optional<std::string> canon_ann(std::optional<std::string> ann) {
     if (!ann) return ann;
-    auto it = C_FFI_ALIAS.find(*ann);
-    if (it == C_FFI_ALIAS.end()) return ann;
-    return it->second;
+    static const std::vector<std::string> contracts = {
+        "thread(same)", "thread(any)", "reenter(yes)", "reenter(no)",
+    };
+    std::vector<std::string> suffixes;
+    std::string core = *ann;
+    for (;;) {
+        bool stripped = false;
+        for (const auto &suffix : contracts) {
+            if (core.size() >= suffix.size() &&
+                core.compare(core.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                suffixes.push_back(suffix);
+                core.erase(core.size() - suffix.size());
+                stripped = true;
+                break;
+            }
+        }
+        if (!stripped) break;
+    }
+    std::string out = canon_type(core);
+    for (auto it = suffixes.rbegin(); it != suffixes.rend(); ++it) out += *it;
+    return out;
 }
 
 // Names the C emitter spells into generated C as written (an `extern` symbol is

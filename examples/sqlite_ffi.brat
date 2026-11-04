@@ -1,0 +1,223 @@
+extern "libsqlite3.so.0" {
+  extern fn sqlite3_open(filename: str, db: ptr[ptr]) -> i32
+  extern fn sqlite3_close(db: ptr) -> i32
+  extern fn sqlite3_errmsg(db: ptr) -> str
+  extern fn sqlite3_prepare_v2(db: ptr, sql: str, nbyte: i32, stmt: ptr[ptr], tail: ptr) -> i32
+  extern fn sqlite3_bind_int64(stmt: ptr, idx: i32, value: i64) -> i32
+  extern fn sqlite3_bind_double(stmt: ptr, idx: i32, value: f64) -> i32
+  extern fn sqlite3_bind_text(stmt: ptr, idx: i32, text: str, n: i32, destructor: fn(ptr)) -> i32
+  extern fn sqlite3_bind_null(stmt: ptr, idx: i32) -> i32
+  extern fn sqlite3_step(stmt: ptr) -> i32
+  extern fn sqlite3_reset(stmt: ptr) -> i32
+  extern fn sqlite3_clear_bindings(stmt: ptr) -> i32
+  extern fn sqlite3_finalize(stmt: ptr) -> i32
+  extern fn sqlite3_column_count(stmt: ptr) -> i32
+  extern fn sqlite3_column_name(stmt: ptr, col: i32) -> str
+  extern fn sqlite3_column_type(stmt: ptr, col: i32) -> i32
+  extern fn sqlite3_column_text(stmt: ptr, col: i32) -> ptr[u8]
+  extern fn sqlite3_column_int64(stmt: ptr, col: i32) -> i64
+  extern fn sqlite3_column_double(stmt: ptr, col: i32) -> f64
+}
+
+fn fail(db, stmt) -> i64 {
+  eprint(sqlite3_errmsg(db))
+  if stmt != 0 {
+    sqlite3_finalize(stmt)
+  }
+  return 1
+}
+
+fn exec_sql(db, sql) -> i64 {
+  let mut stmt = 0
+  if sqlite3_prepare_v2(db, sql, -1, &stmt, 0) != 0 {
+    return fail(db, stmt)
+  }
+  if sqlite3_step(stmt) != 101 {
+    return fail(db, stmt)
+  }
+  sqlite3_finalize(stmt)
+  return 0
+}
+
+fn insert_one(stmt, name, price, qty, note, has_note) -> i64 {
+  if sqlite3_bind_text(stmt, 1, name, -1, -1) != 0 {
+    return 1
+  }
+  if sqlite3_bind_double(stmt, 2, price) != 0 {
+    return 1
+  }
+  if sqlite3_bind_int64(stmt, 3, qty) != 0 {
+    return 1
+  }
+  if has_note {
+    if sqlite3_bind_text(stmt, 4, note, -1, -1) != 0 {
+      return 1
+    }
+  } else {
+    if sqlite3_bind_null(stmt, 4) != 0 {
+      return 1
+    }
+  }
+  if sqlite3_step(stmt) != 101 {
+    return 1
+  }
+  if sqlite3_reset(stmt) != 0 {
+    return 1
+  }
+  if sqlite3_clear_bindings(stmt) != 0 {
+    return 1
+  }
+  return 0
+}
+
+fn seed(db) -> i64 {
+  let mut stmt = 0
+  if sqlite3_prepare_v2(db, "INSERT INTO items(name, price, qty, note) VALUES(?1, ?2, ?3, ?4)", -1, &stmt, 0) != 0 {
+    return fail(db, stmt)
+  }
+  if insert_one(stmt, "ap" + "ple", 2.5, 12, "crisp", true) != 0 {
+    return fail(db, stmt)
+  }
+  if insert_one(stmt, "pe" + "ar", 4.75, 7, "", false) != 0 {
+    return fail(db, stmt)
+  }
+  if insert_one(stmt, "pl" + "um", 3.25, 20, "dark", true) != 0 {
+    return fail(db, stmt)
+  }
+  sqlite3_finalize(stmt)
+  return 0
+}
+
+fn add_one(db, name, price, qty, note, has_note) -> i64 {
+  let mut stmt = 0
+  if sqlite3_prepare_v2(db, "INSERT INTO items(name, price, qty, note) VALUES(?1, ?2, ?3, ?4)", -1, &stmt, 0) != 0 {
+    return fail(db, stmt)
+  }
+  if insert_one(stmt, name, price, qty, note, has_note) != 0 {
+    return fail(db, stmt)
+  }
+  sqlite3_finalize(stmt)
+  print("added {name}")
+  return 0
+}
+
+fn col_text(stmt, col) -> str {
+  let t = sqlite3_column_type(stmt, col)
+  if t == 1 {
+    return str(sqlite3_column_int64(stmt, col))
+  }
+  if t == 2 {
+    return str(sqlite3_column_double(stmt, col))
+  }
+  if t == 3 {
+    return ptr_read_str(sqlite3_column_text(stmt, col))
+  }
+  if t == 5 {
+    return "NULL"
+  }
+  return "<blob>"
+}
+
+fn list_items(db) -> i64 {
+  let mut stmt = 0
+  if sqlite3_prepare_v2(db, "SELECT id, name, price, qty, note FROM items ORDER BY id", -1, &stmt, 0) != 0 {
+    return fail(db, stmt)
+  }
+  let cols = sqlite3_column_count(stmt)
+  let mut fields = []
+  let mut col = 0
+  while col < cols {
+    fields.push(sqlite3_column_name(stmt, col))
+    col = col + 1
+  }
+  print(fields.join("\t"))
+  let mut going = true
+  while going {
+    let rc = sqlite3_step(stmt)
+    if rc == 100 {
+      let mut fields = []
+      col = 0
+      while col < cols {
+        fields.push(col_text(stmt, col))
+        col = col + 1
+      }
+      print(fields.join("\t"))
+    } else {
+      if rc != 101 {
+        return fail(db, stmt)
+      }
+      going = false
+    }
+  }
+  sqlite3_finalize(stmt)
+  return 0
+}
+
+fn run(db, argv) -> i64 {
+  if exec_sql(db, "CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL NOT NULL, qty INTEGER NOT NULL, note TEXT)") != 0 {
+    return 1
+  }
+  let mut base = 0
+  if len(argv) > 0 {
+    base = 1
+  }
+  if len(argv) == base {
+    if base == 0 {
+      if seed(db) != 0 {
+        return 1
+      }
+    }
+    return list_items(db)
+  }
+  let cmd = argv[base]
+  if cmd == "list" {
+    return list_items(db)
+  }
+  if cmd == "add" {
+    if len(argv) < base + 4 {
+      eprint("usage: sqlite_ffi.brat DB add NAME PRICE QTY [NOTE]")
+      return 2
+    }
+    let name = argv[base + 1]
+    let price_text = argv[base + 2]
+    let qty_text = argv[base + 3]
+    if is_err(price_text.parse_float()) {
+      eprint("price must be a number")
+      return 2
+    }
+    if is_err(qty_text.parse_int()) {
+      eprint("qty must be an integer")
+      return 2
+    }
+    let mut note = ""
+    let mut has_note = false
+    if len(argv) > base + 4 {
+      note = argv[base + 4]
+      has_note = true
+    }
+    return add_one(db, name, unwrap(price_text.parse_float()), unwrap(qty_text.parse_int()), note, has_note)
+  }
+  eprint("usage: sqlite_ffi.brat [DB [list | add NAME PRICE QTY [NOTE]]]")
+  return 2
+}
+
+fn main() -> i64 {
+  let argv = args()
+  let mut path = ":memory:"
+  if len(argv) > 0 {
+    path = argv[0]
+  }
+  let mut db = 0
+  if sqlite3_open(path, &db) != 0 {
+    if db != 0 {
+      eprint(sqlite3_errmsg(db))
+      sqlite3_close(db)
+    } else {
+      eprint("cannot open database")
+    }
+    return 1
+  }
+  let rc = run(db, argv)
+  sqlite3_close(db)
+  return rc
+}

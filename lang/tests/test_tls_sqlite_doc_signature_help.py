@@ -154,6 +154,63 @@ check(lines71[4] == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964e
 print("ok: https:// TLS + std.time + std.crypto + ASan")
 
 
+# A corrupt TLS record after valid application data is an error, not EOF.
+corrupt_listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+corrupt_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+corrupt_listener.bind(("127.0.0.1", 0))
+corrupt_listener.listen(2)
+corrupt_port = corrupt_listener.getsockname()[1]
+
+
+def _corrupt_tls_server():
+    for _ in range(2):
+        try:
+            conn, _ = corrupt_listener.accept()
+        except OSError:
+            break
+        try:
+            tls_conn = srv_ctx.wrap_socket(conn, server_side=True)
+            _req = tls_conn.recv(4096)
+            tls_conn.sendall(b"HTTP/1.0 200 OK\r\n\r\npartial")
+            raw_conn = socket.socket(fileno=tls_conn.detach())
+            raw_conn.sendall(b"\x17\x03\x03\x00\x10" + b"X" * 16)
+            raw_conn.close()
+        except Exception:
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+threading.Thread(target=_corrupt_tls_server, daemon=True).start()
+corrupt_src = write("tls_app/corrupt.brat", f'''fn main() -> i64 {{
+  let r = https_request_raw("127.0.0.1:{corrupt_port}", "localhost", "GET / HTTP/1.0\\r\\n\\r\\n", "ca_cert.pem")
+  assert(is_err(r))
+  print("TLS_CORRUPT_REJECTED")
+  return 0
+}}
+''')
+r_corrupt_i = run_cli("run", "--interp", corrupt_src)
+check(r_corrupt_i.returncode == 0, f"interp corrupt TLS failed: {r_corrupt_i.stdout}\n{r_corrupt_i.stderr}")
+check(r_corrupt_i.stdout.strip() == "TLS_CORRUPT_REJECTED", f"interp corrupt TLS: {r_corrupt_i.stdout}")
+c_corrupt = run_cli("emit-c", corrupt_src)
+check(c_corrupt.returncode == 0, f"corrupt TLS emit-c failed: {c_corrupt.stderr}")
+c_corrupt_path = os.path.join(TMP, "tls_app", "corrupt.c")
+exe_corrupt = os.path.join(TMP, "tls_app", "corrupt_asan.exe")
+with open(c_corrupt_path, "w", encoding="utf-8") as f:
+    f.write(c_corrupt.stdout)
+subprocess.run(
+    ["gcc", "-std=c99", "-O1", "-g", "-fsanitize=address,leak",
+     "-I", ENGINE, c_corrupt_path, "-lpthread", "-ldl", "-lm", "-o", exe_corrupt],
+    check=True, timeout=60
+)
+r_corrupt_n = subprocess.run([exe_corrupt], capture_output=True, text=True, timeout=30)
+corrupt_listener.close()
+check(r_corrupt_n.returncode == 0, f"native corrupt TLS failed: {r_corrupt_n.stdout}\n{r_corrupt_n.stderr}")
+check(r_corrupt_n.stdout.strip() == "TLS_CORRUPT_REJECTED", f"native corrupt TLS: {r_corrupt_n.stdout}")
+print("ok: corrupt TLS record rejected after partial response")
+
+
 # `std.sqlite` parameterized queries, SQLi safety & confinement
 step72_src = write("sql_app/db_test.brat", '''import std.sqlite
 

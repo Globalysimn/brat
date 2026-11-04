@@ -138,21 +138,20 @@ paths the repository contains.
 
 ## How far to trust this
 
-`lang/tests/` holds 154 test files that pass on Linux x86-64 with GCC 14 and
-Python 3.13. `run_all.py` counts skips separately from passes, and a test that
+`lang/tests/` holds 157 test files. Run results depend on the platform and
+installed tools. `run_all.py` counts skips separately from passes, and a test that
 cannot run says so. Most behaviour is pinned by examples; the strongest
 evidence is differential: `test_agreement.py` runs 109 cases through the
 interpreter and the native C backend, and `test_ffi_front_ends_agree.py` feeds both
 FFI verifiers thousands of generated declarations and requires identical
 verdicts.
 
-The tree has been audited once: by reading, by differential probes, with ASan,
-UBSan and LSan builds of the C++ compiler and of generated programs, and with
-four minutes of libFuzzer on each of the archive reader and the front end. That
-produced 35 findings, among them a use-after-free in generated code. What came
-out of it is kept in [known risks](docs/project/LEDGER.md). Four minutes of
-fuzzing find shallow bugs only. Nothing here has been run in production, and
-nobody outside the project has reviewed it.
+The [4 November review](docs/project/AUDIT-2026-11-04.md) records reproduced
+defects, fixes, sanitizer commands and validation limits. It is a focused review,
+not a complete audit. Earlier claims about fuzzing duration and finding counts
+were not independently reproduced in that review. See [known risks](docs/project/LEDGER.md)
+before treating a passing check or test run as evidence of safety. This is not
+production-ready software.
 
 ## Documentation
 
@@ -173,7 +172,7 @@ lang/engine/     Python implementation (interpreter/checker) and crt.h runtime
 lang/cxx/src/    C++20 compiler, sole C emitter and tools
 lang/std/        standard library
 lang/examples/   64 example programs
-lang/tests/      154 test files; run_all.py drives them
+lang/tests/      157 test files; run_all.py drives them
 editors/         VS Code extension and grammar
 docs/            guides, design notes, audit report
 ```

@@ -115,6 +115,25 @@ CASES["nested_scope"] = '''fn main() -> i64 {
 }
 '''
 
+CASES["nested_blocking_spawn"] = '''fn main() -> i64 {
+  let ready = chan(1)
+  let ch = chan(1)
+  scope {
+    spawn {
+      ready.send(1)
+      sleep_ms(100)
+      spawn {
+        ch.send(42)
+      }
+      print(ch.recv())
+    }
+    print(ready.recv())
+  }
+  print("done")
+  return 0
+}
+'''
+
 CASES["return_joins"] = '''fn early(ch: i64) -> i64 {
   scope {
     spawn {
@@ -141,6 +160,56 @@ CASES["send_after_close"] = '''fn main() -> i64 {
     Err(e) => { print(e) }
   }
   print(ch.recv())
+  return 0
+}
+'''
+
+CASES["child_error_caught"] = '''fn main() -> i64 {
+  try {
+    scope {
+      spawn {
+        raise("child")
+      }
+    }
+  } catch e {
+    print(e)
+  }
+  print("done")
+  return 0
+}
+'''
+
+CASES["parent_error_first"] = '''fn main() -> i64 {
+  try {
+    scope {
+      spawn {
+        sleep_ms(50)
+        raise("child")
+      }
+      raise("parent")
+    }
+  } catch e {
+    print(e)
+  }
+  print("done")
+  return 0
+}
+'''
+
+CASES["many_live_channels"] = '''fn main() -> i64 {
+  let mut cs = []
+  for i in 0..100 {
+    let c = chan(1)
+    c.send(i)
+    cs.push(c)
+  }
+  let mut total = 0
+  for c in cs {
+    total = total + c.recv()
+    c.close()
+  }
+  print(total)
+  print(len(cs))
   return 0
 }
 '''
@@ -177,14 +246,28 @@ WANT = {
     "pipeline": "690\njoined\n",
     "backpressure": "50\n",
     "nested_scope": "12\n",
+    "nested_blocking_spawn": "1\n42\ndone\n",
     "return_joins": "7\nfrom child\n",
     "send_after_close": "send on closed channel\nNone\n",
+    "child_error_caught": "child\ndone\n",
+    "parent_error_first": "parent\ndone\n",
+    "many_live_channels": "4950\n100\n",
 }
 
 for name, src in CASES.items():
     path, _ = build(src, name)
     out = run_both(path, name)
     assert out == WANT[name], "%s stdout=%r want=%r" % (name, out, WANT[name])
+
+path, _ = build(CASES["nested_blocking_spawn"], "nested_blocking_spawn_one_thread")
+exe = os.path.join(TMP, "nested_blocking_spawn_one_thread.exe")
+built = subprocess.run([sys.executable, CLI, "build", path, "-o", exe],
+                       capture_output=True, text=True, timeout=300)
+assert built.returncode == 0, "one-thread build: %r" % ((built.stdout + built.stderr)[-800:])
+native = subprocess.run([exe], capture_output=True, text=True, timeout=10,
+                        env=dict(os.environ, BRAT_THREADS="1"))
+assert native.returncode == 0, "one-thread rc=%d %r" % (native.returncode, native.stdout + native.stderr)
+assert native.stdout == WANT["nested_blocking_spawn"], "one-thread stdout=%r" % native.stdout
 
 # A program that sends and drains must leave nothing behind.
 path, csrc = build(CASES["pipeline"], "pipeline_asan")
@@ -201,6 +284,98 @@ both = seen.stdout + seen.stderr
 assert "AddressSanitizer" not in both, "pipeline broken: %s" % both[-800:]
 assert "LeakSanitizer" not in both, "pipeline leaked: %s" % both[-800:]
 assert seen.stdout == WANT["pipeline"], "asan run stdout=%r" % seen.stdout
+
+tsan_src = '''fn main() -> i64 {
+  let mut round = 0
+  while round < 200 {
+    let ch = chan(64)
+    scope {
+      spawn {
+        let mut i = 0
+        while i < 64 {
+          ch.send(i)
+          i = i + 1
+        }
+        ch.close()
+      }
+      spawn {
+        let mut seen = 0
+        let mut go = true
+        while go {
+          let v = ch.recv()
+          if is_none(v) {
+            go = false
+          } else {
+            seen = seen + 1
+          }
+        }
+        if seen != 64 {
+          print(seen)
+        }
+      }
+    }
+    round = round + 1
+  }
+  print("done")
+  return 0
+}
+'''
+path, csrc = build(tsan_src, "close_drain_tsan")
+cfile = os.path.join(TMP, "close_drain_tsan.c")
+with open(cfile, "w", encoding="utf-8") as f:
+    f.write(csrc)
+exe = os.path.join(TMP, "close_drain_tsan.exe")
+cc = subprocess.run(["cc", "-fsanitize=thread", "-g", "-O1", "-fPIE", "-pie", "-I", ENGINE,
+                     cfile, "-o", exe, "-lm", "-lpthread", "-ldl"],
+                    capture_output=True, text=True, timeout=600)
+if cc.returncode == 0:
+    seen = subprocess.run([exe], capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, TSAN_OPTIONS="halt_on_error=1"))
+    both = seen.stdout + seen.stderr
+    assert seen.returncode == 0, "tsan run rc=%d %s" % (seen.returncode, both[-1200:])
+    assert "ThreadSanitizer" not in both, "channel race: %s" % both[-1200:]
+    assert seen.stdout == "done\n", "tsan run stdout=%r" % seen.stdout
+
+if sys.platform.startswith("linux"):
+    no_worker_src = '''fn main() -> i64 {
+  let ch = chan(1)
+  try {
+    spawn {
+      ch.send(42)
+    }
+    print(ch.recv())
+  } catch e {
+    print(e)
+  }
+  print("done")
+  return 0
+}
+'''
+    path, csrc = build(no_worker_src, "spawn_no_worker")
+    cfile = os.path.join(TMP, "spawn_no_worker.c")
+    with open(cfile, "w", encoding="utf-8") as f:
+        f.write(csrc)
+    exe = os.path.join(TMP, "spawn_no_worker.exe")
+    cc = subprocess.run(["cc", "-O1", "-I", ENGINE, cfile, "-o", exe, "-lm", "-lpthread", "-ldl"],
+                        capture_output=True, text=True, timeout=600)
+    assert cc.returncode == 0, "no-worker cc: %r" % (cc.stdout + cc.stderr)
+    fail_c = os.path.join(TMP, "fail_pthread_create.c")
+    with open(fail_c, "w", encoding="utf-8") as f:
+        f.write("#include <errno.h>\n"
+                "#include <pthread.h>\n"
+                "int pthread_create(pthread_t *thread, const pthread_attr_t *attr, "
+                "void *(*start_routine)(void *), void *arg) {\n"
+                "    (void)thread; (void)attr; (void)start_routine; (void)arg;\n"
+                "    return EAGAIN;\n"
+                "}\n")
+    fail_so = os.path.join(TMP, "fail_pthread_create.so")
+    cc = subprocess.run(["cc", "-shared", "-fPIC", fail_c, "-o", fail_so, "-pthread"],
+                        capture_output=True, text=True, timeout=600)
+    assert cc.returncode == 0, "interposer cc: %r" % (cc.stdout + cc.stderr)
+    seen = subprocess.run([exe], capture_output=True, text=True, timeout=10,
+                          env=dict(os.environ, LD_PRELOAD=fail_so))
+    assert seen.returncode == 0, "no-worker rc=%d %r" % (seen.returncode, seen.stdout + seen.stderr)
+    assert seen.stdout == "spawn failed: could not start worker thread\ndone\n", seen.stdout
 
 # The checker refuses to use a value after handing it to a channel.
 bad = os.path.join(TMP, "after_send.brat")

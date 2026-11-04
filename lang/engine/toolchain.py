@@ -153,9 +153,13 @@ def prune_cache(limit=None):
         with os.scandir(d) as it:
             for e in it:
                 try:
-                    if not e.is_file():
+                    # BRAT_CACHE may point at a directory with unrelated files.
+                    # Only completed entries written by cc_cached belong to us.
+                    if (len(e.name) != 64
+                            or any(c not in "0123456789abcdef" for c in e.name)
+                            or not e.is_file(follow_symlinks=False)):
                         continue
-                    st = e.stat()
+                    st = e.stat(follow_symlinks=False)
                 except OSError:
                     continue
                 entries.append((st.st_mtime_ns, e.path, st.st_size))

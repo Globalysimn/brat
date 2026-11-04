@@ -17,6 +17,7 @@ with open(os.path.join(TMP, "plug.c"), "w", encoding="utf-8") as f:
         'long long add(long long a, long long b) { return a + b; }\n'
         'double half(double x) { return x / 2.0; }\n'
         'const char *greet(void) { return "hi from plugin"; }\n'
+        'const char *bad_text(void) { static char b[3] = {(char)0xff, \'x\', 0}; return b; }\n'
         'void poke(long long *p, long long v) { *p = v; }\n'
         'long long scale(long long v, double k) { return (long long)(v * k); }\n'
         '#include <unistd.h>\n'
@@ -118,6 +119,16 @@ fn main() -> i64 {
   return h
 }
 ''' % TMP, "lib_open: ")
+
+runtime_fail("bad_text", '''
+fn main() -> i64 {
+  let h = lib_open("%s")
+  let f = lib_sym(h, "bad_text")
+  print(call(f, "str()"))
+  lib_close(h)
+  return 0
+}
+''' % LIB, "call: invalid UTF-8 str result")
 
 def static_fail(name, src, text):
     """The checker refuses it, and `brat run` refuses to run it too."""

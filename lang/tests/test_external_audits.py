@@ -19,14 +19,18 @@ Covers:
   - R3-08: aggregate channel slot budget (4,194,304) + reclamation on close.
   - R3-10: refcounted heap sbuf (>63 builders, ASan leak-free, Unicode codepoint len parity).
   - R3-11: expanded env_get credential denylist + BRAT_ENV_DENY_ALL=1 strict default-deny.
+  - Dynamic TLS/SQLite backends reject libraries missing required symbols.
 """
 
 import json
 import os
 import shutil
+import socket
+import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 import _cxx
@@ -305,14 +309,17 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
         '  let live_v = rows[0]["x"]\n'
         '  let cap_err = is_err(sqlite.query(db2, '
         '"WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 105000) SELECT x FROM cnt", []))\n'
+        '  let multi_err = is_err(sqlite.query(db2, "SELECT x FROM a; INSERT INTO a VALUES (33)", []))\n'
+        '  let after = unwrap(sqlite.query(db2, "SELECT COUNT(*) AS c FROM a", []))\n'
+        '  let after_c = after[0]["c"]\n'
         '  let c2 = !is_err(sqlite.close(db2))\n'
-        '  print("{c1} {diff} {stale_q} {stale_c} {live_v} {cap_err} {c2}")\n'
+        '  print("{c1} {diff} {stale_q} {stale_c} {live_v} {cap_err} {multi_err} {after_c} {c2}")\n'
         '  return 0\n'
         '}\n',
         asan=True,
     )
     assert rc == 0
-    assert out.strip().lower() == "true true true true 22 true true", f"got: {out!r}"
+    assert out.strip().lower() == "true true true true 22 true true 1 true", f"got: {out!r}"
 
     # R3-02: Concurrent sql_query + sql_close race test under ThreadSanitizer (TSan) and --interp
     race_src = (
@@ -351,6 +358,57 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
                 f"TSan detected SQL race: rc={r_tsan.returncode}, stderr={r_tsan.stderr.decode()}"
             )
 
+    busy_src = (
+        'import std.sqlite\n'
+        'fn main() -> i64 {\n'
+        '  let db = unwrap(sqlite.open("busy.db"))\n'
+        '  print(sqlite.exec(db, "INSERT INTO t VALUES (7)"))\n'
+        '  let rows = unwrap(sqlite.query(db, "SELECT x FROM t", []))\n'
+        '  print(rows[0]["x"])\n'
+        '  let _c = unwrap(sqlite.close(db))\n'
+        '  return 0\n'
+        '}\n'
+    )
+    busy_path = os.path.join(td, "sql_busy.brat")
+    with open(busy_path, "w", encoding="utf-8") as f:
+        f.write(busy_src)
+    busy_exe = os.path.join(td, "sql_busy.exe")
+    r_busy_build = run_cmd([sys.executable, CLI, "build", busy_path, "-o", busy_exe], cwd=td)
+    assert r_busy_build.returncode == 0, r_busy_build.stderr.decode()
+    busy_db = os.path.join(td, "busy.db")
+    setup = sqlite3.connect(busy_db)
+    setup.execute("CREATE TABLE t(x INTEGER)")
+    setup.commit()
+    setup.close()
+
+    def run_locked(argv):
+        lock = sqlite3.connect(busy_db, isolation_level=None, check_same_thread=False)
+        lock.execute("DELETE FROM t")
+        lock.execute("BEGIN EXCLUSIVE")
+
+        def release():
+            try:
+                lock.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            lock.close()
+
+        timer = threading.Timer(0.5, release)
+        started = time.monotonic()
+        proc = subprocess.Popen(argv, cwd=td, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        timer.start()
+        out, err = proc.communicate(timeout=10)
+        elapsed = time.monotonic() - started
+        timer.join()
+        return proc.returncode, out, err, elapsed
+
+    want_busy = "('ok', 1)\n7\n"
+    for argv in ([sys.executable, CLI, "run", "--interp", busy_path], [busy_exe]):
+        rc_b, out_b, err_b, elapsed_b = run_locked(argv)
+        assert rc_b == 0 and out_b == want_busy and elapsed_b >= 0.4, (
+            f"busy lock: rc={rc_b} elapsed={elapsed_b} out={out_b!r} err={err_b!r}"
+        )
+
 
 def test_r305_proc_run_timeout_and_pgid_kill():
     td = _scratch.mkdtemp(prefix="audit-r305")
@@ -363,6 +421,10 @@ def test_r305_proc_run_timeout_and_pgid_kill():
         '  Ok(_) => { print("unexpected-ok") },\n'
         '  Err(e) => { print("err:{e}") }\n'
         '}\n'
+        'match proc.run_timeout("/bin/sh", ["-c", "exec 1>&- 2>&-; sleep 30"], 150) {\n'
+        '  Ok(_) => { print("unexpected-closed-ok") },\n'
+        '  Err(e) => { print("err:{e}") }\n'
+        '}\n'
         'match proc.run("/bin/echo", ["hi"]) {\n'
         '  Ok(m) => { print("ok:{m[\\"code\\"]}") },\n'
         '  Err(e) => { print("unexpected:{e}") }\n'
@@ -372,7 +434,7 @@ def test_r305_proc_run_timeout_and_pgid_kill():
     )
     elapsed = time.monotonic() - t0
     assert rc == 0
-    assert out.strip().splitlines() == ["err:proc_run timed out", "ok:0"], f"got: {out!r}"
+    assert out.strip().splitlines() == ["err:proc_run timed out", "err:proc_run timed out", "ok:0"], f"got: {out!r}"
     assert elapsed < 10.0, f"proc_run timeout did not kill child promptly ({elapsed:.2f}s)"
 
 
@@ -613,6 +675,139 @@ def test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets():
         assert rc_mc.returncode == 0, f"MinGW crt.h failed: {rc_mc.stderr.decode()}"
 
 
+def test_dynamic_backend_missing_symbols_fail_closed():
+    if not sys.platform.startswith("linux"):
+        return
+    cc = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
+    assert cc, "C compiler required for dynamic backend symbol test"
+    td = _scratch.mkdtemp(prefix="audit-dlsym-")
+
+    def write(name, content):
+        path = os.path.join(td, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def build_shared(source_name, source, output_name):
+        src = write(source_name, source)
+        out = os.path.join(td, output_name)
+        result = run_cmd([cc, "-shared", "-fPIC", src, "-o", out], cwd=td)
+        assert result.returncode == 0, result.stderr.decode()
+        return out
+
+    def build_program(source_name, source, output_name):
+        src = write(source_name, source)
+        out = os.path.join(td, output_name)
+        result = run_cmd([CXX, "build", src, "-o", out], cwd=td)
+        assert result.returncode == 0, result.stderr.decode()
+        return out
+
+    build_shared(
+        "fake_sqlite.c",
+        """
+int sqlite3_open(const char *path, void **db) { (void)path; *db = (void *)1; return 0; }
+int sqlite3_close_v2(void *db) { (void)db; return 0; }
+int sqlite3_prepare_v2(void *db, const char *sql, int n, void **stmt, const char **tail) {
+    (void)db; (void)sql; (void)n; (void)tail; *stmt = (void *)2; return 0;
+}
+int sqlite3_step(void *stmt) { (void)stmt; return 101; }
+int sqlite3_finalize(void *stmt) { (void)stmt; return 0; }
+int sqlite3_exec(void *db, const char *sql, void *cb, void *arg, char **err) {
+    (void)db; (void)sql; (void)cb; (void)arg; if (err) *err = 0; return 0;
+}
+const char *sqlite3_errmsg(void *db) { (void)db; return "fake sqlite"; }
+""",
+        "libsqlite3.so.0",
+    )
+    sqlite_exe = build_program(
+        "sqlite_probe.brat",
+        """fn main() -> i64 {
+  let opened = sql_open(":memory:")
+  if is_err(opened) {
+    print("SQLITE_UNAVAILABLE")
+    return 0
+  }
+  let db = unwrap(opened)
+  let _rows = unwrap(sql_query(db, "SELECT ?", [42]))
+  print("SQLITE_ACCEPTED")
+  return 0
+}
+""",
+        "sqlite_probe.exe",
+    )
+    r_sqlite = run_cmd([sqlite_exe], cwd=td, env={"LD_LIBRARY_PATH": td})
+    assert r_sqlite.returncode == 0, r_sqlite.stderr.decode()
+    assert r_sqlite.stdout.decode().strip() == "SQLITE_UNAVAILABLE", r_sqlite.stdout.decode()
+
+    build_shared(
+        "fake_ssl.c",
+        """
+#include <stdint.h>
+const void *TLS_client_method(void) { return (const void *)1; }
+void *SSL_CTX_new(const void *method) { (void)method; return (void *)2; }
+void SSL_CTX_free(void *ctx) { (void)ctx; }
+int SSL_CTX_set_default_verify_paths(void *ctx) { (void)ctx; return 1; }
+void SSL_CTX_set_verify(void *ctx, int mode, void *cb) { (void)ctx; (void)mode; (void)cb; }
+void *SSL_new(void *ctx) { (void)ctx; return (void *)3; }
+void SSL_free(void *ssl) { (void)ssl; }
+int SSL_set_fd(void *ssl, int fd) { (void)ssl; (void)fd; return 1; }
+intptr_t SSL_ctrl(void *ssl, int cmd, intptr_t larg, void *parg) {
+    (void)ssl; (void)cmd; (void)larg; (void)parg; return 1;
+}
+int SSL_set1_host(void *ssl, const char *name) { (void)ssl; (void)name; return 1; }
+void *SSL_get0_param(void *ssl) { (void)ssl; return (void *)4; }
+int SSL_connect(void *ssl) { (void)ssl; return 1; }
+intptr_t SSL_get_verify_result(const void *ssl) { (void)ssl; return 0; }
+int SSL_write(void *ssl, const void *buf, int num) { (void)ssl; (void)buf; return num; }
+int SSL_read(void *ssl, void *buf, int num) { (void)ssl; (void)buf; (void)num; return 0; }
+int SSL_shutdown(void *ssl) { (void)ssl; return 1; }
+""",
+        "libssl.so.3",
+    )
+    build_shared(
+        "fake_crypto.c",
+        'int X509_VERIFY_PARAM_set1_ip_asc(void *param, const char *ip) { (void)param; (void)ip; return 1; }\n',
+        "libcrypto.so.3",
+    )
+    write("ca.pem", "not a real CA\n")
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    listener.settimeout(2)
+    tls_port = listener.getsockname()[1]
+
+    def accept_once():
+        try:
+            conn, _addr = listener.accept()
+            conn.close()
+        except OSError:
+            pass
+
+    server = threading.Thread(target=accept_once, daemon=True)
+    server.start()
+    try:
+        tls_exe = build_program(
+            "tls_probe.brat",
+            f"""fn main() -> i64 {{
+  let r = https_request_raw("127.0.0.1:{tls_port}", "localhost", "GET / HTTP/1.0\\r\\n\\r\\n", "ca.pem")
+  assert(is_err(r))
+  print("TLS_UNAVAILABLE")
+  return 0
+}}
+""",
+            "tls_probe.exe",
+        )
+        r_tls = run_cmd([tls_exe], cwd=td, env={"LD_LIBRARY_PATH": td})
+    finally:
+        listener.close()
+        server.join(timeout=1)
+    assert r_tls.returncode == 0, r_tls.stderr.decode()
+    assert r_tls.stdout.decode().strip() == "TLS_UNAVAILABLE", r_tls.stdout.decode()
+
+
 def main():
     test_mem02_arena_intrinsics_locked()
     print("audit ok: MEM-02 ($arena_enter/$arena_leave lockdown + ASan)")
@@ -632,6 +827,8 @@ def main():
     print("audit ok: R3-04 (LSP 16 MiB cap + 1M JSON token cap + -32600 JSON-RPC envelope)")
     test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets()
     print("audit ok: F-03/F-04/F-05/R3-06/R3-07 (MCP 2 MiB cap + CC timeout + pkg graph cap + MinGW)")
+    test_dynamic_backend_missing_symbols_fail_closed()
+    print("audit ok: dynamic TLS/SQLite libraries with missing symbols fail closed")
     print("EXTERNAL AUDITS REGRESSION SUITE ALL GREEN")
 
 
