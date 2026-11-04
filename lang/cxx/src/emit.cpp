@@ -1,9 +1,7 @@
 // The C emitter: BRAT's tree becomes C that links against crt.h.
 //
-// This is the C++ twin of lang/engine/codegen_c.py and the contract is byte
-// equality, so every string is built in the order the Python builds it. The
-// notes that explain *why* a rule exists live in the Python file; the ones here
-// are the ones that only make sense against this code.
+// This is BRAT's only C emitter. Its output is a compatibility surface for
+// generated programs and tests, so construction order is deliberately stable.
 
 #include <stdexcept>
 
@@ -38,13 +36,10 @@ using ExprList = std::vector<const Expr *>;
 using Names = std::set<std::string>;
 
 
-inline void app(std::string &) {}
 inline void app(std::string &o, const std::string &s) { o += s; }
 inline void app(std::string &o, const char *s) { o += s; }
-inline void app(std::string &o, char c) { o += c; }
 inline void app(std::string &o, int v) { o += std::to_string(v); }
 inline void app(std::string &o, long v) { o += std::to_string(v); }
-inline void app(std::string &o, long long v) { o += std::to_string(v); }
 inline void app(std::string &o, unsigned long v) { o += std::to_string(v); }
 
 // `cat("a", n, "b")`: the Python's `%` formatting, spelled once.
@@ -164,6 +159,7 @@ StmtP clone_stmt(const Stmt &s) {
     c->ext.varargs = s.ext.varargs;
     c->ext.owned = s.ext.owned;
     c->ext.checked = s.ext.checked;
+    c->ext.effects = s.ext.effects;
     for (const auto &p : s.ext.params) {
         Param q;
         q.name = p.name;
@@ -221,9 +217,9 @@ bool ffi_int_result(const std::string &t) {
     return s.count(t) > 0;
 }
 
-// One table for the whole FFI boundary, kept in step with _FFI_C in
-// codegen_c.py: two ladders that disagree (a declaration saying `int64_t`, a
-// call site saying `short`) is how an ABI bug is born -- it compiles, links and
+// One table for the whole FFI boundary. Two ladders that disagree (a
+// declaration saying `int64_t`, a call site saying `short`) is how an ABI bug
+// is born -- it compiles, links and
 // corrupts the next stack slot. A width that is not here is refused instead of
 // being spelled as a machine word.
 static const std::map<std::string, std::string> &ffi_scalar_c() {
@@ -261,7 +257,7 @@ std::string clit(const std::string &s) {
             // A trigraph: under strict ISO C `??/` is a backslash, so a literal
             // holding `??/` would not mean what it says. Adjacent literals are
             // one literal, so splitting the character keeps its bytes and stops
-            // the pair from forming. Mirrors `_clit` in codegen_c.py.
+            // the pair from forming.
             o += "?\"\"";
         } else if (c >= 32 && c < 127) {
             o.push_back(static_cast<char>(c));
@@ -443,7 +439,7 @@ void stmt_vars(const Stmt &s, Names &acc) {
     case SK::Try:
         for (const auto &t : view(s.body)) stmt_vars(*t, acc);
         for (const auto &t : view(s.body2)) stmt_vars(*t, acc);
-        if (s.opt1) acc.insert(*s.opt1);
+        if (s.opt1) acc.insert("@catch_" + *s.opt1);
         break;
     case SK::Spawn: case SK::Scope: case SK::Unsafe:
         for (const auto &t : view(s.body)) stmt_vars(*t, acc);
@@ -578,6 +574,7 @@ struct OrderItem {
 struct Ext {
     std::string name, lib;
     const std::vector<Param> *params = nullptr;
+    const std::vector<std::string> *effects = nullptr;
     std::optional<std::string> ret, varargs;
     bool checked = false;
 };
@@ -611,18 +608,39 @@ struct V {
 const std::set<std::string> HEAP_METHODS = {
     "upper", "lower", "trim", "replace", "repeat", "copy", "join", "split",
     "split_once", "lines", "chars", "slice", "map", "filter", "keys", "vals",
-    "items", "entries", "values", "recv", "parse_int", "parse_float",
-    "rev",
+    "items", "entries", "values", "recv", "send", "parse_int", "parse_float",
+    "rev", "pop", "del", "zip", "chunks", "enumerate",
 };
 
 // Builtins that hand back a fresh value the caller owns: a new vector, a new
 // string, or an Ok/Err tag built on the spot. Missing one of these is not a
 // type error anywhere -- it just means the binding is classified as an alias,
 // never released, and LeakSanitizer reports it once per call. `args()` did.
+const std::string LOCAL_BINDING_PREFIX = "\x01local:";
+
 const std::set<std::string> HEAP_CALLS = {
     "str", "own", "str_from_ptr", "args", "read_file", "write_file",
-    "tcp_listen", "tcp_connect", "tcp_accept", "tcp_recv", "sbuf", "sbuf_str",
-    "chan"};
+    "read_bytes", "write_bytes", "proc_run", "env_get",
+    "utf8_bytes", "utf8_str", "fs_rename", "fs_remove",
+    "sha256_bytes", "random_bytes", "https_request_raw",
+    "sql_open", "sql_close", "sql_exec", "sql_query",
+    "re_find", "re_captures", "re_replace",
+    "strerror", "ptr_read_str", "ptr_read_struct",
+    "tcp_listen", "tcp_connect", "tcp_accept", "tcp_close",
+    "tcp_recv", "tcp_send", "sbuf", "sbuf_str", "chan"};
+
+bool must_return(const StmtList &body) {
+    if (body.empty() || body.back() == nullptr) return false;
+    const Stmt &last = *body.back();
+    if (last.k == SK::Return) return true;
+    if (last.k == SK::If) {
+        const Stmt *els = real_else(last);
+        if (!els) return false;
+        StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+        return must_return(view(last.body)) && must_return(eb);
+    }
+    return false;
+}
 
 struct Emitter {
     int tmp = 0;
@@ -636,6 +654,7 @@ struct Emitter {
     std::set<std::string> errno_externs;
     std::map<std::string, const std::vector<StructField> *> structs;
     std::set<std::string> packed;
+    std::set<std::string> unions;
     std::vector<std::string> struct_order;
     std::set<std::string> enums;
     std::set<std::string> exported;
@@ -649,6 +668,7 @@ struct Emitter {
     std::vector<std::string> out;
     std::map<std::string, Sym> sym;
     std::optional<std::pair<std::string, std::set<std::string>>> cap;
+    std::map<std::string, int64_t> cap_slots;
     std::vector<std::string> dfb;
     std::set<std::string> dfb_locals;
     int try_n = 0;
@@ -665,26 +685,38 @@ struct Emitter {
     std::set<std::string> fails;
     // -O1: the nodes ir::analyze proved need no check, and the proofs to print.
     int opt = 0;
+    std::string target_triple;
+    bool trace_lines = false;
     bool opt_done = false;
     std::set<const Expr *> unchecked;
+    std::set<const Expr *> nonzero_div;
+    std::set<const Expr *> unchecked_idx;
+    std::set<const Stmt *> unchecked_setidx;
     std::vector<ir::Proof> *proofs = nullptr;
     std::map<std::string, std::set<std::string>> fastvec;
     std::string fkind = "int64_t";
     std::map<std::string, std::string> fsym;
-    bool need_idiv = false, need_imod = false, need_fdiv = false, need_fmod = false;
-    bool need_viat = false, need_vset = false;
+    bool need_idiv = false, need_imod = false, need_idiv_nz = false, need_imod_nz = false;
+    bool need_fdiv = false, need_fmod = false;
+    bool need_viat = false, need_viat_nb = false, need_vset = false;
     std::set<std::string> fvecvars;
+    int ic_n = 0, fic_n = 0, mic_slot = -1;
+    std::map<std::pair<std::string, std::vector<std::string>>, int> shapes;
+    std::vector<std::pair<std::string, std::vector<std::string>>> shape_defs;
+    std::set<std::string> ub_ints;
+    std::set<std::string> ub_floats;
     int nesting = 0;
     int nested_seq = 0;
     std::map<std::string, std::string> fn_alias;
     std::set<std::string> assigned;
     std::set<std::string> reclaim, relet;
-    // BRAT_MOVE_RT=0 turns the drops off, the bisect knob codegen_c.py has: a
-    // program emitted that way leaks on purpose so an emitted change can be
-    // diffed against older output.
+    // BRAT_MOVE_RT=0 turns the drops off. It is a bisection knob: a program
+    // emitted that way leaks on purpose so drop changes can be isolated.
     bool move_rt = std::getenv("BRAT_MOVE_RT") == nullptr ||
                    std::strcmp(std::getenv("BRAT_MOVE_RT"), "0") != 0;
-    std::set<std::string> moved, captured, shared, dropped, alias_temps;
+    std::set<std::string> moved, captured, shared, dropped, alias_temps, catch_cns;
+    std::vector<std::string> call_cleanup;
+    std::set<std::string> scalar_vars;
     int clos_done = 0, clos_declared = 0, late_done = 0, late_declared = 0;
     std::string base;
     // A defer body is a statement built here; `clos` points into this deque.
@@ -708,6 +740,7 @@ struct Emitter {
         return c;
     }
     std::string cfn(const std::string &key) { return cat("bf_c", fn_code(key)); }
+    std::string direct_cfn(const std::string &key) { return cat(cfn(key), "_p"); }
     std::string fn_key(const std::string &name) {
         auto it = fn_alias.find(name);
         return it == fn_alias.end() ? name : it->second;
@@ -757,14 +790,56 @@ struct Emitter {
                   const std::set<std::string> &intvars, const std::set<std::string> &vecvars);
     bool intish(const Expr &e, const std::string &kind, const std::set<std::string> &intvars);
     bool booly(const Expr &e);
+    bool all_bool(const Expr &e);
     bool print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand, const std::string &kind,
-                  const std::set<std::string> &intvars);
+                  const std::set<std::string> &intvars, const std::set<std::string> &vecvars = {});
     // `returned`, when given, collects one entry per `return`: true when the
     // value is float. A `f64` fast path that never returns one is refused below,
     // so `fn a(x: f64) -> f64 { return 3 }` prints `3` on both backends.
     bool int_body(const StmtList &body, const std::map<std::string, FnEntry> &cand, const std::string &kind,
                   std::set<std::string> intvars, const std::set<std::string> &vecvars,
                   std::vector<bool> *returned = nullptr);
+    bool pure_int_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
+                          const std::set<std::string> &param_names,
+                          const std::set<std::string> &vecvars = {});
+    bool pure_float_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
+                            const std::set<std::string> &param_names);
+    bool has_float_lit(const StmtList &body) const;
+    std::set<std::string> vec_params_in(const StmtList &body, const std::set<std::string> &pnames) const;
+    bool ub_expr_ok(const Expr &e, const std::set<std::string> &cand) const;
+    bool ub_expr_ok(const Expr &e) const { return ub_expr_ok(e, ub_ints); }
+    bool ub_may_raise(const Expr &e) const;
+    std::string ub_ex(const Expr &e) const;
+    void ub_assign(const std::string &name, const Expr &rhs, const std::string &ind);
+    bool ub_int_sub(const Expr &e) const;
+    bool ubf_expr_ok(const Expr &e, const std::set<std::string> &cand) const;
+    bool ubf_expr_ok(const Expr &e) const { return ubf_expr_ok(e, ub_floats); }
+    bool ubf_may_raise(const Expr &e) const;
+    std::string ubf_ex(const Expr &e) const;
+    std::string ubf_cmp_c(const std::string &op, const std::string &a, const std::string &b) const;
+    void ubf_assign(const std::string &name, const Expr &rhs, const std::string &ind);
+    std::set<std::string> closure_free_vars(const FnDecl &decl) const;
+    void closure_walk_expr(const Expr *e, const std::set<std::string> &bound,
+                           std::set<std::string> &free) const;
+    void closure_walk_stmts(const StmtList &stmts, const std::set<std::string> &bound,
+                            std::set<std::string> &free) const;
+    std::set<std::string> compute_ub_vars(const StmtList &body, const std::set<std::string> &vars_,
+                                          const std::set<std::string> &param_names, bool is_float);
+    std::set<std::string> compute_ub_ints(const StmtList &body, const std::set<std::string> &vars_,
+                                          const std::set<std::string> &param_names);
+    std::set<std::string> compute_ub_floats(const StmtList &body, const std::set<std::string> &vars_,
+                                            const std::set<std::string> &param_names);
+    std::string next_ic() { return cat("&_mic[", ic_n++, "]"); }
+    std::string next_fic() { return cat("&_fic[", fic_n++, "]"); }
+    int shape_id(const std::string &tname, const std::vector<std::string> &fnames) {
+        auto key = std::make_pair(tname, fnames);
+        auto it = shapes.find(key);
+        if (it != shapes.end()) return it->second;
+        int sid = static_cast<int>(shape_defs.size());
+        shapes[key] = sid;
+        shape_defs.push_back(std::move(key));
+        return sid;
+    }
     void compute_fast();
     void run_opt();
     bool has_setidx(const StmtList &body);
@@ -802,8 +877,13 @@ struct Emitter {
     void emit_loop_drops(const StmtList &body, const std::string &ind);
     std::set<std::string> heap_returns();
     V call_result(std::vector<std::string> pre, const std::string &vec, const std::string &call);
+    V direct_call_result(const ExprList &args,
+                         const std::function<std::string(const std::vector<std::string> &)> &call);
+    bool raw_i64_arg(const Expr &e, std::string &out) const;
+    bool direct_fast_call(const std::string &name, const ExprList &args, V &out);
     V read_only(const Expr &arg, const std::string &fn);
     V read_only_call(const Expr &arg, const std::function<std::string(const std::string &)> &mk);
+    V borrow_builtin(const std::string &c_name, const ExprList &args);
     V release_lit_args(const std::vector<std::string> &pre, const ExprList &nodes,
                        const std::vector<std::string> &vals, const std::string &call);
     V part_of_temp(const V &a, const Expr &src, const std::string &open,
@@ -821,8 +901,13 @@ struct Emitter {
                   const ExprList &args);
     V ex_strvec_meth(const std::string &so, const std::vector<std::string> &po, const std::string &meth,
                      const ExprList &args);
-    V ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, const Expr *first);
-    V ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *arg);
+    V ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, const Expr *first,
+             const V *recv = nullptr);
+    V ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *arg,
+                   const V *recv = nullptr);
+    bool fusible_expr(const Expr &e, const std::set<std::string> &pset) const;
+    bool fusible_fnlit(const Expr *fn_node, size_t arity) const;
+    V ex_fused_stream(const Expr &obj, const std::string &meth, const ExprList &args);
     V ex_closure(const Expr &e);
     V ex_parfor(const Expr &e);
 
@@ -846,7 +931,9 @@ struct Emitter {
     std::string var_ref(const std::string &name);
     std::optional<std::string> place_root(const Expr &e);
     std::string keep(const Expr &e, const std::string &val);
-    std::vector<std::string> capture(const std::string &cm, const std::string &var);
+    std::string own_operand(const Expr &e, const std::string &val);
+    std::string truth(const Expr &e, const std::string &val, std::vector<std::string> &lines);
+    std::vector<std::string> capture(const std::string &cm, const std::string &var, int64_t slot);
     Own own_of(const Expr &e);
     bool drop_allowed(const std::string &name);
     bool part_of_local(const Expr &e, const std::string &root);
@@ -858,7 +945,8 @@ struct Emitter {
 
     void define_fn(const std::string &cname_, const std::vector<Param> &params, const StmtList &body,
                    const std::set<std::string> *caps, const std::string *fastraw,
-                   const std::string *fastkind, const std::string *fastname);
+                   const std::string *fastkind, const std::string *fastname,
+                   bool positional = false);
     void emit_fn_by_key(const std::string &key);
     void emit_prelude_tables();
     void run_pipeline();
@@ -867,6 +955,7 @@ struct Emitter {
     void emit_main_close();
     std::string emit_program();
     std::string val_to_c_struct(const std::string &sname, const std::string &valexpr);
+    std::vector<std::string> emit_struct_conv(const std::string &sname);
     std::string c_struct_to_val(const std::string &sname, const std::string &cexpr);
     void emit_forward_decls();
     void emit_closure_protos();
@@ -889,7 +978,7 @@ bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand
     switch (e.k) {
     case EK::Num:
         if (!e.is_float) return true;
-        return kind == "f64";
+        return kind == "f64" || kind == "f64_dyn";
     case EK::Bool:
         return true;
     case EK::Var:
@@ -899,29 +988,44 @@ bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand
     case EK::Move:
         return int_expr(*e.kids[0], cand, kind, intvars, vecvars);
     case EK::Idx:
-        return kind == "i64v" && e.kids[0]->k == EK::Var && vecvars.count(e.kids[0]->a) &&
-               intish(*e.kids[1], kind, intvars);
+        return (kind == "i64v" || kind == "i64v_dyn") && e.kids[0]->k == EK::Var &&
+               vecvars.count(e.kids[0]->a) && intish(*e.kids[1], kind, intvars);
     case EK::Bin: {
         static const std::set<std::string> ops = {"+", "-", "*", "/", "%", "==", "!=", "<",
                                                   ">", "<=", ">=", "&&", "||"};
         if (!ops.count(e.a)) return false;
         if (!int_expr(*e.kids[0], cand, kind, intvars, vecvars)) return false;
         if (!int_expr(*e.kids[1], cand, kind, intvars, vecvars)) return false;
-        if ((e.a == "/" || e.a == "%") && kind == "f64" && intish(*e.kids[0], kind, intvars) &&
-            intish(*e.kids[1], kind, intvars))
+        if ((e.a == "/" || e.a == "%") && (kind == "f64" || kind == "f64_dyn") &&
+            intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars))
             return false;
-        if ((e.a == "&&" || e.a == "||") && (may_raise(*e.kids[0]) || may_raise(*e.kids[1])))
-            return false;
+        if (e.a == "&&" || e.a == "||") {
+            if (may_raise(*e.kids[0]) || may_raise(*e.kids[1])) return false;
+            if (!all_bool(*e.kids[0]) &&
+                e.kids[0]->k != EK::Var && e.kids[0]->k != EK::Num && e.kids[0]->k != EK::Bool)
+                return false;
+        }
         return true;
     }
     case EK::Call:
-        if (e.a == "len" && kind == "i64v" && e.kids.size() == 1) {
+        if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn") && e.kids.size() == 1) {
             const Expr &a = *e.kids[0];
             if (a.k == EK::Var && vecvars.count(a.a)) return true;
         }
         {
             auto it = cand.find(e.a);
-            if (it == cand.end() || fastkinds[e.a] != kind) return false;
+            if (it == cand.end()) return false;
+            const std::string &ck = fastkinds[e.a];
+            auto ri = fn_ret.find(e.a);
+            bool not_bool = (ri == fn_ret.end() || !ri->second || *ri->second != "bool");
+            bool same_k = (ck == kind) ||
+                          ((kind == "i64" || kind == "i64_dyn") &&
+                           (ck == "i64" || ck == "i64_dyn") && not_bool) ||
+                          ((kind == "f64" || kind == "f64_dyn") &&
+                           (ck == "f64" || ck == "f64_dyn") && not_bool) ||
+                          ((kind == "i64v" || kind == "i64v_dyn") &&
+                           (ck == "i64" || ck == "i64_dyn") && not_bool);
+            if (!same_k) return false;
             for (const auto &a : e.kids)
                 if (!int_expr(*a, cand, kind, intvars, vecvars)) return false;
             return true;
@@ -944,35 +1048,60 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
     case EK::Move:
         return intish(*e.kids[0], kind, intvars);
     case EK::Idx:
-        return kind == "i64v";
+        return kind == "i64v" || kind == "i64v_dyn";
     case EK::Bin:
         if (e.a == "==" || e.a == "!=" || e.a == "<" || e.a == ">" || e.a == "<=" ||
             e.a == ">=" || e.a == "&&" || e.a == "||")
             return true;
         return intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars);
     case EK::Call: {
+        if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn") && e.kids.size() == 1)
+            return true;
         auto it = fastkinds.find(e.a);
-        return kind == "i64" && it != fastkinds.end() && it->second == "i64";
+        return (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") &&
+               it != fastkinds.end() && (it->second == "i64" || it->second == "i64_dyn");
     }
     default:
         return false;
     }
 }
 
+bool Emitter::all_bool(const Expr &e) {
+    if (e.k == EK::Bool || (e.k == EK::Un && e.a == "!")) return true;
+    if (e.k == EK::Bin) {
+        if (e.a == "==" || e.a == "!=" || e.a == "<" || e.a == ">" || e.a == "<=" || e.a == ">=")
+            return true;
+        if ((e.a == "&&" || e.a == "||") && e.kids.size() == 2)
+            return all_bool(*e.kids[0]) && all_bool(*e.kids[1]);
+    }
+    return false;
+}
+
 bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand,
-                       const std::string &kind, const std::set<std::string> &intvars) {
+                       const std::string &kind, const std::set<std::string> &intvars,
+                       const std::set<std::string> &vecvars) {
     if (e.k != EK::Call || e.a != "print") return false;
+    bool dbl = (kind == "f64" || kind == "f64_dyn");
+    int fslots = 0;
     for (const auto &ap : e.kids) {
         const Expr &a = *ap;
         if (a.k == EK::Str) {
-            for (const auto &p : split_interp(a.a))
-                if (p.first == "var" && p.second.find('.') != std::string::npos) return false;
+            for (const auto &p : split_interp(a.a)) {
+                if (p.first == "var") {
+                    if (p.second.find('.') != std::string::npos || vecvars.count(p.second) ||
+                        global_lets.count(p.second))
+                        return false;
+                    if (dbl) fslots++;
+                }
+            }
             continue;
         }
         if (booly(a)) return false;
-        if (!int_expr(a, cand, kind, intvars, std::set<std::string>())) return false;
+        if (!int_expr(a, cand, kind, intvars, vecvars)) return false;
+        if (a.k == EK::Num && a.is_float) fslots++;
+        else if (dbl && !(a.k == EK::Num && !a.is_float)) fslots++;
     }
-    return true;
+    return fslots <= 8;
 }
 
 bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry> &cand,
@@ -1001,7 +1130,7 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             }
             break;
         case SK::SetIdx:
-            if (kind != "i64v") return false;
+            if (kind != "i64v" && kind != "i64v_dyn") return false;
             if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) return false;
             if (!intish(*s.e2, kind, intvars) || !intish(*s.e3, kind, intvars)) return false;
             break;
@@ -1010,7 +1139,7 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             if (returned) returned->push_back(intish(*s.e1, kind, intvars));
             break;
         case SK::Expr:
-            if (print_ok(*s.e1, cand, kind, intvars)) break;
+            if (print_ok(*s.e1, cand, kind, intvars, vecvars)) break;
             if (!int_expr(*s.e1, cand, kind, intvars, vecvars)) return false;
             break;
         case SK::If: {
@@ -1037,7 +1166,7 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             break;
         }
         case SK::ForIter: {
-            if (kind != "i64v") return false;
+            if (kind != "i64v" && kind != "i64v_dyn") return false;
             if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) return false;
             std::set<std::string> sub = intvars;
             sub.insert(s.a);
@@ -1054,6 +1183,250 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
     return true;
 }
 
+bool Emitter::pure_int_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
+                               const std::set<std::string> &param_names,
+                               const std::set<std::string> &vecvars) {
+    std::set<std::string> pure;
+    for (const auto &p : param_names)
+        if (!vecvars.count(p)) pure.insert(p);
+    std::set<std::string> vars_all;
+    collect_vars(body, vars_all);
+    for (const auto &v : vars_all)
+        if (!vecvars.count(v)) pure.insert(v);
+    std::function<bool(const Expr &)> is_pi = [&](const Expr &e) -> bool {
+        switch (e.k) {
+        case EK::Num: return !e.is_float;
+        case EK::Var: return pure.count(e.a) > 0;
+        case EK::Idx:
+            return e.kids[0]->k == EK::Var && vecvars.count(e.kids[0]->a) && is_pi(*e.kids[1]);
+        case EK::Un: return e.a == "-" && is_pi(*e.kids[0]);
+        case EK::Move: return is_pi(*e.kids[0]);
+        case EK::Bin:
+            return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%") &&
+                   is_pi(*e.kids[0]) && is_pi(*e.kids[1]);
+        case EK::Call: {
+            if (e.a == "len" && e.kids.size() == 1 && e.kids[0]->k == EK::Var &&
+                vecvars.count(e.kids[0]->a))
+                return true;
+            if (!cand.count(e.a)) return false;
+            auto fk = fastkinds.find(e.a);
+            if (fk == fastkinds.end() || (fk->second != "i64" && fk->second != "i64_dyn")) return false;
+            auto ri = fn_ret.find(e.a);
+            return ri == fn_ret.end() || !ri->second || *ri->second != "bool";
+        }
+        default: return false;
+        }
+    };
+    std::function<bool(const StmtList &)> scan_binds = [&](const StmtList &stmts) -> bool {
+        bool dropped = false;
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::Set) {
+                std::string nm = s.a.substr(0, s.a.find('.'));
+                if (pure.count(nm) && !is_pi(*s.e1)) {
+                    pure.erase(nm);
+                    dropped = true;
+                }
+            } else if (s.k == SK::If) {
+                if (scan_binds(view(s.body))) dropped = true;
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    if (scan_binds(eb)) dropped = true;
+                }
+            } else if (s.k == SK::While) {
+                if (scan_binds(view(s.body))) dropped = true;
+            } else if (s.k == SK::ForRange) {
+                if (scan_binds(view(s.body))) dropped = true;
+            } else if (s.k == SK::ForIter) {
+                if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) {
+                    if (pure.erase(s.a) > 0) dropped = true;
+                }
+                if (scan_binds(view(s.body))) dropped = true;
+            }
+        }
+        return dropped;
+    };
+    while (scan_binds(body)) {}
+    std::function<bool(const StmtList &)> check_rets = [&](const StmtList &stmts) -> bool {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Return) {
+                if (!is_pi(*s.e1)) return false;
+            } else if (s.k == SK::If) {
+                if (!check_rets(view(s.body))) return false;
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    if (!check_rets(eb)) return false;
+                }
+            } else if (s.k == SK::While) {
+                if (!check_rets(view(s.body))) return false;
+            } else if (s.k == SK::ForRange) {
+                if (!check_rets(view(s.body))) return false;
+            } else if (s.k == SK::ForIter) {
+                if (!check_rets(view(s.body))) return false;
+            }
+        }
+        return true;
+    };
+    return check_rets(body);
+}
+
+bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
+                                 const std::set<std::string> &param_names) {
+    std::set<std::string> fpure = param_names, ipure, vars_all;
+    collect_vars(body, vars_all);
+    for (const auto &v : vars_all)
+        if (!param_names.count(v)) fpure.insert(v);
+    std::function<bool(const Expr &)> is_num_int = [&](const Expr &e) -> bool {
+        switch (e.k) {
+        case EK::Num: return !e.is_float;
+        case EK::Var: return ipure.count(e.a) > 0;
+        case EK::Un: return e.a == "-" && is_num_int(*e.kids[0]);
+        case EK::Bin:
+            return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%") &&
+                   is_num_int(*e.kids[0]) && is_num_int(*e.kids[1]);
+        default: return false;
+        }
+    };
+    std::function<bool(const Expr &)> is_pf = [&](const Expr &e) -> bool {
+        switch (e.k) {
+        case EK::Num: return e.is_float;
+        case EK::Var: return fpure.count(e.a) > 0;
+        case EK::Un: return e.a == "-" && is_pf(*e.kids[0]);
+        case EK::Move: return is_pf(*e.kids[0]);
+        case EK::Bin: {
+            if (e.a != "+" && e.a != "-" && e.a != "*" && e.a != "/" && e.a != "%") return false;
+            bool lf = is_pf(*e.kids[0]), rf = is_pf(*e.kids[1]);
+            bool li = is_num_int(*e.kids[0]), ri = is_num_int(*e.kids[1]);
+            return (lf && (rf || ri)) || (rf && li);
+        }
+        case EK::Call: {
+            if (!cand.count(e.a)) return false;
+            auto fk = fastkinds.find(e.a);
+            if (fk == fastkinds.end() || (fk->second != "f64" && fk->second != "f64_dyn")) return false;
+            auto ri = fn_ret.find(e.a);
+            return ri == fn_ret.end() || !ri->second || *ri->second != "bool";
+        }
+        default: return false;
+        }
+    };
+    std::function<bool(const StmtList &)> scan_binds = [&](const StmtList &stmts) -> bool {
+        bool dropped = false;
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::Set) {
+                std::string nm = s.a.substr(0, s.a.find('.'));
+                if (fpure.count(nm) && !is_pf(*s.e1)) {
+                    fpure.erase(nm);
+                    if (is_num_int(*s.e1)) ipure.insert(nm);
+                    dropped = true;
+                } else if (ipure.count(nm) && !is_num_int(*s.e1)) {
+                    ipure.erase(nm);
+                    dropped = true;
+                }
+            } else if (s.k == SK::If) {
+                if (scan_binds(view(s.body))) dropped = true;
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    if (scan_binds(eb)) dropped = true;
+                }
+            } else if (s.k == SK::While) {
+                if (scan_binds(view(s.body))) dropped = true;
+            } else if (s.k == SK::ForRange) {
+                if (fpure.erase(s.a) > 0) {
+                    ipure.insert(s.a);
+                    dropped = true;
+                }
+                if (scan_binds(view(s.body))) dropped = true;
+            }
+        }
+        return dropped;
+    };
+    while (scan_binds(body)) {}
+    std::function<bool(const StmtList &)> check_rets = [&](const StmtList &stmts) -> bool {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Return) {
+                if (!is_pf(*s.e1)) return false;
+            } else if (s.k == SK::If) {
+                if (!check_rets(view(s.body))) return false;
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    if (!check_rets(eb)) return false;
+                }
+            } else if (s.k == SK::While) {
+                if (!check_rets(view(s.body))) return false;
+            } else if (s.k == SK::ForRange) {
+                if (!check_rets(view(s.body))) return false;
+            }
+        }
+        return true;
+    };
+    return check_rets(body);
+}
+
+bool Emitter::has_float_lit(const StmtList &body) const {
+    std::function<bool(const Expr &)> we = [&](const Expr &e) -> bool {
+        if (e.k == EK::Num && e.is_float) return true;
+        for (const auto &k : e.kids)
+            if (k && we(*k)) return true;
+        return false;
+    };
+    for (const Stmt *sp : body) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        if (s.e1 && we(*s.e1)) return true;
+        if (s.e2 && we(*s.e2)) return true;
+        if (s.e3 && we(*s.e3)) return true;
+        if (has_float_lit(view(s.body)) || has_float_lit(view(s.body2))) return true;
+        if (const Stmt *els = real_else(s)) {
+            StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+            if (has_float_lit(eb)) return true;
+        }
+    }
+    return false;
+}
+
+std::set<std::string> Emitter::vec_params_in(const StmtList &body,
+                                             const std::set<std::string> &pnames) const {
+    std::set<std::string> out;
+    std::function<void(const Expr &)> we = [&](const Expr &e) {
+        if (e.k == EK::Idx && !e.kids.empty() && e.kids[0]->k == EK::Var &&
+            pnames.count(e.kids[0]->a))
+            out.insert(e.kids[0]->a);
+        else if (e.k == EK::Call && e.a == "len" && e.kids.size() == 1 &&
+                 e.kids[0]->k == EK::Var && pnames.count(e.kids[0]->a))
+            out.insert(e.kids[0]->a);
+        for (const auto &k : e.kids)
+            if (k) we(*k);
+    };
+    std::function<void(const StmtList &)> ws = [&](const StmtList &stmts) {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::ForIter && s.e1 && s.e1->k == EK::Var && pnames.count(s.e1->a))
+                out.insert(s.e1->a);
+            else if (s.k == SK::SetIdx && s.e1 && s.e1->k == EK::Var && pnames.count(s.e1->a))
+                out.insert(s.e1->a);
+            if (s.e1) we(*s.e1);
+            if (s.e2) we(*s.e2);
+            if (s.e3) we(*s.e3);
+            ws(view(s.body));
+            ws(view(s.body2));
+            if (const Stmt *els = real_else(s)) {
+                StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                ws(eb);
+            }
+        }
+    };
+    ws(body);
+    return out;
+}
+
 void Emitter::compute_fast() {
     std::map<std::string, std::string> kinds;
     fastvec.clear();
@@ -1062,19 +1435,30 @@ void Emitter::compute_fast() {
         const std::vector<Param> &params = entry.decl->params;
         std::vector<std::string> anns;
         bool ok = true;
+        auto ri = fn_ret.find(name);
+        std::string ret_ann = (ri != fn_ret.end() && ri->second) ? *ri->second : "";
+        bool ret_dyn_ok = (ret_ann.empty() || ret_ann == "i64" || ret_ann == "bool");
+        bool ret_fdyn_ok = (ret_ann.empty() || ret_ann == "f64" || ret_ann == "bool");
+        bool dyn_ok = (name.find('.') == std::string::npos) && ret_dyn_ok;
+        bool fdyn_ok = (name.find('.') == std::string::npos) && ret_fdyn_ok;
+        std::set<std::string> unann_pnames, dfl_pnames;
         for (const auto &p : params) {
+            if (!p.ann) unann_pnames.insert(p.name);
+            if (p.def) dfl_pnames.insert(p.name);
             if (p.ann && (*p.ann == "i64" || *p.ann == "f64" || *p.ann == "vec[i64]")) {
                 anns.push_back(*p.ann);
+                if (*p.ann != "i64") dyn_ok = false;
+                if (*p.ann != "f64") fdyn_ok = false;
             } else {
                 ok = false;
+                if (p.ann) {
+                    dyn_ok = false;
+                    fdyn_ok = false;
+                }
             }
+            if (p.def && !(p.def->k == EK::Num && !p.def->is_float)) dyn_ok = false;
+            if (p.def && p.def->k != EK::Num) fdyn_ok = false;
         }
-        // A fast function is raw C over `int64_t`/`double`; a script-level `let`
-        // is a `Val` in the file scope, so a body that names one cannot be raw C.
-        // Excluding it here, before it is given a kind, is what makes the
-        // fixpoint drop its callers too; a caller that stayed fast would call a
-        // function that no longer exists. `refs_in` and not `collect_vars`: the
-        // question is what the body reads, and `return total` binds nothing.
         std::set<std::string> body_names, own_names;
         refs_in(view(entry.decl->body), body_names);
         bound_in(view(entry.decl->body), own_names);
@@ -1094,6 +1478,22 @@ void Emitter::compute_fast() {
             fastvec[name] = vs;
         } else if (ok && (anns.empty() || std::set<std::string>(anns.begin(), anns.end()).size() == 1)) {
             kinds[name] = anns.empty() ? "i64" : anns[0];
+        } else if (!ok && !params.empty() && must_return(view(entry.decl->body))) {
+            std::set<std::string> vparams =
+                dyn_ok ? vec_params_in(view(entry.decl->body), unann_pnames) : std::set<std::string>();
+            bool vp_has_dfl = false;
+            for (const auto &vp : vparams)
+                if (dfl_pnames.count(vp)) vp_has_dfl = true;
+            if (dyn_ok && !vparams.empty() && !vp_has_dfl) {
+                kinds[name] = "i64v_dyn";
+                fastvec[name] = vparams;
+            } else if (fdyn_ok && (ret_ann == "f64" || has_float_lit(view(entry.decl->body)))) {
+                kinds[name] = "f64_dyn";
+            } else if (dyn_ok) {
+                kinds[name] = "i64_dyn";
+            } else {
+                continue;
+            }
         } else {
             continue;
         }
@@ -1122,16 +1522,30 @@ void Emitter::compute_fast() {
             const std::string name = it->first;
             const std::vector<Param> &params = fns[name].decl->params;
             std::string kind = kinds[name];
+            std::set<std::string> pnames;
+            for (const auto &p : params) pnames.insert(p.name);
+            const std::set<std::string> &vvars = fastvec[name];
             std::set<std::string> intvars;
-            if (kind == "i64")
-                for (const auto &p : params) intvars.insert(p.name);
+            if (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") {
+                for (const auto &pn : pnames)
+                    if (!vvars.count(pn)) intvars.insert(pn);
+            }
             auto snapshot = cand;   // int_body gets the live set, the Python passes a copy
             std::vector<bool> returned;
             const bool ok = int_body(view(fns[name].decl->body), snapshot, kind, intvars,
-                                     fastvec[name], &returned);
+                                     vvars, &returned);
             bool any_int = false;
             for (bool r : returned) any_int = any_int || r;
-            if (!ok || (kind == "f64" && any_int)) {
+            auto ri = fn_ret.find(name);
+            std::string ret_ann = (ri != fn_ret.end() && ri->second) ? *ri->second : "";
+            bool has_ret_ann = (ret_ann == "i64" || ret_ann == "bool");
+            bool bad_fdyn = (kind == "f64_dyn") &&
+                            ((ret_ann != "bool" && any_int) ||
+                             (ret_ann != "f64" && ret_ann != "bool" &&
+                              !pure_float_returns(view(fns[name].decl->body), snapshot, pnames)));
+            if (!ok || (kind == "f64" && any_int) || bad_fdyn ||
+                ((kind == "i64_dyn" || kind == "i64v_dyn") && !has_ret_ann &&
+                 !pure_int_returns(view(fns[name].decl->body), snapshot, pnames, vvars))) {
                 it = cand.erase(it);
                 changed = true;
             } else {
@@ -1149,21 +1563,21 @@ void Emitter::compute_fast() {
         std::string kind = fastkinds[name];
         for (const auto &op : ops_in(view(entry.decl->body))) {
             if (op == "/") {
-                if (kind == "i64" || kind == "i64v") {
+                if (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") {
                     need_idiv = true;
                 } else {
                     need_fdiv = true;
                 }
             }
             if (op == "%") {
-                if (kind == "i64" || kind == "i64v") {
+                if (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") {
                     need_imod = true;
                 } else {
                     need_fmod = true;
                 }
             }
         }
-        if (kind == "i64v") {
+        if (kind == "i64v" || kind == "i64v_dyn") {
             need_viat = true;
             if (has_setidx(view(entry.decl->body))) need_vset = true;
         }
@@ -1173,15 +1587,60 @@ void Emitter::compute_fast() {
 void Emitter::run_opt() {
     if (opt_done) return;   // run_pipeline runs twice; the pass reads the same tree
     opt_done = true;
-    // Only functions the fast path already lowered to plain i64 are modelled;
-    // ir::analyze refuses anything else, and a refused function keeps its
-    // checks. `bf_idiv`/`bf_imod` stay in the output even when nothing calls
-    // them: the helpers are part of what S3 emitted.
+    if (opt == 1) {
+        // `-O1`: exact original contract on `"i64"` fast functions.
+        for (const auto &[name, entry] : fast) {
+            if (fastkinds[name] != "i64") continue;
+            ir::Result r;
+            ir::analyze(name, entry.decl->params, entry.decl->body, r);
+            unchecked.insert(r.unchecked.begin(), r.unchecked.end());
+            if (proofs) proofs->insert(proofs->end(), r.proofs.begin(), r.proofs.end());
+        }
+        return;
+    }
+    // `-O2`: bottom-up interprocedural return summaries + relational `IV × Cong × DBM`
+    // across `"i64"`, `"i64_dyn"`, `"i64v"` and `"i64v_dyn"` fast functions.
+    std::map<std::string, ir::FnSummary> summaries;
+    auto is_int_fast = [&](const std::string &rk) {
+        return rk == "i64" || rk == "i64_dyn" || rk == "i64v" || rk == "i64v_dyn";
+    };
+    const size_t max_rounds = std::min<size_t>(fast.size() + 1, 16);
+    for (size_t round = 0; round < max_rounds; ++round) {
+        bool changed = false;
+        for (const auto &[name, entry] : fast) {
+            if (!is_int_fast(fastkinds[name])) continue;
+            const std::set<std::string> empty_vs;
+            const auto &vs = fastvec.count(name) ? fastvec[name] : empty_vs;
+            ir::Result dummy;
+            ir::FnSummary next_s;
+            if (!ir::analyze_o2(name, entry.decl->params, vs, entry.decl->body,
+                                summaries, dummy, &next_s))
+                continue;
+            const ir::FnSummary &prev_s = summaries[name];
+            if (prev_s.valid != next_s.valid || prev_s.top != next_s.top ||
+                prev_s.lo != next_s.lo || prev_s.hi != next_s.hi ||
+                prev_s.mod != next_s.mod || prev_s.rem != next_s.rem) {
+                summaries[name] = next_s;
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
     for (const auto &[name, entry] : fast) {
-        if (fastkinds[name] != "i64") continue;
+        if (!is_int_fast(fastkinds[name])) continue;
+        const std::set<std::string> empty_vs;
+        const auto &vs = fastvec.count(name) ? fastvec[name] : empty_vs;
         ir::Result r;
-        ir::analyze(name, entry.decl->params, entry.decl->body, r);
+        ir::analyze_o2(name, entry.decl->params, vs, entry.decl->body, summaries, r, nullptr);
         unchecked.insert(r.unchecked.begin(), r.unchecked.end());
+        nonzero_div.insert(r.nonzero_div.begin(), r.nonzero_div.end());
+        unchecked_idx.insert(r.unchecked_idx.begin(), r.unchecked_idx.end());
+        unchecked_setidx.insert(r.unchecked_setidx.begin(), r.unchecked_setidx.end());
+        for (const Expr *nd : r.nonzero_div) {
+            if (nd->a == "/") need_idiv_nz = true;
+            else need_imod_nz = true;
+        }
+        if (!r.unchecked_idx.empty()) need_viat_nb = true;
         if (proofs) proofs->insert(proofs->end(), r.proofs.begin(), r.proofs.end());
     }
 }
@@ -1254,17 +1713,29 @@ std::string Emitter::fx(const Expr &e) {
     case EK::Move:
         return fx(*e.kids[0]);
     case EK::Idx:
+        if (opt >= 2 && unchecked_idx.count(&e))
+            return cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
         return cat("bf_viat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
     case EK::Bin: {
         std::string a = fx(*e.kids[0]), b = fx(*e.kids[1]);
         const std::string &op = e.a;
         if (op == "/" || op == "%") {
             if (!dbl && opt >= 1 && unchecked.count(&e)) return cat("(", a, " ", op, " ", b, ")");
+            if (!dbl && opt >= 2 && nonzero_div.count(&e))
+                return cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
             return cat(dbl ? (op == "/" ? "bf_fdiv" : "bf_fmod") : (op == "/" ? "bf_idiv" : "bf_imod"),
                        "(", a, ", ", b, ")");
         }
-        if (op == "&&") return cat("(", a, " ? ", b, " : ", a, ")");
-        if (op == "||") return cat("(", a, " ? ", a, " : ", b, ")");
+        if (op == "&&") {
+            if (all_bool(e))
+                return dbl ? cat("((", a, " && ", b, ") ? (1.0) : (0.0))") : cat("(", a, " && ", b, ")");
+            return cat("(", a, " ? ", b, " : ", a, ")");
+        }
+        if (op == "||") {
+            if (all_bool(e))
+                return dbl ? cat("((", a, " || ", b, ") ? (1.0) : (0.0))") : cat("(", a, " || ", b, ")");
+            return cat("(", a, " ? ", a, " : ", b, ")");
+        }
         if (!dbl && (op == "+" || op == "-" || op == "*"))
             return cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
         return cat("(", a, " ", op, " ", b, ")");
@@ -1305,6 +1776,7 @@ std::set<std::string> Emitter::may_fail() {
         }
         StmtList body = view(entry.decl->body);
         std::function<void(const Stmt &)> ws = [&](const Stmt &s) {
+            if (s.k == SK::SetIdx) fail.insert(name);
             for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()})
                 if (e && touches(*e)) fail.insert(name);
             for (const Stmt *t : view(s.body)) ws(*t);
@@ -1342,7 +1814,12 @@ std::set<std::string> Emitter::may_fail() {
 }
 
 bool Emitter::fraise(const Expr &e) {
-    if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) return true;
+    if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) {
+        if (opt >= 2 && fkind != "f64" && (unchecked.count(&e) || nonzero_div.count(&e))) {
+            return fraise(*e.kids[0]) || fraise(*e.kids[1]);
+        }
+        return true;
+    }
     if (e.k == EK::Idx) return true;
     if (e.k == EK::Call) {
         if (e.a == "len") return false;   // a length is a field read, it cannot fail
@@ -1384,6 +1861,9 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
         } else if (a.k == EK::Num && a.is_float) {
             fmt += "%s";
             vals += cat(", vfmt_double(", repr_f64(a.f), ")");
+        } else if (a.k == EK::Num) {
+            fmt += "%lld";
+            vals += cat(", (long long)(", clit64(a.i), ")");
         } else if (dbl) {
             fmt += "%s";
             vals += cat(", vfmt_double(", fchk(a, ind), ")");
@@ -1396,6 +1876,9 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
 }
 
 void Emitter::fst(const Stmt &s, const std::string &ind) {
+    if (trace_lines && s.line > 0) {
+        ln(ind, cat("btrace_line(", s.line, ");"));
+    }
     switch (s.k) {
     case SK::Let:
     case SK::LetTmp:
@@ -1448,7 +1931,16 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         break;
     }
     case SK::SetIdx:
-        ln(ind, cat("bf_vset(", fsym[s.e1->a], ", ", fchk(*s.e2, ind), ", ", fchk(*s.e3, ind), ");"));
+        if (opt >= 2 && unchecked_setidx.count(&s)) {
+            std::string idx_s = fchk(*s.e2, ind);
+            std::string val_s = fchk(*s.e3, ind);
+            ln(ind, cat(fsym[s.e1->a], "->items[", idx_s, "] = vint(", val_s, ");"));
+        } else {
+            std::string idx_s = fchk(*s.e2, ind);
+            std::string val_s = fchk(*s.e3, ind);
+            ln(ind, cat("bf_vset(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
+            ln(ind, cat("if (verr_pending()) return ", fkind == "f64" ? "0.0" : "0", ";"));
+        }
         break;
     case SK::Break:
         ln(ind, "break;");
@@ -1533,7 +2025,8 @@ std::set<std::string> Emitter::drop_recursive_fast(const std::map<std::string, F
 
 void Emitter::emit_fast_fn(const std::string &name) {
     const FnDecl &decl = *fast[name].decl;
-    fkind = fastkinds[name];
+    const std::string &rk = fastkinds[name];
+    fkind = (rk == "f64" || rk == "f64_dyn") ? "f64" : ((rk == "i64v" || rk == "i64v_dyn") ? "i64v" : rk);
     std::string ct = fkind == "f64" ? "double" : "int64_t";
     fvecvars = fastvec.count(name) ? fastvec[name] : std::set<std::string>();
     std::vector<std::string> names;
@@ -1604,12 +2097,15 @@ static bool returns_param(const std::vector<StmtP> &body, const std::set<std::st
 }
 
 void Emitter::collect_prog(const std::vector<StmtP> &prog) {
-    for (const auto &sp : prog)
-        if (is_top_kind(sp->k)) collect_top(*sp);
     for (const auto &sp : prog) {
-        if (is_top_kind(sp->k)) continue;
-        top_exe.push_back(sp.get());
-        if (sp->k == SK::Let || sp->k == SK::LetTmp) global_lets.insert(sp->a);
+        const Stmt &u = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body[0] : *sp;
+        if (is_top_kind(u.k)) collect_top(*sp);
+    }
+    for (const auto &sp : prog) {
+        const Stmt &u = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body[0] : *sp;
+        if (is_top_kind(u.k)) continue;
+        top_exe.push_back(&u);
+        if (u.k == SK::Let || u.k == SK::LetTmp) global_lets.insert(u.a);
     }
 }
 
@@ -1624,6 +2120,7 @@ void Emitter::collect_top(const Stmt &s) {
         // `extern packed struct`: no padding, 1-byte alignment. It has to reach
         // the typedef, or every field offset after the first one is wrong.
         if (s.opt1 && *s.opt1 == "packed") packed.insert(s.a);
+        if (s.opt1 && *s.opt1 == "union") unions.insert(s.a);
         return;
     case SK::ExportFn: {
         const FnDecl &f = s.fns[0];
@@ -1642,6 +2139,7 @@ void Emitter::collect_top(const Stmt &s) {
         e.name = s.ext.name;
         e.lib = s.ext.lib.value_or("");
         e.params = &s.ext.params;
+        e.effects = &s.ext.effects;
         e.ret = s.ext.ret;
         e.varargs = s.ext.varargs;
         e.checked = s.ext.checked;
@@ -1833,34 +2331,83 @@ const std::map<std::string, std::pair<std::string, std::string>> FFI_RANGE = {
     {"usize", {"0LL", "9223372036854775807LL"}},
 };
 
-// `"i64(i64,f64)"` -> ("i64", {"i64", "f64"}); throws when the literal is malformed.
-static std::pair<std::string, std::vector<std::string>> parse_sig(const Expr &node) {
-    if (node.k != EK::Str) throw EmitError("call: signature must be a string literal");
-    std::string text;
-    for (char c : node.a)
-        if (c != ' ') text.push_back(c);
-    size_t p = text.find('(');
-    if (p == std::string::npos || text.back() != ')')
-        throw EmitError("call: bad signature `" + text + "`");
-    std::string ret = text.substr(0, p);
-    std::string rest = text.substr(p + 1, text.size() - p - 2);
-    std::vector<std::string> params;
-    std::string cur;
-    for (char c : rest) {
-        if (c == ',') {
-            if (!cur.empty()) params.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(c);
+static std::string norm_plugin_slot(const std::string &raw) {
+    std::string s;
+    for (unsigned char c : raw)
+        if (!std::isspace(c)) s.push_back(static_cast<char>(c));
+    if (s == "ownptr" || s == "moveptr") return "own ptr";
+    if (s == "outptr") return "out ptr";
+    if (s == "&ptr" || s == "refptr") return "&ptr";
+    if (s.rfind("fn(", 0) == 0) {
+        while (true) {
+            std::string hit;
+            const std::pair<std::string, std::vector<std::string>> tbl[] = {
+                {"thread", {"same", "any"}}, {"reenter", {"yes", "no"}}
+            };
+            for (const auto &ent : tbl) {
+                for (const auto &v : ent.second) {
+                    std::string suf = ent.first + "(" + v + ")";
+                    if (s.size() >= suf.size() &&
+                        s.compare(s.size() - suf.size(), suf.size(), suf) == 0) {
+                        hit = suf;
+                        break;
+                    }
+                }
+                if (!hit.empty()) break;
+            }
+            if (hit.empty()) break;
+            s.erase(s.size() - hit.size());
         }
     }
-    if (!cur.empty()) params.push_back(cur);
+    return s;
+}
+
+// `"own ptr(&ptr,out ptr)"` -> ("own ptr", {"&ptr", "out ptr"}); throws when malformed.
+static std::pair<std::string, std::vector<std::string>> parse_sig(const Expr &node) {
+    if (node.k != EK::Str) throw EmitError("call: signature must be a string literal");
+    size_t lo = 0, hi = node.a.size();
+    while (lo < hi && std::isspace(static_cast<unsigned char>(node.a[lo]))) lo++;
+    while (hi > lo && std::isspace(static_cast<unsigned char>(node.a[hi - 1]))) hi--;
+    std::string raw = node.a.substr(lo, hi - lo);
+    auto bad = [&]() -> std::pair<std::string, std::vector<std::string>> {
+        std::string compact;
+        for (char c : node.a)
+            if (c != ' ') compact.push_back(c);
+        throw EmitError("call: bad signature `" + compact + "`");
+    };
+    size_t p = raw.find('(');
+    if (p == 0 || p == std::string::npos || raw.empty() || raw.back() != ')') return bad();
+    int pdepth = 0;
+    for (size_t i = p; i < raw.size(); i++) {
+        if (raw[i] == '(') pdepth++;
+        else if (raw[i] == ')') {
+            pdepth--;
+            if (pdepth == 0 && i + 1 != raw.size()) return bad();
+        }
+    }
+    if (pdepth != 0) return bad();
+    std::string ret = norm_plugin_slot(raw.substr(0, p));
+    std::string rest = raw.substr(p + 1, raw.size() - p - 2);
+    std::vector<std::string> params;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < rest.size(); i++) {
+        if (rest[i] == '(') depth++;
+        else if (rest[i] == ')') depth--;
+        else if (rest[i] == ',' && depth == 0) {
+            std::string piece = norm_plugin_slot(rest.substr(start, i - start));
+            if (!piece.empty()) params.push_back(piece);
+            start = i + 1;
+        }
+    }
+    std::string tail = norm_plugin_slot(rest.substr(start));
+    if (!tail.empty()) params.push_back(tail);
     return {ret, params};
 }
 
 // Methods that answer with a part of the receiver (an element): the part is lifted
 // out of the container before the temporary receiver is released.
-const std::set<std::string> PART_RESULT = {"min", "max", "first", "last", "pop", "get"};
+const std::set<std::string> PART_RESULT = {"min", "max", "first", "last", "get", "find"};
 
 // Methods that mutate the receiver and hand it back: the result is owned exactly
 // when the receiver was. `m.keys().sort()` is a container with no other name,
@@ -1871,7 +2418,8 @@ const std::set<std::string> FRESH_RESULT = {
     "split", "split_once", "join", "upper", "lower", "trim", "replace", "repeat",
     "chars", "lines", "zip", "chunks", "enumerate", "copy", "keys", "items",
     "vals", "sum", "index_of", "starts_with", "ends_with", "contains", "has",
-    "parse_int", "parse_float", "rev"};
+    "parse_int", "parse_float", "rev", "fold", "any", "all", "map", "filter",
+    "pop", "del", "slice"};
 // True when evaluating `e` can raise: it calls something, or it divides. The
 // emitter uses this to check between a failing operand and the operator that
 // would otherwise read the placeholder value it left behind.
@@ -1895,6 +2443,8 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
         if (e.a == "unwrap" || e.a == "Ok" || e.a == "Err" || e.a == "Some") return true;
         // `__at` is the desugared `a[i]`, which hands back an owned reference.
         if (e.a == "__at") return true;
+        if (e.kids.empty() && !e.a.empty() && e.a[0] >= 'A' && e.a[0] <= 'Z' &&
+            heap.count(LOCAL_BINDING_PREFIX + e.a)) return false;
         return heap.count(e.a) || HEAP_CALLS.count(e.a);
     // `x?` yields an owned reference for the same reason.
     case EK::Quest: return true;
@@ -1916,6 +2466,26 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
     default:
         return false;
     }
+}
+
+// Only ever a bool or a number: nothing to retain or release.
+static bool is_imm_expr(const Expr &e) {
+    switch (e.k) {
+    case EK::Num: case EK::Bool:
+        return true;
+    case EK::Un:
+        return e.a == "!";
+    case EK::Bin:
+        if (e.a == "&&" || e.a == "||") return is_imm_expr(*e.kids[0]) && is_imm_expr(*e.kids[1]);
+        return e.a == "==" || e.a == "!=" || e.a == "<" || e.a == "<=" || e.a == ">" || e.a == ">=";
+    default:
+        return false;
+    }
+}
+
+// `a && b`, `a || b` and `x or y` evaluate to one of their operands.
+static bool yields_operand(const Expr &e) {
+    return e.k == EK::Or || (e.k == EK::Bin && (e.a == "&&" || e.a == "||") && !is_imm_expr(e));
 }
 
 V Emitter::ex(const Expr &e) {
@@ -1940,8 +2510,18 @@ V Emitter::ex(const Expr &e) {
             auto a = out_addr(*e.kids[0], nullptr);
             return {a.first, a.second};
         }
+        if (!ub_floats.empty() && e.a == "-" && ubf_expr_ok(e)) {
+            if (ubf_may_raise(e)) {
+                std::string t = new_tmp("ubf");
+                return {{cat("double ", t, " = ", ubf_ex(e), ";"), err_check_line()}, cat("vfloat(", t, ")")};
+            }
+            return {{}, cat("vfloat(", ubf_ex(e), ")")};
+        }
         V x = ex(*e.kids[0]);
-        if (e.a == "!") return {x.pre, cat("vbool(!vis_true(", x.val, "))")};
+        if (e.a == "!") {
+            const std::string test = truth(*e.kids[0], x.val, x.pre);
+            return {x.pre, cat("vbool(!", test, ")")};
+        }
         return {x.pre, cat("vneg(", x.val, ")")};
     }
     case EK::Bin:
@@ -1951,19 +2531,14 @@ V Emitter::ex(const Expr &e) {
         V b = ex(*e.kids[1]);
         std::string t = new_tmp();
         std::vector<std::string> pre = a.pre;
-        pre.push_back(cat("Val ", t, " = (", a.val, ");"));
-        for (auto &p : b.pre) pre.push_back(p);
         // `pick_first([]) or 99` answers with the tag the call built or with the
         // fallback. Whichever it is, the binding that receives it owns one
-        // reference: the left side is released when the fallback wins, and the
-        // fallback is counted up front so both branches hand over one.
+        // reference: a left side that is a variable is retained, and the left side is
+        // released when the fallback wins.
+        pre.push_back(cat("Val ", t, " = (", own_operand(*e.kids[0], a.val), ");"));
+        for (auto &p : b.pre) pre.push_back(p);
         const std::string fb = keep(*e.kids[1], b.val);
-        const bool held = dec_able(*e.kids[0], heap_returns()) ||
-                          (e.kids[0]->k == EK::Call && may_raise(*e.kids[0]));
-        if (held)
-            pre.push_back(cat("if (vor_fb(", t, ")) { vdrop_temp(", t, "); ", t, " = (", fb, "); }"));
-        else
-            pre.push_back(cat("if (vor_fb(", t, ")) { ", t, " = (", fb, "); }"));
+        pre.push_back(cat("if (vor_fb(", t, ")) { vdrop_temp(", t, "); ", t, " = (", fb, "); }"));
         return {pre, t};
     }
     case EK::Quest: {
@@ -1993,7 +2568,7 @@ V Emitter::ex(const Expr &e) {
         }
         a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { vraise(\"no field ",
                             fname, "\"); ", bail, " }"));
-        a.pre.push_back(cat("Val *", t, " = map_get((", recv, ").as.map, \"", fname, "\");"));
+        a.pre.push_back(cat("Val *", t, " = map_get_ic((", recv, ").as.map, \"", fname, "\", ", next_fic(), ");"));
         a.pre.push_back(cat("if (!", t, ") { vraise(\"no field ", fname, "\"); ", bail, " }"));
         if (owned) {
             std::string v = new_tmp("v");
@@ -2071,24 +2646,202 @@ std::string Emitter::path_ref(const std::string &path) {
     parts.push_back(cur);
     std::string e = var_ref(parts[0]);
     for (size_t i = 1; i < parts.size(); i++)
-        e = cat("vfield(", e, ", \"", clit(parts[i]), "\")");
+        e = cat("vfield_ic(", e, ", \"", clit(parts[i]), "\", ", next_fic(), ")");
     return e;
+}
+
+bool Emitter::ub_expr_ok(const Expr &e, const std::set<std::string> &cand) const {
+    if (cand.empty()) return false;
+    switch (e.k) {
+    case EK::Num: return !e.is_float;
+    case EK::Var: return cand.count(e.a) > 0;
+    case EK::Un: return e.a == "-" && ub_expr_ok(*e.kids[0], cand);
+    case EK::Bin:
+        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%") &&
+               ub_expr_ok(*e.kids[0], cand) && ub_expr_ok(*e.kids[1], cand);
+    default: return false;
+    }
+}
+
+bool Emitter::ub_may_raise(const Expr &e) const {
+    if (e.k == EK::Bin) {
+        if (e.a == "/" || e.a == "%") return true;
+        return ub_may_raise(*e.kids[0]) || ub_may_raise(*e.kids[1]);
+    }
+    if (e.k == EK::Un) return ub_may_raise(*e.kids[0]);
+    return false;
+}
+
+std::string Emitter::ub_ex(const Expr &e) const {
+    switch (e.k) {
+    case EK::Num: return clit64(e.i);
+    case EK::Var: return cat("ub_", cname(e.a));
+    case EK::Un: return cat("((int64_t)(0ULL - (uint64_t)(", ub_ex(*e.kids[0]), ")))");
+    case EK::Bin: {
+        std::string a = ub_ex(*e.kids[0]);
+        std::string b = ub_ex(*e.kids[1]);
+        if (e.a == "/") return cat("vub_div(", a, ", ", b, ")");
+        if (e.a == "%") return cat("vub_mod(", a, ", ", b, ")");
+        return cat("((int64_t)((uint64_t)(", a, ") ", e.a, " (uint64_t)(", b, ")))");
+    }
+    default: throw EmitError("ub node");
+    }
+}
+
+bool Emitter::ub_int_sub(const Expr &e) const {
+    switch (e.k) {
+    case EK::Num: return !e.is_float;
+    case EK::Var: return ub_ints.count(e.a) > 0;
+    case EK::Un: return e.a == "-" && ub_int_sub(*e.kids[0]);
+    case EK::Bin:
+        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%") &&
+               ub_int_sub(*e.kids[0]) && ub_int_sub(*e.kids[1]);
+    default: return false;
+    }
+}
+
+bool Emitter::ubf_expr_ok(const Expr &e, const std::set<std::string> &cand) const {
+    if (cand.empty()) return false;
+    switch (e.k) {
+    case EK::Num: return e.is_float;
+    case EK::Var: return cand.count(e.a) > 0;
+    case EK::Un: return e.a == "-" && ubf_expr_ok(*e.kids[0], cand);
+    case EK::Bin: {
+        if (e.a != "+" && e.a != "-" && e.a != "*" && e.a != "/" && e.a != "%") return false;
+        bool lf = ubf_expr_ok(*e.kids[0], cand);
+        bool rf = ubf_expr_ok(*e.kids[1], cand);
+        bool li = ub_int_sub(*e.kids[0]);
+        bool ri = ub_int_sub(*e.kids[1]);
+        return (lf && (rf || ri)) || (rf && li);
+    }
+    default: return false;
+    }
+}
+
+bool Emitter::ubf_may_raise(const Expr &e) const {
+    if (ub_int_sub(e)) return ub_may_raise(e);
+    if (e.k == EK::Bin) {
+        if (e.a == "/" || e.a == "%") return true;
+        return ubf_may_raise(*e.kids[0]) || ubf_may_raise(*e.kids[1]);
+    }
+    if (e.k == EK::Un) return ubf_may_raise(*e.kids[0]);
+    return false;
+}
+
+std::string Emitter::ubf_ex(const Expr &e) const {
+    if (ub_int_sub(e)) return cat("((double)(", ub_ex(e), "))");
+    switch (e.k) {
+    case EK::Num: return repr_f64(e.f);
+    case EK::Var: return cat("ubf_", cname(e.a));
+    case EK::Un: return cat("(-(", ubf_ex(*e.kids[0]), "))");
+    case EK::Bin: {
+        std::string a = ubf_ex(*e.kids[0]);
+        std::string b = ubf_ex(*e.kids[1]);
+        if (e.a == "/") return cat("vub_fdiv(", a, ", ", b, ")");
+        if (e.a == "%") return cat("vub_fmod(", a, ", ", b, ")");
+        return cat("((", a, ") ", e.a, " (", b, "))");
+    }
+    default: throw EmitError("ubf node");
+    }
+}
+
+std::string Emitter::ubf_cmp_c(const std::string &op, const std::string &a, const std::string &b) const {
+    if (op == "==" || op == "!=") return cat("(", a, ") ", op, " (", b, ")");
+    int code = op == "<" ? 0 : (op == "<=" ? 1 : (op == ">" ? 2 : 3));
+    return cat("vub_fcmp(", a, ", ", b, ", ", code, ")");
 }
 
 V Emitter::ex_bin(const Expr &e) {
     const std::string &op = e.a;
     if (op == "&&" || op == "||") {
+        // The result is one operand, chosen at run time, and whoever receives it owns it
+        // either way: a variable is retained, and a fresh left value is released when the
+        // right one replaces it. Taking the operand as an alias freed it with the result.
         V a = ex(*e.kids[0]);
         V b = ex(*e.kids[1]);
         std::string t = new_tmp();
         std::vector<std::string> pre = a.pre;
-        pre.push_back(cat("Val ", t, " = (", a.val, ");"));
+        pre.push_back(cat("Val ", t, " = (", own_operand(*e.kids[0], a.val), ");"));
         pre.push_back(op == "&&" ? cat("if (vis_true(", t, ")) {")
                                  : cat("if (!vis_true(", t, ")) {"));
         for (auto &p : b.pre) pre.push_back("  " + p);
-        pre.push_back(cat("  ", t, " = (", b.val, ");"));
+        if (!is_imm_expr(*e.kids[0])) pre.push_back(cat("  vdrop_temp(", t, ");"));
+        pre.push_back(cat("  ", t, " = (", own_operand(*e.kids[1], b.val), ");"));
         pre.push_back("}");
         return {pre, t};
+    }
+    if ((op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") &&
+        e.kids.size() == 2 && e.kids[0]->k == EK::Idx && e.kids[0]->kids.size() == 2 &&
+        e.kids[0]->kids[0]->k == EK::Var &&
+        (e.kids[0]->kids[1]->k == EK::Var || e.kids[0]->kids[1]->k == EK::Num) &&
+        e.kids[1]->k == EK::Str && e.kids[1]->a.size() == 1 &&
+        static_cast<unsigned char>(e.kids[1]->a[0]) < 0x80) {
+        V base = ex(*e.kids[0]->kids[0]);
+        V index = ex(*e.kids[0]->kids[1]);
+        V ch = ex(*e.kids[1]);
+        if (base.pre.empty() && index.pre.empty() && ch.pre.empty()) {
+            const std::string fast = new_tmp("ascii_fast");
+            const std::string cmp = new_tmp("ascii_cmp");
+            const std::string result = new_tmp("ascii_result");
+            const std::string picked = new_tmp("ascii_char");
+            std::vector<std::string> pre{
+                cat("int ", fast, " = 0;"),
+                cat("int ", cmp, " = vstr_ascii_cmp(", base.val, ", ", index.val, ", ",
+                    static_cast<int>(static_cast<unsigned char>(e.kids[1]->a[0])), ", &", fast, ");"),
+                err_check_line(),
+                cat("Val ", result, ";"),
+                cat("if (", fast, ") {"),
+                cat("  ", result, " = vbool((", cmp, ") ", op, " 0);"),
+                "} else {",
+                cat("  Val ", picked, " = vat(", base.val, ", ", index.val, ");"),
+                cat("  ", err_check_line())
+            };
+            std::string fallback;
+            if (op == "==") fallback = cat("veq(", picked, ", ", ch.val, ")");
+            else if (op == "!=") fallback = cat("!veq(", picked, ", ", ch.val, ")");
+            else fallback = cat("vcmpt(", picked, ", ", ch.val, ", \"", op, "\") ", op, " 0");
+            pre.push_back(cat("  ", result, " = vbool(", fallback, ");"));
+            pre.push_back("}");
+            return {pre, result};
+        }
+    }
+    if (!ub_ints.empty() && ub_expr_ok(*e.kids[0]) && ub_expr_ok(*e.kids[1])) {
+        if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+            if (ub_may_raise(e)) {
+                std::string t = new_tmp("ub");
+                return {{cat("int64_t ", t, " = ", ub_ex(e), ";"), err_check_line()}, cat("vint(", t, ")")};
+            }
+            return {{}, cat("vint(", ub_ex(e), ")")};
+        }
+        if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+            if (ub_may_raise(*e.kids[0]) || ub_may_raise(*e.kids[1])) {
+                std::string ta = new_tmp("ub"), tb = new_tmp("ub");
+                return {{cat("int64_t ", ta, " = ", ub_ex(*e.kids[0]), ";"), err_check_line(),
+                         cat("int64_t ", tb, " = ", ub_ex(*e.kids[1]), ";"), err_check_line()},
+                        cat("vbool((", ta, ") ", op, " (", tb, "))")};
+            }
+            return {{}, cat("vbool((", ub_ex(*e.kids[0]), ") ", op, " (", ub_ex(*e.kids[1]), "))")};
+        }
+    }
+    if (!ub_floats.empty()) {
+        bool lf = ubf_expr_ok(*e.kids[0]);
+        bool rf = ubf_expr_ok(*e.kids[1]);
+        if ((op == "+" || op == "-" || op == "*" || op == "/" || op == "%") && ubf_expr_ok(e)) {
+            if (ubf_may_raise(e)) {
+                std::string t = new_tmp("ubf");
+                return {{cat("double ", t, " = ", ubf_ex(e), ";"), err_check_line()}, cat("vfloat(", t, ")")};
+            }
+            return {{}, cat("vfloat(", ubf_ex(e), ")")};
+        }
+        if ((op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") && lf && rf) {
+            if (ubf_may_raise(*e.kids[0]) || ubf_may_raise(*e.kids[1])) {
+                std::string ta = new_tmp("ubf"), tb = new_tmp("ubf");
+                return {{cat("double ", ta, " = ", ubf_ex(*e.kids[0]), ";"), err_check_line(),
+                         cat("double ", tb, " = ", ubf_ex(*e.kids[1]), ";"), err_check_line()},
+                        cat("vbool(", ubf_cmp_c(op, ta, tb), ")")};
+            }
+            return {{}, cat("vbool(", ubf_cmp_c(op, ubf_ex(*e.kids[0]), ubf_ex(*e.kids[1])), ")")};
+        }
     }
     V a = ex(*e.kids[0]);
     V b = ex(*e.kids[1]);
@@ -2133,9 +2886,10 @@ V Emitter::ex_bin(const Expr &e) {
         const Expr *nodes[2] = {e.kids[0].get(), e.kids[1].get()};
         const std::string vals[2] = {a.val, b.val};
         for (int i = 0; i < 2; i++) {
-            auto tmp = container_tmp(vals[i]);
-            if (tmp && (nodes[i]->k == EK::VecLit || nodes[i]->k == EK::MapLit))
-                pre.push_back(cat("vrc_dec(vvecv(", *tmp, "));"));
+            auto k = nodes[i]->k;
+            bool is_ml = (k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
+            if ((container_tmp(vals[i]) || is_ml) && (k == EK::VecLit || k == EK::MapLit))
+                pre.push_back(cat("vrc_dec(", vals[i], ");"));
         }
         for (auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
         if (!drops.empty()) pre.push_back(err_check_line());
@@ -2144,15 +2898,15 @@ V Emitter::ex_bin(const Expr &e) {
     // A container built for a comparison is read, not consumed: `v == [1, 2, 3]`
     // left the literal's vector behind on every evaluation.
     std::vector<std::string> cdrops;
-    if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+    if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "in") {
         const Expr *nodes[2] = {e.kids[0].get(), e.kids[1].get()};
         const std::string vals[2] = {a.val, b.val};
         for (int i = 0; i < 2; i++) {
-            auto tmp = container_tmp(vals[i]);
-            if (!tmp) continue;
             auto k = nodes[i]->k;
+            bool is_ml = (k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
+            if (!container_tmp(vals[i]) && !is_ml) continue;
             if (k == EK::VecLit || k == EK::MapLit || k == EK::StructLit)
-                cdrops.push_back(cat("vrc_dec(vvecv(", *tmp, "));"));
+                cdrops.push_back(cat("vrc_dec(", vals[i], ");"));
         }
     }
     std::string res;
@@ -2164,6 +2918,8 @@ V Emitter::ex_bin(const Expr &e) {
     else if (op == "!=") res = cat("vbool(!veq(", a.val, ", ", b.val, "))");
     else if (op == "<" || op == ">" || op == "<=" || op == ">=")
         res = cat("vbool(vcmpt(", a.val, ", ", b.val, ", \"", op, "\") ", op, " 0)");
+    else if (op == "in")
+        res = cat("vbool(vcontains(", b.val, ", ", a.val, "))");
     if (!res.empty()) {
         if (drops.empty() && cdrops.empty()) return {pre, res};
         std::string t = new_tmp("v");
@@ -2177,23 +2933,11 @@ V Emitter::ex_bin(const Expr &e) {
         for (auto &d : cdrops) pre.push_back(d);
         return {pre, t};
     }
-    if (op == "in") {
-        // `x in [7, 11]` builds the container only to search it.
-        auto tmp = container_tmp(b.val);
-        const bool dropc = tmp && e.kids[1]->k == EK::VecLit;
-        std::string r = cat("vbool(vcontains(", b.val, ", ", a.val, "))");
-        if (drops.empty() && !dropc) return {pre, r};
-        std::string t = new_tmp("v");
-        pre.push_back(cat("Val ", t, " = (", r, ");"));
-        for (auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
-        pre.push_back(err_check_line());
-        if (dropc) pre.push_back(cat("vrc_dec(vvecv(", *tmp, "));"));
-        return {pre, t};
-    }
     throw EmitError("operator " + op);
 }
 
-const std::set<std::string> SIG_TYPES = {"i64", "f64", "str", "ptr", "none"};
+const std::set<std::string> SIG_TYPES = {"i64", "f32", "f64", "str", "ptr",
+                                         "own ptr", "&ptr", "out ptr", "none"};
 
 V Emitter::ex_plugin(const std::string &name, const ExprList &args) {
     if (name == "lib_open") {
@@ -2215,40 +2959,77 @@ V Emitter::ex_plugin(const std::string &name, const ExprList &args) {
         return {a.pre, cat("vlib_close(", a.val, ")")};
     }
     auto [ret_t, params] = parse_sig(*args[1]);
-    if (!SIG_TYPES.count(ret_t)) throw EmitError("call: unsupported return type `" + ret_t + "`");
-    for (const auto &t : params)
+    if (!SIG_TYPES.count(ret_t) || ret_t == "&ptr" || ret_t == "out ptr")
+        throw EmitError("call: unsupported return type `" + ret_t + "`");
+    for (const auto &t : params) {
+        if (t.rfind("fn(", 0) == 0 && t.find(")->") != std::string::npos) continue;
         if (!SIG_TYPES.count(t) || t == "none")
             throw EmitError("call: unsupported argument type `" + t + "`");
+    }
     if (args.size() - 2 != params.size())
         throw EmitError(cat("call: signature wants ", params.size(), " argument(s), got ",
                             args.size() - 2));
     V f = ex(*args[0]);
     std::vector<std::string> pre = f.pre;
     std::string cvals;
+    auto saved_out = out_binds;
+    out_binds.clear();
     for (size_t i = 0; i < params.size(); i++) {
-        V a = ex(*args[2 + i]);
-        for (auto &p : a.pre) pre.push_back(p);
+        const std::string &t = params[i];
+        const Expr &arg = *args[2 + i];
         if (!cvals.empty()) cvals += ", ";
-        if (params[i] == "f64") cvals += cat("(", a.val, ").as.fval");
-        else if (params[i] == "str") cvals += cat("(", a.val, ").as.str");
-        else if (params[i] == "ptr") cvals += cat("(void *)(intptr_t)(", a.val, ").as.ival");
+        if (t.rfind("fn(", 0) == 0) {
+            check_cb_arg(t, arg, "call", static_cast<int>(i) + 1);
+            cvals += cat("(void *)(intptr_t)brat_cb_", arg.a);
+            continue;
+        }
+        if (t == "out ptr" && arg.k == EK::Un && arg.a == "&") {
+            in_out_arg = true;
+            auto o = out_addr(*arg.kids[0], nullptr);
+            in_out_arg = false;
+            for (auto &p : o.first) pre.push_back(p);
+            cvals += o.second;
+            continue;
+        }
+        V a = ex(arg);
+        for (auto &p : a.pre) pre.push_back(p);
+        if (t == "f64") cvals += cat("(", a.val, ").as.fval");
+        else if (t == "f32") cvals += cat("(float)vnum(", a.val, ")");
+        else if (t == "str") cvals += cat("vstr_pin(", a.val, ")");
+        else if (t == "ptr" || t == "own ptr" || t == "&ptr" || t == "out ptr")
+            cvals += cat("(void *)(intptr_t)(", a.val, ").as.ival");
         else cvals += cat("(int64_t)(", a.val, ").as.ival");
     }
+    std::vector<std::string> fl = out_binds.empty() ? std::vector<std::string>{} : out_flush();
+    out_binds = std::move(saved_out);
     std::string plugin_owner = new_tmp("plugin_owner");
     std::string plugin_fn = new_tmp("plugin_fn");
+    auto canon_pslot = [](const std::string &s) -> std::string {
+        if (s == "own ptr" || s == "&ptr" || s == "out ptr" || s.rfind("fn(", 0) == 0)
+            return "ptr";
+        return s;
+    };
+    std::string canon_sig = canon_pslot(ret_t) + "(";
+    for (size_t i = 0; i < params.size(); i++) {
+        if (i) canon_sig += ",";
+        canon_sig += canon_pslot(params[i]);
+    }
+    canon_sig += ")";
     pre.push_back(err_check_line());
     pre.push_back(cat("bint ", plugin_owner, " = 0;"));
-    pre.push_back(cat("void *", plugin_fn, " = vplugin_acquire(", f.val, ", &",
-                      plugin_owner, ");"));
+    pre.push_back(cat("void *", plugin_fn, " = vplugin_acquire_sig(", f.val, ", &",
+                      plugin_owner, ", \"", canon_sig, "\");"));
     pre.push_back(err_check_line());
-    std::vector<std::string> release = {
-        cat("vplugin_release(", plugin_owner, ");"), err_check_line()
-    };
+    std::vector<std::string> release = fl;
+    release.push_back(cat("vplugin_release(", plugin_owner, ");"));
+    release.push_back(err_check_line());
     auto ctype = [](const std::string &t) -> std::string {
+        if (t.rfind("fn(", 0) == 0) return "void *";
         if (t == "i64") return "int64_t";
+        if (t == "f32") return "float";
         if (t == "f64") return "double";
         if (t == "str") return "const char *";
-        if (t == "ptr") return "void *";
+        if (t == "ptr" || t == "own ptr" || t == "&ptr" || t == "out ptr") return "void *";
         return "void";
     };
     std::string c_ret = ctype(ret_t);
@@ -2269,6 +3050,11 @@ V Emitter::ex_plugin(const std::string &name, const ExprList &args) {
         for (const auto &line : release) pre.push_back(line);
         return {pre, "vint(0)"};
     }
+    if (ret_t == "f32") {
+        pre.push_back(cat("float ", t_tmp, " = ", call_expr, ";"));
+        for (const auto &line : release) pre.push_back(line);
+        return {pre, cat("vfloat((double)", t_tmp, ")")};
+    }
     if (ret_t == "f64") {
         pre.push_back(cat("double ", t_tmp, " = ", call_expr, ";"));
         for (const auto &line : release) pre.push_back(line);
@@ -2282,7 +3068,7 @@ V Emitter::ex_plugin(const std::string &name, const ExprList &args) {
         for (const auto &line : release) pre.push_back(line);
         return {pre, result};
     }
-    if (ret_t == "ptr") {
+    if (ret_t == "ptr" || ret_t == "own ptr") {
         pre.push_back(cat("void *", t_tmp, " = ", call_expr, ";"));
         for (const auto &line : release) pre.push_back(line);
         return {pre, cat("vint((int64_t)(intptr_t)", t_tmp, ")")};
@@ -2374,11 +3160,12 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
         // A window over C records hands back the record, not its address: the
         // element the window declared is the layout to read it with.
         if (std::string se = slice_elem(*args[0]); structs.count(se)) {
-            std::string at = cat("vslice_at(", s.val, ", ", i.val, ")");
+            std::string sa = new_tmp("sa");
             std::string r = new_tmp("sr");
+            pre.push_back(cat("Val ", sa, " = vslice_at(", s.val, ", ", i.val, ");"));
             pre.push_back(cat("Val ", r, " = vunwind;"));
-            pre.push_back(cat("if (vptr_live(", at, ")) { ", r, " = ",
-                              c_struct_to_val(se, cat("(*(bf_", se, " *)(", at, ").as.ival)")),
+            pre.push_back(cat("if (vptr_live(", sa, ")) { ", r, " = ",
+                              c_struct_to_val(se, cat("(*(bf_", se, " *)(", sa, ").as.ival)")),
                               "; }"));
             return {pre, r};
         }
@@ -2436,6 +3223,20 @@ V Emitter::ex_maplit(const ExprList &kids) {
 
 V Emitter::ex_struct(const Expr &e) {
     std::string t = new_tmp("m");
+    std::set<std::string> uniq(e.names.begin(), e.names.end());
+    if (!e.names.empty() && uniq.size() == e.names.size()) {
+        int sid = shape_id(e.a, e.names);
+        std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid, "], \"",
+                                            clit(e.a), "\", _sk", sid, ", ",
+                                            static_cast<int>(e.names.size()), ");")};
+        for (size_t i = 0; i < e.names.size(); i++) {
+            const Expr &fv = *e.kids[i];
+            V f = ex(fv);
+            for (auto &p : f.pre) pre.push_back(p);
+            pre.push_back(cat(t, "->vals[", static_cast<int>(i), "] = ", keep(fv, f.val), ";"));
+        }
+        return {pre, cat("vstruct(", t, ")")};
+    }
     std::vector<std::string> pre = {cat("Map *", t, " = vmap(\"", clit(e.a), "\");")};
     for (size_t i = 0; i < e.names.size(); i++) {
         const Expr &fv = *e.kids[i];
@@ -2448,6 +3249,24 @@ V Emitter::ex_struct(const Expr &e) {
 
 V Emitter::args_vec(const ExprList &args) {
     std::string t = new_tmp("a");
+    size_t n = args.size();
+    if (n == 0) {
+        std::string sv = new_tmp("sv");
+        return {{cat("BStackVec ", sv, "; VSTACK_VEC_INIT(", sv, ", NULL, 0); Vec *", t, " = &", sv, ".vec;")}, t};
+    }
+    if (n <= 8) {
+        std::string sv = new_tmp("sv");
+        std::string ab = new_tmp("ab");
+        std::vector<std::string> pre = {cat("Val ", ab, "[", n, "]; BStackVec ", sv, "; VSTACK_VEC_INIT(", sv,
+                                            ", ", ab, ", ", n, "); Vec *", t, " = &", sv, ".vec;")};
+        for (const Expr *a : args) {
+            V v = ex(*a);
+            for (auto &p : v.pre) pre.push_back(p);
+            pre.push_back(cat(ab, "[", t, "->len++] = ", keep(*a, v.val), ";"));
+            pre.push_back(err_check_line());
+        }
+        return {pre, t};
+    }
     std::vector<std::string> pre = {cat("Vec *", t, " = vvec();")};
     for (const Expr *a : args) {
         V v = ex(*a);
@@ -2467,6 +3286,7 @@ void Emitter::emit_loop_drops(const StmtList &body, const std::string &ind) {
                 if (relet.count(name) && !seen.count(name)) {
                     seen.insert(name);
                     ln(ind, cat("vrelease(", cname(name), ");"));
+                    ln(ind, cat(cname(name), " = vnil();"));
                 }
             } else if (st->k == SK::If) {
                 walk(view(st->body));
@@ -2552,7 +3372,7 @@ std::set<std::string> Emitter::heap_returns() {
     }
     // Bodies that prove it, whatever the annotation claims. Two passes reach
     // the usual fixpoint: a helper used by a helper.
-    for (int pass = 0; pass < 3; pass++) {
+    for (;;) {
         std::set<std::string> grown = out_;
         for (const auto &[name, entry] : fns) {
             if (!entry.decl || entry.ctor) continue;
@@ -2563,13 +3383,21 @@ std::set<std::string> Emitter::heap_returns() {
         if (grown.size() == out_.size()) break;
         out_ = grown;
     }
-    // `Has(Ok(9))` builds a fresh tag in place of the call: counted as a
-    // borrow, the tag and everything inside it stayed allocated.
+    // Local closure calls can return any Val. Uppercase bare bindings are
+    // encoded as zero-argument calls too; mark them to keep those reads borrowed.
+    for (const auto &[name, _] : sym) {
+        out_.insert(name);
+        out_.insert(LOCAL_BINDING_PREFIX + name);
+    }
+    if (cap) {
+        for (const auto &name : cap->second) {
+            out_.insert(name);
+            out_.insert(LOCAL_BINDING_PREFIX + name);
+        }
+    }
+    // `Has(Ok(9))` builds a fresh tag in place of the call.
     for (const auto &[name, entry] : fns)
         if (entry.ctor) out_.insert(name);
-    // A callee that returns a parameter view hands back its own reference
-    // (`vrc_inc` at the return site, because the caller frees the argument
-    // vector), so the holder may release the result like any fresh value.
     return out_;
 }
 
@@ -2603,8 +3431,21 @@ V Emitter::read_only_call(const Expr &arg, const std::function<std::string(const
 V Emitter::part_of_temp(const V &a, const Expr &src, const std::string &open,
                         const std::string &close) {
     const std::string expr = cat(open, a.val, close);
+    if (!dec_able(src, heap_returns())) return {a.pre, expr};
     std::optional<std::string> t = owned_temp(src, a.val);
-    if (!dec_able(src, heap_returns()) || !t) return {a.pre, expr};
+    if (!t) {
+        if (src.k == EK::Call || src.k == EK::MCall ||
+            src.k == EK::Idx || src.k == EK::Quest) {
+            std::string hold = new_tmp("h");
+            std::string r = new_tmp("a");
+            std::vector<std::string> pre = a.pre;
+            pre.push_back(cat("Val ", hold, " = (", a.val, ");"));
+            pre.push_back(cat("Val ", r, " = ", open, hold, close, ";"));
+            pre.push_back(cat("vdrop_temp(", hold, ");"));
+            return {pre, r};
+        }
+        return {a.pre, expr};
+    }
     std::string r = new_tmp("a");
     std::vector<std::string> pre = a.pre;
     pre.push_back(cat("Val ", r, " = ", expr, ";"));
@@ -2612,11 +3453,175 @@ V Emitter::part_of_temp(const V &a, const Expr &src, const std::string &open,
     return {pre, r};
 }
 
+V Emitter::borrow_builtin(const std::string &c_name, const ExprList &args) {
+    std::vector<std::string> pre;
+    std::vector<std::string> cargs;
+    std::vector<std::string> drops;
+    std::vector<std::string> lits;
+    std::set<std::string> heap = heap_returns();
+    for (const auto &arg : args) {
+        V av = ex(*arg);
+        for (const auto &p : av.pre) pre.push_back(p);
+        if (auto d = owned_temp(*arg, av.val)) {
+            cargs.push_back(av.val);
+            drops.push_back(*d);
+        } else if (arg->k == EK::VecLit) {
+            cargs.push_back(av.val);
+            if (auto ct = container_tmp(av.val)) lits.push_back(*ct);
+        } else if (arg->k == EK::MapLit || arg->k == EK::StructLit) {
+            std::string h = new_tmp("h");
+            pre.push_back(cat("Val ", h, " = (", av.val, ");"));
+            cargs.push_back(h);
+            drops.push_back(h);
+        } else if ((arg->k == EK::Call || arg->k == EK::MCall ||
+                    arg->k == EK::Idx || arg->k == EK::Quest) &&
+                   dec_able(*arg, heap)) {
+            std::string h = new_tmp("h");
+            pre.push_back(cat("Val ", h, " = (", av.val, ");"));
+            cargs.push_back(h);
+            drops.push_back(h);
+        } else {
+            cargs.push_back(av.val);
+        }
+    }
+    std::string joined;
+    for (size_t i = 0; i < cargs.size(); ++i) {
+        if (i) joined += ", ";
+        joined += cargs[i];
+    }
+    std::string call = cat(c_name, "(", joined, ")");
+    if (!lits.empty()) {
+        std::string t = new_tmp("v");
+        pre.push_back(cat("Val ", t, " = (", call, ");"));
+        for (const auto &l : lits) pre.push_back(cat("vrc_dec(vvecv(", l, "));"));
+        call = t;
+    }
+    if (drops.empty()) return {pre, call};
+    std::string r = new_tmp("a");
+    pre.push_back(cat("Val ", r, " = ", call, ";"));
+    for (const auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
+    return {pre, r};
+}
+
 V Emitter::call_result(std::vector<std::string> pre, const std::string &vec, const std::string &call) {
     std::string t = new_tmp("c");
     pre.push_back(cat("Val ", t, " = (", call, ");"));
-    pre.push_back(cat("vrc_dec(vvecv(", vec, "));"));
+    pre.push_back(cat("vargs_drop(", vec, ");"));
     return {pre, t};
+}
+
+V Emitter::direct_call_result(
+    const ExprList &args,
+    const std::function<std::string(const std::vector<std::string> &)> &call) {
+    std::vector<std::string> pre, vals, held;
+    const auto heap = heap_returns();
+    std::vector<Names> later_moves(args.size());
+    Names future;
+    for (size_t i = args.size(); i > 0; i--) {
+        const size_t at = i - 1;
+        later_moves[at] = future;
+        std::function<void(const Expr &)> scan = [&](const Expr &e) {
+            if (e.k == EK::Move && !e.kids.empty() && e.kids[0]->k == EK::Var)
+                future.insert(e.kids[0]->a);
+            for (const auto &kid : e.kids) scan(*kid);
+        };
+        scan(*args[at]);
+    }
+
+    const size_t start = call_cleanup.size();
+    try {
+        for (size_t i = 0; i < args.size(); i++) {
+            const Expr &node = *args[i];
+            V value = ex(node);
+            for (const auto &line : value.pre) pre.push_back(line);
+            bool owned = dec_able(node, heap);
+            if (!owned && node.k == EK::Move && !node.kids.empty() &&
+                node.kids[0]->k == EK::Var && sym.count(node.kids[0]->a))
+                owned = true;
+
+            bool stable = false;
+            if (node.k == EK::Var) {
+                auto it = sym.find(node.a);
+                const bool scalar = scalar_vars.count(node.a) || ub_ints.count(node.a) || ub_floats.count(node.a);
+                stable = scalar || (it != sym.end() && (it->second.own == Own::Owned || it->second.own == Own::Copy) &&
+                                    !global_lets.count(node.a) && !(cap && cap->second.count(node.a)));
+                stable = stable && !later_moves[i].count(node.a);
+            }
+            const bool no_raise = node.k == EK::Num || node.k == EK::Bool || node.k == EK::None ||
+                                  node.k == EK::Str || node.k == EK::RStr || node.k == EK::Var ||
+                                  (node.k == EK::Move && !node.kids.empty() && node.kids[0]->k == EK::Var);
+            const bool literal = node.k == EK::Num || node.k == EK::Bool || node.k == EK::None ||
+                                 node.k == EK::Str || node.k == EK::RStr;
+            if (value.pre.empty() && (literal || (node.k == EK::Var && stable))) {
+                vals.push_back(value.val);
+                continue;
+            }
+
+            std::string val = new_tmp("da");
+            pre.push_back(cat("Val ", val, " = (", value.val, ");"));
+            if (owned) {
+                held.push_back(val);
+                call_cleanup.push_back(val);
+            } else if (!stable) {
+                pre.push_back(cat("vrc_inc(", val, ");"));
+                held.push_back(val);
+                call_cleanup.push_back(val);
+            }
+            if (!no_raise) pre.push_back(err_check_line());
+            vals.push_back(val);
+        }
+        std::string result = new_tmp("c");
+        pre.push_back(cat("Val ", result, " = (", call(vals), ");"));
+        for (const auto &value : held) pre.push_back(cat("vdrop_temp(", value, ");"));
+        V out{pre, result};
+        call_cleanup.resize(start);
+        return out;
+    } catch (...) {
+        call_cleanup.resize(start);
+        throw;
+    }
+}
+
+bool Emitter::raw_i64_arg(const Expr &e, std::string &out) const {
+    if (e.k == EK::Num && !e.is_float) {
+        out = clit64(e.i);
+        return true;
+    }
+    if (e.k == EK::Var && ub_ints.count(e.a)) {
+        out = cat("ub_", cname(e.a));
+        return true;
+    }
+    return false;
+}
+
+bool Emitter::direct_fast_call(const std::string &name, const ExprList &args, V &out) {
+    if (args.size() > 4) return false;
+    auto kind = fastkinds.find(name);
+    auto fn = fastc.find(name);
+    if (kind == fastkinds.end() || kind->second != "i64" || fn == fastc.end()) return false;
+
+    std::vector<std::string> raw;
+    raw.reserve(args.size());
+    for (const Expr *arg : args) {
+        std::string value;
+        if (!raw_i64_arg(*arg, value)) return false;
+        raw.push_back(std::move(value));
+    }
+    std::string call = cat(fn->second, "(");
+    for (size_t i = 0; i < raw.size(); i++) {
+        if (i) call += ", ";
+        call += raw[i];
+    }
+    call += ")";
+    bool ret_bool = false;
+    auto ret = fn_ret.find(name);
+    if (ret != fn_ret.end() && ret->second && *ret->second == "bool") ret_bool = true;
+    std::string value = ret_bool ? cat("vbool((", call, ") != 0)") : cat("vint(", call, ")");
+    std::string result = new_tmp("c");
+    std::vector<std::string> pre = {cat("Val ", result, " = ", value, ";")};
+    if (fails.count(name)) pre.push_back(err_check_line());
+    out = {std::move(pre), result};
+    return true;
 }
 
 void Emitter::need_arity(const ExprList &args, size_t n, const std::string &name) {
@@ -2671,7 +3676,7 @@ V Emitter::ex_dotted(const std::string &name, const ExprList &args) {
         V a = args_vec(args);
         std::vector<std::string> pre = o.pre;
         for (auto &p : a.pre) pre.push_back(p);
-        return call_result(pre, a.val, cat("vcall_method(", o.val, ", \"", clit(meth), "\", ", a.val, ")"));
+        return call_result(pre, a.val, cat("vcall_method_ic(", o.val, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")"));
     }
     if (upper && parts.size() == 2) {
         auto it = fns.find(head);
@@ -2680,7 +3685,7 @@ V Emitter::ex_dotted(const std::string &name, const ExprList &args) {
             std::string base = tag == "none" ? "vnil()" : cat("vtagv(\"", clit(tag), "\", vvec())");
             V a = args_vec(args);
             return call_result(a.pre, a.val,
-                               cat("vcall_method(", base, ", \"", clit(meth), "\", ", a.val, ")"));
+                               cat("vcall_method_ic(", base, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")"));
         }
         std::string key = head + "." + meth;
         auto kt = fns.find(key);
@@ -2689,6 +3694,16 @@ V Emitter::ex_dotted(const std::string &name, const ExprList &args) {
             if (!params.empty() && params[0].name == "self")
                 throw EmitError(key + " needs instance, use value.method()");
             std::vector<const Expr *> padded = pad_defaults(params, args, key);
+            if (padded.size() <= 4) {
+                V raw;
+                if (direct_fast_call(key, padded, raw)) return raw;
+                const std::string target = direct_cfn("meth:" + key);
+                return direct_call_result(padded, [target](const std::vector<std::string> &vals) {
+                    std::string call = cat(target, "(NULL");
+                    for (const auto &value : vals) call += cat(", ", value);
+                    return call + ")";
+                });
+            }
             V a = args_vec(padded);
             return call_result(a.pre, a.val, cat(cfn("meth:" + key), "(NULL, ", a.val, ")"));
         }
@@ -2699,7 +3714,7 @@ V Emitter::ex_dotted(const std::string &name, const ExprList &args) {
     V a = args_vec(args);
     std::vector<std::string> pre = o.pre;
     for (auto &p : a.pre) pre.push_back(p);
-    return call_result(pre, a.val, cat("vcall_method(", o.val, ", \"", clit(meth), "\", ", a.val, ")"));
+    return call_result(pre, a.val, cat("vcall_method_ic(", o.val, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")"));
 }
 
 std::vector<const Expr *> Emitter::pad_defaults(const std::vector<Param> &params,
@@ -2726,8 +3741,19 @@ V Emitter::ex_direct(const std::string &name, std::vector<const Expr *> args) {
         return ex_tag(entry.ctor_tag, args);
     }
     args = pad_defaults(entry.decl->params, args, name);
+    const std::string key = "fn:" + fn_key(name);
+    if (args.size() <= 4) {
+        V raw;
+        if (direct_fast_call(name, args, raw)) return raw;
+        const std::string target = direct_cfn(key);
+        return direct_call_result(args, [target](const std::vector<std::string> &vals) {
+            std::string call = cat(target, "(NULL");
+            for (const auto &value : vals) call += cat(", ", value);
+            return call + ")";
+        });
+    }
     V a = args_vec(args);
-    return call_result(a.pre, a.val, cat(cfn("fn:" + fn_key(name)), "(NULL, ", a.val, ")"));
+    return call_result(a.pre, a.val, cat(cfn(key), "(NULL, ", a.val, ")"));
 }
 
 V Emitter::ex_vcall(const std::string &name, const ExprList &args) {
@@ -2747,12 +3773,27 @@ V Emitter::ex_mcall(const Expr &e) {
         obj_owned = mk_var(obj->a);
         obj = obj_owned.get();
     }
-    if ((meth == "map" || meth == "filter") && args.size() == 1)
-        return ex_mapfilter(*obj, meth, args[0]);
-    if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1)
-        return ex_hof(*obj, meth, args[0], nullptr);
-    if (meth == "fold" && args.size() == 2) return ex_hof(*obj, meth, args[1], args[0]);
     if (meth == "sort_by" && args.size() == 1) return ex_hof(*obj, meth, args[0], nullptr);
+    if (obj->k == EK::Call && obj->kids.empty() && !obj->a.empty() &&
+        obj->a.find('.') == std::string::npos && obj->a[0] >= 'A' && obj->a[0] <= 'Z' &&
+        !sym.count(obj->a) && !(cap && cap->second.count(obj->a))) {
+        // `Type.make(x)`: an `impl` function that does not take `self`. The bare
+        // uppercase name parses as a zero-argument call, so name_path() below
+        // does not see a path. Only rewrite when the `impl` declares the name
+        // and wants no receiver, or `Red.code()` would stop dispatching on the
+        // variant. Both checkers accept the call, so failing here is a backend
+        // disagreement (F-033).
+        auto it = fns.find(obj->a + "." + meth);
+        if (it != fns.end() && !it->second.ctor && it->second.decl) {
+            // ex_dotted() emits this under the `meth:` key the body is defined
+            // with, and answers a method that wants a receiver with `needs
+            // instance`. Going through mk_call() instead would ask for
+            // `fn:Type.name`, which is forward declared and never defined.
+            // `Red.code()` does not come here: the key is `Color.code`, so the
+            // receiver is still built and dispatched on its variant.
+            return ex_dotted(obj->a + "." + meth, args);
+        }
+    }
     auto path = name_path(*obj);
     if (path && !sym.count(head_of(*path)) && !(cap && cap->second.count(head_of(*path)))) {
         // Static path: the callee is resolved by name, so no receiver storage is read.
@@ -2760,6 +3801,11 @@ V Emitter::ex_mcall(const Expr &e) {
         for (const Expr *a : args) call_args.push_back(clone(*a));
         owned.push_back(mk_call(*path + "." + meth, std::move(call_args)));
         return ex(*owned.back());
+    }
+    if (!cap && !user_meths.count(meth) &&
+        (((meth == "map" || meth == "filter") && args.size() == 1 && fusible_fnlit(args[0], 1)) ||
+         (meth == "fold" && args.size() == 2 && fusible_fnlit(args[1], 2)))) {
+        return ex_fused_stream(*obj, meth, args);
     }
     V o = ex(*obj);
     // `"a,b".split(",")` builds a container nothing else names: the receiver is
@@ -2780,6 +3826,12 @@ V Emitter::ex_mcall(const Expr &e) {
         res.val = t;
         return res;
     };
+    if ((meth == "map" || meth == "filter") && args.size() == 1)
+        return done(ex_mapfilter(*obj, meth, args[0], &o));
+    if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1)
+        return done(ex_hof(*obj, meth, args[0], nullptr, &o));
+    if (meth == "fold" && args.size() == 2)
+        return done(ex_hof(*obj, meth, args[1], args[0], &o));
     bool direct = (VBUILTIN_DIRECT.count(meth) || (STRVEC_METH.count(meth) && MAP_METH.count(meth))) &&
                   !user_meths.count(meth);
     if (direct) {
@@ -2795,7 +3847,7 @@ V Emitter::ex_mcall(const Expr &e) {
     V a = args_vec(args);
     std::vector<std::string> pre = o.pre;
     for (auto &p : a.pre) pre.push_back(p);
-    return done(call_result(pre, a.val, cat("vcall_method(", o.val, ", \"", clit(meth), "\", ", a.val, ")")));
+    return done(call_result(pre, a.val, cat("vcall_method_ic(", o.val, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")")));
 }
 
 V Emitter::ex_map_meth(const std::string &so, const std::vector<std::string> &po, const std::string &meth,
@@ -2851,15 +3903,15 @@ V Emitter::release_lit_args(const std::vector<std::string> &pre, const ExprList 
     for (size_t i = 0; i < nodes.size() && i < vals.size(); i++) {
         const Expr *n = nodes[i];
         if (n->k != EK::VecLit && n->k != EK::MapLit && n->k != EK::StructLit) continue;
-        auto tmp = container_tmp(vals[i]);
-        if (tmp) lits.push_back(*tmp);
+        bool is_ml = (n->k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
+        if (container_tmp(vals[i]) || is_ml) lits.push_back(vals[i]);
     }
     if (lits.empty()) return {pre, call};
     V out;
     out.pre = pre;
     std::string t = new_tmp("v");
     out.pre.push_back(cat("Val ", t, " = (", call, ");"));
-    for (auto &l : lits) out.pre.push_back(cat("vrc_dec(vvecv(", l, "));"));
+    for (auto &l : lits) out.pre.push_back(cat("vrc_dec(", l, ");"));
     out.val = t;
     return out;
 }
@@ -2880,20 +3932,17 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
         if (meth == "ins") cargs[1] = keep(*args[1], cargs[1]);
         std::string joined;
         for (auto &c : cargs) joined += ", " + c;
+        if (meth == "ins") return {pre, cat(fn, "(", so, joined, ")")};
         return release_lit_args(pre, args, cargs, cat(fn, "(", so, joined, ")"));
     }
     if (meth == "split") {
         if (args.size() > 1) throw EmitError("split arity");
-        if (args.empty()) {
-            std::vector<std::string> pre = po;
-            pre.push_back("Vec *_sp = vvec();");
-            return {pre, cat("vsplit(", so, ", vvecv(_sp))")};
-        }
+        if (args.empty()) return {po, cat("vsplit_ws(", so, ")")};
         V a = ex(*args[0]);
         std::vector<std::string> pre = po;
         for (auto &p : a.pre) pre.push_back(p);
-        pre.push_back(cat("if ((", a.val, ").tag == V_STR && !(", a.val,
-                          ").as.str[0]) { vraise(\"empty separator\"); ", err_bail(), " }"));
+        pre.push_back(cat("if ((", a.val, ").tag == V_STR && vstr_empty(", a.val,
+                          ")) { vraise(\"empty separator\"); ", err_bail(), " }"));
         return {pre, cat("vsplit(", so, ", ", a.val, ")")};
     }
     if (meth == "lines") {
@@ -2953,8 +4002,9 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
     throw EmitError("method " + meth);
 }
 
-V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, const Expr *first) {
-    V o = ex(obj);
+V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, const Expr *first,
+                  const V *recv) {
+    V o = recv ? *recv : ex(obj);
     const FnDecl *entry = nullptr;
     if (arg->k == EK::Var) {
         auto it = fns.find(arg->a);
@@ -2965,16 +4015,12 @@ V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, con
     if (entry) {
         int code = fn_code("fn:" + arg->a);
         std::string t = new_tmp("c");
-        int n = tmp;
-        pre.push_back(cat("Vec *_cb", n, " = vvec();"));
-        pre.push_back(cat("vec_push(_cb", n, ", vint(", code, "));"));
-        pre.push_back(cat("vec_push(_cb", n, ", vstruct(vmap(\"\")));"));
-        pre.push_back(cat("Val ", t, " = vtagv(\"closure\", _cb", n, ");"));
+        pre.push_back(cat("Val ", t, " = vclosure0(", code, ");"));
         fnv = t;
     } else {
         V a = ex(*arg);
         for (auto &p : a.pre) pre.push_back(p);
-        fnv = a.val;
+        fnv = keep(*arg, a.val);
     }
     if (first) {
         V f = ex(*first);
@@ -2987,8 +4033,9 @@ V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, con
     return {pre, cat("vsort_by(", o.val, ", ", fnv, ")")};
 }
 
-V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *arg) {
-    V o = ex(obj);
+V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *arg,
+                        const V *recv) {
+    V o = recv ? *recv : ex(obj);
     const FnDecl *entry = nullptr;
     if (arg->k == EK::Var) {
         auto it = fns.find(arg->a);
@@ -2997,12 +4044,8 @@ V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *ar
     if (entry) {
         int code = fn_code("fn:" + arg->a);
         std::string t = new_tmp("c");
-        int n = tmp;
         std::vector<std::string> pre = o.pre;
-        pre.push_back(cat("Vec *_cb", n, " = vvec();"));
-        pre.push_back(cat("vec_push(_cb", n, ", vint(", code, "));"));
-        pre.push_back(cat("vec_push(_cb", n, ", vstruct(vmap(\"\")));"));
-        pre.push_back(cat("Val ", t, " = vtagv(\"closure\", _cb", n, ");"));
+        pre.push_back(cat("Val ", t, " = vclosure0(", code, ");"));
         return {pre, cat("vmap_with(", o.val, ", ", t, ", \"", clit(meth), "\")")};
     }
     V a = ex(*arg);
@@ -3013,44 +4056,403 @@ V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *ar
     return {pre, cat("vmap_with(", o.val, ", ", keep(*arg, a.val), ", \"", clit(meth), "\")")};
 }
 
+bool Emitter::fusible_expr(const Expr &e, const std::set<std::string> &pset) const {
+    switch (e.k) {
+    case EK::Num:
+    case EK::Bool:
+    case EK::RStr:
+    case EK::None:
+        return true;
+    case EK::Str:
+        for (const auto &[ck, cv] : split_interp(e.a)) {
+            if (ck == "var" && !pset.count(cv) && (!sym.count(cv) || global_lets.count(cv)))
+                return false;
+        }
+        return true;
+    case EK::Var:
+        return pset.count(e.a) > 0 || (sym.count(e.a) > 0 && !global_lets.count(e.a));
+    case EK::Un:
+        return (e.a == "-" || e.a == "!") && !e.kids.empty() && fusible_expr(*e.kids[0], pset);
+    case EK::Bin:
+        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%" ||
+                e.a == "==" || e.a == "!=" || e.a == "<" || e.a == ">" ||
+                e.a == "<=" || e.a == ">=" || e.a == "&&" || e.a == "||") &&
+               e.kids.size() == 2 && fusible_expr(*e.kids[0], pset) && fusible_expr(*e.kids[1], pset);
+    case EK::Idx:
+        return e.kids.size() == 2 && fusible_expr(*e.kids[0], pset) && fusible_expr(*e.kids[1], pset);
+    case EK::Field:
+        return !e.kids.empty() && fusible_expr(*e.kids[0], pset);
+    case EK::Call: {
+        const std::string &cn = e.a;
+        auto it = fns.find(cn);
+        bool ok_fn = (cn == "str" || cn == "len" || cn == "int" || cn == "float" || cn == "abs") ||
+                     (it != fns.end() && !it->second.ctor && it->second.decl != nullptr &&
+                      !pset.count(cn) && !sym.count(cn));
+        if (!ok_fn) return false;
+        for (const auto &a : e.kids)
+            if (!fusible_expr(*a, pset)) return false;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+bool Emitter::fusible_fnlit(const Expr *fn_node, size_t arity) const {
+    if (!fn_node || fn_node->k != EK::Closure || !fn_node->fn || fn_node->fn->name.has_value())
+        return false;
+    const auto &params = fn_node->fn->params;
+    const auto &body = fn_node->fn->body;
+    if (params.size() != arity || body.size() != 1 || !body[0]) return false;
+    std::set<std::string> pset;
+    for (const auto &p : params) {
+        if (p.mode != Mode::Ref || p.def) return false;
+        pset.insert(p.name);
+    }
+    if (body[0]->k != SK::Return || !body[0]->e1) return false;
+    return fusible_expr(*body[0]->e1, pset);
+}
+
+V Emitter::ex_fused_stream(const Expr &obj, const std::string &meth, const ExprList &args) {
+    const Expr *fold_init = nullptr;
+    const Expr *fold_fn = nullptr;
+    const Expr *cur_obj = &obj;
+    std::vector<std::pair<std::string, const Expr *>> stages;
+    if (meth == "fold") {
+        fold_init = args[0];
+        fold_fn = args[1];
+    } else {
+        stages.push_back({meth, args[0]});
+    }
+    while (cur_obj->k == EK::MCall && !cur_obj->kids.empty()) {
+        const Expr *sub_obj = cur_obj->kids[0].get();
+        const std::string &sub_meth = cur_obj->b;
+        auto spath = name_path(*sub_obj);
+        if (spath && !sym.count(head_of(*spath))) break;
+        if ((sub_meth == "map" || sub_meth == "filter") && !user_meths.count(sub_meth) &&
+            cur_obj->kids.size() == 2 && fusible_fnlit(cur_obj->kids[1].get(), 1)) {
+            stages.push_back({sub_meth, cur_obj->kids[1].get()});
+            cur_obj = sub_obj;
+        } else {
+            break;
+        }
+    }
+    std::reverse(stages.begin(), stages.end());
+    const std::string first_meth = stages.empty() ? "fold" : stages[0].first;
+    V o = ex(*cur_obj);
+    std::vector<std::string> po = o.pre;
+    std::string so = o.val;
+    std::string base_recv;
+    const auto hr = heap_returns();
+    if (dec_able(*cur_obj, hr)) {
+        base_recv = new_tmp("r");
+        po.push_back(cat("Val ", base_recv, " = (", so, ");"));
+        so = base_recv;
+    }
+    std::string vec_var, out_var;
+    if (fold_fn) {
+        V iv = ex(*fold_init);
+        for (const auto &l : iv.pre) po.push_back(l);
+        out_var = new_tmp("fa");
+        po.push_back(cat("Val ", out_var, " = (", keep(*fold_init, iv.val), ");"));
+    }
+    std::string w_var = new_tmp("fw");
+    po.push_back(cat("Vec *", w_var, " = vvec_of_m(", so, ", \"", clit(first_meth), "\");"));
+    std::vector<std::string> err_drops;
+    if (!base_recv.empty()) err_drops.push_back(base_recv);
+    if (fold_fn) err_drops.push_back(out_var);
+    po.push_back(err_check_line(err_drops));
+    if (!fold_fn) {
+        vec_var = new_tmp("fo");
+        out_var = new_tmp("fv");
+        po.push_back(cat("Vec *", vec_var, " = vvec();"));
+        po.push_back(cat("Val ", out_var, " = vvecv(", vec_var, ");"));
+    }
+    std::string idx_var = new_tmp("fi");
+    std::string cur_var = new_tmp("fx");
+    std::string err_lbl = "__ferr" + cur_var;
+    po.push_back(cat("Val ", cur_var, " = vnil();"));
+
+    std::vector<std::string> loop_lines;
+    loop_lines.push_back(cat("for (int64_t ", idx_var, " = 0; ", idx_var, " < ", w_var, "->len; ", idx_var, "++) {"));
+    loop_lines.push_back(cat("  ", cur_var, " = vrc_inc(", w_var, "->items[", idx_var, "]);"));
+
+    auto saved_goto = err_goto;
+    auto saved_base = err_base;
+    err_goto = err_lbl;
+    err_base.reset();
+
+    for (const auto &[smeth, sfn] : stages) {
+        const std::string &pname = sfn->fn->params[0].name;
+        const Expr &ret_e = *sfn->fn->body[0]->e1;
+        bool had_sym = sym.count(pname) > 0;
+        Sym old_sym = had_sym ? sym[pname] : Sym{};
+        bool had_ub = ub_ints.erase(pname) > 0;
+        bool had_ubf = ub_floats.erase(pname) > 0;
+        sym[pname] = Sym{cur_var, Own::Copy, "", ""};
+        V sv = ex(ret_e);
+        if (had_sym) sym[pname] = old_sym;
+        else sym.erase(pname);
+        if (had_ub) ub_ints.insert(pname);
+        if (had_ubf) ub_floats.insert(pname);
+        for (const auto &l : sv.pre) loop_lines.push_back("  " + l);
+        if (smeth == "filter") {
+            std::string cv = new_tmp("fc");
+            std::string okv = new_tmp("fk");
+            loop_lines.push_back(cat("  Val ", cv, " = (", sv.val, ");"));
+            loop_lines.push_back(cat("  int ", okv, " = vis_true(", cv, ");"));
+            if (dec_able(ret_e, hr)) loop_lines.push_back(cat("  vdrop_temp(", cv, ");"));
+            loop_lines.push_back(cat("  if (!", okv, ") { vrc_dec(", cur_var, "); ", cur_var, " = vnil(); continue; }"));
+        } else {
+            std::string nv = new_tmp("fm");
+            loop_lines.push_back(cat("  Val ", nv, " = (", keep(ret_e, sv.val), ");"));
+            loop_lines.push_back(cat("  vrc_dec(", cur_var, ");"));
+            loop_lines.push_back(cat("  ", cur_var, " = ", nv, ";"));
+        }
+    }
+    if (fold_fn) {
+        const std::string &acc_p = fold_fn->fn->params[0].name;
+        const std::string &x_p = fold_fn->fn->params[1].name;
+        const Expr &fold_ret = *fold_fn->fn->body[0]->e1;
+        struct Saved { bool hs; Sym osym; bool hub; bool hubf; };
+        std::map<std::string, Saved> saved_syms;
+        for (const auto &p : {acc_p, x_p}) {
+            if (!saved_syms.count(p))
+                saved_syms[p] = Saved{sym.count(p) > 0, sym.count(p) ? sym[p] : Sym{},
+                                      ub_ints.count(p) > 0, ub_floats.count(p) > 0};
+        }
+        ub_ints.erase(acc_p);
+        ub_ints.erase(x_p);
+        ub_floats.erase(acc_p);
+        ub_floats.erase(x_p);
+        sym[acc_p] = Sym{out_var, Own::Copy, "", ""};
+        sym[x_p] = Sym{cur_var, Own::Copy, "", ""};
+        V fv = ex(fold_ret);
+        for (const auto &[p, st] : saved_syms) {
+            if (st.hs) sym[p] = st.osym;
+            else sym.erase(p);
+            if (st.hub) ub_ints.insert(p);
+            if (st.hubf) ub_floats.insert(p);
+        }
+        for (const auto &l : fv.pre) loop_lines.push_back("  " + l);
+        std::string nfv = new_tmp("fn");
+        loop_lines.push_back(cat("  Val ", nfv, " = (", keep(fold_ret, fv.val), ");"));
+        loop_lines.push_back(cat("  vrc_dec(", cur_var, "); ", cur_var, " = vnil();"));
+        loop_lines.push_back(cat("  vrc_dec(", out_var, ");"));
+        loop_lines.push_back(cat("  ", out_var, " = ", nfv, ";"));
+    } else {
+        loop_lines.push_back(cat("  vec_push(", vec_var, ", ", cur_var, "); ", cur_var, " = vnil();"));
+    }
+    loop_lines.push_back("}");
+    err_goto = saved_goto;
+    err_base = saved_base;
+
+    bool used_err = false;
+    for (const auto &l : loop_lines) {
+        if (l.find(err_lbl) != std::string::npos) used_err = true;
+        po.push_back(l);
+    }
+    if (used_err) {
+        std::string bdrop = base_recv.empty() ? std::string() : cat("vdrop_temp(", base_recv, "); ");
+        po.push_back(cat("if (0) { ", err_lbl, ": vdrop_temp(", cur_var, "); vrc_dec(", out_var, "); ",
+                         bdrop, err_bail(), " }"));
+    }
+    if (!base_recv.empty()) {
+        po.push_back(cat("vdrop_recv(", base_recv, ", ", out_var, ");"));
+    }
+    return {po, out_var};
+}
+
+std::set<std::string> Emitter::closure_free_vars(const FnDecl &decl) const {
+    std::set<std::string> free;
+    std::set<std::string> bound0;
+    for (const auto &p : decl.params) {
+        if (p.def) closure_walk_expr(p.def.get(), bound0, free);
+        bound0.insert(p.name);
+    }
+    closure_walk_stmts(view(decl.body), bound0, free);
+    return free;
+}
+
+void Emitter::closure_walk_expr(const Expr *e, const std::set<std::string> &bound,
+                                std::set<std::string> &free) const {
+    if (!e) return;
+    switch (e->k) {
+    case EK::Var: {
+        std::string root = e->a.substr(0, e->a.find('.'));
+        if (!bound.count(root)) free.insert(root);
+        return;
+    }
+    case EK::Str:
+        for (const auto &[ck, cv] : split_interp(e->a)) {
+            if (ck == "var") {
+                std::string root = cv.substr(0, cv.find('.'));
+                if (!bound.count(root)) free.insert(root);
+            }
+        }
+        return;
+    case EK::Call: {
+        std::string root = e->a.substr(0, e->a.find('.'));
+        if (!bound.count(root)) free.insert(root);
+        for (const auto &a : e->kids) closure_walk_expr(a.get(), bound, free);
+        return;
+    }
+    case EK::Closure: {
+        auto sub = closure_free_vars(*e->fn);
+        if (e->fn->name) sub.erase(*e->fn->name);
+        for (const auto &r : sub)
+            if (!bound.count(r)) free.insert(r);
+        return;
+    }
+    case EK::ParFor: {
+        closure_walk_expr(e->kids[0].get(), bound, free);
+        closure_walk_expr(e->kids[1].get(), bound, free);
+        if (!e->b.empty() && !bound.count(e->b)) free.insert(e->b);
+        auto sub = closure_free_vars(*e->fn);
+        for (const auto &r : sub)
+            if (!bound.count(r)) free.insert(r);
+        return;
+    }
+    default:
+        for (const auto &sub : e->kids) closure_walk_expr(sub.get(), bound, free);
+        return;
+    }
+}
+
+void Emitter::closure_walk_stmts(const StmtList &stmts, const std::set<std::string> &bound,
+                                 std::set<std::string> &free) const {
+    std::set<std::string> cur = bound;
+    for (const Stmt *sp : stmts) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        switch (s.k) {
+        case SK::Let:
+        case SK::LetTmp:
+            closure_walk_expr(s.e1.get(), cur, free);
+            if (s.a.find('.') != std::string::npos) {
+                std::string root = s.a.substr(0, s.a.find('.'));
+                if (!cur.count(root)) free.insert(root);
+            } else {
+                cur.insert(s.a);
+            }
+            break;
+        case SK::Set: {
+            closure_walk_expr(s.e1.get(), cur, free);
+            std::string root = s.a.substr(0, s.a.find('.'));
+            if (!cur.count(root)) free.insert(root);
+            break;
+        }
+        case SK::SetIdx:
+            closure_walk_expr(s.e1.get(), cur, free);
+            closure_walk_expr(s.e2.get(), cur, free);
+            closure_walk_expr(s.e3.get(), cur, free);
+            break;
+        case SK::SetField:
+            closure_walk_expr(s.e1.get(), cur, free);
+            closure_walk_expr(s.e2.get(), cur, free);
+            break;
+        case SK::Return:
+        case SK::Expr:
+        case SK::Defer:
+            closure_walk_expr(s.e1.get(), cur, free);
+            break;
+        case SK::If:
+            closure_walk_expr(s.e1.get(), cur, free);
+            closure_walk_stmts(view(s.body), cur, free);
+            if (const Stmt *els = real_else(s)) {
+                StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                closure_walk_stmts(eb, cur, free);
+            }
+            break;
+        case SK::While:
+            closure_walk_expr(s.e1.get(), cur, free);
+            closure_walk_stmts(view(s.body), cur, free);
+            break;
+        case SK::ForRange: {
+            closure_walk_expr(s.e1.get(), cur, free);
+            closure_walk_expr(s.e2.get(), cur, free);
+            auto sub = cur;
+            sub.insert(s.a);
+            closure_walk_stmts(view(s.body), sub, free);
+            break;
+        }
+        case SK::ForIter: {
+            closure_walk_expr(s.e1.get(), cur, free);
+            auto sub = cur;
+            sub.insert(s.a);
+            closure_walk_stmts(view(s.body), sub, free);
+            break;
+        }
+        case SK::Try: {
+            closure_walk_stmts(view(s.body), cur, free);
+            auto cbound = cur;
+            if (s.opt1) cbound.insert(*s.opt1);
+            closure_walk_stmts(view(s.body2), cbound, free);
+            break;
+        }
+        case SK::Unsafe:
+        case SK::Block:
+        case SK::Scope:
+        case SK::Spawn:
+        case SK::Pub:
+            closure_walk_stmts(view(s.body), cur, free);
+            break;
+        case SK::Fn:
+            if (!s.fns.empty()) {
+                const FnDecl &f = s.fns[0];
+                if (f.name) cur.insert(*f.name);
+                auto fbound = cur;
+                for (const auto &p : f.params) {
+                    if (p.def) closure_walk_expr(p.def.get(), fbound, free);
+                    fbound.insert(p.name);
+                }
+                closure_walk_stmts(view(f.body), fbound, free);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 V Emitter::ex_parfor(const Expr &e) {
     V it = ex(*e.kids[0]);
     V unit = ex(*e.kids[1]);
     const FnDecl &decl = *e.fn;
     const int code = fn_code(cat("clo:", clos.size()));
-    std::set<std::string> outer;
-    if (cap) outer = cap->second;
-    std::set<std::string> capnames;
+    auto free = closure_free_vars(decl);
+    std::set<std::string> avail;
     for (const auto &[n, s] : sym)
-        if (assigned.count(n)) capnames.insert(n);
-    for (const auto &n : outer) capnames.insert(n);
-    capnames.erase(e.a);
+        if (assigned.count(n)) avail.insert(n);
+    if (cap)
+        for (const auto &n : cap->second) avail.insert(n);
+    avail.erase(e.a);
+    std::set<std::string> capnames;
+    for (const auto &n : avail)
+        if (free.count(n)) capnames.insert(n);
     clos.push_back({&decl.params, view(decl.body), capnames});
     std::string m = new_tmp("m");
     const int body_cb = tmp;
-    new_tmp("c");
-    const int op_cb = tmp;
     std::string opc = new_tmp("c");
     std::vector<std::string> pre = it.pre;
     pre.insert(pre.end(), unit.pre.begin(), unit.pre.end());
-    pre.push_back(cat("Map *_cm", body_cb, " = vmap(\"\");"));
-    std::set<std::string> others;
-    for (const auto &[n, s] : sym)
-        if (assigned.count(n)) others.insert(n);
-    for (const auto &n : outer) others.insert(n);
-    others.erase(e.a);
-    for (const auto &var : others)
-        for (auto &l : capture(cat("_cm", body_cb), var)) pre.push_back(l);
-    pre.push_back(cat("Vec *_cb", body_cb, " = vvec();"));
-    pre.push_back(cat("vec_push(_cb", body_cb, ", vint(", code, "));"));
-    pre.push_back(cat("{ Val _cv = vstruct(_cm", body_cb, "); vec_push(_cb", body_cb,
-                      ", _cv); }"));
-    pre.push_back(cat("Val ", m, " = vtagv(\"closure\", _cb", body_cb, ");"));
+    if (capnames.empty()) {
+        pre.push_back(cat("Val ", m, " = vclosure0(", code, ");"));
+    } else {
+        pre.push_back(cat("Map *_cm", body_cb, " = vclosure_env_new(", capnames.size(), ");"));
+        int64_t capture_slot = 0;
+        for (const auto &var : capnames) {
+            for (auto &l : capture(cat("_cm", body_cb), var, capture_slot)) pre.push_back(l);
+            capture_slot++;
+        }
+        pre.push_back(cat("Vec *_cb", body_cb, " = vvec();"));
+        pre.push_back(cat("vec_push(_cb", body_cb, ", vint(", code, "));"));
+        pre.push_back(cat("{ Val _cv = vstruct(_cm", body_cb, "); vec_push(_cb", body_cb,
+                          ", _cv); }"));
+        pre.push_back(cat("Val ", m, " = vtagv(\"closure\", _cb", body_cb, ");"));
+    }
     const int opcode = fn_code("fn:" + e.b);
-    pre.push_back(cat("Vec *_cb", op_cb, " = vvec();"));
-    pre.push_back(cat("vec_push(_cb", op_cb, ", vint(", opcode, "));"));
-    pre.push_back(cat("vec_push(_cb", op_cb, ", vstruct(vmap(\"\")));"));
-    pre.push_back(cat("Val ", opc, " = vtagv(\"closure\", _cb", op_cb, ");"));
+    pre.push_back(cat("Val ", opc, " = vclosure0(", opcode, ");"));
     std::string t = new_tmp("pf");
     pre.push_back(cat("Val ", t, " = vparfor(", it.val, ", ", m, ", ", unit.val,
                       ", ", opc, ");"));
@@ -3060,37 +4462,48 @@ V Emitter::ex_parfor(const Expr &e) {
 V Emitter::ex_closure(const Expr &e) {
     const FnDecl &decl = *e.fn;
     int code = fn_code(cat("clo:", clos.size()));
-    std::set<std::string> outer;
-    if (cap) outer = cap->second;
-    std::set<std::string> base;
+    auto free = closure_free_vars(decl);
+    std::set<std::string> avail;
     for (const auto &[n, s] : sym)
-        if (assigned.count(n)) base.insert(n);
-    std::set<std::string> capnames = base;
-    for (const auto &n : outer) capnames.insert(n);
+        if (assigned.count(n)) avail.insert(n);
+    if (cap)
+        for (const auto &n : cap->second) avail.insert(n);
     bool named = decl.name.has_value();
-    if (named) capnames.insert(*decl.name);
+    bool self_used = named && free.count(*decl.name) > 0;
+    std::set<std::string> others;
+    for (const auto &n : avail)
+        if (free.count(n) && (!named || n != *decl.name)) others.insert(n);
+    std::set<std::string> capnames = others;
+    if (self_used) capnames.insert(*decl.name);
     clos.push_back({&decl.params, view(decl.body), capnames});
     std::string t = new_tmp("m");
+    if (capnames.empty()) {
+        return {{cat("Val ", t, " = vclosure0(", code, ");")}, t};
+    }
     int n = tmp;
-    std::vector<std::string> pre = {cat("Map *_cm", n, " = vmap(\"\");")};
-    std::set<std::string> others = base;
-    for (const auto &x : outer) others.insert(x);
-    if (named) others.erase(*decl.name);
-    for (const auto &var : others)
-        for (auto &l : capture(cat("_cm", n), var)) pre.push_back(l);
+    std::vector<std::string> pre = {cat("Map *_cm", n, " = vclosure_env_new(", capnames.size(), ");")};
+    int64_t capture_slot = 0, self_slot = -1;
+    for (const auto &var : capnames) {
+        if (others.count(var))
+            for (auto &l : capture(cat("_cm", n), var, capture_slot)) pre.push_back(l);
+        if (self_used && var == *decl.name) self_slot = capture_slot;
+        capture_slot++;
+    }
     pre.push_back(cat("Vec *_cb", n, " = vvec();"));
     pre.push_back(cat("vec_push(_cb", n, ", vint(", code, "));"));
-    pre.push_back(cat("Val ", t, " = vtagv(\"closure\", _cb", n, ");"));
     pre.push_back(cat("{ Val _cv = vstruct(_cm", n, "); vec_push(_cb", n, ", _cv); }"));
-    if (named) pre.push_back(cat("map_set(_cm", n, ", \"", *decl.name, "\", ", t, ");"));
+    pre.push_back(cat("Val ", t, " = vtagv(\"closure\", _cb", n, ");"));
+    if (self_used) pre.push_back(cat("vclosure_env_set_weak_capture(", t, ", ", self_slot, ");"));
     return {pre, t};
 }
 
 
 std::string Emitter::var_ref(const std::string &name) {
+    if (ub_ints.count(name)) return cat("vint(ub_", cname(name), ")");
+    if (ub_floats.count(name)) return cat("vfloat(ubf_", cname(name), ")");
     auto it = sym.find(name);
     if (it != sym.end()) return it->second.cn;
-    if (cap && cap->second.count(name)) return cat("(*map_get(", cap->first, ", \"", name, "\"))");
+    if (cap && cap->second.count(name)) return cat("(*vclosure_env_at(", cap->first, ", ", cap_slots[name], "))");
     return cname(name);
 }
 
@@ -3212,13 +4625,29 @@ std::string Emitter::keep(const Expr &e, const std::string &val) {
     return cat("vrc_inc(", val, ")");
 }
 
-std::vector<std::string> Emitter::capture(const std::string &cm, const std::string &var) {
+// An operand that becomes the value of `&&`, `||` or `or` has to arrive owned. A call hands back a
+// reference of its own and a bool or number holds none; anything else is borrowed.
+std::string Emitter::own_operand(const Expr &e, const std::string &val) {
+    if (is_imm_expr(e) || e.k == EK::Call) return val;
+    return keep(e, val);
+}
+
+// A condition only asks whether a value is true. `a && b` and `x or y` hand back one of their
+// operands as a reference of their own, which the test releases.
+std::string Emitter::truth(const Expr &e, const std::string &val, std::vector<std::string> &lines) {
+    if (!yields_operand(e)) return cat("vis_true(", val, ")");
+    const std::string ok = new_tmp("ok");
+    lines.push_back(cat("int ", ok, " = vis_true(", val, ");"));
+    lines.push_back(cat("vdrop_temp(", val, ");"));
+    return ok;
+}
+
+std::vector<std::string> Emitter::capture(const std::string &cm, const std::string &var, int64_t slot) {
     std::string ref = var_ref(var);
-    // Always its own reference: the closure may die before the frame (a loop
-    // defer) or outlive it (a returned closure), so neither side can lean on
-    // the other's.
+    // The frame and closure hold independent references to captured values.
     captured.insert(var);
-    return {cat("vrc_inc(", ref, ");"), cat("map_set(", cm, ", \"", var, "\", ", ref, ");")};
+    return {cat("vrc_inc(", ref, ");"),
+            cat("*vclosure_env_at(", cm, ", ", slot, ") = ", ref, ";")};
 }
 
 Own Emitter::own_of(const Expr &e) {
@@ -3229,11 +4658,12 @@ Own Emitter::own_of(const Expr &e) {
     case EK::Str:
     case EK::RStr:
         return Own::Copy;   // scalars and string literals are immortal
-    case EK::Var: {
-        auto it = sym.find(e.a);
-        if (it == sym.end()) return Own::Copy;   // param / capture storage is the caller's
-        return it->second.own == Own::Copy ? Own::Copy : Own::Borrow;
-    }
+    case EK::Var:
+        // The binding/set path increments aliases before storing them. That
+        // increment is owned by the destination even when the source is a
+        // parameter, capture, or another local; treating it as a borrow leaked
+        // one reference at every scope exit.
+        return Own::Owned;
     case EK::Move:
         // A move takes the reference. A whole-value `move x` takes the one the
         // source held and invalidates it; a projection move `move p.x` is handed
@@ -3334,6 +4764,11 @@ void Emitter::emit_scope_drops(const std::string &ind) {
         ln(ind, cat(s.cn, " = vnil();"));
         dropped.insert(name);
     }
+    for (const auto &ccn : catch_cns) {
+        ln(ind, cat("vrelease(", ccn, ");"));
+        ln(ind, cat(ccn, " = vnil();"));
+    }
+    catch_cns.clear();
 }
 
 std::vector<std::string> Emitter::sorted_sym_names() const {
@@ -3343,8 +4778,287 @@ std::vector<std::string> Emitter::sorted_sym_names() const {
     return out;
 }
 
-// Every `let` name declared inside a try body, at any depth: those are released
-// at the end of their block, and the catch path jumps over that code.
+void Emitter::ub_assign(const std::string &name, const Expr &rhs, const std::string &ind) {
+    std::string ucn = cat("ub_", cname(name));
+    if (rhs.k == EK::Call && rhs.a == "len" && rhs.kids.size() == 1) {
+        V lv = read_only(*rhs.kids[0], "vlen");
+        for (auto &p : lv.pre) ln(ind, p);
+        std::string t = new_tmp("ubl");
+        ln(ind, cat("Val ", t, " = (", lv.val, ");"));
+        emit_err_check(ind);
+        ln(ind, cat(ucn, " = (", t, ").as.ival;"));
+    } else if (rhs.k == EK::Call && (rhs.a == "time_ms" || rhs.a == "mono_ns") && rhs.kids.empty()) {
+        ln(ind, cat(ucn, " = (v", rhs.a, "()).as.ival;"));
+    } else if (ub_may_raise(rhs)) {
+        std::string t = new_tmp("ub");
+        ln(ind, cat("int64_t ", t, " = ", ub_ex(rhs), ";"));
+        emit_err_check(ind);
+        ln(ind, cat(ucn, " = ", t, ";"));
+    } else {
+        ln(ind, cat(ucn, " = ", ub_ex(rhs), ";"));
+    }
+    assigned.insert(name);
+}
+
+void Emitter::ubf_assign(const std::string &name, const Expr &rhs, const std::string &ind) {
+    std::string ucn = cat("ubf_", cname(name));
+    if (ubf_may_raise(rhs)) {
+        std::string t = new_tmp("ubf");
+        ln(ind, cat("double ", t, " = ", ubf_ex(rhs), ";"));
+        emit_err_check(ind);
+        ln(ind, cat(ucn, " = ", t, ";"));
+    } else {
+        ln(ind, cat(ucn, " = ", ubf_ex(rhs), ";"));
+    }
+    assigned.insert(name);
+}
+
+std::set<std::string> try_let_names(const StmtList &body);
+
+std::set<std::string> Emitter::compute_ub_vars(const StmtList &body, const std::set<std::string> &vars_,
+                                               const std::set<std::string> &param_names, bool is_float) {
+    std::set<std::string> cand;
+    for (const auto &v : vars_) {
+        if (!param_names.count(v) && !global_lets.count(v) && !v.empty() && v[0] != '@')
+            cand.insert(v);
+    }
+    if (cand.empty()) return {};
+
+    auto expr_refs = [&](const Expr *e, Names &r) {
+        refs_in_expr(e, r);
+        if (!e) return;
+        std::vector<const Expr *> st{e};
+        while (!st.empty()) {
+            const Expr *cur = st.back();
+            st.pop_back();
+            if (!cur) continue;
+            if (cur->k == EK::Str) {
+                for (const auto &[ck, cv] : split_interp(cur->a))
+                    if (ck == "var") r.insert(cv.substr(0, cv.find('.')));
+                continue;
+            }
+            if (cur->k == EK::Call && !cur->a.empty())
+                r.insert(cur->a.substr(0, cur->a.find('.')));
+            for (const auto &k : cur->kids)
+                if (k) st.push_back(k.get());
+        }
+    };
+
+    auto drop_expr_refs = [&](const Expr *e) {
+        Names r;
+        expr_refs(e, r);
+        if (e && e->fn) bound_in(view(e->fn->body), r);
+        for (const auto &x : r) cand.erase(x);
+    };
+
+    std::function<void(const Expr *)> ban_expr = [&](const Expr *e) {
+        if (!e) return;
+        if (e->k == EK::Closure) {
+            auto sub = closure_free_vars(*e->fn);
+            if (e->fn->name) sub.erase(*e->fn->name);
+            for (const auto &x : sub) cand.erase(x);
+            return;
+        }
+        if (e->k == EK::ParFor) {
+            ban_expr(e->kids[0].get());
+            ban_expr(e->kids[1].get());
+            if (!e->b.empty()) cand.erase(e->b);
+            auto sub = closure_free_vars(*e->fn);
+            for (const auto &x : sub) cand.erase(x);
+            return;
+        }
+        if (e->k == EK::Move || (e->k == EK::Un && e->a == "&")) {
+            drop_expr_refs(e);
+            return;
+        }
+        for (const auto &sub : e->kids) ban_expr(sub.get());
+    };
+
+    std::function<void(const StmtList &)> ban_stmts = [&](const StmtList &stmts) {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Spawn || s.k == SK::Scope || s.k == SK::Defer || s.k == SK::Fn ||
+                s.k == SK::Impl || s.k == SK::Trait || s.k == SK::Enum || s.k == SK::Pub) {
+                cand.clear();
+                return;
+            }
+            if (s.k == SK::Let || s.k == SK::LetTmp) {
+                if (s.a.find('.') != std::string::npos ||
+                    (s.ann && (s.ann->rfind("ptr[", 0) == 0 || s.ann->rfind("slice[", 0) == 0)))
+                    cand.erase(s.a.substr(0, s.a.find('.')));
+                ban_expr(s.e1.get());
+            } else if (s.k == SK::Set) {
+                if (s.a.find('.') != std::string::npos)
+                    cand.erase(s.a.substr(0, s.a.find('.')));
+                ban_expr(s.e1.get());
+            } else if (s.k == SK::ForIter) {
+                cand.erase(s.a);
+                ban_expr(s.e1.get());
+                ban_stmts(view(s.body));
+            } else if (s.k == SK::ForRange) {
+                if (is_float) cand.erase(s.a);
+                ban_expr(s.e1.get());
+                ban_expr(s.e2.get());
+                ban_stmts(view(s.body));
+            } else if (s.k == SK::If) {
+                ban_expr(s.e1.get());
+                ban_stmts(view(s.body));
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    ban_stmts(eb);
+                }
+            } else if (s.k == SK::While) {
+                ban_expr(s.e1.get());
+                ban_stmts(view(s.body));
+            } else if (s.k == SK::Try) {
+                for (const auto &tn : try_let_names(view(s.body))) cand.erase(tn);
+                if (s.opt1) cand.erase(*s.opt1);
+                ban_stmts(view(s.body));
+                ban_stmts(view(s.body2));
+            } else if (s.k == SK::Unsafe || s.k == SK::Block) {
+                ban_stmts(view(s.body));
+            } else if (s.k == SK::Return || s.k == SK::Expr) {
+                ban_expr(s.e1.get());
+            } else if (s.k == SK::SetIdx) {
+                ban_expr(s.e1.get());
+                ban_expr(s.e2.get());
+                ban_expr(s.e3.get());
+            } else if (s.k == SK::SetField) {
+                ban_expr(s.e1.get());
+                ban_expr(s.e2.get());
+            }
+        }
+    };
+
+    ban_stmts(body);
+    if (cand.empty()) return {};
+
+    auto check_expr_init = [&](const Expr *e, const std::set<std::string> &init) {
+        Names r;
+        expr_refs(e, r);
+        for (const auto &x : r)
+            if (!init.count(x)) cand.erase(x);
+    };
+
+    std::function<void(const StmtList &, std::set<std::string> &)> check_init =
+        [&](const StmtList &stmts, std::set<std::string> &init) {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Let || s.k == SK::LetTmp) {
+                check_expr_init(s.e1.get(), init);
+                if (s.a.find('.') == std::string::npos) init.insert(s.a);
+            } else if (s.k == SK::Set) {
+                check_expr_init(s.e1.get(), init);
+                std::string nm = s.a.substr(0, s.a.find('.'));
+                if (!init.count(nm)) cand.erase(nm);
+            } else if (s.k == SK::ForRange) {
+                check_expr_init(s.e1.get(), init);
+                check_expr_init(s.e2.get(), init);
+                std::set<std::string> sub = init;
+                sub.insert(s.a);
+                check_init(view(s.body), sub);
+            } else if (s.k == SK::ForIter) {
+                check_expr_init(s.e1.get(), init);
+                std::set<std::string> sub = init;
+                check_init(view(s.body), sub);
+            } else if (s.k == SK::If) {
+                check_expr_init(s.e1.get(), init);
+                std::set<std::string> sub1 = init;
+                check_init(view(s.body), sub1);
+                if (const Stmt *els = real_else(s)) {
+                    std::set<std::string> sub2 = init;
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    check_init(eb, sub2);
+                }
+            } else if (s.k == SK::While) {
+                check_expr_init(s.e1.get(), init);
+                std::set<std::string> sub = init;
+                check_init(view(s.body), sub);
+            } else if (s.k == SK::Try) {
+                std::set<std::string> sub1 = init, sub2 = init;
+                check_init(view(s.body), sub1);
+                check_init(view(s.body2), sub2);
+            } else if (s.k == SK::Unsafe || s.k == SK::Block) {
+                check_init(view(s.body), init);
+            } else if (s.k == SK::Return || s.k == SK::Expr) {
+                check_expr_init(s.e1.get(), init);
+            } else if (s.k == SK::SetIdx) {
+                check_expr_init(s.e1.get(), init);
+                check_expr_init(s.e2.get(), init);
+                check_expr_init(s.e3.get(), init);
+            } else if (s.k == SK::SetField) {
+                check_expr_init(s.e1.get(), init);
+                check_expr_init(s.e2.get(), init);
+            }
+        }
+    };
+
+    {
+        std::set<std::string> init = param_names;
+        check_init(body, init);
+    }
+    if (cand.empty()) return {};
+
+    auto rhs_ok = [&](const Expr &e) -> bool {
+        if (is_float) return ubf_expr_ok(e, cand);
+        if (ub_expr_ok(e, cand)) return true;
+        if (e.k == EK::Call) {
+            if (e.a == "len" && e.kids.size() == 1) return true;
+            if ((e.a == "time_ms" || e.a == "mono_ns") && e.kids.empty()) return true;
+        }
+        return false;
+    };
+
+    std::set<std::string> writes;
+    std::function<bool(const StmtList &)> step = [&](const StmtList &stmts) -> bool {
+        bool dropped = false;
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::Set) {
+                std::string nm = s.a.substr(0, s.a.find('.'));
+                if (s.a.find('.') == std::string::npos) writes.insert(nm);
+                if (cand.count(nm) && (s.a.find('.') != std::string::npos || !rhs_ok(*s.e1))) {
+                    cand.erase(nm);
+                    dropped = true;
+                }
+            } else if (s.k == SK::ForRange) {
+                if (!is_float) writes.insert(s.a);
+                if (step(view(s.body))) dropped = true;
+            } else if (s.k == SK::ForIter || s.k == SK::While || s.k == SK::Unsafe || s.k == SK::Block) {
+                if (step(view(s.body))) dropped = true;
+            } else if (s.k == SK::If) {
+                if (step(view(s.body))) dropped = true;
+                if (const Stmt *els = real_else(s)) {
+                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                    if (step(eb)) dropped = true;
+                }
+            } else if (s.k == SK::Try) {
+                if (step(view(s.body))) dropped = true;
+                if (step(view(s.body2))) dropped = true;
+            }
+        }
+        return dropped;
+    };
+
+    while (!cand.empty() && step(body)) {}
+    std::set<std::string> out_;
+    for (const auto &v : cand)
+        if (writes.count(v)) out_.insert(v);
+    return out_;
+}
+
+std::set<std::string> Emitter::compute_ub_ints(const StmtList &body, const std::set<std::string> &vars_,
+                                               const std::set<std::string> &param_names) {
+    return compute_ub_vars(body, vars_, param_names, false);
+}
+
+std::set<std::string> Emitter::compute_ub_floats(const StmtList &body, const std::set<std::string> &vars_,
+                                                 const std::set<std::string> &param_names) {
+    return compute_ub_vars(body, vars_, param_names, true);
+}
 void try_let_names(const StmtList &body, std::set<std::string> &acc) {
     for (const Stmt *st : body) {
         if (!st) continue;
@@ -3445,9 +5159,12 @@ void Emitter::emit_defer(const Expr &e, const std::string &ind) {
     clos.push_back({&no_params(), StmtList{&syn}, capnames});
     std::string cm = new_tmp("m");
     std::string cb = new_tmp("cb");
-    std::vector<std::string> pre = {cat("Map *", cm, " = vmap(\"\");")};
-    for (const auto &var : capnames)
-        for (auto &l : capture(cm, var)) pre.push_back(l);
+    std::vector<std::string> pre = {cat("Map *", cm, " = vclosure_env_new(", capnames.size(), ");")};
+    int64_t capture_slot = 0;
+    for (const auto &var : capnames) {
+        for (auto &l : capture(cm, var, capture_slot)) pre.push_back(l);
+        capture_slot++;
+    }
     pre.push_back(cat("Vec *", cb, " = vvec();"));
     pre.push_back(cat("vec_push(", cb, ", vint(", code, "));"));
     pre.push_back(cat("{ Val _cv = vstruct(", cm, "); vec_push(", cb, ", _cv); }"));
@@ -3458,6 +5175,7 @@ void Emitter::emit_defer(const Expr &e, const std::string &ind) {
 void Emitter::st(const Stmt &s, const std::string &ind) {
     switch (s.k) {
     case SK::Block:
+    case SK::Unsafe:
         emit_block(view(s.body), ind);
         return;
     case SK::Pub:
@@ -3469,6 +5187,22 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
     case SK::Import:
     case SK::PubUse:
         return;
+    default:
+        break;
+    }
+    if (trace_lines && s.line > 0) {
+        switch (s.k) {
+        case SK::Let: case SK::LetTmp: case SK::Set: case SK::SetIdx: case SK::SetField:
+        case SK::Expr: case SK::If: case SK::While: case SK::ForRange: case SK::ForIter:
+        case SK::Return: case SK::Break: case SK::Continue: case SK::Spawn: case SK::Scope:
+        case SK::Defer: case SK::Try:
+            ln(ind, cat("btrace_line(", s.line, ");"));
+            break;
+        default:
+            break;
+        }
+    }
+    switch (s.k) {
     case SK::Let:
     case SK::LetTmp: {
         const std::string &name = s.a;
@@ -3481,13 +5215,21 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             assigned.insert(name);
             return;
         }
+        if (name.find('.') == std::string::npos && ub_ints.count(name)) {
+            ub_assign(name, e, ind);
+            return;
+        }
+        if (name.find('.') == std::string::npos && ub_floats.count(name)) {
+            ubf_assign(name, e, ind);
+            return;
+        }
         V v = ex(e);
         for (auto &p : v.pre) ln(ind, p);
         if (name.find('.') != std::string::npos) {
             auto dot = name.find('.');
             std::string head = name.substr(0, dot), rest = name.substr(dot + 1);
             if (sym.count(head)) {
-                ln(ind, cat("vfieldset(", sym[head].cn, ", \"", rest, "\", ", keep(e, v.val), ");"));
+                ln(ind, cat("vfieldset_ic(", sym[head].cn, ", \"", rest, "\", ", keep(e, v.val), ", ", next_fic(), ");"));
                 emit_err_check(ind);
                 return;
             }
@@ -3496,6 +5238,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         bool fresh = dec_able(e, heap_returns());
         auto root = place_root(e);
         if (!fresh && e.k != EK::Call) v.val = cat("vrc_inc(", v.val, ")");
+        if ((name.empty() || name[0] != '@') && e.k == EK::Field) own = Own::Owned;
         bool lit = v.val.rfind("vlit(", 0) == 0;
         if ((reclaim.count(name) || relet.count(name)) && lit) {
             v.val = "vstr(" + v.val.substr(5);
@@ -3543,14 +5286,30 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ln(ind, cat(cn, " = (", v.val, ");"));
         }
         emit_err_check(ind);
+        moved.erase(name);
+        dropped.erase(name);
         if (!name.empty() && name[0] == '@' && !fresh) alias_temps.insert(name);
         return;
     }
     case SK::Set: {
         const std::string &tgt = s.a;
         const Expr &e = *s.e1;
+        const bool global_binding = global_lets.count(tgt) && !dfb_locals.count(tgt) &&
+                                    !ub_ints.count(tgt) && !ub_floats.count(tgt) &&
+                                    !cur_params.count(tgt) && !(cap && cap->second.count(tgt));
+        if (tgt.find('.') == std::string::npos && ub_ints.count(tgt)) {
+            ub_assign(tgt, e, ind);
+            return;
+        }
+        if (tgt.find('.') == std::string::npos && ub_floats.count(tgt)) {
+            ubf_assign(tgt, e, ind);
+            return;
+        }
         auto d = sym.find(tgt);
-        bool self_concat = e.k == EK::Bin && e.a == "+" && e.kids[0]->k == EK::Var && e.kids[0]->a == tgt;
+        bool self_concat = reclaim.count(tgt) && d != sym.end() &&
+                           !moved.count(tgt) && !dropped.count(tgt) &&
+                           e.k == EK::Bin && e.a == "+" &&
+                           e.kids[0]->k == EK::Var && e.kids[0]->a == tgt;
         Own own;
         V v;
         std::vector<std::string> drop;
@@ -3558,10 +5317,19 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             v = ex(*e.kids[1]);
             for (auto &p : v.pre) ln(ind, p);
             if (auto d = owned_temp(*e.kids[1], v.val)) drop.push_back(*d);
+            if (drop.empty() &&
+                (e.kids[1]->k == EK::Call || e.kids[1]->k == EK::MCall ||
+                 e.kids[1]->k == EK::Idx || e.kids[1]->k == EK::Quest) &&
+                dec_able(*e.kids[1], heap_returns())) {
+                std::string h = new_tmp("h");
+                ln(ind, cat("Val ", h, " = (", v.val, ");"));
+                v.val = h;
+                drop.push_back(h);
+            }
             // `s = s + f()`: the append must not read the value a failed `f`
             // left behind; the error goes to the enclosing try.
             if (!v.pre.empty() && may_raise(*e.kids[1])) emit_err_check(ind);
-            own = Own::Owned;
+            own = global_binding ? Own::Copy : Own::Owned;
             std::string cn_tmp = var_def(tgt, own);
             v.val = cat("vadd_self(", cn_tmp, ", ", v.val, ")");
         } else {
@@ -3571,6 +5339,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             // `n = n + f()`: see the append case above.
             if (!v.pre.empty() && may_raise(e)) emit_err_check(ind);
             own = own_of(e);
+            if ((tgt.empty() || tgt[0] != '@') && e.k == EK::Field) own = Own::Owned;
             if (reclaim.count(tgt) && v.val.rfind("vlit(", 0) == 0) {
                 v.val = "vstr(" + v.val.substr(5);
                 own = Own::Owned;
@@ -3580,9 +5349,11 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             v.val = "vstr(" + v.val.substr(5);
             own = Own::Owned;
         }
-        bool release = reclaim.count(tgt) && d != sym.end() && !moved.count(tgt) && !dropped.count(tgt) &&
+        bool release = (reclaim.count(tgt) || global_binding) && d != sym.end() &&
+                       !moved.count(tgt) && !dropped.count(tgt) &&
                        (self_concat || place_root(e) != std::optional<std::string>(tgt));
         if (!dec_able(e, heap_returns())) v.val = cat("vrc_inc(", v.val, ")");
+        if (global_binding) own = Own::Copy;
         std::string cn = var_def(tgt, own);
         assigned.insert(tgt);
         // A store must not land when the RHS raised: the target keeps its old
@@ -3603,6 +5374,8 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ln(ind, cat(cn, " = (", v.val, ");"));
             emit_err_check(ind);
         }
+        moved.erase(tgt);
+        dropped.erase(tgt);
         return;
     }
     case SK::SetIdx: {
@@ -3641,10 +5414,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         if (dec_able(*s.e1, heap_returns())) {
             std::string r = new_tmp("r");
             ln(ind, "Val " + r + " = (" + b.val + ");");
-            ln(ind, cat("vfieldset(", r, ", \"", s.a, "\", ", keep(*s.e2, v.val), ");"));
+            ln(ind, cat("vfieldset_ic(", r, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ", next_fic(), ");"));
             ln(ind, "vdrop_temp(" + r + ");");
         } else {
-            ln(ind, cat("vfieldset(", b.val, ", \"", s.a, "\", ", keep(*s.e2, v.val), ");"));
+            ln(ind, cat("vfieldset_ic(", b.val, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ", next_fic(), ");"));
         }
         emit_err_check(ind);
         return;
@@ -3655,42 +5428,65 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         emit_err_check(ind);
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
             ln(ind, cat("vscope_end(vint(", *it, "));"));
+        if (!scopes.empty()) emit_err_check(ind);
         // The value leaves with the caller; the exit drops must not free it.
         // `a[i]` already hands back a reference the holder owns (vat_owned), so
         // the container can just be dropped at the exit like any other local;
         // lifting the part out and stealing it was the pre-vat_owned shape.
         const bool owned_part = is_index_read(*s.e1);
-        auto root = place_root(*s.e1);
+        // `r.sort()` is `r` itself and `r.first()` is a part of it, so the value belongs to the
+        // root `r` belongs to.
+        const Expr *alias = s.e1.get();
+        bool part_call = false;
+        while (alias->k == EK::MCall && !alias->kids.empty() &&
+               (SELF_RESULT.count(alias->b) || PART_RESULT.count(alias->b))) {
+            part_call = part_call || PART_RESULT.count(alias->b) > 0;
+            alias = alias->kids[0].get();
+        }
+        auto root = place_root(*alias);
+        const bool is_part = root && sym.count(*root) &&
+                             (part_of_local(*alias, *root) ||
+                              (part_call && sym[*root].own == Own::Owned));
+        std::string steal_cn;
         if (root && !owned_part && sym.count(*root)) {
-            if (part_of_local(*s.e1, *root)) {
+            if (is_part) {
                 // `return v[0]` hands out a part of a local container: the part is
                 // lifted into a temp, then the container goes.
                 std::string t = new_tmp("c");
                 ln(ind, "Val " + t + " = (" + v.val + ");");
                 ln(ind, "vdrop_recv_part(" + sym[*root].cn + ", " + t + ");");
+                // The container reference was consumed above. Clear its slot so
+                // shared exit cleanup cannot release the stale pointer again.
+                ln(ind, sym[*root].cn + " = vnil();");
                 dropped.insert(*root);
                 v.val = t;
-            } else {
+            } else if (global_lets.count(*root) || fin == "__fin_top") {
                 // A script-level binding outlives the frame that returns it, so
                 // the caller gets a reference of its own; without the inc nobody
                 // may release the result.
                 if (global_lets.count(*root)) v.val = cat("vrc_inc(", v.val, ")");
                 shared.insert(*root);
+            } else if (sym[*root].own == Own::Owned) {
+                steal_cn = sym[*root].cn;
+            } else {
+                shared.insert(*root);
             }
         }
-        if (root && cur_params.count(*root) && !owned_part) {
+        if (root && cur_params.count(*root) && !reclaim.count(*root) && !owned_part) {
             // `return x` and `return v[0]` hand back storage owned by the
             // argument vector, which the caller releases: the value needs a
             // reference of its own or the caller holds freed memory.
             v.val = cat("vrc_inc(", v.val, ")");
         }
-        std::string handed = (root && !owned_part && !part_of_local(*s.e1, *root)) ? *root : "";
+        std::string handed = (root && !owned_part && !is_part) ? *root : "";
         Names keep;
         refs_in_expr(s.e1.get(), keep);
         emit_fn_drops(ind, handed, true, keep);
         if (fin == "__fin_top") {
             ln(ind, cat("{ fprintf(stderr, \"unhandled: \"); vprint_err(", v.val,
                         "); fprintf(stderr, \"\\n\"); return 1; }"));
+        } else if (!steal_cn.empty()) {
+            ln(ind, cat("{ __ret = (", v.val, "); ", steal_cn, " = vnil(); goto ", fin, "; }"));
         } else {
             ln(ind, cat("{ __ret = (", v.val, "); goto ", fin, "; }"));
         }
@@ -3714,10 +5510,28 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         return;
     }
     case SK::If: {
-        V c = ex(*s.e1);
-        for (auto &p : c.pre) ln(ind, p);
-        emit_err_check(ind);
-        ln(ind, cat("if (vis_true(", c.val, ")) {"));
+        std::string cond_c;
+        if (!ub_ints.empty() && s.e1->k == EK::Bin &&
+            (s.e1->a == "==" || s.e1->a == "!=" || s.e1->a == "<" || s.e1->a == ">" ||
+             s.e1->a == "<=" || s.e1->a == ">=") &&
+            ub_expr_ok(*s.e1->kids[0]) && ub_expr_ok(*s.e1->kids[1]) &&
+            !ub_may_raise(*s.e1->kids[0]) && !ub_may_raise(*s.e1->kids[1])) {
+            cond_c = cat("(", ub_ex(*s.e1->kids[0]), ") ", s.e1->a, " (", ub_ex(*s.e1->kids[1]), ")");
+        } else if (!ub_floats.empty() && s.e1->k == EK::Bin &&
+            (s.e1->a == "==" || s.e1->a == "!=" || s.e1->a == "<" || s.e1->a == ">" ||
+             s.e1->a == "<=" || s.e1->a == ">=") &&
+            ubf_expr_ok(*s.e1->kids[0]) && ubf_expr_ok(*s.e1->kids[1]) &&
+            !ubf_may_raise(*s.e1->kids[0]) && !ubf_may_raise(*s.e1->kids[1])) {
+            cond_c = ubf_cmp_c(s.e1->a, ubf_ex(*s.e1->kids[0]), ubf_ex(*s.e1->kids[1]));
+        } else {
+            V c = ex(*s.e1);
+            for (auto &p : c.pre) ln(ind, p);
+            emit_err_check(ind);
+            std::vector<std::string> test;
+            cond_c = truth(*s.e1, c.val, test);
+            for (auto &p : test) ln(ind, p);
+        }
+        ln(ind, cat("if (", cond_c, ") {"));
         emit_block(view(s.body), ind + "  ");
         const Stmt *els = real_else(s);
         if (!els) {
@@ -3739,11 +5553,40 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         return;
     }
     case SK::While: {
+        if (!ub_ints.empty() && s.e1->k == EK::Bin &&
+            (s.e1->a == "==" || s.e1->a == "!=" || s.e1->a == "<" || s.e1->a == ">" ||
+             s.e1->a == "<=" || s.e1->a == ">=") &&
+            ub_expr_ok(*s.e1->kids[0]) && ub_expr_ok(*s.e1->kids[1]) &&
+            !ub_may_raise(*s.e1->kids[0]) && !ub_may_raise(*s.e1->kids[1])) {
+            ln(ind, cat("while ((", ub_ex(*s.e1->kids[0]), ") ", s.e1->a, " (", ub_ex(*s.e1->kids[1]), ")) {"));
+            loop_exit_depths.emplace_back(scopes.size(), dfb.size());
+            emit_block(view(s.body), ind + "  ");
+            loop_exit_depths.pop_back();
+            ln(ind, "}");
+            emit_loop_drops(view(s.body), ind);
+            return;
+        }
+        if (!ub_floats.empty() && s.e1->k == EK::Bin &&
+            (s.e1->a == "==" || s.e1->a == "!=" || s.e1->a == "<" || s.e1->a == ">" ||
+             s.e1->a == "<=" || s.e1->a == ">=") &&
+            ubf_expr_ok(*s.e1->kids[0]) && ubf_expr_ok(*s.e1->kids[1]) &&
+            !ubf_may_raise(*s.e1->kids[0]) && !ubf_may_raise(*s.e1->kids[1])) {
+            ln(ind, cat("while (", ubf_cmp_c(s.e1->a, ubf_ex(*s.e1->kids[0]), ubf_ex(*s.e1->kids[1])), ") {"));
+            loop_exit_depths.emplace_back(scopes.size(), dfb.size());
+            emit_block(view(s.body), ind + "  ");
+            loop_exit_depths.pop_back();
+            ln(ind, "}");
+            emit_loop_drops(view(s.body), ind);
+            return;
+        }
         V c = ex(*s.e1);
         ln(ind, "while (1) {");
         for (auto &p : c.pre) ln(ind + "  ", p);
         emit_err_check(ind + "  ");
-        ln(ind + "  ", cat("if (!vis_true(", c.val, ")) break;"));
+        std::vector<std::string> test;
+        const std::string ok = truth(*s.e1, c.val, test);
+        for (auto &p : test) ln(ind + "  ", p);
+        ln(ind + "  ", cat("if (!", ok, ") break;"));
         loop_exit_depths.emplace_back(scopes.size(), dfb.size());
         emit_block(view(s.body), ind + "  ");
         loop_exit_depths.pop_back();
@@ -3762,8 +5605,12 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind, cat("int64_t ", hi, " = vlong(", b.val, ");"));
         emit_err_check(ind);
         ln(ind, cat("for (int64_t ", kk, " = ", lo, "; ", kk, " < ", hi, "; ++", kk, ") {"));
-        std::string cn = var_def(s.a, Own::Copy);
-        ln(ind + "  ", cat(cn, " = vint(", kk, ");"));
+        if (ub_ints.count(s.a)) {
+            ln(ind + "  ", cat("ub_", cname(s.a), " = ", kk, ";"));
+        } else {
+            std::string cn = var_def(s.a, Own::Copy);
+            ln(ind + "  ", cat(cn, " = vint(", kk, ");"));
+        }
         assigned.insert(s.a);
         loop_exit_depths.emplace_back(scopes.size(), dfb.size());
         emit_block(view(s.body), ind + "  ");
@@ -3816,6 +5663,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind + "  ", cat("goto ", after_lbl, ";"));
         ln(ind, cat(catch_lbl, ":;"));
         for (const auto &nm : try_let_names(view(s.body))) {
+            if (ub_ints.count(nm) || ub_floats.count(nm)) continue;
             // The body's own bindings cannot be live here and their drop at the
             // end of the block is unreachable from this path. Released through
             // `vrelease`: it leaves the error value alone, which the channel is
@@ -3823,24 +5671,30 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ln(ind + "  ", cat("vrelease(", cname(nm), ");"));
             ln(ind + "  ", cat(cname(nm), " = vnil();"));
         }
+        bool had_prev = false;
+        Sym prev_sym;
+        bool had_prev_assigned = false;
+        std::string cn;
         if (s.opt1) {
-            std::string cn = var_def(*s.opt1, Own::Copy);
+            auto pit = sym.find(*s.opt1);
+            if (pit != sym.end()) { had_prev = true; prev_sym = pit->second; }
+            had_prev_assigned = assigned.count(*s.opt1) > 0;
+            cn = cname("@catch_" + *s.opt1);
+            sym[*s.opt1] = Sym{cn, Own::Owned, "", ""};
+            catch_cns.insert(cn);
+            ln(ind + "  ", cat("vrelease(", cn, ");"));
             ln(ind + "  ", cat(cn, " = verr_catch_part();"));
             assigned.insert(*s.opt1);
         } else {
-            ln(ind + "  ", "(void)verr_take();");
+            ln(ind + "  ", "verr_catch_discard();");
         }
         emit_block(view(s.body2), ind + "  ");
-        ln(ind + "  ", "verr_catch_end();");
         if (s.opt1) {
-            // The error belongs to the error channel, which frees it here. The
-            // binding must not be released again: a later `let` reuses the same C
-            // local, and the exit cleanup would read a tag already freed.
-            ln(ind + "  ", cat(cname(*s.opt1), " = vnil();"));
-        }
-        if (s.opt1 && sym.count(*s.opt1)) {
-            sym.erase(*s.opt1);
-            assigned.erase(*s.opt1);
+            ln(ind + "  ", cat("vrelease(", cn, ");"));
+            ln(ind + "  ", cat(cn, " = vnil();"));
+            if (had_prev) sym[*s.opt1] = prev_sym;
+            else sym.erase(*s.opt1);
+            if (!had_prev_assigned) assigned.erase(*s.opt1);
         }
         ln(ind, cat(after_lbl, ":;"));
         ln(ind, "}");
@@ -3853,6 +5707,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         emit_block(view(s.body), ind);
         scopes.pop_back();
         ln(ind, cat("vscope_end(vint(", sc, "));"));
+        emit_err_check(ind);
         return;
     }
     case SK::Spawn: {
@@ -3873,9 +5728,12 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         clos.push_back({&no_params(), view(s.body), capnames});
         new_tmp("m");
         int n = tmp;
-        ln(ind, cat("Map *_cm", n, " = vmap(\"\");"));
-        for (const auto &var : capnames)
-            for (auto &l : capture(cat("_cm", n), var)) ln(ind, l);
+        ln(ind, cat("Map *_cm", n, " = vclosure_env_new(", capnames.size(), ");"));
+        int64_t capture_slot = 0;
+        for (const auto &var : capnames) {
+            for (auto &l : capture(cat("_cm", n), var, capture_slot)) ln(ind, l);
+            capture_slot++;
+        }
         ln(ind, cat("Vec *_cb", n, " = vvec();"));
         ln(ind, cat("vec_push(_cb", n, ", vint(", code, "));"));
         ln(ind, cat("{ Val _cv = vstruct(_cm", n, "); vec_push(_cb", n, ", _cv); }"));
@@ -3917,12 +5775,15 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
     }
     case SK::Extern:
     case SK::ExternStruct:
-    case SK::Unsafe:
-        if (s.k == SK::Unsafe) emit_block(view(s.body), ind);
+    default:
         return;
     }
 }
 
+
+bool reclaimable_rhs(const Expr &e, const std::set<std::string> &heap) {
+    return dec_able(e, heap) || e.k == EK::Field;
+}
 
 std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
     const StmtList &body, const std::set<std::string> &params,
@@ -3935,13 +5796,21 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
             case SK::Let:
             case SK::LetTmp: {
                 std::string n = head_of(st->a);
-                ok[n] = (ok.count(n) ? ok[n] : true) && dec_able(*st->e1, heap);
+                if (!n.empty() && n[0] == '@') {
+                    ok[n] = false;
+                } else {
+                    ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
+                }
                 if (loop) loop_let.insert(n);
                 break;
             }
             case SK::Set: {
                 std::string n = head_of(st->a);
-                ok[n] = (ok.count(n) ? ok[n] : true) && dec_able(*st->e1, heap);
+                if (!n.empty() && n[0] == '@') {
+                    ok[n] = false;
+                } else {
+                    ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
+                }
                 has_set.insert(n);
                 break;
             }
@@ -3979,7 +5848,7 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
     walk(body, false);
     std::set<std::string> reclaim, relet;
     for (const auto &[n, v] : ok) {
-        if (v && has_set.count(n) && !params.count(n)) reclaim.insert(n);
+        if (v && has_set.count(n)) reclaim.insert(n);
     }
     for (const auto &n : loop_let) {
         auto it = ok.find(n);
@@ -3991,13 +5860,25 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
 
 void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params, const StmtList &body,
                         const std::set<std::string> *caps, const std::string *fastraw,
-                        const std::string *fastkind, const std::string *fastname) {
+                        const std::string *fastkind, const std::string *fastname, bool positional) {
     std::vector<std::string> names;
     for (const auto &p : params) names.push_back(p.name);
+    const std::string impl = positional ? cn + "_p" : cn;
+    std::vector<std::string> arg_exprs;
+    for (size_t i = 0; i < names.size(); i++)
+        arg_exprs.push_back(positional ? cat("bf_arg_", i) : cat("args->items[", i, "]"));
     auto saved_params = cur_params;
     cur_params = std::set<std::string>(names.begin(), names.end());
+    auto saved_scalar_vars = scalar_vars;
+    scalar_vars.clear();
+    static const std::set<std::string> scalar_types = {
+        "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "f32", "f64", "ptr"};
+    for (const auto &p : params)
+        if (p.ann && (scalar_types.count(*p.ann) || p.ann->rfind("ptr[", 0) == 0))
+            scalar_vars.insert(p.name);
     auto saved_sym = sym;
     auto saved_cap = cap;
+    auto saved_cap_slots = cap_slots;
     auto saved_dfb = dfb;
     auto saved_fin = fin;
     // A top-level `let` is a file-scope Val; a function that reads it resolves
@@ -4007,17 +5888,36 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     // the global the parent may be writing.
     sym.clear();
     for (const auto &n : global_lets)
-        if (!caps || !caps->count(n)) sym[n] = Sym{cname(n), Own::Copy};
+        if (!caps || !caps->count(n)) sym[n] = Sym{cname(n), Own::Copy, "", ""};
     auto saved_assigned = assigned;
     assigned.clear();
     cap.reset();
-    if (caps) cap = std::make_pair(std::string("cap"), *caps);
+    cap_slots.clear();
+    if (caps) {
+        cap = std::make_pair(std::string("cap"), *caps);
+        int64_t slot = 0;
+        for (const auto &name : *caps) cap_slots[name] = slot++;
+    }
     std::string dfbname = cat("__vdf_", cn);
     dfb.clear();
     fin = cat("__fin_", cn);
-    ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
+    if (positional) {
+        ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
+        ln("  ", "(void)cap;");
+        ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
+        std::string call = cat(impl, "(cap");
+        for (size_t i = 0; i < names.size(); i++) call += cat(", args->items[", i, "]");
+        ln("  ", cat("return ", call, ");"));
+        ln("", "}");
+        std::string sig = cat("static Val ", impl, "(Map *cap");
+        for (size_t i = 0; i < names.size(); i++) sig += cat(", Val bf_arg_", i);
+        ln("", cat(sig, ") {"));
+    } else {
+        ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
+        ln("  ", "(void)cap;");
+        ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
+    }
     ln("  ", "(void)cap;");
-    ln("  ", cat("if (args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
     if (fastraw) {
         const std::string &kind = *fastkind;
         // The body is raw C, so a `-> bool` annotation was lost on the way back:
@@ -4030,7 +5930,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
             if (ri != fn_ret.end() && ri->second && *ri->second == "bool") ret_bool = true;
         }
         const std::string vret =
-            ret_bool ? "vbool((__r) != 0)" : (kind == "f64" ? "vfloat(__r)" : "vint(__r)");
+            ret_bool ? "vbool((__r) != 0)"
+                     : ((kind == "f64" || kind == "f64_dyn") ? "vfloat(__r)" : "vint(__r)");
         if (kind == "f64") {
             std::string checks, rawargs;
             for (size_t i = 0; i < names.size(); i++) {
@@ -4038,13 +5939,25 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                     checks += " && ";
                     rawargs += ", ";
                 }
-                checks += cat("(args->items[", i, "].tag == V_INT || args->items[", i, "].tag == V_FLOAT)");
-                rawargs += cat("(args->items[", i, "].tag == V_INT ? (double)args->items[", i,
-                               "].as.ival : args->items[", i, "].as.fval)");
+                checks += cat("(", arg_exprs[i], ".tag == V_INT || ", arg_exprs[i], ".tag == V_FLOAT)");
+                rawargs += cat("(", arg_exprs[i], ".tag == V_INT ? (double)", arg_exprs[i],
+                               ".as.ival : ", arg_exprs[i], ".as.fval)");
             }
             ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { double __r = ", *fastraw, "(", rawargs,
                          "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
-        } else if (kind == "i64v") {
+        } else if (kind == "f64_dyn") {
+            std::string checks, rawargs;
+            for (size_t i = 0; i < names.size(); i++) {
+                if (i) {
+                    checks += " && ";
+                    rawargs += ", ";
+                }
+                checks += cat(arg_exprs[i], ".tag == V_FLOAT");
+                rawargs += cat(arg_exprs[i], ".as.fval");
+            }
+            ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { double __r = ", *fastraw, "(", rawargs,
+                         "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
+        } else if (kind == "i64v" || kind == "i64v_dyn") {
             const std::set<std::string> &vv = fastvec[*fastname];
             std::string checks, rawargs;
             for (size_t i = 0; i < names.size(); i++) {
@@ -4056,11 +5969,11 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                     // The tag says vec, not vec[i64]: the raw body reads
                     // elements without a per-element check, so the wrapper scans
                     // once and falls back if one is not an int.
-                    checks += cat("args->items[", i, "].tag == V_VEC && vvec_all_int(args->items[", i, "].as.vec)");
-                    rawargs += cat("args->items[", i, "].as.vec");
+                    checks += cat(arg_exprs[i], ".tag == V_VEC && vvec_all_int(", arg_exprs[i], ".as.vec)");
+                    rawargs += cat(arg_exprs[i], ".as.vec");
                 } else {
-                    checks += cat("args->items[", i, "].tag == V_INT");
-                    rawargs += cat("args->items[", i, "].as.ival");
+                    checks += cat(arg_exprs[i], ".tag == V_INT");
+                    rawargs += cat(arg_exprs[i], ".as.ival");
                 }
             }
             ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { int64_t __r = ", *fastraw, "(", rawargs,
@@ -4072,8 +5985,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                     checks += " && ";
                     rawargs += ", ";
                 }
-                checks += cat("args->items[", i, "].tag == V_INT");
-                rawargs += cat("args->items[", i, "].as.ival");
+                checks += cat(arg_exprs[i], ".tag == V_INT");
+                rawargs += cat(arg_exprs[i], ".as.ival");
             }
             ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { int64_t __r = ", *fastraw, "(", rawargs,
                          "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
@@ -4106,9 +6019,17 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     auto saved_reclaim = reclaim;
     auto saved_relet = relet;
     // A captured binding has no owner here: releasing it would drop the map's.
-    auto rr = reclaim_names(body, std::set<std::string>(names.begin(), names.end()), heap_returns());
+    const std::set<std::string> param_names(names.begin(), names.end());
+    auto rr = reclaim_names(body, param_names, heap_returns());
     reclaim = rr.first;
     relet = rr.second;
+    Names local_bindings;
+    bound_in(body, local_bindings);
+    for (const auto &g : global_lets) {
+        if (caps_set.count(g) || param_names.count(g) || local_bindings.count(g)) continue;
+        reclaim.erase(g);
+        relet.erase(g);
+    }
     for (const auto &c : caps_set) {
         reclaim.erase(c);
         relet.erase(c);
@@ -4116,26 +6037,55 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     auto saved_shared = shared;
     auto saved_captured = captured;
     auto saved_dropped = dropped;
+    auto saved_catch_cns = catch_cns;
     shared.clear();
     // Per function: a name dropped in one function must still be released in
     // the next one that happens to use the same identifier.
     dropped.clear();
     captured.clear();
+    catch_cns.clear();
     auto saved_locals = dfb_locals;
-    dfb_locals = vars;
-    std::set<std::string> param_names(names.begin(), names.end());
+    auto saved_ub = ub_ints;
+    auto saved_ubf = ub_floats;
+    ub_ints = (caps == nullptr) ? compute_ub_ints(body, vars, param_names) : std::set<std::string>();
+    std::set<std::string> rem_vars;
+    for (const auto &v : vars)
+        if (!ub_ints.count(v)) rem_vars.insert(v);
+    ub_floats = (caps == nullptr) ? compute_ub_floats(body, rem_vars, param_names) : std::set<std::string>();
+    for (const auto &u : ub_ints) {
+        reclaim.erase(u);
+        relet.erase(u);
+    }
+    for (const auto &u : ub_floats) {
+        reclaim.erase(u);
+        relet.erase(u);
+    }
+    dfb_locals.clear();
+    for (const auto &n : vars)
+        if (!ub_ints.count(n) && !ub_floats.count(n)) dfb_locals.insert(n);
     for (const auto &n : vars) {
-        Own own = param_names.count(n) ? Own::Borrow : Own::Copy;
-        sym[n] = Sym{cname(n), own};
+        if (ub_ints.count(n)) {
+            ln("  ", cat("int64_t BRAT_UNUSED ub_", cname(n), " = 0;"));
+            continue;
+        }
+        if (ub_floats.count(n)) {
+            ln("  ", cat("double BRAT_UNUSED ubf_", cname(n), " = 0.0;"));
+            continue;
+        }
+        Own own = reclaim.count(n) ? Own::Owned : (param_names.count(n) ? Own::Borrow : Own::Copy);
+        sym[n] = Sym{cname(n), own, "", ""};
         ln("  ", cat("Val BRAT_UNUSED ", cname(n), " = vnil();"));
     }
     for (const auto &n : relet)
-        if (vars.count(n)) ln("  ", cat(cname(n), " = vnil();"));
+        if (vars.count(n) && !ub_ints.count(n) && !ub_floats.count(n)) ln("  ", cat(cname(n), " = vnil();"));
     for (const auto &n : vars)
         if (caps_set.count(n) && !param_names.count(n))
-            ln("  ", cat(cname(n), " = (*map_get(cap, \"", n, "\"));"));
+            ln("  ", cat(cname(n), " = (*vclosure_env_at(cap, ", cap_slots[n], "));"));
     for (size_t i = 0; i < names.size(); i++) {
-        ln("  ", cat(cname(names[i]), " = args->items[", i, "];"));
+        std::string init_expr = reclaim.count(names[i])
+            ? cat("vrc_inc(", arg_exprs[i], ")")
+            : arg_exprs[i];
+        ln("  ", cat(cname(names[i]), " = ", init_expr, ";"));
         assigned.insert(names[i]);
     }
     nesting++;
@@ -4155,6 +6105,10 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
             ln("  ", cat("vrc_dec(", it->second.cn, ");"));
             alias_temps.erase(name);
         }
+        for (const auto &ccn : catch_cns) {
+            ln("  ", cat("vrelease(", ccn, ");"));
+            ln("  ", cat(ccn, " = vnil();"));
+        }
     }
     ln("  ", "bdepth_pop();");
     ln("  ", cat("vdfreset(", dfbname, ");"));
@@ -4162,17 +6116,22 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     ln("", "}");
     ln("", "");
     cur_params = saved_params;
+    scalar_vars = saved_scalar_vars;
     sym = saved_sym;
     cap = saved_cap;
+    cap_slots = saved_cap_slots;
     dfb = saved_dfb;
     fin = saved_fin;
     dfb_locals = saved_locals;
+    ub_ints = saved_ub;
+    ub_floats = saved_ubf;
     assigned = saved_assigned;
     reclaim = saved_reclaim;
     relet = saved_relet;
     shared = saved_shared;
     captured = saved_captured;
     dropped = saved_dropped;
+    catch_cns = saved_catch_cns;
 }
 
 void Emitter::emit_fn_by_key(const std::string &key) {
@@ -4185,25 +6144,26 @@ void Emitter::emit_fn_by_key(const std::string &key) {
             kind = &fastkinds[name];
             fname = &name;
         }
-        define_fn(cfn(key), f.params, view(f.body), nullptr, raw, kind, fname);
+        define_fn(cfn(key), f.params, view(f.body), nullptr, raw, kind, fname, true);
     } else if (key.rfind("meth:", 0) == 0) {
         std::string rest = key.substr(5);
         auto dot = rest.rfind('.');
         std::string tname = rest.substr(0, dot), mname = rest.substr(dot + 1);
         const FnDecl &f = *fns[tname + "." + mname].decl;
-        define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr);
+        define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true);
     } else {
         throw EmitError("bad fn key " + key);
     }
 }
 
 void Emitter::emit_prelude_tables() {
-    ln("", "static const struct { const char *type, *meth; int code; } MTAB[] = {");
+    ln("", "static const struct { const char *type, *meth; int code; BMethFn fn; } MTAB[] = {");
     std::vector<std::pair<std::pair<std::string, std::string>, int>> mt(mtab.begin(), mtab.end());
     std::sort(mt.begin(), mt.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
     for (const auto &[k, code] : mt)
-        ln("  ", cat("{\"", clit(k.first), "\", \"", clit(k.second), "\", ", code, "},"));
-    ln("  ", "{0, 0, 0}");
+        ln("  ", cat("{\"", clit(k.first), "\", \"", clit(k.second), "\", ", code, ", ",
+                     cfn("meth:" + k.first + "." + k.second), "},"));
+    ln("  ", "{0, 0, 0, 0}");
     ln("", "};");
     ln("", "static const struct { const char *tag, *type; } VTAB[] = {");
     for (const auto &[tag, tname] : vtab)
@@ -4213,10 +6173,10 @@ void Emitter::emit_prelude_tables() {
     ln("", "static Val vcall_any(Val fn, Vec *a);");
     ln("", "static Val vcall_any(Val fn, Vec *a) {");
     ln("  ", "(void)a;");
-    ln("  ", "if (fn.tag != V_TAG || strcmp(fn.as.tv.tag, \"closure\") || fn.as.tv.args->len != 2) { "
+    ln("  ", "if (fn.tag != V_TAG || strcmp(fn.as.tv->tag, \"closure\") || fn.as.tv->len != 2) { "
             "vraise(\"not callable\"); return vunwind; }");
-    ln("  ", "int64_t code = vlong(fn.as.tv.args->items[0]);");
-    ln("  ", "Val cp = fn.as.tv.args->items[1];");
+    ln("  ", "int64_t code = vlong(fn.as.tv->items[0]);");
+    ln("  ", "Val cp = fn.as.tv->items[1];");
     ln("  ", "Map *cap = cp.tag == V_STRUCT ? cp.as.map : NULL;");
     ln("  ", "(void)cap;");
     ln("  ", "switch (code) {");
@@ -4226,51 +6186,73 @@ void Emitter::emit_prelude_tables() {
     ln("  ", "}");
     ln("  ", "vraise(\"bad code\"); return vunwind;");
     ln("", "}");
-    ln("", "static Val __attribute__((unused)) vcall_method(Val obj, const char *meth, Vec *a) {");
+    ln("", "static Val __attribute__((unused)) vcall_method_ic(Val obj, const char *meth, Vec *a, BMethIC *ic) {");
     ln("  ", "(void)a;");
-    ln("  ", "const char *tn = NULL;");
-    ln("  ", "int64_t i;");
-    ln("  ", "if (obj.tag == V_STRUCT) tn = obj.as.map->type;");
-    ln("  ", "else if (obj.tag == V_TAG) { for (i = 0; VTAB[i].tag; i++) if (!strcmp(VTAB[i].tag, "
-            "obj.as.tv.tag)) tn = VTAB[i].type; }");
-    ln("  ", "if (tn) for (i = 0; MTAB[i].type; i++) if (!strcmp(MTAB[i].type, tn) && "
-            "!strcmp(MTAB[i].meth, meth)) {");
-    ln("    ", "Vec *b = vvec(); vec_push(b, obj);");
-    ln("    ", "for (int64_t j = 0; j < a->len; j++) vec_push(b, a->items[j]);");
-    ln("    ", "int64_t code = MTAB[i].code;");
-    ln("    ", "switch (code) {");
-    // `b` is this dispatcher's own argument vector. The callee copies what it
-    // needs out of it, so the container goes right after the call -- emptied
-    // first, because it never owned its items and freeing it would drop them.
-    for (const auto &[key, code] : cd) {
-        if (move_rt)
-            ln("    ", cat("case ", code, ": { Val r = ", cfn(key),
-                           "(NULL, b); b->len = 0; vrc_dec(vvecv(b)); return r; }"));
-        else
-            ln("    ", cat("case ", code, ": return ", cfn(key), "(NULL, b);"));
-    }
+    ln("  ", "const char *rkey = NULL;");
+    ln("  ", "if (obj.tag == V_STRUCT) rkey = obj.as.map->type;");
+    ln("  ", "else if (obj.tag == V_TAG) rkey = obj.as.tv->tag;");
+    ln("  ", "else return vbuiltin(obj, meth, a);");
+    ln("  ", "BMethFn fn = NULL;");
+    ln("  ", "int _mhit = 0;");
+    ln("  ", "if (ic) {");
+    ln("    ", "for (int64_t _w = 0; _w < 4; _w++) {");
+    ln("      ", "if (!ic->hits[_w]) break;");
+    ln("      ", "if (ic->tags[_w] == obj.tag && (ic->tns[_w] == rkey || !strcmp(ic->tns[_w], rkey))) {");
+    ln("        ", "fn = ic->fns[_w]; _mhit = 1; break;");
+    ln("      ", "}");
     ln("    ", "}");
     ln("  ", "}");
+    ln("  ", "if (!_mhit) {");
+    ln("    ", "const char *tn = NULL;");
+    ln("    ", "const char *ck = NULL;");
+    ln("    ", "int64_t i;");
+    ln("    ", "if (obj.tag == V_STRUCT) { tn = rkey; ck = *rkey ? rkey : \"\"; }");
+    ln("    ", "else { for (i = 0; VTAB[i].tag; i++) if (!strcmp(VTAB[i].tag, rkey)) { tn = VTAB[i].type; ck = VTAB[i].tag; break; } }");
+    ln("    ", "if (tn) for (i = 0; MTAB[i].type; i++) if (!strcmp(MTAB[i].type, tn) && !strcmp(MTAB[i].meth, meth)) {");
+    ln("      ", "fn = MTAB[i].fn;");
+    ln("      ", "if (obj.tag == V_STRUCT) ck = MTAB[i].type;");
+    ln("      ", "break;");
+    ln("    ", "}");
+    ln("    ", "if (ic && ck) { unsigned _iw = (unsigned)(ic->next & 3u); ic->tns[_iw] = ck; ic->fns[_iw] = fn; ic->tags[_iw] = obj.tag; ic->hits[_iw] = 1; ic->next = (unsigned char)((_iw + 1u) & 3u); }");
+    ln("  ", "}");
+    ln("  ", "if (fn) {");
+    ln("    ", "if (a->len <= 8) {");
+    ln("      ", "Val _mb[9]; BStackVec _msv; VSTACK_VEC_INIT(_msv, _mb, 9);");
+    ln("      ", "_mb[0] = obj;");
+    ln("      ", "for (int64_t j = 0; j < a->len; j++) _mb[j + 1] = a->items[j];");
+    ln("      ", "_msv.vec.len = a->len + 1;");
+    ln("      ", "return fn(NULL, &_msv.vec);");
+    ln("    ", "}");
+    ln("    ", "Vec *b = vvec(); vec_push(b, obj);");
+    ln("    ", "for (int64_t j = 0; j < a->len; j++) vec_push(b, a->items[j]);");
+    if (move_rt)
+        ln("    ", "Val r = fn(NULL, b); b->len = 0; vrc_dec(vvecv(b)); return r;");
+    else
+        ln("    ", "return fn(NULL, b);");
+    ln("  ", "}");
     ln("  ", "return vbuiltin(obj, meth, a);");
+    ln("", "}");
+    ln("", "static Val __attribute__((unused)) vcall_method(Val obj, const char *meth, Vec *a) {");
+    ln("  ", "return vcall_method_ic(obj, meth, a, NULL);");
     ln("", "}");
     ln("", "static Val __attribute__((unused)) vmap_with(Val obj, Val fn, "
            "const char *meth) {");
     ln("  ", "Vec *w = vvec_of_m(obj, meth);");
-    ln("  ", "Vec *o = vvec();");
-    ln("  ", "Vec *one = vvec();");
+    ln("  ", "if (verr_pending()) { vrc_dec(fn); return vunwind; }");
+    ln("  ", "Vec *o = meth[0] == 'm' ? vvec_cap(w->len) : vvec();");
+    ln("  ", "Val _ob[1]; BStackVec _osv; VSTACK_VEC_INIT(_osv, _ob, 1);");
+    ln("  ", "_osv.vec.len = 1;");
     ln("  ", "for (int64_t i = 0; i < w->len; i++) {");
-    ln("    ", "one->len = 0; vec_push(one, w->items[i]);");
-    ln("    ", "Val r = vcall_any(fn, one);");
+    ln("    ", "_ob[0] = w->items[i];");
+    ln("    ", "Val r = vcall_any(fn, &_osv.vec);");
     ln("    ", "if (verr_pending()) {");
-    ln("      ", "one->len = 0; vrc_dec(vvecv(one)); vrc_dec(fn); vrc_dec(vvecv(o));");
+    ln("      ", "vrc_dec(fn); vrc_dec(vvecv(o));");
     ln("      ", "return r;");
     ln("    ", "}");
-    // `one` borrows its item, so it is emptied before release; `o` owns what map
-    // returned and co-owns what filter kept, which is why filter takes a reference.
     ln("    ", "if (meth[0] == 'm') vec_push(o, r);");
-    ln("    ", "else if (vis_true(r)) vec_push(o, vrc_inc(w->items[i]));");
+    ln("    ", "else { if (vis_true(r)) vec_push(o, vrc_inc(w->items[i])); vrc_dec(r); }");
     ln("  ", "}");
-    ln("  ", "one->len = 0; vrc_dec(vvecv(one)); vrc_dec(fn);");
+    ln("  ", "vrc_dec(fn);");
     ln("  ", "return vvecv(o);");
     ln("", "}");
 }
@@ -4289,8 +6271,9 @@ void Emitter::run_pipeline() {
     for (const auto &[k, v] : mtab) user_meths.insert(k.second);
     compute_fast();
     if (opt >= 1) run_opt();
+    const std::string opt_unused = "BRAT_UNUSED ";
     if (need_idiv) {
-        ln("", "static int64_t bf_idiv(int64_t a, int64_t b) {");
+        ln("", cat("static ", opt_unused, "int64_t bf_idiv(int64_t a, int64_t b) {"));
         ln("  ", "if (!b) { vraise(\"div by zero\"); return 0; }");
         ln("  ", "if (a == INT64_MIN && b == -1) { return INT64_MIN; }");
         ln("  ", "int64_t q = a / b;");
@@ -4299,7 +6282,7 @@ void Emitter::run_pipeline() {
         ln("", "}");
     }
     if (need_imod) {
-        ln("", "static int64_t bf_imod(int64_t a, int64_t b) {");
+        ln("", cat("static ", opt_unused, "int64_t bf_imod(int64_t a, int64_t b) {"));
         ln("  ", "if (!b) { vraise(\"div by zero\"); return 0; }");
         ln("  ", "if (a == INT64_MIN && b == -1) { return 0; }");
         ln("  ", "int64_t r = a % b;");
@@ -4307,14 +6290,30 @@ void Emitter::run_pipeline() {
         ln("  ", "return r;");
         ln("", "}");
     }
+    if (need_idiv_nz) {
+        ln("", "static BRAT_UNUSED int64_t bf_idiv_nz(int64_t a, int64_t b) {");
+        ln("  ", "if (a == INT64_MIN && b == -1) { return INT64_MIN; }");
+        ln("  ", "int64_t q = a / b;");
+        ln("  ", "if ((a % b) && ((a < 0) != (b < 0))) q--;");
+        ln("  ", "return q;");
+        ln("", "}");
+    }
+    if (need_imod_nz) {
+        ln("", "static BRAT_UNUSED int64_t bf_imod_nz(int64_t a, int64_t b) {");
+        ln("  ", "if (a == INT64_MIN && b == -1) { return 0; }");
+        ln("  ", "int64_t r = a % b;");
+        ln("  ", "if (r && ((r < 0) != (b < 0))) r += b;");
+        ln("  ", "return r;");
+        ln("", "}");
+    }
     if (need_fdiv) {
-        ln("", "static double bf_fdiv(double a, double b) {");
+        ln("", "static BRAT_UNUSED double bf_fdiv(double a, double b) {");
         ln("  ", "if (b == 0.0) { vraise(\"div by zero\"); return 0.0; }");
         ln("  ", "return a / b;");
         ln("", "}");
     }
     if (need_fmod) {
-        ln("", "static double bf_fmod(double a, double b) {");
+        ln("", "static BRAT_UNUSED double bf_fmod(double a, double b) {");
         ln("  ", "if (b == 0.0) { vraise(\"div by zero\"); return 0.0; }");
         ln("  ", "double r = fmod(a, b);");
         ln("  ", "if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;");
@@ -4322,15 +6321,22 @@ void Emitter::run_pipeline() {
         ln("", "}");
     }
     if (need_viat) {
-        ln("", "static int64_t bf_viat(Vec *v, int64_t i) {");
+        ln("", cat("static ", opt_unused, "int64_t bf_viat(Vec *v, int64_t i) {"));
         ln("  ", "if (i < 0 || i >= v->len) { vraise(\"index out of range\"); return 0; }");
         ln("  ", "Val x = v->items[i];");
         ln("  ", "if (x.tag != V_INT) { vraise(\"vec elem not int\"); return 0; }");
         ln("  ", "return x.as.ival;");
         ln("", "}");
     }
+    if (need_viat_nb) {
+        ln("", "static BRAT_UNUSED int64_t bf_viat_nb(Vec *v, int64_t i) {");
+        ln("  ", "Val x = v->items[i];");
+        ln("  ", "if (x.tag != V_INT) { vraise(\"vec elem not int\"); return 0; }");
+        ln("  ", "return x.as.ival;");
+        ln("", "}");
+    }
     if (need_vset) {
-        ln("", "static void bf_vset(Vec *v, int64_t i, int64_t x) {");
+        ln("", cat("static ", opt_unused, "void bf_vset(Vec *v, int64_t i, int64_t x) {"));
         ln("  ", "if (i < 0 || i >= v->len) { vraise(\"index out of range\"); return; }");
         ln("  ", "v->items[i] = vint(x);");
         ln("", "}");
@@ -4351,7 +6357,14 @@ void Emitter::run_pipeline() {
 void Emitter::emit_late() {
     while (late_done < static_cast<int>(late.size())) {
         while (late_declared < static_cast<int>(late.size())) {
-            ln("", cat("static Val ", cfn("fn:" + late[late_declared].name), "(Map *cap, Vec *args);"));
+            const std::string key = "fn:" + late[late_declared].name;
+            ln("", cat("static Val ", cfn(key), "(Map *cap, Vec *args);"));
+            auto it = fns.find(late[late_declared].name);
+            if (it != fns.end() && !it->second.ctor && it->second.decl) {
+                std::string sig = cat("static Val ", cfn(key), "_p(Map *cap");
+                for (size_t i = 0; i < it->second.decl->params.size(); i++) sig += cat(", Val bf_arg_", i);
+                ln("", cat(sig, ");"));
+            }
             late_declared++;
         }
         emit_fn_by_key("fn:" + late[late_done].name);
@@ -4363,6 +6376,7 @@ void Emitter::emit_late() {
 void Emitter::emit_main_open() {
     sym.clear();
     cap.reset();
+    cap_slots.clear();
     dfb.clear();
     fin = "__fin_top";
     if (codes.count("fn:main")) {
@@ -4375,7 +6389,7 @@ void Emitter::emit_main_open() {
         ln("    ", "case V_STR: return \"str\";");
         ln("    ", "case V_VEC: return \"vec\";");
         ln("    ", "case V_STRUCT: return \"struct\";");
-        ln("    ", "default: return v.as.tv.tag ? v.as.tv.tag : \"tag\";");
+        ln("    ", "default: return v.as.tv && v.as.tv->tag ? v.as.tv->tag : \"tag\";");
         ln("  ", "}");
         ln("", "}");
     }
@@ -4385,6 +6399,7 @@ void Emitter::emit_main_open() {
     ln("  ", "bdepth_init();");
     ln("  ", cat("vbase_set(\"", cstr_path(base), "\");"));
     ln("  ", "Vec *_a = vvec();");
+    ln("  ", "bexit_track_args(_a);");
     std::set<std::string> names;
     std::function<void(const Stmt &)> scan = [&](const Stmt &s) {
         if (s.k == SK::Pub) {
@@ -4408,16 +6423,20 @@ void Emitter::emit_main_open() {
         if (s->k == SK::Let || s->k == SK::LetTmp) script_lets.insert(s->a);
     for (const auto &n : names) {
         if (global_lets.count(n)) continue;
-        sym[n] = Sym{cname(n), script_lets.count(n) ? Own::Owned : Own::Copy};
+        sym[n] = Sym{cname(n), script_lets.count(n) ? Own::Owned : Own::Copy, "", ""};
         ln("  ", cat("Val BRAT_UNUSED ", cname(n), " = vnil();"));
+        if (script_lets.count(n)) ln("  ", cat("bexit_track_val(&", cname(n), ");"));
     }
-    for (const auto &n : global_lets)
-        sym[n] = Sym{cname(n), script_lets.count(n) ? Own::Owned : Own::Copy};
+    for (const auto &n : global_lets) {
+        sym[n] = Sym{cname(n), script_lets.count(n) ? Own::Owned : Own::Copy, "", ""};
+        if (script_lets.count(n)) ln("  ", cat("bexit_track_val(&", cname(n), ");"));
+    }
     for (const auto &n : relet)
         if (names.count(n)) ln("  ", cat(cname(n), " = vnil();"));
 }
 
 void Emitter::emit_main_close() {
+    ln("  ", "bexit_untrack_all();");
     if (codes.count("fn:main")) {
         ln("  ", cat("Val __r = ", cfn("fn:main"), "(NULL, _a);"));
         ln("  ", "vrc_dec(vvecv(_a));");
@@ -4437,16 +6456,22 @@ void Emitter::emit_main_close() {
     if (codes.count("fn:main")) {
         ln("  ", "if (__r.tag == V_NIL) return 0;");
         ln("  ", "if (__r.tag == V_TAG) {");
-        ln("    ", "if (__r.as.tv.tag && strcmp(__r.as.tv.tag, \"err\") == 0) {");
+        ln("    ", "if (__r.as.tv && __r.as.tv->tag && strcmp(__r.as.tv->tag, \"err\") == 0) {");
         ln("      ", "fprintf(stderr, \"unhandled: ('err', \");");
         ln("      ", "{ Val __p = vnil();");
-        ln("        ", "if (__r.as.tv.args && __r.as.tv.args->len > 0) __p = __r.as.tv.args->items[0];");
-        ln("        ", "if (__p.tag == V_STR) fprintf(stderr, \"'%s'\", __p.as.str);");
-        ln("        ", "else { Val __s = vstr_of(__p); fprintf(stderr, \"%s\", __s.as.str); } }");
-        ln("      ", "fprintf(stderr, \")\\n\");");
+        ln("        ", "if (__r.as.tv->len > 0) __p = __r.as.tv->items[0];");
+        ln("        ", "if (__p.tag == V_STR) fprintf(stderr, \"'%s'\", vstr_c(&__p));");
+        ln("        ", "else { Val __s = vstr_of(__p); fprintf(stderr, \"%s\", vstr_c(&__s)); } }");
+        if (trace_lines) {
+            ln("      ", "fprintf(stderr, \")\");");
+            ln("      ", "vtrace_print_cur_line();");
+            ln("      ", "fprintf(stderr, \"\\n\");");
+        } else {
+            ln("      ", "fprintf(stderr, \")\\n\");");
+        }
         ln("      ", "return 1;");
         ln("    ", "}");
-        ln("    ", "fprintf(stderr, \"TypeError: main must return i64, got %s\\n\", __r.as.tv.tag);");
+        ln("    ", "fprintf(stderr, \"TypeError: main must return i64, got %s\\n\", __r.as.tv && __r.as.tv->tag ? __r.as.tv->tag : \"tag\");");
         ln("    ", "return 1;");
         ln("  ", "}");
         // `main` may hand back a container or a string; the process is about to
@@ -4459,77 +6484,171 @@ void Emitter::emit_main_close() {
     ln("", "}");
 }
 
-std::string Emitter::val_to_c_struct(const std::string &sname, const std::string &valexpr) {
-    std::string mems;
+static int64_t parse_ffi_arr_dim(const std::string &s) {
+    size_t i = 0, n = s.size();
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    while (n > i && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+    if (i == n) throw EmitError("empty array dimension in extern struct");
+    int64_t v = 0;
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') throw EmitError("invalid array dimension `" + s + "` in extern struct");
+        int d = s[i] - '0';
+        if (v > (67108864LL - d) / 10)
+            throw EmitError("array dimension `" + s + "` exceeds limit in extern struct");
+        v = v * 10 + d;
+    }
+    return v;
+}
+
+static std::string trim_ffi_tok(const std::string &s) {
+    size_t i = 0, n = s.size();
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    while (n > i && (s[n - 1] == ' ' || s[n - 1] == '\t')) n--;
+    return s.substr(i, n - i);
+}
+
+std::vector<std::string> Emitter::emit_struct_conv(const std::string &sname) {
+    std::vector<std::string> lines;
+    const bool is_un = unions.count(sname) > 0;
+    const std::string cf = ffi_c(sname);
+    lines.push_back(cat("BFN ", cf, " _bv2c_", sname, "(Val _v) {"));
+    lines.push_back(cat("  ", cf, " _u;"));
+    lines.push_back("  memset(&_u, 0, sizeof(_u));");
+    lines.push_back(cat("  if (_v.tag != V_STRUCT || !_v.as.map) { vraise(\"ffi: expected struct ", sname, "\"); return _u; }"));
+    lines.push_back("  Val *_p;");
+    std::vector<StructField> flds = *structs[sname];
+    if (is_un) {
+        std::stable_sort(flds.begin(), flds.end(), [](const StructField &a, const StructField &b) {
+            auto rank = [](const std::optional<std::string> &t) {
+                return (t && (*t == "f32" || *t == "f64")) ? 0 : 1;
+            };
+            return rank(a.ann) < rank(b.ann);
+        });
+    }
+    auto conv_scalar_to_c = [&](const std::string &ft, const std::string &src, const std::string &dst,
+                                const std::string &label) -> std::string {
+        if (ft == "bool") {
+            return cat("if (", src, ".tag != V_BOOL) { vraise(\"ffi: field ", label, " wants bool\"); return _u; } ", dst, " = ", src, ".as.b;");
+        }
+        if (ft == "str") {
+            return cat("if (", src, ".tag != V_STR) { vraise(\"ffi: field ", label, " wants str\"); return _u; } ", dst, " = vstr_pin(", src, "); if (verr_pending()) return _u;");
+        }
+        if (ft == "ptr" || ft.rfind("ptr[", 0) == 0 || ft.rfind("fn", 0) == 0) {
+            return cat("if (", src, ".tag != V_INT || ", src, ".as.ival < 0) { vraise(\"ffi: field ", label, " wants ptr\"); return _u; } ", dst, " = (void *)(intptr_t)", src, ".as.ival;");
+        }
+        if (ft == "f64") {
+            return cat("if (", src, ".tag != V_FLOAT && ", src, ".tag != V_INT) { vraise(\"ffi: field ", label, " wants f64\"); return _u; } ", dst, " = (", src, ".tag == V_INT ? (double)", src, ".as.ival : ", src, ".as.fval);");
+        }
+        if (ft == "f32") {
+            return cat("if (", src, ".tag != V_FLOAT && ", src, ".tag != V_INT) { vraise(\"ffi: field ", label, " wants f32\"); return _u; } ", dst, " = (float)(", src, ".tag == V_INT ? (double)", src, ".as.ival : ", src, ".as.fval);");
+        }
+        if (structs.count(ft)) {
+            return cat(dst, " = _bv2c_", ft, "(", src, "); if (verr_pending()) return _u;");
+        }
+        std::string ok = cat(src, ".tag == V_INT");
+        if (FFI_RANGE.count(ft)) {
+            const auto &r = FFI_RANGE.at(ft);
+            ok += cat(" && ", src, ".as.ival >= ", r.first, " && ", src, ".as.ival <= ", r.second);
+        }
+        return cat("if (!(", ok, ")) { vraise(\"ffi: field ", label, " wants ", ft.empty() ? std::string("i64") : ft, "\"); return _u; } ", dst, " = ", src, ".as.ival;");
+    };
+    for (const auto &sfield : flds) {
+        const std::string &f = sfield.name;
+        const std::string ft = sfield.ann.value_or("");
+        const std::string ffn = ffi_c(f);
+        const std::string label = sname + "." + f;
+        std::string body;
+        if (ft.rfind("ptr[", 0) != 0 && ft.find('[') != std::string::npos && !ft.empty() && ft.back() == ']') {
+            auto lb = ft.find('[');
+            std::string ael = trim_ffi_tok(ft.substr(0, lb));
+            int64_t acnt = parse_ffi_arr_dim(ft.substr(lb + 1, ft.size() - lb - 2));
+            std::string step = conv_scalar_to_c(ael, "(*_p).as.vec->items[_i]", cat("_u.", ffn, "[_i]"), label);
+            body = cat("if ((*_p).tag != V_VEC || !(*_p).as.vec || (*_p).as.vec->len != ", std::to_string(acnt),
+                       ") { vraise(\"ffi: field ", label, " wants vec of length ", std::to_string(acnt),
+                       "\"); return _u; } for (int64_t _i = 0; _i < ", std::to_string(acnt), "; _i++) { ", step, " }");
+        } else {
+            body = conv_scalar_to_c(ft, "(*_p)", cat("_u.", ffn), label);
+        }
+        if (is_un) {
+            lines.push_back(cat("  if ((_p = map_get(_v.as.map, \"", f, "\")) != NULL) { ", body, " }"));
+        } else {
+            lines.push_back(cat("  if ((_p = map_get(_v.as.map, \"", f, "\")) == NULL) { vraise(\"ffi: struct ", sname, " missing field ", f, "\"); return _u; }"));
+            lines.push_back(cat("  ", body));
+        }
+    }
+    lines.push_back("  return _u;");
+    lines.push_back("}");
+
+    lines.push_back(cat("BFN Val _bc2v_", sname, "(", cf, " _r) {"));
+    lines.push_back(cat("  Val _v = vstruct(vmap(\"", sname, "\"));"));
+    auto conv_c_to_val = [&](const std::string &ft, const std::string &src) -> std::string {
+        if (ft == "bool") return cat("vbool(", src, ")");
+        if (ft == "str") return cat("(", src, " ? vstr(", src, ") : vnil())");
+        if (ft == "ptr" || ft.rfind("ptr[", 0) == 0 || ft.rfind("fn", 0) == 0)
+            return cat("vint((int64_t)(intptr_t)", src, ")");
+        if (ft == "f64") return cat("vfloat(", src, ")");
+        if (ft == "f32") return cat("vfloat((double)", src, ")");
+        if (structs.count(ft)) return cat("_bc2v_", ft, "(", src, ")");
+        return cat("vint((int64_t)", src, ")");
+    };
     for (const auto &sfield : *structs[sname]) {
         const std::string &f = sfield.name;
-        std::string ft = sfield.ann.value_or("");
-        std::string base_expr = cat("(*map_get((", valexpr, ").as.map, \"", f, "\"))");
-        const std::string ffn = ffi_c(f);
-        std::string member;
-        if (ft == "bool") {
-            member = cat(".", ffn, " = ", base_expr, ".as.b");
-        } else if (ft == "str") {
-            member = cat(".", ffn, " = ", base_expr, ".as.str");
-        } else if (ft == "ptr") {
-            member = cat(".", ffn, " = (void *)", base_expr, ".as.ival");
-        } else if (ft == "f64") {
-            member = cat(".", ffn, " = ", base_expr, ".as.fval");
-        } else if (ft == "f32") {
-            member = cat(".", ffn, " = (float)", base_expr, ".as.fval");
-        } else if (structs.count(ft)) {
-            member = cat(".", ffn, " = ", val_to_c_struct(ft, base_expr));
+        const std::string ft = sfield.ann.value_or("");
+        const std::string fexpr = cat("_r.", ffi_c(f));
+        if (ft.rfind("ptr[", 0) != 0 && ft.find('[') != std::string::npos && !ft.empty() && ft.back() == ']') {
+            auto lb = ft.find('[');
+            std::string ael = trim_ffi_tok(ft.substr(0, lb));
+            int64_t acnt = parse_ffi_arr_dim(ft.substr(lb + 1, ft.size() - lb - 2));
+            std::string av = conv_c_to_val(ael, cat(fexpr, "[_i]"));
+            lines.push_back(cat("  { Vec *_av = vvec_cap(", std::to_string(acnt), "); for (int64_t _i = 0; _i < ",
+                                std::to_string(acnt), "; _i++) { vec_push(_av, ", av, "); } map_set(_v.as.map, \"",
+                                f, "\", vvecv(_av)); }"));
         } else {
-            member = cat(".", ffn, " = ", base_expr, ".as.ival");
+            lines.push_back(cat("  map_set(_v.as.map, \"", f, "\", ", conv_c_to_val(ft, fexpr), ");"));
         }
-        if (!mems.empty()) mems += ", ";
-        mems += member;
     }
-    return cat("(", ffi_c(sname), "){ ", mems, " }");
+    lines.push_back("  return _v;");
+    lines.push_back("}");
+    return lines;
+}
+
+std::string Emitter::val_to_c_struct(const std::string &sname, const std::string &valexpr) {
+    return cat("_bv2c_", sname, "(", valexpr, ")");
 }
 
 std::string Emitter::c_struct_to_val(const std::string &sname, const std::string &cexpr) {
-    std::string sets;
-    for (const auto &sfield : *structs[sname]) {
-        const std::string &f = sfield.name;
-        std::string ft = sfield.ann.value_or("");
-        const std::string fexpr = cat(cexpr, ".", ffi_c(f));
-        std::string val;
-        if (ft == "bool") {
-            val = cat("vbool(", fexpr, ")");
-        } else if (ft == "str") {
-            val = cat("vstr(", fexpr, ")");
-        } else if (ft == "ptr") {
-            val = cat("vint((int64_t)", fexpr, ")");
-        } else if (ft == "f64") {
-            val = cat("vfloat(", fexpr, ")");
-        } else if (ft == "f32") {
-            val = cat("vfloat((double)", fexpr, ")");
-        } else if (structs.count(ft)) {
-            val = c_struct_to_val(ft, fexpr);
-        } else {
-            val = cat("vint(", fexpr, ")");
-        }
-        if (!sets.empty()) sets += " ";
-        sets += cat("map_set(_v.as.map, \"", f, "\", ", val, ");");
-    }
-    return cat("({ ", ffi_c(sname), " _r = ", cexpr, "; Val _v = vstruct(vmap(\"", sname, "\")); ", sets,
-               "; _v; })");
+    return cat("_bc2v_", sname, "(", cexpr, ")");
 }
 
 void Emitter::emit_forward_decls() {
     ln("", "static Val vcall_any(Val fn, Vec *a);");
+    ln("", "static Val vcall_method_ic(Val obj, const char *meth, Vec *a, BMethIC *ic);");
     ln("", "static Val vcall_method(Val obj, const char *meth, Vec *a);");
     ln("", "static Val vmap_with(Val obj, Val fn, const char *meth);");
+    mic_slot = static_cast<int>(out.size());
     std::vector<std::pair<std::string, int>> cd(codes.begin(), codes.end());
     std::sort(cd.begin(), cd.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
-    for (const auto &[key, code] : cd)
+    for (const auto &[key, code] : cd) {
         ln("", cat("static Val ", cfn(key), "(Map *cap, Vec *args);"));
+        const std::vector<Param> *params = nullptr;
+        if (key.rfind("fn:", 0) == 0) {
+            auto it = fns.find(key.substr(3));
+            if (it != fns.end() && !it->second.ctor && it->second.decl) params = &it->second.decl->params;
+        } else if (key.rfind("meth:", 0) == 0) {
+            auto it = fns.find(key.substr(5));
+            if (it != fns.end() && !it->second.ctor && it->second.decl) params = &it->second.decl->params;
+        }
+        if (params) {
+            std::string sig = cat("static Val ", cfn(key), "_p(Map *cap");
+            for (size_t i = 0; i < params->size(); i++) sig += cat(", Val bf_arg_", i);
+            ln("", cat(sig, ");"));
+        }
+    }
     for (const auto &[name, e] : fast) {
         const std::vector<Param> &params = e.decl->params;
-        std::string ct = fastkinds[name] == "f64" ? "double" : "int64_t";
+        std::string ct = (fastkinds[name] == "f64" || fastkinds[name] == "f64_dyn") ? "double" : "int64_t";
         std::string types;
-        if (fastkinds[name] == "i64v") {
+        if (fastkinds[name] == "i64v" || fastkinds[name] == "i64v_dyn") {
             const std::set<std::string> &vv = fastvec[name];
             for (const auto &p : params) {
                 if (!types.empty()) types += ", ";
@@ -4568,6 +6687,7 @@ void Emitter::emit_prelude_headers() {
     ln("", case_version && std::strcmp(case_version, "1600") == 0
               ? "#define BRAT_CASE_MAP_VERSION 1600"
               : "#define BRAT_CASE_MAP_VERSION 1500");
+    if (trace_lines) ln("", "#define BRAT_TRACE_DEFAULT 1");
     ln("", "#include \"crt.h\"");
     ln("", "");
 }
@@ -4649,6 +6769,8 @@ std::string Emitter::emit_program() {
         cb_wrappers.push_back(Cb{cbname, cret, cparams});
     }
     out.clear();
+    ic_n = 0;
+    mic_slot = -1;
     nested_seq = 0;
     clos_done = clos_declared = late_done = late_declared = 0;
     tmp = 0;
@@ -4657,6 +6779,8 @@ std::string Emitter::emit_program() {
     captured.clear();
     shared.clear();
     dropped.clear();
+    call_cleanup.clear();
+    scalar_vars.clear();
     scopes.clear();
     emit_prelude_headers();
     ln("", "#include <stdlib.h>");
@@ -4672,8 +6796,15 @@ std::string Emitter::emit_program() {
         std::function<void(const std::string &)> visit = [&](const std::string &n) {
             if (seen.count(n) || !structs.count(n)) return;
             seen.insert(n);
-            for (const auto &fld : *structs[n])
-                if (fld.ann && structs.count(*fld.ann) && *fld.ann != n) visit(*fld.ann);
+            for (const auto &fld : *structs[n]) {
+                if (!fld.ann) continue;
+                std::string bft = *fld.ann;
+                if (bft.rfind("ptr[", 0) != 0) {
+                    auto lb = bft.find('[');
+                    if (lb != std::string::npos) bft = bft.substr(0, lb);
+                }
+                if (structs.count(bft) && bft != n) visit(bft);
+            }
             sorted_structs.push_back(n);
         };
         for (const auto &n : struct_order) visit(n);
@@ -4685,13 +6816,38 @@ std::string Emitter::emit_program() {
     // `_Static_assert` in the emitted C. What the computation buys is a floor on
     // the target's rules -- a field spelled at the wrong width, or a target whose
     // `long` is 4 bytes while `i64` claims 8, fails the build instead of
-    // corrupting the struct at run time. Same numbers, same text as codegen_c.py.
-    // The target's widths, not the host's: the Python emitter computes them
-    // (`ffi.field_shape`) and passes the two numbers, so the triple is parsed
-    // in one place and both emitters cannot drift.
+    // corrupting the struct at run time.
+    // Use the target's widths, not the host's. An explicit triple determines
+    // them below; BRAT_FFI_PTR/BRAT_FFI_A8 are overrides for the no-triple
+    // path used by focused tests.
     int ffi_pw = 8, ffi_a8 = 8;
-    if (const char *e = std::getenv("BRAT_FFI_PTR")) ffi_pw = std::atoi(e);
-    if (const char *e = std::getenv("BRAT_FFI_A8")) ffi_a8 = std::atoi(e);
+    if (!target_triple.empty()) {
+        std::string t = target_triple;
+        for (char &ch : t) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        const bool is_win = t.find("windows") != std::string::npos ||
+                            t.find("win32") != std::string::npos ||
+                            t.find("msvc") != std::string::npos ||
+                            t.find("mingw") != std::string::npos;
+        const bool is_ilp32 = !is_win && (
+            t.rfind("i386", 0) == 0 || t.rfind("i486", 0) == 0 || t.rfind("i586", 0) == 0 ||
+            t.rfind("i686", 0) == 0 || t.rfind("arm", 0) == 0 || t.rfind("armv", 0) == 0 ||
+            t.rfind("thumb", 0) == 0 || t.rfind("wasm32", 0) == 0 || t.rfind("mips", 0) == 0 ||
+            t.rfind("riscv32", 0) == 0 || t.rfind("powerpc-", 0) == 0 ||
+            t.rfind("x86-64-32", 0) == 0 || t.find("-gnux32") != std::string::npos ||
+            t.find("-x32") != std::string::npos || t.find("ilp32") != std::string::npos);
+        if (is_ilp32) {
+            ffi_pw = 4;
+            const bool x86_32 = t.rfind("i386", 0) == 0 || t.rfind("i486", 0) == 0 ||
+                                t.rfind("i586", 0) == 0 || t.rfind("i686", 0) == 0 ||
+                                t.rfind("x86-64-32", 0) == 0 ||
+                                t.find("-x32") != std::string::npos ||
+                                t.find("gnux32") != std::string::npos;
+            ffi_a8 = x86_32 ? 4 : 8;
+        }
+    } else {
+        if (const char *e = std::getenv("BRAT_FFI_PTR")) ffi_pw = std::atoi(e);
+        if (const char *e = std::getenv("BRAT_FFI_A8")) ffi_a8 = std::atoi(e);
+    }
     auto ffi_field_shape = [ffi_pw, ffi_a8](const std::string &t) -> std::optional<std::pair<int, int>> {
         static const std::map<std::string, std::pair<int, int>> shape = {
             {"bool", {1, 1}},
@@ -4718,12 +6874,36 @@ std::string Emitter::emit_program() {
         if (done != ffi_layout.end()) return &done->second;
         if (!structs.count(n)) return nullptr;
         const bool pk = packed.count(n) > 0;
+        const bool is_un = unions.count(n) > 0;
         FFILayout lay;
-        int off = 0, align = 1;
+        int off = 0, max_sz = 0, align = 1;
         for (const auto &sfld : *structs[n]) {
             const std::string sty = sfld.ann.value_or("");
             int size = 0, falign = 1;
-            if (structs.count(sty)) {
+            std::string arr_elem;
+            int arr_cnt = 0;
+            if (sty.rfind("ptr[", 0) != 0 && !sty.empty() && sty.back() == ']') {
+                auto lb = sty.find('[');
+                if (lb != std::string::npos) {
+                    std::string cs = sty.substr(lb + 1, sty.size() - lb - 2);
+                    bool dig = !cs.empty();
+                    for (char ch : cs) if (!std::isdigit(static_cast<unsigned char>(ch))) dig = false;
+                    if (dig) { arr_elem = sty.substr(0, lb); arr_cnt = std::stoi(cs); }
+                }
+            }
+            if (arr_cnt > 0) {
+                if (structs.count(arr_elem)) {
+                    const FFILayout *sub = ffi_of(arr_elem);
+                    if (!sub) return nullptr;
+                    size = sub->size * arr_cnt;
+                    falign = sub->align;
+                } else {
+                    auto sh = ffi_field_shape(arr_elem);
+                    if (!sh) return nullptr;
+                    size = sh->first * arr_cnt;
+                    falign = sh->second;
+                }
+            } else if (structs.count(sty)) {
                 const FFILayout *sub = ffi_of(sty);
                 if (!sub) return nullptr;
                 size = sub->size;
@@ -4734,16 +6914,27 @@ std::string Emitter::emit_program() {
                 size = sh->first;
                 falign = sh->second;
             }
-            if (pk) falign = 1;
-            off = (off + falign - 1) / falign * falign;
-            lay.slots.push_back({sfld.name, off});
-            off += size;
-            align = std::max(align, falign);
+            if (is_un) {
+                lay.slots.push_back({sfld.name, 0});
+                max_sz = std::max(max_sz, size);
+                align = std::max(align, falign);
+            } else {
+                if (pk) falign = 1;
+                off = (off + falign - 1) / falign * falign;
+                lay.slots.push_back({sfld.name, off});
+                off += size;
+                align = std::max(align, falign);
+            }
         }
-        if (pk) align = 1;
-        else off = (off + align - 1) / align * align;
-        lay.size = off;
-        lay.align = align;
+        if (is_un) {
+            lay.size = (max_sz + align - 1) / align * align;
+            lay.align = align;
+        } else {
+            if (pk) align = 1;
+            else off = (off + align - 1) / align * align;
+            lay.size = off;
+            lay.align = align;
+        }
         auto ins = ffi_layout.emplace(n, std::move(lay));
         return &ins.first->second;
     };
@@ -4785,8 +6976,29 @@ std::string Emitter::emit_program() {
                 m = cat("float ", sfn, ";");
             } else if (sty == "str") {
                 m = cat("const char *", sfn, ";");
-            } else if (sty == "ptr") {
+            } else if (sty == "ptr" || sty.rfind("ptr[", 0) == 0 || sty.rfind("fn", 0) == 0) {
                 m = cat("void *", sfn, ";");
+            } else if (sty.find('[') != std::string::npos && !sty.empty() && sty.back() == ']') {
+                auto lb = sty.find('[');
+                std::string ael = sty.substr(0, lb);
+                std::string acnt = sty.substr(lb + 1, sty.size() - lb - 2);
+                std::string act = "int64_t";
+                if (ael == "bool") act = "_Bool";
+                else if (ael == "i64") act = "int64_t";
+                else if (ael == "i32") act = "int";
+                else if (ael == "u8") act = "unsigned char";
+                else if (ael == "i8") act = "signed char";
+                else if (ael == "u16") act = "unsigned short";
+                else if (ael == "i16") act = "short";
+                else if (ael == "u32") act = "unsigned";
+                else if (ael == "u64") act = "uint64_t";
+                else if (ael == "usize") act = "size_t";
+                else if (ael == "f64") act = "double";
+                else if (ael == "f32") act = "float";
+                else if (ael == "str") act = "const char *";
+                else if (ael == "ptr") act = "void *";
+                else if (structs.count(ael)) act = ffi_c(ael);
+                m = cat(act, " ", sfn, "[", std::to_string(parse_ffi_arr_dim(acnt)), "];");
             } else if (structs.count(sty)) {
                 m = cat(ffi_c(sty), " ", sfn, ";");
             } else {
@@ -4795,31 +7007,50 @@ std::string Emitter::emit_program() {
             if (!mems.empty()) mems += " ";
             mems += m;
         }
-        // The attribute is what makes the offsets the header's, not the
-        // compiler's: a packed record has no padding between its fields.
-        ln("", cat(packed.count(sname) ? "typedef struct __attribute__((packed)) { "
-                                      : "typedef struct { ",
+        const bool is_un = unions.count(sname) > 0;
+        const char *rk = is_un ? "union" : "struct";
+        ln("", cat(is_un ? "typedef union { "
+                         : (packed.count(sname) ? "typedef struct __attribute__((packed)) { "
+                                                : "typedef struct { "),
                    mems, " } ", ffi_c(sname), ";"));
-        // Compile-time only: no code, no data, no run-time cost. A struct whose
-        // C layout disagrees with the one the emitter generated code for is an
-        // ABI bug that would otherwise surface as a corrupted value in
-        // production, or not at all.
         const FFILayout *lay = ffi_of(sname);
         if (lay) {
             ln("", cat("_Static_assert(sizeof(", ffi_c(sname), ") == ", std::to_string(lay->size),
-                       ", \"extern struct ", sname,
+                       ", \"extern ", rk, " ", sname,
                        ": size differs from the declared layout\");"));
             for (const auto &slot : lay->slots) {
                 ln("", cat("_Static_assert(offsetof(", ffi_c(sname), ", ", ffi_c(slot.first),
-                           ") == ", std::to_string(slot.second), ", \"extern struct ", sname,
+                           ") == ", std::to_string(slot.second), ", \"extern ", rk, " ", sname,
                            ".", slot.first, ": offset differs from the declared layout\");"));
             }
         }
+        for (const auto &sl : emit_struct_conv(sname)) ln("", sl);
     }
     ln("", "");
+    static const std::set<std::string> sys_c_syms = {
+        "malloc", "calloc", "realloc", "free", "abs", "labs", "llabs",
+        "atoi", "atol", "atoll", "atof", "strtol", "strtoul", "strtoll",
+        "strtoull", "strtod", "strtof", "exit", "_exit", "abort", "getenv",
+        "setenv", "unsetenv", "system", "qsort", "bsearch", "rand", "srand",
+        "strlen", "strnlen", "strcmp", "strncmp", "strcpy", "strncpy",
+        "strcat", "strncat", "strchr", "strrchr", "strstr", "strdup",
+        "strndup", "strerror", "memcpy", "memmove", "memset", "memcmp",
+        "memchr", "printf", "fprintf", "sprintf", "snprintf", "puts",
+        "fputs", "putchar", "getchar", "fopen", "fclose", "fread", "fwrite",
+        "fflush", "fseek", "ftell", "rewind", "remove", "rename", "htonl",
+        "htons", "ntohl", "ntohs", "sin", "cos", "tan", "asin", "acos",
+        "atan", "atan2", "sinh", "cosh", "tanh", "sqrt", "cbrt", "hypot",
+        "pow", "exp", "log", "log10", "log2", "floor", "ceil", "fabs",
+        "fmod", "round", "trunc", "read", "write", "close", "open", "lseek",
+        "unlink", "access", "getpid", "sleep", "usleep", "time", "clock",
+        "difftime",
+    };
+    std::set<std::string> emitted_externs;
     for (const auto &e : externs) {
-        if (e.lib.empty()) continue;
-        if (e.lib.find("libc.so") != std::string::npos || e.lib == "libc") continue;
+        if (!emitted_externs.insert(e.name).second) continue;
+        if (e.lib.empty() && sys_c_syms.count(e.name)) continue;
+        if (!e.lib.empty() && (e.lib.find("libc.so") != std::string::npos || e.lib == "libc"))
+            continue;
         const std::string cret = ffi_decl_type(e.ret ? *e.ret : std::string());
         std::string cparams;
         for (const auto &p : *e.params) {
@@ -4831,7 +7062,19 @@ std::string Emitter::emit_program() {
             if (!cparams.empty()) cparams += ", ";
             cparams += "...";
         }
-        ln("", cat("extern ", cret, " ", e.name, "(", cparams.empty() ? "void" : cparams, ");"));
+        std::string attr;
+        if (e.effects) {
+            bool has_pure = false, has_nothrow = false, has_reads = false;
+            for (const auto &ef : *e.effects) {
+                if (ef == "pure") has_pure = true;
+                else if (ef == "nothrow") has_nothrow = true;
+                else if (ef.rfind("reads:", 0) == 0) has_reads = true;
+            }
+            if (has_pure) attr = has_reads ? " BRAT_ATTR_PURE" : " BRAT_ATTR_CONST";
+            else if (has_nothrow) attr = " BRAT_ATTR_NOTHROW";
+        }
+        ln("", cat("extern ", cret, " ", e.name, "(", cparams.empty() ? "void" : cparams, ")",
+                   attr, ";"));
     }
     ln("", "");
     for (const auto &cb : cb_wrappers) {
@@ -4896,7 +7139,7 @@ std::string Emitter::emit_program() {
         } else if (*ret == "bool") {
             ln("  ", "return _r.as.b;");
         } else if (*ret == "str") {
-            ln("  ", "return _r.as.str;");
+            ln("  ", "return vstr_pin(_r);");
         } else if (ret->rfind("ptr", 0) == 0) {
             ln("  ", cat("return (", ffi_decl_type(*ret), ")_r.as.ival;"));
         } else if (*ret == "f32" || *ret == "f64") {
@@ -4916,6 +7159,7 @@ std::string Emitter::emit_program() {
     emit_main_close();
     emit_closures_queue();
     emit_prelude_tables();
+    std::vector<std::pair<std::string, std::string>> abi_entries;
     for (const auto &exname : exported) {
         auto it = fns.find(exname);
         if (it == fns.end() || it->second.ctor) continue;
@@ -4923,7 +7167,7 @@ std::string Emitter::emit_program() {
         std::optional<std::string> ret;
         auto rit = fn_ret.find(exname);
         if (rit != fn_ret.end()) ret = rit->second;
-        std::vector<std::string> cparams, pushes;
+        std::vector<std::string> cparams, pushes, abi_ps;
         bool ok = true;
         for (size_t i = 0; i < f.params.size(); i++) {
             const auto &ann = f.params[i].ann;
@@ -4931,62 +7175,94 @@ std::string Emitter::emit_program() {
             if (ann && *ann == "bool") {
                 cparams.push_back(cat("_Bool ", arg));
                 pushes.push_back(cat("vec_push(_a, vbool(", arg, "));"));
-            } else if (ann && (*ann == "i64" || *ann == "i32")) {
-                cparams.push_back(cat(*ann == "i64" ? "int64_t" : "int", " ", arg));
+                abi_ps.push_back("bool");
+            } else if (ann && (*ann == "i64" || *ann == "i32" || *ann == "i16" ||
+                               *ann == "i8" || *ann == "isize")) {
+                const char *ct = *ann == "i64" ? "int64_t" : (*ann == "i32" ? "int"
+                                 : (*ann == "i16" ? "short" : (*ann == "i8" ? "signed char" : "ptrdiff_t")));
+                cparams.push_back(cat(ct, " ", arg));
                 pushes.push_back(cat("vec_push(_a, vint(", arg, "));"));
+                abi_ps.push_back(*ann);
             } else if (ann && *ann == "u8") {
                 cparams.push_back(cat("unsigned char ", arg));
                 pushes.push_back(cat("vec_push(_a, vint(", arg, "));"));
+                abi_ps.push_back("u8");
             } else if (ann && *ann == "u16") {
                 cparams.push_back(cat("unsigned short ", arg));
                 pushes.push_back(cat("vec_push(_a, vint(", arg, "));"));
+                abi_ps.push_back("u16");
             } else if (ann && (*ann == "u32" || *ann == "u64" || *ann == "usize")) {
                 cparams.push_back(cat(*ann == "u32" ? "unsigned" : (*ann == "u64" ? "uint64_t"
                                                   : "size_t"), " ", arg));
                 pushes.push_back(cat("vec_push(_a, vint(", arg, "));"));
+                abi_ps.push_back(*ann);
             } else if (ann && *ann == "f64") {
                 cparams.push_back(cat("double ", arg));
                 pushes.push_back(cat("vec_push(_a, vfloat(", arg, "));"));
+                abi_ps.push_back("f64");
             } else if (ann && *ann == "f32") {
                 cparams.push_back(cat("float ", arg));
                 pushes.push_back(cat("vec_push(_a, vfloat((double)", arg, "));"));
+                abi_ps.push_back("f32");
             } else if (ann && *ann == "str") {
                 cparams.push_back(cat("const char * ", arg));
                 pushes.push_back(cat("vec_push(_a, vstr(", arg, "));"));
+                abi_ps.push_back("str");
             } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
                 cparams.push_back(cat("void * ", arg));
                 pushes.push_back(cat("vec_push(_a, vint((int64_t)", arg, "));"));
+                abi_ps.push_back("ptr");
             } else if (ann && structs.count(*ann)) {
                 cparams.push_back(cat(ffi_c(*ann), " ", arg));
                 pushes.push_back(cat("vec_push(_a, ", c_struct_to_val(*ann, arg), ");"));
+                abi_ps.push_back(*ann);
             } else {
                 ok = false;
                 break;
             }
         }
         if (!ok) continue;
-        std::string cret;
+        std::string cret, abi_ret;
         if (!ret || *ret == "none") {
             cret = "void";
+            abi_ret = "none";
         } else if (*ret == "bool") {
             cret = "_Bool";
+            abi_ret = "bool";
         } else if (structs.count(*ret)) {
             cret = ffi_c(*ret);
-        } else if (*ret == "i64" || *ret == "i32") {
-            cret = *ret == "i64" ? "int64_t" : "int";
+            abi_ret = *ret;
+        } else if (*ret == "i64" || *ret == "i32" || *ret == "i16" || *ret == "i8" ||
+                   *ret == "isize" || *ret == "u8" || *ret == "u16" || *ret == "u32" ||
+                   *ret == "u64" || *ret == "usize") {
+            cret = *ret == "i64" ? "int64_t" : (*ret == "i32" ? "int"
+                 : (*ret == "i16" ? "short" : (*ret == "i8" ? "signed char"
+                 : (*ret == "isize" ? "ptrdiff_t" : (*ret == "u8" ? "unsigned char"
+                 : (*ret == "u16" ? "unsigned short" : (*ret == "u32" ? "unsigned"
+                 : (*ret == "u64" ? "uint64_t" : "size_t"))))))));
+            abi_ret = *ret;
         } else if (*ret == "f64") {
             cret = "double";
+            abi_ret = "f64";
         } else if (*ret == "f32") {
             cret = "float";
-        } else if (*ret == "bool") {
-            ln("  ", "return _r.as.b;");
+            abi_ret = "f32";
         } else if (*ret == "str") {
             cret = "const char *";
-        } else if (*ret == "ptr") {
+            abi_ret = "str";
+        } else if (*ret == "ptr" || ret->rfind("ptr[", 0) == 0) {
             cret = "void *";
+            abi_ret = "ptr";
         } else {
             continue;
         }
+        std::string abi_sig = abi_ret + "(";
+        for (size_t i = 0; i < abi_ps.size(); i++) {
+            if (i) abi_sig += ",";
+            abi_sig += abi_ps[i];
+        }
+        abi_sig += ")";
+        abi_entries.push_back({exname, abi_sig});
         std::string joined;
         for (const auto &p : cparams) {
             if (!joined.empty()) joined += ", ";
@@ -4997,20 +7273,58 @@ std::string Emitter::emit_program() {
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
         ln("  ", cat("Val _r = ", cfn("fn:" + exname), "(NULL, _a);"));
+        ln("  ", "vargs_drop(_a);");
+        ln("  ", "vcb_check(_r);");
         if (!ret || *ret == "none") {
-            ln("  ", "(void)_r;");
+            ln("  ", "vrc_dec(_r);");
         } else if (*ret == "str") {
-            ln("  ", "return _r.as.str;");
-        } else if (*ret == "ptr") {
+            ln("  ", "return vstr_pin(_r);");
+        } else if (*ret == "bool") {
+            ln("  ", "return _r.as.b;");
+        } else if (*ret == "ptr" || ret->rfind("ptr[", 0) == 0) {
             ln("  ", "return (void *)_r.as.ival;");
         } else if (*ret == "f64") {
             ln("  ", "return _r.as.fval;");
+        } else if (*ret == "f32") {
+            ln("  ", "return (float)_r.as.fval;");
         } else if (structs.count(*ret)) {
-            ln("  ", cat("return ", val_to_c_struct(*ret, "_r"), ";"));
+            ln("  ", cat(ffi_c(*ret), " _out = ", val_to_c_struct(*ret, "_r"), ";"));
+            ln("  ", "vrc_dec(_r);");
+            ln("  ", "return _out;");
         } else {
             ln("  ", "return _r.as.ival;");
         }
         ln("", "}");
+    }
+    if (!abi_entries.empty()) {
+        ln("", "");
+        ln("", "extern const BPluginAbiEntry brat_plugin_abi_v1[];");
+        ln("", "const BPluginAbiEntry brat_plugin_abi_v1[] = {");
+        for (const auto &ae : abi_entries)
+            ln("  ", cat("{\"", ae.first, "\", \"", ae.second, "\"},"));
+        ln("  ", "{NULL, NULL}");
+        ln("", "};");
+    }
+    if (mic_slot >= 0) {
+        std::vector<std::string> ic_decls;
+        for (size_t sid = 0; sid < shape_defs.size(); sid++) {
+            const auto &fnames = shape_defs[sid].second;
+            std::string klits;
+            for (size_t j = 0; j < fnames.size(); j++) {
+                if (j) klits += ", ";
+                klits += cat("\"", clit(fnames[j]), "\"");
+            }
+            ic_decls.push_back(cat("static const char *const _sk", static_cast<int>(sid), "[",
+                                   static_cast<int>(fnames.size()), "] = {", klits, "};"));
+        }
+        if (!shape_defs.empty())
+            ic_decls.push_back(cat("static BShape _shp[", static_cast<int>(shape_defs.size()), "];"));
+        if (fic_n > 0)
+            ic_decls.push_back(cat("static BTLS BFieldIC _fic[", fic_n, "];"));
+        if (ic_n > 0)
+            ic_decls.push_back(cat("static BTLS BMethIC _mic[", ic_n, "];"));
+        if (!ic_decls.empty())
+            out.insert(out.begin() + mic_slot, ic_decls.begin(), ic_decls.end());
     }
     std::string text;
     for (size_t i = 0; i < out.size(); i++) {
@@ -5029,20 +7343,29 @@ bool Emitter::booly(const Expr &e) {
 }
 
 std::string Emitter::err_bail() {
+    std::string rel;
+    for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it)
+        rel += cat("vdrop_temp(", *it, "); ");
     if (err_goto)
-        return cat("{ ", err_base ? cat("vdfreset(", *err_base, "); ") : std::string(), "goto ",
+        return cat("{ ", rel, err_base ? cat("vdfreset(", *err_base, "); ") : std::string(), "goto ",
                    *err_goto, "; }");
     if (fin == "__fin_top")
-        return "{ fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); fprintf(stderr, "
-               "\"\\n\"); return 1; }";
-    return cat("{ __ret = verr_leave(); goto ", fin, "; }");
+        return cat("{ ", rel, "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
+                   "fprintf(stderr, \"\\n\"); return 1; }");
+    return cat("{ ", rel, "__ret = verr_leave(); goto ", fin, "; }");
 }
 
 std::string Emitter::err_check_line(const std::vector<std::string> &drops) {
     // `drops` are temps this statement built and handed to nothing: on the way to
     // the catch their owner is gone, so they are released here.
     std::string rel;
-    for (auto &d : drops) rel += cat("vdrop_temp(", d, "); ");
+    std::set<std::string> seen;
+    for (auto &d : drops) {
+        if (seen.insert(d).second) rel += cat("vdrop_temp(", d, "); ");
+    }
+    for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it) {
+        if (seen.insert(*it).second) rel += cat("vdrop_temp(", *it, "); ");
+    }
     if (err_goto) {
         if (err_base)
             return cat("if (verr_pending()) { ", rel, "vdfreset(", *err_base, "); goto ", *err_goto, "; }");
@@ -5149,7 +7472,7 @@ V Emitter::ex_call(const Expr &e) {
             lvl.push_back(static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c));
         std::vector<std::string> pre = a.pre;
         pre.push_back(cat("vlogv(\"", lvl, "\", ", a.val, ");"));
-        pre.push_back(cat("vrc_dec(vvecv(", a.val, "));"));
+        pre.push_back(cat("vargs_drop(", a.val, ");"));
         return {pre, "vint(0)"};
     }
     if (name == "trace.span") {
@@ -5163,7 +7486,7 @@ V Emitter::ex_call(const Expr &e) {
         V a = args_vec(rest);
         std::vector<std::string> out = a.pre;
         out.push_back(cat("vspan(vvecv(", a.val, "));"));
-        out.push_back(cat("vrc_dec(vvecv(", a.val, "));"));
+        out.push_back(cat("vargs_drop(", a.val, ");"));
         if (body) {
             V b = ex(*body);
             for (auto &p : b.pre) out.push_back(p);
@@ -5171,6 +7494,7 @@ V Emitter::ex_call(const Expr &e) {
             out.push_back(cat("Vec *", sv, " = vvec();"));
             out.push_back(cat("Val ", t, " = vcall_any(", b.val, ", ", sv, ");"));
             out.push_back(cat("vrc_dec(vvecv(", sv, "));"));
+            out.push_back(cat("vrc_dec(", b.val, ");"));
             return {out, t};
         }
         return {out, "vint(0)"};
@@ -5218,50 +7542,62 @@ V Emitter::ex_call(const Expr &e) {
             V b = ex(*args[1]);
             std::vector<std::string> pre = a.pre;
             for (auto &p : b.pre) pre.push_back(p);
-            pre.push_back(cat("if (!vis_true(", a.val, ")) { Vec *_ae = vvec(); vec_push(_ae, ", b.val,
-                              "); vunwind = vtagv(\"err\", _ae); vunwind_do(); ", bail, " }"));
+            pre.push_back(cat("if (!vassert2(", keep(*args[0], a.val), ", ", keep(*args[1], b.val), ")) ", bail));
             return {pre, "vbool(1)"};
         }
         std::vector<std::string> pre = a.pre;
-        pre.push_back(cat("if (!vis_true(", a.val, ")) { vraise(\"assert failed\"); ", bail, " }"));
+        pre.push_back(cat("if (!vassert1(", keep(*args[0], a.val), ")) ", bail));
         return {pre, "vbool(1)"};
     }
-    if (name == "read_file" || name == "write_file" || name == "tcp_listen" || name == "tcp_connect" ||
+    if (name == "read_file" || name == "write_file" || name == "read_bytes" || name == "write_bytes" ||
+        name == "proc_run" || name == "utf8_bytes" || name == "utf8_str" ||
+        name == "fs_rename" || name == "fs_remove" ||
+        name == "sha256_bytes" || name == "random_bytes" || name == "https_request_raw" ||
+        name == "sql_open" || name == "sql_close" || name == "sql_exec" || name == "sql_query" ||
+        name == "tcp_listen" || name == "tcp_connect" ||
         name == "tcp_accept" || name == "tcp_close" || name == "sbuf" || name == "sbuf_add" ||
         name == "sbuf_len" || name == "sbuf_str" || name == "tcp_recv" || name == "tcp_send" ||
         name == "chan" || name == "join_all" || name == "args" || name == "exit" || name == "eprint" ||
-        name == "raise" || name == "own" || name == "__arena_enter" || name == "__arena_leave" ||
-        name == "time_ms" || name == "sleep_ms") {
-        if (name == "read_file") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            return {a.pre, cat("vreadfile(", a.val, ")")};
+        name == "raise" || name == "own" || name == "$arena_enter" || name == "$arena_leave" ||
+        name == "time_ms" || name == "mono_ns" || name == "sleep_ms") {
+        static const std::map<std::string, std::string> BORROW_1 = {
+            {"read_file", "vreadfile"}, {"read_bytes", "vreadbytes"},
+            {"utf8_bytes", "vutf8_bytes"}, {"utf8_str", "vutf8_str"},
+            {"fs_remove", "vfs_remove"}, {"sha256_bytes", "vsha256_bytes"},
+            {"random_bytes", "vrandom_bytes"},
+            {"sql_open", "vsql_open"}, {"sql_close", "vsql_close"},
+            {"tcp_listen", "vtcp_listen"}, {"tcp_connect", "vtcp_connect"},
+            {"tcp_accept", "vtcp_accept"}, {"tcp_close", "vtcp_close"},
+            {"sbuf_len", "vsbuf_len"}, {"sbuf_str", "vsbuf_str"},
+        };
+        static const std::map<std::string, std::string> BORROW_2 = {
+            {"write_file", "vwritefile"}, {"write_bytes", "vwritebytes"},
+            {"proc_run", "vproc_run"}, {"fs_rename", "vfs_rename"},
+            {"sql_exec", "vsql_exec"}, {"sbuf_add", "vsbuf_add"},
+            {"tcp_recv", "vtcp_recv"}, {"tcp_send", "vtcp_send"},
+        };
+        if (name == "proc_run" && args.size() == 3) {
+            return borrow_builtin("vproc_run_to", args);
         }
-        if (name == "write_file") {
+        if (auto it = BORROW_1.find(name); it != BORROW_1.end()) {
+            need_arity(args, 1, name);
+            return borrow_builtin(it->second, args);
+        }
+        if (auto it = BORROW_2.find(name); it != BORROW_2.end()) {
             need_arity(args, 2, name);
-            V a = ex(*args[0]);
-            V b = ex(*args[1]);
-            std::vector<std::string> pre = a.pre;
-            for (auto &p : b.pre) pre.push_back(p);
-            return {pre, cat("vwritefile(", a.val, ", ", b.val, ")")};
+            return borrow_builtin(it->second, args);
         }
-        if (name == "tcp_listen" || name == "tcp_connect" || name == "tcp_accept" || name == "tcp_close" ||
-            name == "sbuf_len" || name == "sbuf_str") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            return {a.pre, cat("v", name, "(", a.val, ")")};
+        if (name == "https_request_raw") {
+            need_arity(args, 4, name);
+            return borrow_builtin("vhttps_request_raw", args);
+        }
+        if (name == "sql_query") {
+            need_arity(args, 3, name);
+            return borrow_builtin("vsql_query", args);
         }
         if (name == "sbuf") {
             need_arity(args, 0, name);
             return {{}, "vsbuf()"};
-        }
-        if (name == "sbuf_add" || name == "tcp_recv" || name == "tcp_send") {
-            need_arity(args, 2, name);
-            V a = ex(*args[0]);
-            V b = ex(*args[1]);
-            std::vector<std::string> pre = a.pre;
-            for (auto &p : b.pre) pre.push_back(p);
-            return {pre, cat("v", name, "(", a.val, ", ", b.val, ")")};
         }
         if (name == "chan") {
             need_arity(args, 1, name);
@@ -5285,7 +7621,7 @@ V Emitter::ex_call(const Expr &e) {
             V a = args_vec(args);
             std::vector<std::string> pre = a.pre;
             pre.push_back(cat("veprint(", a.val, ");"));
-            pre.push_back(cat("vrc_dec(vvecv(", a.val, "));"));
+            pre.push_back(cat("vargs_drop(", a.val, ");"));
             return {pre, "vint(0)"};
         }
         if (name == "raise") {
@@ -5301,14 +7637,18 @@ V Emitter::ex_call(const Expr &e) {
             V a = ex(*args[0]);
             return {a.pre, cat("vown(", a.val, ")")};
         }
-        if (name == "__arena_enter" || name == "__arena_leave") {
+        if (name == "$arena_enter" || name == "$arena_leave") {
             need_arity(args, 0, name);
-            std::string fn = name == "__arena_enter" ? "varena_enter" : "varena_leave";
+            std::string fn = name == "$arena_enter" ? "varena_enter" : "varena_leave";
             return {{cat(fn, "();")}, "vint(0)"};
         }
         if (name == "time_ms") {
             need_arity(args, 0, name);
             return {{}, "vtime_ms()"};
+        }
+        if (name == "mono_ns") {
+            need_arity(args, 0, name);
+            return {{}, "vmono_ns()"};
         }
         need_arity(args, 1, name);
         V a = ex(*args[0]);
@@ -5374,8 +7714,32 @@ V Emitter::ex_call(const Expr &e) {
         if (!structs.count(tn.a)) throw EmitError("ptr_write_struct: " + tn.a + " is not an extern struct");
         std::vector<std::string> pre = a.pre;
         for (auto &p : b.pre) pre.push_back(p);
+        std::function<bool(const std::string &, std::set<std::string> &)> struct_has_str =
+            [&](const std::string &sn, std::set<std::string> &seen) -> bool {
+                if (!structs.count(sn) || !structs.at(sn) || !seen.insert(sn).second) return false;
+                for (const auto &sf : *structs.at(sn)) {
+                    std::string ft = sf.ann.value_or("");
+                    if (ft.rfind("ptr[", 0) != 0 && ft.find('[') != std::string::npos &&
+                        !ft.empty() && ft.back() == ']')
+                        ft = trim_ffi_tok(ft.substr(0, ft.find('[')));
+                    if (ft == "str") return true;
+                    if (structs.count(ft) && struct_has_str(ft, seen)) return true;
+                }
+                return false;
+            };
+        std::set<std::string> seen;
+        if (dec_able(*args[1], heap_returns()) && !struct_has_str(tn.a, seen)) {
+            std::string ws = new_tmp("ws");
+            std::string wr = new_tmp("wr");
+            pre.push_back(cat("Val ", ws, " = (", b.val, ");"));
+            pre.push_back(cat("Val ", wr, " = vunwind;"));
+            pre.push_back(cat("if (vptr_live(", a.val, ")) { *(bf_", tn.a, " *)(", a.val, ").as.ival = ",
+                              val_to_c_struct(tn.a, ws), "; ", wr, " = (verr_pending() ? vunwind : vint(0)); }"));
+            pre.push_back(cat("vdrop_temp(", ws, ");"));
+            return {pre, wr};
+        }
         std::string stmt = cat("*(", "bf_", tn.a, " *)(", a.val, ").as.ival = ", val_to_c_struct(tn.a, b.val));
-        return {pre, cat("((vptr_live(", a.val, ")) ? ((", stmt, "), vint(0)) : vunwind)")};
+        return {pre, cat("((vptr_live(", a.val, ")) ? ((", stmt, "), (verr_pending() ? vunwind : vint(0))) : vunwind)")};
     }
     if (name == "ptr_read_i64" || name == "ptr_read_f64" || name == "ptr_read_ptr" ||
         name == "ptr_read_str") {
@@ -5403,13 +7767,13 @@ V Emitter::ex_call(const Expr &e) {
         else if (name == "ptr_write_ptr")
             store = cat("(*(void **)(", a.val, ").as.ival = (void *)(", b.val, ").as.ival)");
         else
-            store = cat("(*(const char **)(", a.val, ").as.ival = (const char *)(", b.val, ").as.str)");
+            store = cat("(*(const char **)(", a.val, ").as.ival = (const char *)vstr_pin(", b.val, "))");
         return {pre, cat("((vptr_live(", a.val, ")) ? (", store, ", vint(0)) : vunwind)")};
     }
     if (name == "ptr_of_str") {
         need_arity(args, 1, name);
         V a = ex(*args[0]);
-        return {a.pre, cat("vint((int64_t)(", a.val, ").as.str)")};
+        return {a.pre, cat("vint((int64_t)vstr_pin(", a.val, "))")};
     }
     if (name == "errno") {
         need_arity(args, 0, name);
@@ -5422,16 +7786,37 @@ V Emitter::ex_call(const Expr &e) {
     }
     if (name == "env_get") {
         need_arity(args, 1, name);
-        V a = ex(*args[0]);
-        return {a.pre, cat("venv_get(", a.val, ")")};
+        return borrow_builtin("venv_get", args);
     }
-    if (name == "re_match") {
-        need_arity(args, 2, name);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
-        std::vector<std::string> pre = a.pre;
-        for (auto &p : b.pre) pre.push_back(p);
-        return {pre, cat("vbool(vre_match(", a.val, ", ", b.val, "))")};
+    if (name == "re_match" || name == "re_find" || name == "re_captures" || name == "re_replace") {
+        int want_n = (name == "re_replace") ? 3 : 2;
+        need_arity(args, want_n, name);
+        std::vector<std::string> pre;
+        std::vector<std::string> vals;
+        std::vector<std::string> drops;
+        for (const Expr *arg_node : args) {
+            V a = ex(*arg_node);
+            for (auto &p : a.pre) pre.push_back(p);
+            if (dec_able(*arg_node, heap_returns())) {
+                if (a.val.empty() || a.val[0] != '_') {
+                    std::string t = new_tmp("v");
+                    pre.push_back(cat("Val ", t, " = (", a.val, ");"));
+                    a.val = t;
+                }
+                drops.push_back(a.val);
+            }
+            vals.push_back(a.val);
+        }
+        std::string expr;
+        if (name == "re_match") expr = cat("vbool(vre_match(", vals[0], ", ", vals[1], "))");
+        else if (name == "re_find") expr = cat("vre_find(", vals[0], ", ", vals[1], ")");
+        else if (name == "re_captures") expr = cat("vre_captures(", vals[0], ", ", vals[1], ")");
+        else expr = cat("vre_replace(", vals[0], ", ", vals[1], ", ", vals[2], ")");
+        if (drops.empty()) return {pre, expr};
+        std::string r = new_tmp("a");
+        pre.push_back(cat("Val ", r, " = ", expr, ";"));
+        for (auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
+        return {pre, r};
     }
     if (fns.count(fn_key(name))) return ex_direct(fn_key(name), args);
     if (name.find('.') != std::string::npos) return ex_dotted(name, args);
@@ -5447,6 +7832,20 @@ V Emitter::ex_call(const Expr &e) {
         const Ext &x = externs[ext->second];
         std::vector<std::string> pa_all;
         std::string cargs;
+        auto saved_out = out_binds;
+        out_binds.clear();
+        size_t clean_start = call_cleanup.size();
+        std::vector<std::string> held;
+        struct ExtGuard {
+            Emitter *em;
+            std::vector<OutBind> saved;
+            size_t cs;
+            ~ExtGuard() {
+                em->out_binds = std::move(saved);
+                if (em->call_cleanup.size() > cs) em->call_cleanup.resize(cs);
+            }
+        } guard{this, std::move(saved_out), clean_start};
+        const auto &hr = heap_returns();
         for (size_t i = 0; i < args.size(); i++) {
             std::optional<std::string> ann;
             if (i < x.params->size()) {
@@ -5464,9 +7863,6 @@ V Emitter::ex_call(const Expr &e) {
                 ann->rfind("ptr[", 0) != 0)
                 throw EmitError(cat("unsupported FFI argument type `", *ann, "` in extern fn ", name));
             if (ann && ann->rfind("ptr", 0) == 0 && a.k == EK::Un && a.a == "&") {
-                // `&x` is the out-parameter: the callee gets the address of the
-                // binding's storage, and the binding takes the value back as
-                // soon as the call returns.
                 in_out_arg = true;
                 auto o = out_addr(*a.kids[0], ann ? &*ann : nullptr);
                 in_out_arg = false;
@@ -5476,14 +7872,26 @@ V Emitter::ex_call(const Expr &e) {
             }
             V v = ex(a);
             for (auto &p : v.pre) pa_all.push_back(p);
+            const bool owned_arg = dec_able(a, hr);
             if (ann && structs.count(*ann)) {
-                cargs += cat(cargs.empty() ? "" : ", ", val_to_c_struct(*ann, v.val));
+                std::string tv = new_tmp("fa");
+                std::string ts = new_tmp("fs");
+                pa_all.push_back(cat("Val ", tv, " = ", v.val, ";"));
+                if (owned_arg) {
+                    held.push_back(tv);
+                    call_cleanup.push_back(tv);
+                }
+                pa_all.push_back(cat(ffi_c(*ann), " ", ts, " = ", val_to_c_struct(*ann, tv), ";"));
+                pa_all.push_back(cat("if (verr_pending()) ", err_bail()));
+                cargs += cat(cargs.empty() ? "" : ", ", ts);
                 continue;
             }
-            // FFI misuse is a BRAT error, never a segfault: check the tag once
-            // into a temp, then read the payload.
             std::string t = new_tmp("fa");
             pa_all.push_back(cat("Val ", t, " = ", v.val, ";"));
+            if (owned_arg) {
+                held.push_back(t);
+                call_cleanup.push_back(t);
+            }
             std::string ok;
             bool var_slot = i >= x.params->size() && ann && *ann == "ptr";
             if (ann && *ann == "bool") {
@@ -5491,8 +7899,6 @@ V Emitter::ex_call(const Expr &e) {
             } else if (ann && *ann == "str") {
                 ok = cat(t, ".tag == V_STR");
             } else if (var_slot) {
-                // A `str` fills a variadic `..ptr` slot as `const char *`,
-                // which is what `%s` reads.
                 ok = cat("((", t, ".tag == V_INT && ", t, ".as.ival >= 0) || ", t, ".tag == V_STR)");
             } else if (ann && (*ann == "f64" || *ann == "f32")) {
                 ok = cat("(", t, ".tag == V_FLOAT || ", t, ".tag == V_INT)");
@@ -5502,7 +7908,7 @@ V Emitter::ex_call(const Expr &e) {
                     const auto &r = FFI_RANGE.at(*ann);
                     ok += cat(" && ", t, ".as.ival >= ", r.first, " && ", t, ".as.ival <= ", r.second);
                 } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
-                    ok += cat(" && ", t, ".as.ival >= 0");   // negative pointers never reach C
+                    ok += cat(" && ", t, ".as.ival >= 0");
                 }
             }
             pa_all.push_back(cat("if (!(", ok, ")) { vraise(\"ffi: arg ", i + 1, " of ", name, " wants ",
@@ -5510,17 +7916,16 @@ V Emitter::ex_call(const Expr &e) {
             if (ann && *ann == "bool") {
                 cargs += cat(cargs.empty() ? "" : ", ", t, ".as.b");
             } else if (ann && *ann == "str") {
-                cargs += cat(cargs.empty() ? "" : ", ", t, ".as.str");
+                cargs += cat(cargs.empty() ? "" : ", ", "vstr_pin(", t, ")");
             } else if (var_slot) {
-                cargs += cat(cargs.empty() ? "" : ", ", "(", t, ".tag == V_STR ? (void *)", t,
-                             ".as.str : (void *)", t, ".as.ival)");
+                cargs += cat(cargs.empty() ? "" : ", ", "(", t, ".tag == V_STR ? (void *)vstr_pin(", t,
+                             ") : (void *)", t, ".as.ival)");
             } else if (ann && (*ann == "ptr" || ann->rfind("ptr[", 0) == 0)) {
                 cargs += cat(cargs.empty() ? "" : ", ", "(void *)", t, ".as.ival");
             } else if (ann && *ann == "f64") {
                 cargs += cat(cargs.empty() ? "" : ", ", "(", t, ".tag == V_INT ? (double)", t,
                              ".as.ival : ", t, ".as.fval)");
             } else if (ann && *ann == "f32") {
-                // A CUDA/OpenGL kernel takes floats: the value narrows here, once.
                 cargs += cat(cargs.empty() ? "" : ", ", "(float)(", t, ".tag == V_INT ? (double)", t,
                              ".as.ival : ", t, ".as.fval)");
             } else {
@@ -5529,32 +7934,42 @@ V Emitter::ex_call(const Expr &e) {
         }
         std::string call = cat(name, "(", cargs, ")");
         std::string ret = x.ret.value_or("");
-        // The values the callee wrote come back here: after the call, before
-        // anything a raise could skip.
         std::vector<std::string> fl = out_flush();
         out_binds.clear();
+        if (call_cleanup.size() > clean_start) call_cleanup.resize(clean_start);
+        auto finish_post_call = [&]() {
+            for (auto &f : fl) pa_all.push_back(f);
+            for (auto &d : held) pa_all.push_back(cat("vdrop_temp(", d, ");"));
+        };
         if (errno_externs.count(name)) {
-            // Failure is NULL (ptr) or -1 (integers); errno is read right after.
             std::string r = new_tmp("er");
+            std::string eno = new_tmp("eno");
             std::string sentinel = ret == "ptr" ? "0" : "-1";
             pa_all.push_back("errno = 0;");
             pa_all.push_back(cat("int64_t ", r, " = (int64_t)", call, ";"));
-            pa_all.push_back(cat("if (", r, " == ", sentinel, ") { vraise_errno(\"", name, "\"); ",
+            pa_all.push_back(cat("int ", eno, " = errno;"));
+            finish_post_call();
+            pa_all.push_back(cat("if (", r, " == ", sentinel, ") { errno = ", eno, "; vraise_errno(\"", name, "\"); ",
                                  err_bail(), " }"));
             return {pa_all, cat("vint(", r, ")")};
         }
-        if (ret == "bool") return {pa_all, cat("vbool(", call, ")")};
+        if (ret == "bool") {
+            if (fl.empty() && held.empty()) return {pa_all, cat("vbool(", call, ")")};
+            std::string r = new_tmp("br");
+            pa_all.push_back(cat("int ", r, " = (int)(", call, ");"));
+            finish_post_call();
+            return {pa_all, cat("vbool(", r, ")")};
+        }
         if (ffi_int_result(ret)) {
-            // The cast widens the width the header declared, so a `short` that
-            // holds -1 arrives as -1 and not as 65535.
             std::string r = new_tmp("ir");
             pa_all.push_back(cat("int64_t ", r, " = (int64_t)", call, ";"));
-            for (auto &f : fl) pa_all.push_back(f);
+            finish_post_call();
             return {pa_all, cat("vint(", r, ")")};
         }
         if (ret == "u64" || ret == "usize") {
             std::string r = new_tmp("ur");
             pa_all.push_back(cat("uint64_t ", r, " = ", call, ";"));
+            finish_post_call();
             pa_all.push_back(cat("if (", r, " > 9223372036854775807ULL) { vraise(\"ffi: result of ", name,
                                  " does not fit i64\"); ", err_bail(), " }"));
             return {pa_all, cat("vint((int64_t)", r, ")")};
@@ -5562,27 +7977,40 @@ V Emitter::ex_call(const Expr &e) {
         if (ret == "str") {
             std::string t = new_tmp("fr");
             pa_all.push_back(cat("Val ", t, " = vstr_ffi(", call, ");"));
+            finish_post_call();
             pa_all.push_back(cat("if (verr_pending()) ", err_bail()));
             return {pa_all, t};
         }
-        if (ret == "ptr" || ret.rfind("ptr[", 0) == 0)
-            return {pa_all, cat("vint((int64_t)(", call, "))")};
-        if (ret == "f64") return {pa_all, cat("vfloat(", call, ")")};
-        if (ret == "f32") return {pa_all, cat("vfloat((double)", call, ")")};
+        if (ret == "ptr" || ret.rfind("ptr[", 0) == 0) {
+            if (fl.empty() && held.empty()) return {pa_all, cat("vint((int64_t)(", call, "))")};
+            std::string r = new_tmp("pr");
+            pa_all.push_back(cat("int64_t ", r, " = (int64_t)(", call, ");"));
+            finish_post_call();
+            return {pa_all, cat("vint(", r, ")")};
+        }
+        if (ret == "f64") {
+            if (fl.empty() && held.empty()) return {pa_all, cat("vfloat(", call, ")")};
+            std::string r = new_tmp("fr");
+            pa_all.push_back(cat("double ", r, " = ", call, ";"));
+            finish_post_call();
+            return {pa_all, cat("vfloat(", r, ")")};
+        }
+        if (ret == "f32") {
+            if (fl.empty() && held.empty()) return {pa_all, cat("vfloat((double)", call, ")")};
+            std::string r = new_tmp("fr");
+            pa_all.push_back(cat("float ", r, " = ", call, ";"));
+            finish_post_call();
+            return {pa_all, cat("vfloat((double)", r, ")")};
+        }
         if (structs.count(ret)) {
-            // The record is read field by field, so the call goes into a temp
-            // first: inlined into every field access it would be called once per
-            // field -- three calls, three side effects, three different records.
             std::string rt = new_tmp("cs");
             pa_all.push_back(cat(ffi_c(ret), " ", rt, " = ", call, ";"));
+            finish_post_call();
             return {pa_all, c_struct_to_val(ret, rt)};
         }
-        // `-> none` is a spelling of "no result", exactly like an omitted
-        // arrow: the checker already reads them as one (`ffi.check`), and the
-        // emitter must not be the place where the two spellings differ.
         if (!x.ret || *x.ret == "none") {
             pa_all.push_back(cat(call, ";"));
-            for (auto &f : fl) pa_all.push_back(f);
+            finish_post_call();
             return {pa_all, "vnil()"};
         }
         throw EmitError(cat("unsupported FFI return type `", ret, "` in extern fn ", name));
@@ -5591,7 +8019,7 @@ V Emitter::ex_call(const Expr &e) {
     if (cap && cap->second.count(name)) {
         V a = args_vec(args);
         return call_result(a.pre, a.val,
-                           cat("vcall_any((*map_get(", cap->first, ", \"", name, "\")), ", a.val, ")"));
+                           cat("vcall_any((*vclosure_env_at(", cap->first, ", ", cap_slots[name], ")), ", a.val, ")"));
     }
     throw EmitError("unresolved call " + name);
 }
@@ -5599,11 +8027,14 @@ V Emitter::ex_call(const Expr &e) {
 }  // namespace
 
 std::string emit_program(const std::vector<StmtP> &prog, const std::string &base_, int opt,
-                         std::vector<ir::Proof> *proofs) {
+                         std::vector<ir::Proof> *proofs, const std::string &target,
+                         bool trace_lines) {
     Emitter em;
     em.base = base_;
     em.opt = opt;
     em.proofs = proofs;
+    em.target_triple = target;
+    em.trace_lines = trace_lines;
     em.collect_prog(prog);
     return em.emit_program();
 }

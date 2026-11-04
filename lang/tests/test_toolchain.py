@@ -3,7 +3,6 @@ import _scratch
 
 import importlib.util
 import os
-import shutil
 import subprocess
 import sys
 import tempfile

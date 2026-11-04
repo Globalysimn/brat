@@ -1,0 +1,190 @@
+// std.time — wall/monotonic clocks & exact Hinnant Euclidean proleptic Gregorian calendar
+
+pub fn now_ms() -> i64 {
+  return time_ms()
+}
+
+pub fn now_mono_ns() -> i64 {
+  return mono_ns()
+}
+
+pub fn unix_sec() {
+  return time_ms() / 1000
+}
+
+pub fn sleep(ms: i64) -> i64 {
+  let _r = sleep_ms(ms)
+  return 0
+}
+
+pub fn is_leap_year(year: i64) {
+  return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+pub fn days_in_month(year: i64, month: i64) {
+  if month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12 {
+    return 31
+  }
+  if month == 4 || month == 6 || month == 9 || month == 11 {
+    return 30
+  }
+  if month == 2 {
+    if is_leap_year(year) {
+      return 29
+    }
+    return 28
+  }
+  return 0
+}
+
+// Howard Hinnant's exact bijection: days since 1970-01-01 from civil (y, m, d).
+pub fn days_from_civil(y: i64, m: i64, d: i64) {
+  let mut yr = y
+  if m <= 2 {
+    yr = yr - 1
+  }
+  // BRAT `/` is Euclidean floor division, so era is simply `yr / 400`!
+  let era = yr / 400
+  let yoe = yr - era * 400
+  let mut mp = m - 3
+  if m <= 2 {
+    mp = m + 9
+  }
+  let doy = (153 * mp + 2) / 5 + d - 1
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  return era * 146097 + doe - 719468
+}
+
+// Inverse bijection: civil {year, month, day} map from days since 1970-01-01.
+pub fn civil_from_days(z_in: i64) {
+  let z = z_in + 719468
+  let era = z / 146097
+  let doe = z - era * 146097
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let mut y = yoe + era * 400
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp = (5 * doy + 2) / 153
+  let d = doy - (153 * mp + 2) / 5 + 1
+  let mut m = mp + 3
+  if mp >= 10 {
+    m = mp - 9
+  }
+  if m <= 2 {
+    y = y + 1
+  }
+  let mut out = {}
+  out.set("year", y)
+  out.set("month", m)
+  out.set("day", d)
+  return out
+}
+
+// ISO-8601 weekday: 0 = Sunday .. 6 = Saturday.
+pub fn day_of_week(days: i64) {
+  return (days + 4) % 7
+}
+
+fn pad2(n: i64) -> str {
+  if n < 10 {
+    return "0" + str(n)
+  }
+  return str(n)
+}
+
+fn pad4(n: i64) -> str {
+  if n < 0 {
+    return "-" + pad4(0 - n)
+  }
+  if n < 10 {
+    return "000" + str(n)
+  }
+  if n < 100 {
+    return "00" + str(n)
+  }
+  if n < 1000 {
+    return "0" + str(n)
+  }
+  return str(n)
+}
+
+pub fn format_iso8601_utc(epoch_sec: i64) -> str {
+  let days = epoch_sec / 86400
+  let rem = epoch_sec % 86400
+  let civ = civil_from_days(days)
+  let hh = rem / 3600
+  let mm = (rem % 3600) / 60
+  let ss = rem % 60
+  return pad4(civ["year"]) + "-" + pad2(civ["month"]) + "-" + pad2(civ["day"]) + "T" + pad2(hh) + ":" + pad2(mm) + ":" + pad2(ss) + "Z"
+}
+
+fn is_ascii_digits(s: str) -> bool {
+  let bs = utf8_bytes(s)
+  if len(bs) == 0 {
+    return false
+  }
+  for b in bs {
+    if b < 48 || b > 57 {
+      return false
+    }
+  }
+  return true
+}
+
+pub fn parse_iso8601_utc(s: str) {
+  if len(s) != 20 {
+    return Err("ISO-8601 UTC string must be YYYY-MM-DDTHH:MM:SSZ")
+  }
+  if s.slice(4, 5) != "-" || s.slice(7, 8) != "-" || s.slice(10, 11) != "T" || s.slice(13, 14) != ":" || s.slice(16, 17) != ":" || s.slice(19, 20) != "Z" {
+    return Err("ISO-8601 UTC string must be YYYY-MM-DDTHH:MM:SSZ")
+  }
+  let sy = s.slice(0, 4)
+  let sm = s.slice(5, 7)
+  let sd = s.slice(8, 10)
+  let sh = s.slice(11, 13)
+  let smi = s.slice(14, 16)
+  let sse = s.slice(17, 19)
+  if !is_ascii_digits(sy) || !is_ascii_digits(sm) || !is_ascii_digits(sd) || !is_ascii_digits(sh) || !is_ascii_digits(smi) || !is_ascii_digits(sse) {
+    return Err("invalid numeric field in ISO-8601 timestamp")
+  }
+  let yr = sy.parse_int()
+  let mo = sm.parse_int()
+  let dy = sd.parse_int()
+  let hh = sh.parse_int()
+  let mm = smi.parse_int()
+  let ss = sse.parse_int()
+  if is_err(yr) || is_err(mo) || is_err(dy) || is_err(hh) || is_err(mm) || is_err(ss) {
+    return Err("invalid numeric field in ISO-8601 timestamp")
+  }
+  let y = unwrap(yr)
+  let m = unwrap(mo)
+  let d = unwrap(dy)
+  let h = unwrap(hh)
+  let mi = unwrap(mm)
+  let se = unwrap(ss)
+  if m < 1 || m > 12 {
+    return Err("month out of range 1..12")
+  }
+  let dim = days_in_month(y, m)
+  if d < 1 || d > dim {
+    return Err("day out of range for month")
+  }
+  if h < 0 || h > 23 || mi < 0 || mi > 59 || se < 0 || se > 59 {
+    return Err("time component out of range")
+  }
+  let days = days_from_civil(y, m, d)
+  return Ok(days * 86400 + h * 3600 + mi * 60 + se)
+}
+
+pub fn format_duration_ms(ms: i64) -> str {
+  if ms < 1000 {
+    return str(ms) + "ms"
+  }
+  let sec = ms / 1000
+  let rem_ms = ms % 1000
+  if sec < 60 {
+    return str(sec) + "." + pad2(rem_ms / 10) + "s"
+  }
+  let mins = sec / 60
+  let rem_s = sec % 60
+  return str(mins) + "m" + str(rem_s) + "s"
+}

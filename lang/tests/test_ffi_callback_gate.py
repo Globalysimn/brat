@@ -19,8 +19,10 @@ and the sentence is what `check` says, which is the point: one rule, one text.
 No library has to exist for any of this -- a refusal happens before a call.
 
 The last case is the shape that must keep working: a real callback still gets
-its `brat_cb_` wrapper, and both emitters still write the same C for it.
+its `brat_cb_` wrapper, and the Python CLI and native `cc` doors write the
+same C for it.
 """
+import _cxx
 import _scratch
 import os
 import subprocess
@@ -30,11 +32,12 @@ import unicodedata
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENG = os.path.abspath(os.path.join(HERE, "..", "engine"))
 CLI = os.path.join(ENG, "cli.py")
-CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
+CXX = _cxx.build()
 TMP = _scratch.mkdtemp(prefix="brat-ffi-cbgate-")
 version = tuple(int(part) for part in unicodedata.unidata_version.split("."))
 case_version = 1600 if version >= (16, 0) else 1500
 CXX_ENV = dict(os.environ, BRAT_CASE_MAP_VERSION=str(case_version))
+CLI_ENV = dict(CXX_ENV, BRAT_CXX=CXX, BRAT_NO_NATIVE_CLI="1")
 
 BODY = (
     'fn add_two(x: i64) -> i64 { return x + 2 }\n'
@@ -44,7 +47,7 @@ BODY = (
 
 # The interpreter opens a library when the call runs, so the refusal it has to
 # make needs a library that really exists and a symbol that really is there.
-# The emitters refuse before any of that, so they get a name that never loads.
+# The native emitter refuses before any of that, so it gets a name that never loads.
 LIB_C = "int64_t call_cb(int64_t (*f)(int64_t), int64_t v) { return f(v); }\n"
 LIB_C += "int64_t call_ptr(int64_t (*f)(int32_t *), int32_t *p) { return f(p); }\n"
 LIB_C += "int32_t *call_ptr_ret(int32_t *(*f)(int32_t *), int32_t *p) { return f(p); }\n"
@@ -105,9 +108,8 @@ def main():
         # Both front ends, through the two doors that write C.
         cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120,
                      env=CXX_ENV)
-        py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
         ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", path],
-                             capture_output=True, timeout=120, env=py_env)
+                             capture_output=True, timeout=120, env=CLI_ENV)
         for tag, r in (("brat-cxx cc", cxx), ("brat emit-c", ref)):
             assert r.returncode == 1, "%s %s: rc=%d want 1" % (name, tag, r.returncode)
             assert r.stdout == b"", "%s %s: stdout must stay empty, got %r" % (
@@ -119,9 +121,9 @@ def main():
 
         # And the interpreter, which compiles none of this.
         if ipath is None:
-            print("ffi cb gate ok: %s (emitters only)" % name)
+            print("ffi cb gate ok: %s (native only)" % name)
             continue
-        run = subprocess.run([sys.executable, CLI, "run", "--interp", ipath],
+        run = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", ipath],
                              capture_output=True, timeout=120)
         assert run.returncode != 0, "%s interp: ran a program it cannot honour" % name
         assert sentence in run.stderr.decode("utf-8", "replace"), (
@@ -138,10 +140,9 @@ def main():
                          env=CXX_ENV)
     assert cxx.returncode == 0 and b"brat_cb_add_two" in cxx.stdout, (
         "cb_ok: a valid callback must emit its wrapper")
-    py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
     ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", path],
-                         capture_output=True, timeout=120, env=py_env)
-    assert ref.returncode == 0, "cb_ok: reference emitter refused a valid program"
+                         capture_output=True, timeout=120, env=CLI_ENV)
+    assert ref.returncode == 0, "cb_ok: Python CLI refused a valid program"
     # `emit-c` appends the contract block the driver records for the binary;
     # `brat-cxx cc` is the emitter alone, so the C is what must match.
     code, sep, contract = ref.stdout.rpartition(b"\n/* BRAT FFI contract")
@@ -150,9 +151,9 @@ def main():
         ref_stdout = code + b"\n"
     else:
         ref_stdout = ref.stdout
-    assert ref_stdout == cxx.stdout, "cb_ok: the two emitters wrote different C"
+    assert ref_stdout == cxx.stdout, "cb_ok: the CLI doors wrote different C"
     n += 1
-    print("ffi cb gate ok: cb_ok (wrapper emitted, emitters byte-identical)")
+    print("ffi cb gate ok: cb_ok (wrapper emitted, CLI doors byte-identical)")
 
     ptr_src = (
         'extern "%s" fn call_ptr(f: fn(ptr[i32]) -> i64, p: ptr[i32]) -> i64\n' % lib
@@ -164,13 +165,12 @@ def main():
     cxx = subprocess.run([CXX, "cc", ptr_path], capture_output=True, timeout=120,
                          env=CXX_ENV)
     assert cxx.returncode == 0, cxx.stderr.decode("utf-8", "replace")[-400:]
-    py_env = dict(os.environ, BRAT_CXX=os.path.join(TMP, "no-such-binary"))
     ref = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", ptr_path],
-                         capture_output=True, timeout=120, env=py_env)
+                         capture_output=True, timeout=120, env=CLI_ENV)
     code, sep, _contract = ref.stdout.rpartition(b"\n/* BRAT FFI contract")
     ref_stdout = code + b"\n" if sep else ref.stdout
     assert ref.returncode == 0 and ref_stdout == cxx.stdout, (
-        "cb_ptr: typed pointer callback emitters disagree")
+        "cb_ptr: typed pointer callback CLI doors disagree")
     assert b"call_ptr(int64_t (*) (int *), int *)" in cxx.stdout, cxx.stdout[:300]
     cfile = os.path.join(TMP, "cb_ptr.c")
     obj = os.path.join(TMP, "cb_ptr.o")

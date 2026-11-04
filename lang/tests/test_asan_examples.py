@@ -37,13 +37,9 @@ TMP = _scratch.mkdtemp(prefix="brat-asan-")
 # name, and any name that is not here fails the test. Byte counts are deliberately
 # not pinned -- they vary with the arguments an example is handed and with the
 # allocator, and a number that moves on its own turns this oracle into noise.
-KNOWN_LEAKS = {
-    "funclib.brat", "jsonlibtest.brat", "newcomer.brat", "span.brat",
-    # syslib ends with `exit(0)`: the process leaves before the script's exit
-    # drops, so what it held at that line is still held. Not an ownership bug,
-    # and not one a release can fix.
-    "syslib.brat",
-}
+# `vexit` now deterministically releases main's argument vector
+# and top-level script bindings before calling C `exit()`, reducing KNOWN_LEAKS to 0!
+KNOWN_LEAKS = set()
 
 HARD = ("heap-use-after-free", "double-free", "heap-buffer-overflow",
         "stack-buffer-overflow", "SEGV", "attempting free on address")

@@ -23,13 +23,34 @@ required when two loaded modules export the same name (`ambiguous unqualified
 name`); a call to a private function from another file is always an error.
 
 The loader resolves each import relative to the importing file, then from
-`vendor/`, and refuses a path outside the root program directory. Every reachable
+`vendor/` (including an ancestor `<project_root>/vendor/` when anchored by
+`brat.lock`), and for `std.<name>` from the toolchain standard library
+(`lang/std/`, overrideable via `$BRAT_STDLIB`). It refuses any path outside
+those roots. Every reachable
 file is parsed once, imports are flattened into a single AST, and imported
-functions are mangled `module__name`. The interpreter, both checkers and both
-emitters consume that same flattened program, which is why all of them agree.
+functions are mangled `module__name`. The interpreter, both checkers and the
+native emitter consume that same flattened program, which is why they agree.
 Callback function names supplied as string literals to `extern fn` are resolved
 and mangled during flattening as well, so callbacks declared in imported
 modules work in both backends.
+
+## Standard library (`std.*`)
+
+`lang/std/` ships twelve modules with `.bri` interfaces, available in every
+program without copying files or running `brat pkg`:
+
+- `std.path` — `is_abs`, `join`, `dir`, `base`, `ext`, `stem`, `norm`
+- `std.cli` — `has_flag`, `opt`, `opt_int`, `positional` (respects `--`)
+- `std.fs` — `exists`, `read_or`, `read_lines`, `write_lines`, `append_text`
+- `std.csv` — RFC 4180 `parse(s)`, `parse_records(s)`, and `dump(rows)`
+- `std.json` — RFC 8259 `parse(s)` and `stringify(v)`
+- `std.http` — HTTP/1.1 + HTTPS `parse_url`, `request`, `get`, `post`, `post_json`, `Session` keep-alive pooling, `get_stream`, and loopback `serve_once`/`serve_n`
+- `std.env` — `get`, `get_or`, `has`, `flag`
+- `std.proc` — `run`, `status`, `output` (capability-gated via `BRAT_EXEC=1` or `BRAT_EXEC_ALLOW`, `execvp` without a shell)
+- `std.bytes` — confined `read`, `write`, `eq`, `starts_with`, `concat`, `to_hex`, `from_hex`, `to_base64`, `from_base64`
+- `std.time` — `now_ms`, `monotonic_ns`, `sleep_ms`, UTC ISO-8601 `format_utc` and `parse_utc`
+- `std.crypto` — constant-time `ct_eq`, `sha256_hex`, `hmac_sha256_hex`, `hkdf_sha256_hex`, CSPRNG `random_hex`
+- `std.sqlite` — `open`, `close`, `exec`, parameterized `query` (`?1..` bindings) and `with_tx` transactions
 
 ## Interfaces
 
@@ -64,14 +85,22 @@ a diamond that ends at one definition is not.
 ## Tools
 
 ```sh
-brat deps graph.brat -o graph.json    # module -> import edges
+brat deps graph.brat -o graph.json    # module -> import edges (JSON)
+brat deps graph.brat --dot            # Graphviz dependency graph
 brat api  lib.brat                    # exported signature of every module
+brat api --diff old.bri new.bri       # recommended semantic-version bump
 ```
+
+The diff treats added functions as a `minor` bump, removed functions or changed
+signatures as `major`, and identical interfaces as `none`. It compares arity,
+parameter types, and return types; parameter-name-only changes do not alter the
+`.bri` interface contract.
 
 ## Packages
 
 ```sh
-brat pkg add https://example.com/mathx.tar.gz    # vendor/ + brat.lock with sha256
+brat pkg add https://example.com/mathx.tar.gz    # multi-file .tar.gz/.tgz (+ brat.pkg.json deps) -> vendor/<pkg>/ + brat.lock
+brat pkg add github.com/acme/http-kit@v0.3.1     # GitHub ref tarball (+ brat.pkg.json deps) -> vendor/http_kit/ + brat.lock
 brat pkg add acme/mathx@1.2                      # exact version
 brat pkg add acme/mathx@">=1.0,<2.0"             # highest version in range
 brat pkg publish acme/mathx@1.2 mathx.brat       # local index entry + sha256
@@ -119,7 +148,12 @@ validates the lock and all package hashes before staging vendor changes;
 filesystem errors roll back replaced files. `pkg verify` checks local vendor
 files against the lock without network access. Package files are limited to
 16 MiB and lock entries require safe `.brat` filenames, valid SHA-256 hashes
-and supported `https`, `http` or local `file` URLs.
+and supported `https`, `http` or local `file` URLs. Archive packages with
+`brat.pkg.json` may also declare `c_sources` and `c_headers`: `brat pkg` compiles
+the C sources into `vendor/<pkg>/lib<pkg>.so` (plus `lib<pkg>.a` for multi-file C
+packages), verifies the `.brat` extern declarations against the compiled DWARF
+type/symbol tables, and records a signed `.bratbind` manifest so downstream
+`brat build` / `brat run` require `--unsafe-ffi` nowhere.
 
 `pkg update owner/name` re-resolves that package and its currently locked
 dependency closure; unrelated locked package versions stay pinned. `pkg update`

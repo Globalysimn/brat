@@ -10,7 +10,7 @@ What this file pins, one assertion per claim:
 * A window over elements built in the program (`slice_struct_of`) is writable
   and its stores land where the program can see them.
 * `extern packed struct` really is packed: one byte, then an int, at the offsets
-  the header has, in all three implementations, and the proof says so by
+  the header has, in the interpreter and native build, and the proof says so by
   compiling `_Static_assert`s against the header.
 * `u8`/`u16` are widths at the ABI, so a header's `unsigned char` matches `u8`
   and a value of 256 is refused before it reaches C.
@@ -116,6 +116,9 @@ def run(args, **kw):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
             and "--interp" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
+    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
+        i = args.index("--interp") + 1
+        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     p = subprocess.run([sys.executable, CLI] + args, capture_output=True, text=True,
                        timeout=600, **kw)
     return p.returncode, p.stdout, p.stderr
@@ -163,22 +166,6 @@ def main():
     r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     assert r.stdout == WANT, "native:\n%r\nwant:\n%r" % (r.stdout, WANT)
-
-    # the Python emitter, when the C++ one is what ran
-    if os.path.exists(CXX):
-        import importlib
-        sys.path.insert(0, os.path.join(ROOT, "lang", "engine"))
-        cb = importlib.import_module("codegen_c")
-        csrc = write("ptrs.c", cb.emit_file(prog))
-        cexe = os.path.join(TMP, "ptrs_py.bin")
-        r = subprocess.run(["cc", "-std=c99", "-I", os.path.join(ROOT, "lang", "engine"),
-                            csrc, "-L", TMP, "-lptrs", "-o", cexe, "-lpthread", "-lm"],
-                           capture_output=True, text=True)
-        assert r.returncode == 0, r.stderr
-        env = dict(os.environ, LD_LIBRARY_PATH=TMP + ":" + os.environ.get("LD_LIBRARY_PATH", ""))
-        r = subprocess.run([cexe], capture_output=True, text=True, timeout=120, env=env)
-        assert r.returncode == 0, r.stdout + r.stderr
-        assert r.stdout == WANT, "py emitter:\n%r\nwant:\n%r" % (r.stdout, WANT)
 
     # A record table is read-only through the window.
     bad = write("ro.brat", DECLS.replace('"LIB"', '"%s"' % lib) + '''

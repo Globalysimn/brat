@@ -94,6 +94,8 @@ std::string unescape(std::string_view s) {
         case '"': out.push_back('"'); break;
         case '\'': out.push_back('\''); break;
         case '0': out.push_back('\0'); break;
+        case '{': out.push_back('{'); break;
+        case '}': out.push_back('}'); break;
         default: out.push_back('\\'); out.push_back(c);
         }
     }
@@ -110,6 +112,8 @@ std::string lower_ascii(std::string s) {
 }  // namespace
 
 namespace {
+
+StmtP clone_stmt(const Stmt &s);
 
 // A node is owned exactly once; where the grammar needs the same expression
 // twice (`v[i] += x` reads and writes `v[i]`), it is copied here and nowhere
@@ -138,6 +142,7 @@ ExprP clone_expr(const Expr &e) {
             if (p.def) np.def = clone_expr(*p.def);
             f->params.push_back(std::move(np));
         }
+        for (const auto &b : e.fn->body) f->body.push_back(clone_stmt(*b));
         c->fn = std::move(f);
     }
     return c;
@@ -150,15 +155,6 @@ struct Arm {
 };
 
 StmtP clone_stmt(const Stmt &s);
-
-PatP clone_pat(const Pat &p) {
-    auto c = std::make_unique<Pat>();
-    c->k = p.k;
-    c->a = p.a;
-    if (p.lit) c->lit = clone_expr(*p.lit);
-    for (const auto &sub : p.subs) c->subs.push_back(clone_pat(*sub));
-    return c;
-}
 
 StmtP clone_stmt(const Stmt &s) {
     auto c = std::make_unique<Stmt>();
@@ -193,6 +189,8 @@ StmtP clone_stmt(const Stmt &s) {
     c->ext.varargs = s.ext.varargs;
     c->ext.owned = s.ext.owned;
     c->ext.checked = s.ext.checked;
+    c->ext.effects = s.ext.effects;
+    c->ext.contracts = s.ext.contracts;
     for (const auto &f : s.fns) {
         FnDecl nf;
         nf.name = f.name;
@@ -222,7 +220,9 @@ StmtP clone_stmt(const Stmt &s) {
 
 class Parser {
 public:
-    explicit Parser(std::string_view src) : t_(lex(src)) {}
+    explicit Parser(std::string_view src, uint32_t start_line = 1,
+                    int init_nest_expr = 0, int init_nest_block = 0)
+        : t_(lex(src, start_line)), nest_expr_(init_nest_expr), nest_block_(init_nest_block) {}
 
     // One frame of the iterative tree walk: exactly one of the three pointers
     // is set, and `d` is the depth of that node from the statement's root.
@@ -236,7 +236,10 @@ public:
     static void push_expr(std::vector<DepthNode> &stack, const Expr &e, size_t d) {
         for (const auto &kid : e.kids)
             if (kid) stack.push_back({nullptr, kid.get(), nullptr, d + 1});
-        if (e.fn) stack.push_back({nullptr, nullptr, e.fn.get(), d + 1});
+        // A closure's FnDecl is this expression's payload, not a child
+        // node below it; counting it made this depth one greater than
+        // the Python tuple tree for the same function body.
+        if (e.fn) stack.push_back({nullptr, nullptr, e.fn.get(), d});
     }
 
     static void push_stmt(std::vector<DepthNode> &stack, const Stmt &s, size_t d) {
@@ -249,12 +252,16 @@ public:
             if (b) stack.push_back({b.get(), nullptr, nullptr, d + 1});
         for (const auto &p : s.params)
             if (p.def) stack.push_back({nullptr, p.def.get(), nullptr, d + 1});
-        for (const auto &f : s.fns) push_fn(stack, f, d + 1);
+        // A standalone fn's decl is the statement's payload; an impl's
+        // methods are child fn nodes below the impl statement.
+        for (const auto &f : s.fns) push_fn(stack, f, s.k == SK::Impl ? d + 1 : d);
     }
 
     static void push_fn(std::vector<DepthNode> &stack, const FnDecl &f, size_t d) {
+        // A parameter is itself a tuple node in the shared tree dump, so
+        // its default expression sits two levels below the declaration.
         for (const auto &p : f.params)
-            if (p.def) stack.push_back({nullptr, p.def.get(), nullptr, d + 1});
+            if (p.def) stack.push_back({nullptr, p.def.get(), nullptr, d + 2});
         for (const auto &b : f.body)
             if (b) stack.push_back({b.get(), nullptr, nullptr, d + 1});
     }
@@ -413,14 +420,6 @@ private:
             for (auto &s : stmt()) out.push_back(std::move(s));
         }
         return out;
-    }
-
-    template <class... Args>
-    static StmtP make(SK k, Args &&...args) {
-        auto s = std::make_unique<Stmt>();
-        s->k = k;
-        (void)k;
-        return s;
     }
 
     std::vector<StmtP> stmt_inner() {
@@ -602,7 +601,7 @@ private:
             if (konst) fail("const destructure unsupported");
             step();
             std::vector<std::string> names;
-            while (!at("]")) {
+            while (!at("]") && peek().kind != TK::Eof) {
                 names.push_back(to_str(step().text));
                 eat(",");
             }
@@ -627,7 +626,7 @@ private:
             int depth = 0;
             for (;;) {
                 const Tok &x = peek();
-                if (x.text == "=" && depth == 0) break;
+                if (x.kind == TK::Eof || (x.text == "=" && depth == 0)) break;
                 if (x.text == "[") depth++;
                 if (x.text == "]") depth--;
                 toks.push_back(to_str(x.text));
@@ -654,10 +653,10 @@ private:
         auto body = block();
         want("}");
         std::vector<StmtP> then;
-        then.push_back(mk_expr(mk_call("__arena_enter", {})));
+        then.push_back(mk_expr(mk_call("$arena_enter", {})));
         auto def = std::make_unique<Stmt>();
         def->k = SK::Defer;
-        def->e1 = mk_call("__arena_leave", {});
+        def->e1 = mk_call("$arena_leave", {});
         then.push_back(std::move(def));
         for (auto &s : body) then.push_back(std::move(s));
         return mk_if(mk_bool(true), std::move(then), mk_block({}));
@@ -794,6 +793,11 @@ private:
             if (at("enum")) return wrap_pub(enum_stmt());
             if (at("trait")) return wrap_pub(trait_stmt());
             if (at("impl")) return wrap_pub(impl_stmt());
+            if (at("const")) {
+                step();
+                auto v = let_stmt(true);
+                return wrap_pub(std::move(v[0]));
+            }
             if (at("use")) {
                 step();
                 auto s = std::make_unique<Stmt>();
@@ -853,7 +857,7 @@ private:
         Sig g;
         g.name = to_str(step().text);
         want("(");
-        while (!at(")")) {
+        while (!at(")") && peek().kind != TK::Eof) {
             SigParam p;
             p.name = to_str(step().text);
             p.mode = Mode::Ref;
@@ -864,7 +868,7 @@ private:
                 std::optional<std::string> first;
                 for (;;) {
                     const Tok &x = peek();
-                    if (depth == 0 && (x.text == "," || x.text == ")")) break;
+                    if (x.kind == TK::Eof || (depth == 0 && (x.text == "," || x.text == ")"))) break;
                     if (x.text == "[" || x.text == "(") depth++;
                     if (x.text == "]" || x.text == ")") depth--;
                     if (!first && depth == 0 && is_name(x)) first = to_str(x.text);
@@ -885,7 +889,8 @@ private:
             bool move_word = at("move") || at("ref");
             if (move_word && step().text == "ref") fail("ref returns dangle; return owned");
             std::vector<std::string> toks;
-            while (!at("}") && !(peek().kind == TK::Kw && at("fn"))) toks.push_back(to_str(step().text));
+            while (peek().kind != TK::Eof && !at("}") && !(peek().kind == TK::Kw && at("fn")))
+                toks.push_back(to_str(step().text));
             g.ret = ann_text(toks);
         }
         return g;
@@ -937,26 +942,29 @@ private:
         std::optional<std::string> block_lib;
         if (peek().kind == TK::Str) block_lib = unquoted(step().text);
         bool packed = false;
-        if (peek().kind == TK::Id && at("packed") && peek(1).text == "struct") {
-            step();          // `extern packed struct`: no padding, 1-byte alignment
-            packed = true;
+        if (peek().kind == TK::Id && at("packed")) {
+            if (peek(1).text == "union") fail("`packed` wants `struct`, not `union`");
+            if (peek(1).text == "struct") {
+                step();          // `extern packed struct`: no padding, 1-byte alignment
+                packed = true;
+            }
         }
-        if (peek().kind == TK::Id && at("struct")) {
-            step();
-            std::string name = c_ident("extern struct name");
+        if (peek().kind == TK::Id && (at("struct") || at("union"))) {
+            bool is_union = (step().text == "union");
+            std::string name = c_ident(is_union ? "extern union name" : "extern struct name");
             want("{");
             std::vector<StructField> fields;
             while (!at("}")) {
                 StructField f;
-                f.name = c_ident("extern struct field");
+                f.name = c_ident(is_union ? "extern union field" : "extern struct field");
                 want(":");
                 std::vector<std::string> toks;
                 int depth = 0;
                 for (;;) {
                     const Tok &x = peek();
-                    if (depth == 0 && (x.text == "," || x.text == "}")) break;
-                    if (x.text == "[") depth++;
-                    if (x.text == "]") depth--;
+                    if (x.kind == TK::Eof || (depth == 0 && (x.text == "," || x.text == "}"))) break;
+                    if (x.text == "[" || x.text == "(") depth++;
+                    if (x.text == "]" || x.text == ")") depth--;
                     toks.push_back(to_str(x.text));
                     step();
                 }
@@ -969,7 +977,8 @@ private:
             s->k = SK::ExternStruct;
             s->a = std::move(name);
             s->fields = std::move(fields);
-            s->opt1 = packed ? std::optional<std::string>("packed") : std::nullopt;
+            s->opt1 = is_union ? std::optional<std::string>("union")
+                               : (packed ? std::optional<std::string>("packed") : std::nullopt);
             return one(std::move(s));
         }
         if (at("{")) {
@@ -994,7 +1003,7 @@ private:
     // EFFECTS. Kept identical here on purpose: an effect one front end knows and
     // the other does not is a program that means two things.
     static bool is_effect(std::string_view w) {
-        return w == "pure" || w == "nothrow" || w == "reads" || w == "writes";
+        return w == "pure" || w == "nothrow" || w == "reads" || w == "writes" || w == "borrows";
     }
 
     // Same table as `CONTRACTS` in `parser.py`.
@@ -1037,7 +1046,9 @@ private:
         return false;
     }
 
-    static bool is_addressed(std::string_view w) { return w == "reads" || w == "writes"; }
+    static bool is_addressed(std::string_view w) {
+        return w == "reads" || w == "writes" || w == "borrows";
+    }
 
     static std::string effect_text(const std::string &eff) {
         const size_t colon = eff.find(':');
@@ -1048,18 +1059,11 @@ private:
     // the Python front end, so a contradictory declaration is refused with one
     // message by both. A promise that cannot hold is a refusal, not a warning.
     std::vector<std::string> effects_of(const std::string &name, const std::vector<Param> &params,
-                                        bool owned, bool checked) {
+                                        bool owned, bool checked,
+                                        const std::optional<std::string> &ret) {
         std::vector<std::string> out;
         std::vector<std::string> pnames;
-        for (const auto &p : params) {
-            pnames.push_back(p.name);
-            // `p: ptr pure` canonicalises to the type `ptrpure` and the promise
-            // would be dropped on the floor -- same refusal as `parser.py`.
-            for (const char *w : {"pure", "nothrow", "reads", "writes"})
-                if (p.ann && p.ann->find(w) != std::string::npos)
-                    fail(std::string("`") + w + "` is an effect of " + p.name +
-                         ", not a parameter type");
-        }
+        for (const auto &p : params) pnames.push_back(p.name);
         while (peek().kind == TK::Id && is_effect(peek().text)) {
             const std::string word = to_str(step().text);
             if (is_addressed(word)) {
@@ -1097,8 +1101,24 @@ private:
             for (const auto &eff : out)
                 if (eff.rfind("writes:", 0) == 0)
                     fail("`pure` contradicts `" + effect_text(eff) + "` on " + name);
-            if (owned) fail("`pure` contradicts a `move` parameter of " + name);
+            bool has_move_param = false;
+            for (const auto &p : params)
+                if (p.mode == Mode::Move) has_move_param = true;
+            if (owned || has_move_param) fail("`pure` contradicts a `move` parameter of " + name);
             if (checked) fail("`pure` contradicts `errno` on " + name);
+        }
+        for (const auto &eff : out) {
+            if (eff.rfind("borrows:", 0) == 0) {
+                const std::string bp = eff.substr(8);
+                if (owned) fail("`" + effect_text(eff) + "` contradicts `-> move` on " + name);
+                if (!ret || !points_at_memory(*ret))
+                    fail("`" + effect_text(eff) + "` wants a pointer result on " + name +
+                         ", got " + (ret && !ret->empty() ? *ret : "none"));
+                for (const auto &p : params)
+                    if (p.name == bp && p.mode == Mode::Move)
+                        fail("`" + effect_text(eff) + "` contradicts `move` on parameter `" + bp +
+                             "` of " + name);
+            }
         }
         for (const auto &eff : out)
             if (eff.rfind("reads:", 0) == 0)
@@ -1164,6 +1184,97 @@ private:
         return out;
     }
 
+    static bool is_c_type_word(std::string_view w) {
+        return w == "const" || w == "volatile" || w == "restrict" || w == "signed" ||
+               w == "unsigned" || w == "short" || w == "long" || w == "int" ||
+               w == "char" || w == "float" || w == "double" || w == "void" ||
+               w == "bool" || w == "_Bool" || w == "struct" || w == "union" || w == "enum";
+    }
+
+    void take_balanced_type(std::vector<std::string> &toks) {
+        std::vector<char> stack;
+        while (peek().kind != TK::Eof) {
+            const std::string x = to_str(step().text);
+            toks.push_back(x);
+            if (x == "[") stack.push_back(']');
+            else if (x == "(") stack.push_back(')');
+            else if (x == "{") stack.push_back('}');
+            else if (x == "]" || x == ")" || x == "}") {
+                if (!stack.empty() && stack.back() == x[0]) stack.pop_back();
+                else break;
+            }
+            if (stack.empty()) break;
+        }
+    }
+
+    void take_type_postfix(std::vector<std::string> &toks, const std::string &head) {
+        bool map_value = false;
+        for (;;) {
+            if (at("[")) {
+                take_balanced_type(toks);
+                if (head == "map" && !map_value) {
+                    take_type_toks(toks);
+                    map_value = true;
+                }
+                continue;
+            }
+            if (at("*")) {
+                toks.push_back(to_str(step().text));
+                continue;
+            }
+            break;
+        }
+    }
+
+    // Take exactly one result type. The old collector read until a keyword
+    // it knew, so a following statement became part of the annotation:
+    // `-> bool` before `print(x)` was the type `boolprint(x)`.
+    void take_type_toks(std::vector<std::string> &toks) {
+        if (peek().kind == TK::Id && (is_effect(peek().text) || is_contract(peek().text))) return;
+        while (at("move") || at("ref") || at("mut")) toks.push_back(to_str(step().text));
+        if (peek().kind == TK::Eof || at("{") || at("}") || at(";") || at(",") || at(")") || at("]"))
+            return;
+        if (peek().kind == TK::Id && (is_effect(peek().text) || is_contract(peek().text))) return;
+        if (at("fn")) {
+            toks.push_back(to_str(step().text));
+            if (at("(")) take_balanced_type(toks);
+            if (at("->")) {
+                toks.push_back(to_str(step().text));
+                take_type_toks(toks);
+            }
+            take_type_postfix(toks, "");
+            return;
+        }
+        if (at("(")) {
+            take_balanced_type(toks);
+            take_type_postfix(toks, "");
+            return;
+        }
+        if (is_c_type_word(peek().text)) {
+            if (at("struct") || at("union") || at("enum")) {
+                toks.push_back(to_str(step().text));
+                if (is_name(peek())) toks.push_back(to_str(step().text));
+            } else {
+                while (is_c_type_word(peek().text) && !at("struct") && !at("union") && !at("enum"))
+                    toks.push_back(to_str(step().text));
+            }
+            take_type_postfix(toks, "");
+            return;
+        }
+        if (is_name(peek())) {
+            std::string head = to_str(step().text);
+            toks.push_back(head);
+            while (at(".") && is_name(peek(1))) {
+                toks.push_back(to_str(step().text));
+                toks.push_back(to_str(step().text));
+                head.clear();
+            }
+            take_type_postfix(toks, head);
+            return;
+        }
+        toks.push_back(to_str(step().text));
+    }
+
     StmtP extern_fn() {
         std::optional<std::string> lib;
         if (peek().kind == TK::Str) lib = unquoted(step().text);
@@ -1178,17 +1289,12 @@ private:
         if (at("->")) {
             step();
             std::vector<std::string> toks;
-            while (peek().kind != TK::Eof
-                   && !(peek().kind == TK::Kw && (at("fn") || at("extern") || at("let") || at("if")))
-                   && !at("{") && !at("}") && !at(";")
-                   && !(peek().kind == TK::Id && (is_effect(peek().text) || is_contract(peek().text)))) {
-                toks.push_back(to_str(step().text));
-            }
+            take_type_toks(toks);
             owned = !toks.empty() && toks.front() == "move";
             if (owned) toks.erase(toks.begin());
-            checked = !toks.empty() && toks.back() == "errno";
+            checked = peek().kind == TK::Id && at("errno") && peek(1).text != "(";
             if (checked) {
-                toks.pop_back();
+                step();
                 auto t = ann_text(toks);
                 if (!t || (*t != "i32" && *t != "i64" && *t != "ptr")) {
                     fail("errno wants an i32, i64 or ptr result");
@@ -1201,7 +1307,8 @@ private:
         pl.second = canon_ann(pl.second);
         std::vector<std::string> contracts = take_contracts(name, pl.first);
         std::vector<std::string> effects =
-            effects_of(name, pl.first, owned, checked);
+            effects_of(name, pl.first, owned, checked, ret);
+        eat(";");
         auto s = std::make_unique<Stmt>();
         s->k = SK::Extern;
         s->ext = ExternDecl{std::move(lib), std::move(name), std::move(pl.first),
@@ -1236,7 +1343,7 @@ private:
             bool move_word = at("move") || at("ref");
             if (move_word && step().text == "ref") fail("ref returns dangle; return owned");
             std::vector<std::string> toks;
-            while (!at("{")) toks.push_back(to_str(step().text));
+            while (!at("{") && peek().kind != TK::Eof) toks.push_back(to_str(step().text));
             f.ret = ann_text(toks);
         }
         want("{");
@@ -1248,12 +1355,12 @@ private:
     std::pair<std::vector<Param>, std::optional<std::string>> params_list(bool allow_varargs) {
         std::vector<Param> out;
         std::optional<std::string> varargs;
-        while (!at(")")) {
+        while (!at(")") && peek().kind != TK::Eof) {
             if (allow_varargs && at("..")) {
                 step();
                 std::vector<std::string> toks;
                 int depth = 0;
-                while (!(depth == 0 && (at(",") || at(")")))) {
+                while (peek().kind != TK::Eof && !(depth == 0 && (at(",") || at(")")))) {
                     const Tok &x = peek();
                     if (x.text == "[" || x.text == "(") depth++;
                     if (x.text == "]" || x.text == ")") depth--;
@@ -1279,9 +1386,12 @@ private:
                 std::optional<std::string> first;
                 for (;;) {
                     const Tok &x = peek();
-                    if (depth == 0 && (x.text == "," || x.text == ")" || x.text == "=")) break;
+                    if (x.kind == TK::Eof || (depth == 0 && (x.text == "," || x.text == ")" || x.text == "="))) break;
                     if (x.text == "[" || x.text == "(") depth++;
                     if (x.text == "]" || x.text == ")") depth--;
+                    if (allow_varargs && depth == 0 && is_effect(x.text))
+                        fail("`" + to_str(x.text) + "` is an effect of " + p.name +
+                             ", not a parameter type");
                     if (!first && depth == 0 && is_name(x)) first = to_str(x.text);
                     toks.push_back(to_str(x.text));
                     step();
@@ -1475,7 +1585,7 @@ private:
                     key += g;
                 }
                 for (const auto &s : seen) {
-                    if (s == key) fail("duplicate match pattern '" + key + "'");
+                    if (s == key) fail("duplicate match pattern");
                 }
                 seen.push_back(std::move(key));
             }
@@ -1497,10 +1607,11 @@ private:
         StmtP node;
         for (size_t k = arms.size(); k-- > 0;) {
             Arm &a = arms[k];
+            const bool arms_follow = node != nullptr;
             StmtP rest = node ? std::move(node) : mk_block({});
             if (!a.pat) {
                 if (!a.guard) {
-                    if (node) fail("_ must be last");
+                    if (arms_follow) fail("_ must be last");
                     node = mk_block(std::move(a.body));
                 } else {
                     node = build_if(tm, Pat{PK::Wild, {}, nullptr, {}}, std::move(a.body),
@@ -1509,7 +1620,7 @@ private:
                 continue;
             }
             if (a.pat->k == PK::Bind && !a.guard) {
-                if (node) fail("_ must be last");
+                if (arms_follow) fail("_ must be last");
                 std::vector<StmtP> v;
                 v.push_back(mk_let_tmp(a.pat->a, mk_var(tm), false));
                 for (auto &s : a.body) v.push_back(std::move(s));
@@ -1531,8 +1642,21 @@ private:
         return out;
     }
 
-    static bool space_total(const Pat &p) {
-        return p.k == PK::Wild || p.k == PK::Bind;
+    bool space_total(const Pat &p) const {
+        if (p.k == PK::Wild || p.k == PK::Bind) return true;
+        if (p.k == PK::Variant) {
+            auto it = enums_rev_.find(p.a);
+            if (it != enums_rev_.end() && it->second) {
+                auto eit = enums_.find(*it->second);
+                if (eit != enums_.end() && eit->second.size() == 1) {
+                    for (const auto &sp : p.subs) {
+                        if (sp && !space_total(*sp)) return false;
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     void check_exhaustive(const std::vector<Arm> &arms, uint32_t ml) {
@@ -1544,7 +1668,7 @@ private:
         bool has_wild = false;
         for (const auto &a : arms) {
             if (!a.pat || a.pat->k == PK::Wild || a.pat->k == PK::Bind) {
-                has_wild = true;
+                if (!a.guard) has_wild = true;
                 continue;
             }
             const Pat &p = *a.pat;
@@ -1949,24 +2073,47 @@ private:
             std::string text;
             ExprP sub;
         };
+        // Match braces once; scanning from every unmatched opening to the
+        // end makes this quadratic in the length of one string literal.
+        std::unordered_map<size_t, std::pair<size_t, int>> matches;
+        struct Opening {
+            size_t pos;
+            int inner_depth;
+        };
+        std::vector<Opening> opening;
+        for (size_t k = 0; k < raw.size();) {
+            if (raw[k] == '\\' && k + 1 < raw.size()) {
+                k += 2;
+                continue;
+            }
+            if (raw[k] == '{') {
+                opening.push_back({k, 0});
+            } else if (raw[k] == '}' && !opening.empty()) {
+                const Opening cur = opening.back();
+                opening.pop_back();
+                matches[cur.pos] = {k + 1, cur.inner_depth};
+                if (!opening.empty())
+                    opening.back().inner_depth =
+                        std::max(opening.back().inner_depth, cur.inner_depth + 1);
+            }
+            k++;
+        }
         std::vector<Part> parts;
         std::string buf;
         size_t i = 0;
         while (i < raw.size()) {
+            if (raw[i] == '\\' && i + 1 < raw.size()) {
+                buf.append(raw, i, 2);
+                i += 2;
+                continue;
+            }
             const size_t len = utf8_len(static_cast<unsigned char>(raw[i]));
             if (raw[i] == '{') {
-                size_t j = i + 1;
-                int depth = 1;
-                while (j < raw.size() && depth > 0) {
-                    if (raw[j] == '\\' && j + 1 < raw.size()) {
-                        j += 2;
-                        continue;
-                    }
-                    if (raw[j] == '{') depth++;
-                    else if (raw[j] == '}') depth--;
-                    j++;
-                }
-                if (depth == 0) {
+                auto match = matches.find(i);
+                // Past the parser's nesting bound a candidate cannot become
+                // an expression; trying every enclosing level is quadratic.
+                if (match != matches.end() && match->second.second <= kMaxNest) {
+                    const size_t j = match->second.first;
                     std::string inner = unescape(raw.substr(i + 1, j - 1 - (i + 1)));
                     if (auto sub = sub_expr(inner)) {
                         if (!buf.empty()) {
@@ -2014,6 +2161,16 @@ private:
                 return;
             }
         }
+        bool is_re_quant = false;
+        size_t comma = body.find(',');
+        if (comma != std::string::npos && comma > 0 && body.find(',', comma + 1) == std::string::npos) {
+            is_re_quant = true;
+            for (size_t qi = 0; qi < body.size(); ++qi) {
+                if (qi == comma) continue;
+                if (body[qi] < '0' || body[qi] > '9') { is_re_quant = false; break; }
+            }
+        }
+        if (is_re_quant) return;
         bool any = false;
         for (char c : body) {
             if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') any = true;
@@ -2029,9 +2186,9 @@ private:
         return 4;
     }
 
-    static ExprP sub_expr(const std::string &text) {
+    ExprP sub_expr(const std::string &text) const {
         try {
-            Parser p(text);
+            Parser p(text, 1, nest_expr_, nest_block_);
             auto e = p.expr();
             if (p.peek().kind != TK::Eof) return nullptr;
             return e;
@@ -2055,8 +2212,8 @@ private:
             // same value without throwing.
             return mk_float(std::strtod(t.c_str(), nullptr));
         }
-        // `parser.py` parses with arbitrary precision and `codegen_c.py` wraps to
-        // i64, so `9223372036854775808` is a legal literal there (it is what
+        // The reference parser reads arbitrary precision and the language wraps
+        // literals to i64, so `9223372036854775808` is legal here (it is what
         // `-9223372036854775808` is built from). Accumulate modulo 2^64.
         uint64_t v = 0;
         for (char ch : t) {
@@ -2093,7 +2250,68 @@ private:
 
 }  // namespace
 
-ParseOut parse(std::string_view src) {
-    Parser p(src);
+ParseOut parse(std::string_view src, uint32_t start_line) {
+    Parser p(src, start_line);
     return p.run();
+}
+
+StmtP clone_stmt_header(const Stmt &s) {
+    auto c = std::make_unique<Stmt>();
+    c->k = s.k;
+    c->line = s.line;
+    c->a = s.a;
+    c->ann = s.ann;
+    c->mut = s.mut;
+    c->konst = s.konst;
+    if (s.konst && s.e1) c->e1 = clone_expr(*s.e1);
+    if (s.k == SK::Pub && !s.body.empty()) {
+        c->body.push_back(clone_stmt_header(*s.body.front()));
+        return c;
+    }
+    for (const auto &p : s.params) {
+        Param np;
+        np.name = p.name;
+        np.mode = p.mode;
+        np.ann = p.ann;
+        if (p.def) np.def = clone_expr(*p.def);
+        c->params.push_back(std::move(np));
+    }
+    c->names = s.names;
+    c->variants = s.variants;
+    c->sigs = s.sigs;
+    c->fields = s.fields;
+    c->opt1 = s.opt1;
+    c->ext.lib = s.ext.lib;
+    c->ext.name = s.ext.name;
+    c->ext.ret = s.ext.ret;
+    c->ext.varargs = s.ext.varargs;
+    c->ext.owned = s.ext.owned;
+    c->ext.checked = s.ext.checked;
+    c->ext.effects = s.ext.effects;
+    c->ext.contracts = s.ext.contracts;
+    for (const auto &p : s.ext.params) {
+        Param np;
+        np.name = p.name;
+        np.mode = p.mode;
+        np.ann = p.ann;
+        if (p.def) np.def = clone_expr(*p.def);
+        c->ext.params.push_back(std::move(np));
+    }
+    for (const auto &f : s.fns) {
+        FnDecl nf;
+        nf.name = f.name;
+        nf.tparams = f.tparams;
+        nf.ret = f.ret;
+        for (const auto &p : f.params) {
+            Param np;
+            np.name = p.name;
+            np.mode = p.mode;
+            np.ann = p.ann;
+            if (p.def) np.def = clone_expr(*p.def);
+            nf.params.push_back(std::move(np));
+        }
+        // Body intentionally omitted: signature-only header stub for incremental checking.
+        c->fns.push_back(std::move(nf));
+    }
+    return c;
 }

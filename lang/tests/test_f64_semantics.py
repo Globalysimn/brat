@@ -10,8 +10,8 @@ Two divergences, both found by differential fuzzing rather than by the corpus:
     division in both backends (`0`), because the interpreter treats an
     integer-only subexpression as an integer and SPEC §10 says so.
   * `fn f() -> f64 { return 3 }` printed `3` from the interpreter and `3.0` from
-    the C backend, whose fast-path signature is `double`. Fixed in both
-    emitters rather than on one side: a `f64` function whose every `return` is
+    the C backend, whose fast-path signature is `double`. Fixed in the native
+    emitter rather than by coercing values: a `f64` function whose every `return` is
     an integer stays on the tagged-union path, so the integer survives `print`.
     Coercing the interpreter instead would have been the wrong half -- `return
     1 / 2` in an `f64` function is integer division by SPEC §10, and it still

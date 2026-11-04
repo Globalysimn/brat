@@ -9,7 +9,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -149,7 +148,7 @@ def main():
     n += 1
     print("ffiown ok: `move` is a mode, the header proof still holds")
 
-    ri = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True,
+    ri = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True,
                         text=True, timeout=120)
     exe = os.path.join(TMP, "owned_roundtrip.exe")
     b = subprocess.run([sys.executable, CLI, "build", "--unsafe-ffi", path, "-o", exe], capture_output=True,

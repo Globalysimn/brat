@@ -4,7 +4,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -67,5 +66,20 @@ bad = write("ret_none/main.brat", "import circle\nfn main() -> i64 { return circ
 for r in (run(bad), build(bad, "ret_none")):
     out = r.stdout + r.stderr
     assert r.returncode != 0 and "returns `none` in the interface, `i64` in the implementation" in out, out
+
+# The root source is a module too: a sibling .bri must be parsed and enforced
+# even though the root has no namespace. Python and C++ now share this rule.
+root_src = write("rootapi/main.brat", "fn main() -> i64 { return 0 }\n")
+write("rootapi/main.bri", "fn main() -> i64\n")
+for env in ({"BRAT_INTERP": "1"}, {}):
+    ok = subprocess.run([sys.executable, CLI, "check", root_src], capture_output=True,
+                       text=True, timeout=120, env=dict(os.environ, **env))
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+write("rootapi/main.bri", "fn main() -> str\n")
+for env in ({"BRAT_INTERP": "1"}, {}):
+    mismatch = subprocess.run([sys.executable, CLI, "check", root_src], capture_output=True,
+                              text=True, timeout=120, env=dict(os.environ, **env))
+    out = mismatch.stdout + mismatch.stderr
+    assert mismatch.returncode != 0 and "returns `str` in the interface, `i64` in the implementation" in out, out
 
 print("INTERFACE TYPES ALL GREEN")

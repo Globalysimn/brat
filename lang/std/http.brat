@@ -1,0 +1,1292 @@
+fn has_ctl_or_space(s: str) -> bool {
+  let bs = utf8_bytes(s)
+  for b in bs {
+    if b <= 32 || b == 127 {
+      return true
+    }
+  }
+  return false
+}
+
+fn valid_http_token(s: str) -> bool {
+  let bs = utf8_bytes(s)
+  if len(bs) == 0 {
+    return false
+  }
+  for b in bs {
+    let alnum = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57)
+    let sym = b == 33 || b == 35 || b == 36 || b == 37 || b == 38 || b == 39 || b == 42 || b == 43 || b == 45 || b == 46 || b == 94 || b == 95 || b == 96 || b == 124 || b == 126
+    if !alnum && !sym {
+      return false
+    }
+  }
+  return true
+}
+
+fn valid_header_value(s: str) -> bool {
+  let bs = utf8_bytes(s)
+  for b in bs {
+    if (b < 32 && b != 9) || b == 127 {
+      return false
+    }
+  }
+  return true
+}
+
+fn parse_uint(s: str) {
+  for b in utf8_bytes(s) {
+    if b < 48 || b > 57 {
+      return Err("non-digit")
+    }
+  }
+  return s.parse_int()
+}
+
+pub fn parse_url(url: str) {
+  let mut err = ""
+  if has_ctl_or_space(url) {
+    err = "URL contains control characters or spaces"
+  }
+  let mut clean = url + ""
+  let hash = clean.index_of("#")
+  if !is_none(hash) {
+    clean = clean.slice(0, hash)
+  }
+  let mut scheme = "http"
+  let mut rest = ""
+  let mut def_port = 80
+  if len(err) == 0 {
+    if clean.starts_with("https://") {
+      scheme = "https"
+      def_port = 443
+      rest = clean.slice(8, len(clean))
+    } else {
+      if clean.starts_with("http://") {
+        rest = clean.slice(7, len(clean))
+      } else {
+        err = "URL must start with http:// or https://: " + url
+      }
+    }
+  }
+  let mut split_at = len(rest)
+  let slash = rest.index_of("/")
+  if !is_none(slash) && slash < split_at {
+    split_at = slash
+  }
+  let qmark = rest.index_of("?")
+  if !is_none(qmark) && qmark < split_at {
+    split_at = qmark
+  }
+  let hostport = rest.slice(0, split_at)
+  let mut path = "/"
+  if split_at < len(rest) {
+    let tail = rest.slice(split_at, len(rest))
+    if tail.starts_with("/") {
+      path = tail
+    } else {
+      path = "/" + tail
+    }
+  }
+  if len(err) == 0 && len(hostport) == 0 {
+    err = "empty host in URL: " + url
+  }
+  if len(err) == 0 && (!is_none(hostport.index_of("@")) || !is_none(hostport.index_of("\\"))) {
+    err = "userinfo or backslash not allowed in URL authority: " + url
+  }
+  let mut host = hostport + ""
+  let mut port = def_port
+  if len(err) == 0 {
+    let mut pstr = ""
+    if hostport.starts_with("[") {
+      let rb = hostport.index_of("]")
+      if is_none(rb) || rb <= 1 {
+        err = "malformed IPv6 host in URL: " + url
+      } else {
+        host = hostport.slice(0, rb + 1)
+        if rb + 1 < len(hostport) {
+          if hostport.slice(rb + 1, rb + 2) != ":" {
+            err = "invalid IPv6 authority in URL: " + url
+          } else {
+            pstr = hostport.slice(rb + 2, len(hostport))
+            if len(pstr) == 0 {
+              err = "invalid port in URL: " + url
+            }
+          }
+        }
+      }
+    } else {
+      let colon = hostport.index_of(":")
+      if !is_none(colon) {
+        host = hostport.slice(0, colon)
+        pstr = hostport.slice(colon + 1, len(hostport))
+        if len(pstr) == 0 || !is_none(pstr.index_of(":")) {
+          err = "invalid host/port in URL: " + url
+        }
+      }
+    }
+    if len(err) == 0 && len(pstr) > 0 {
+      let pr = parse_uint(pstr)
+      match pr {
+        Ok(pv) => { port = pv },
+        Err(_) => { err = "invalid port in URL: " + pstr }
+      }
+    }
+  }
+  if len(err) == 0 && (len(host) == 0 || port <= 0 || port > 65535) {
+    err = "invalid host/port in URL: " + url
+  }
+  if len(err) > 0 {
+    return Err(err)
+  }
+  let mut dial_host = host + ""
+  if host == "localhost" {
+    dial_host = "127.0.0.1"
+  }
+  return Ok({"scheme": scheme, "host": host, "port": port, "dial": dial_host + ":" + str(port), "path": path})
+}
+
+fn err_str(r) -> str {
+  match r {
+    Ok(_) => { return "" },
+    Err(e) => { return str(e) }
+  }
+  return ""
+}
+
+fn hex_nib_byte(hb: i64) -> i64 {
+  if hb >= 48 && hb <= 57 {
+    return hb - 48
+  }
+  if hb >= 65 && hb <= 70 {
+    return hb - 55
+  }
+  if hb >= 97 && hb <= 102 {
+    return hb - 87
+  }
+  return -1
+}
+
+pub fn encode_query_component(s: str) -> str {
+  let hx = "0123456789ABCDEF"
+  let bs = utf8_bytes(s)
+  let n = len(bs)
+  let mut out = ""
+  let mut run_start = 0
+  let mut i = 0
+  while i < n {
+    let b = bs[i]
+    if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 45 || b == 95 || b == 46 || b == 126 {
+      i = i + 1
+    } else {
+      if i > run_start {
+        out = out + unwrap(utf8_str(bs.slice(run_start, i)))
+      }
+      let hi = b / 16
+      let lo = b % 16
+      out = out + "%" + hx.slice(hi, hi + 1) + hx.slice(lo, lo + 1)
+      i = i + 1
+      run_start = i
+    }
+  }
+  if run_start == 0 {
+    return s
+  }
+  if n > run_start {
+    out = out + unwrap(utf8_str(bs.slice(run_start, n)))
+  }
+  return out
+}
+
+pub fn decode_query_component(s: str) {
+  let bs = utf8_bytes(s)
+  let n = len(bs)
+  let mut out = []
+  let mut i = 0
+  while i < n {
+    let b = bs[i]
+    if b == 43 {
+      out.push(32)
+      i = i + 1
+    } else {
+      if b == 37 {
+        if i + 2 >= n {
+          return Err("incomplete percent escape in: " + s)
+        }
+        let hi = hex_nib_byte(bs[i + 1])
+        let lo = hex_nib_byte(bs[i + 2])
+        if hi < 0 || lo < 0 {
+          return Err("invalid percent escape in: " + s)
+        }
+        out.push(hi * 16 + lo)
+        i = i + 3
+      } else {
+        out.push(b)
+        i = i + 1
+      }
+    }
+  }
+  return utf8_str(out)
+}
+
+pub fn encode_query(params) -> str {
+  if !is_map(params) {
+    return ""
+  }
+  let ks = params.keys().sort()
+  let mut out = ""
+  let mut first = true
+  for k in ks {
+    if !first {
+      out = out + "&"
+    }
+    let ek = encode_query_component(str(k))
+    let ev = encode_query_component(str(params.get(k)))
+    out = out + ek + "=" + ev
+    first = false
+  }
+  return out
+}
+
+pub fn parse_query(qs: str) {
+  let mut raw = qs + ""
+  if qs.starts_with("?") {
+    raw = qs.slice(1, len(qs))
+  }
+  let mut out = {}
+  if len(raw) == 0 {
+    return Ok(out)
+  }
+  for pair in raw.split("&") {
+    if len(pair) == 0 {
+      continue
+    }
+    let eq = pair.index_of("=")
+    let mut kpart = pair + ""
+    let mut vpart = ""
+    if !is_none(eq) {
+      kpart = pair.slice(0, eq)
+      vpart = pair.slice(eq + 1, len(pair))
+    }
+    let dk = decode_query_component(kpart)
+    if is_err(dk) {
+      return dk
+    }
+    let dv = decode_query_component(vpart)
+    if is_err(dv) {
+      return dv
+    }
+    out.set(unwrap(dk), unwrap(dv))
+  }
+  return Ok(out)
+}
+
+fn find_crlf_line(bs: vec[i64], start: i64, n: i64) -> i64 {
+  let mut k = start + 0
+  while k + 1 < n && !(bs[k] == 13 && bs[k + 1] == 10) {
+    if bs[k] == 10 {
+      return -2
+    }
+    k = k + 1
+  }
+  if k + 1 >= n {
+    if k < n && bs[k] == 10 {
+      return -2
+    }
+    return -1
+  }
+  return k
+}
+
+fn scan_chunked(bs: vec[i64], want_text: bool) {
+  let n = len(bs)
+  let mut parts = []
+  let mut pending = []
+  let mut i = 0
+  let mut status = 2
+  let mut mark = 0
+  let mut msg = ""
+  while status == 2 {
+    if i >= n {
+      status = 0
+      mark = n + 1
+      msg = "incomplete HTTP chunked body"
+      break
+    }
+    let line_end = find_crlf_line(bs, i, n)
+    if line_end == -2 {
+      status = -1
+      msg = "malformed HTTP chunk line ending"
+      break
+    }
+    if line_end == -1 {
+      status = 0
+      mark = n + 1
+      msg = "incomplete HTTP chunked body"
+      break
+    }
+    let mut p = i + 0
+    let mut limit = line_end + 0
+    let mut k = i + 0
+    while k < line_end {
+      if bs[k] == 59 {
+        limit = k + 0
+        break
+      }
+      k = k + 1
+    }
+    while p < limit && (bs[p] == 32 || bs[p] == 9) {
+      p = p + 1
+    }
+    while limit > p && (bs[limit - 1] == 32 || bs[limit - 1] == 9) {
+      limit = limit - 1
+    }
+    let mut csize = -1
+    if p < limit {
+      csize = 0
+      while p < limit {
+        let d = hex_nib_byte(bs[p])
+        if d < 0 {
+          csize = -1
+          break
+        }
+        if csize > 576460752303423487 || (csize == 576460752303423487 && d > 7) {
+          csize = -2
+          break
+        }
+        csize = csize * 16 + d
+        p = p + 1
+      }
+    }
+    if csize < 0 {
+      status = -1
+      if csize == -2 {
+        msg = "HTTP chunk size overflow"
+      } else {
+        msg = "invalid chunk size"
+      }
+      break
+    }
+    i = line_end + 2
+    if csize == 0 {
+      while true {
+        let te = find_crlf_line(bs, i, n)
+        if te == -2 {
+          status = -1
+          msg = "malformed HTTP chunk trailer line ending"
+          break
+        }
+        if te == -1 {
+          status = 0
+          mark = n + 1
+          msg = "incomplete HTTP chunked body"
+          break
+        }
+        if te == i {
+          if want_text && len(pending) > 0 {
+            let pr = utf8_str(pending)
+            match pr {
+              Ok(ps) => { parts.push(ps) },
+              Err(pe) => {
+                status = -1
+                msg = str(pe)
+              }
+            }
+          }
+          if status == 2 {
+            status = 1
+            mark = te + 2
+            if want_text {
+              msg = parts.join("")
+            }
+          }
+          break
+        }
+        let tr = utf8_str(bs.slice(i, te))
+        let mut tr_ok = false
+        if !is_err(tr) {
+          let tline = unwrap(tr)
+          let tc = tline.index_of(":")
+          if !is_none(tc) {
+            let tname = tline.slice(0, tc).trim().lower()
+            let tval = tline.slice(tc + 1, len(tline)).trim()
+            tr_ok = valid_http_token(tname) && valid_header_value(tval) && tname != "content-length" && tname != "transfer-encoding"
+          }
+        }
+        if !tr_ok {
+          status = -1
+          msg = "invalid HTTP chunk trailer"
+          break
+        }
+        i = te + 2
+      }
+      break
+    }
+    if csize > n - i || i + csize + 2 > n {
+      if i + csize < n && bs[i + csize] != 13 {
+        status = -1
+        msg = "missing CRLF after HTTP chunk"
+      } else {
+        status = 0
+        mark = i + csize + 5
+        msg = "incomplete HTTP chunked body"
+      }
+      break
+    }
+    if want_text {
+      let seg = bs.slice(i, i + csize)
+      if len(pending) == 0 {
+        let sr = utf8_str(seg)
+        if !is_err(sr) {
+          parts.push(unwrap(sr))
+        } else {
+          for b in seg {
+            pending.push(b)
+          }
+        }
+      } else {
+        for b in seg {
+          pending.push(b)
+        }
+        let pr = utf8_str(pending)
+        if !is_err(pr) {
+          parts.push(unwrap(pr))
+          pending = []
+        }
+      }
+    }
+    i = i + csize
+    if bs[i] != 13 || bs[i + 1] != 10 {
+      status = -1
+      msg = "missing CRLF after HTTP chunk"
+      break
+    }
+    i = i + 2
+  }
+  return [status, mark, msg]
+}
+
+fn parse_framing_headers(lines) {
+  let mut headers = {}
+  let mut i = 1
+  while i < len(lines) {
+    let ln = lines[i].trim()
+    if len(ln) > 0 {
+      let c = ln.index_of(":")
+      if is_none(c) {
+        return Err("malformed HTTP header line: " + ln)
+      }
+      let hk = ln.slice(0, c).trim().lower()
+      let hv = ln.slice(c + 1, len(ln)).trim()
+      if !valid_http_token(hk) || !valid_header_value(hv) {
+        return Err("invalid HTTP header: " + hk)
+      }
+      if hk == "content-length" && headers.has("content-length") {
+        if headers["content-length"] != hv {
+          return Err("conflicting Content-Length headers")
+        }
+        return Err("duplicate Content-Length header")
+      }
+      if hk == "transfer-encoding" && headers.has("transfer-encoding") {
+        return Err("duplicate Transfer-Encoding header")
+      }
+      headers.set(hk, hv)
+    }
+    i = i + 1
+  }
+  if headers.has("transfer-encoding") && headers.has("content-length") {
+    return Err("HTTP message cannot carry both Transfer-Encoding and Content-Length")
+  }
+  return Ok(headers)
+}
+
+fn parse_status_line(sline: str) {
+  let sp1 = sline.index_of(" ")
+  if is_none(sp1) {
+    return Err("malformed HTTP status line: " + sline)
+  }
+  let version = sline.slice(0, sp1).trim()
+  if version != "HTTP/1.1" && version != "HTTP/1.0" {
+    return Err("unsupported HTTP version: " + version)
+  }
+  let code_str = sline.slice(sp1 + 1, len(sline)).trim().split(" ")[0]
+  let cr = parse_uint(code_str)
+  if len(code_str) != 3 || is_err(cr) {
+    return Err("invalid HTTP status code: " + code_str)
+  }
+  let code = unwrap(cr)
+  if code < 100 || code > 599 {
+    return Err("invalid HTTP status code: " + code_str)
+  }
+  return Ok([version, code])
+}
+
+fn extract_framed_body(headers, raw_body: str, inc_err: str) {
+  if headers.has("transfer-encoding") {
+    let te = headers["transfer-encoding"].lower()
+    if te != "chunked" {
+      return Err("unsupported Transfer-Encoding: " + te)
+    }
+    let r = scan_chunked(utf8_bytes(raw_body), true)
+    if r[0] == 1 {
+      return Ok(r[2])
+    }
+    return Err(r[2])
+  }
+  if !headers.has("content-length") {
+    return Ok(raw_body)
+  }
+  let clr = parse_uint(headers["content-length"])
+  if is_err(clr) {
+    return Err("invalid Content-Length: " + headers["content-length"])
+  }
+  let want_len = unwrap(clr)
+  let body_bs = utf8_bytes(raw_body)
+  if len(body_bs) < want_len {
+    return Err(inc_err)
+  }
+  if len(body_bs) > want_len {
+    return utf8_str(body_bs.slice(0, want_len))
+  }
+  return Ok(raw_body)
+}
+
+fn split_head_body(raw: str) {
+  let mut sep = "\r\n\r\n"
+  let mut idx = raw.index_of(sep)
+  if is_none(idx) {
+    sep = "\n\n"
+    idx = raw.index_of(sep)
+  }
+  if is_none(idx) {
+    return []
+  }
+  return [raw.slice(0, idx), raw.slice(idx + len(sep), len(raw))]
+}
+
+fn is_keep_alive_conn(version: str, headers) -> bool {
+  let conn_hdr = headers.get_or("connection", "").lower()
+  if version == "HTTP/1.1" {
+    return !conn_hdr.contains("close")
+  }
+  if version == "HTTP/1.0" {
+    return conn_hdr.contains("keep-alive")
+  }
+  return false
+}
+
+fn parse_response_for_method(raw: str, req_method: str) {
+  let hb = split_head_body(raw)
+  if len(hb) == 0 {
+    return Err("malformed HTTP response: missing header separator")
+  }
+  let lines = hb[0].lines()
+  if len(lines) == 0 {
+    return Err("empty HTTP status line")
+  }
+  let slr = parse_status_line(lines[0].trim())
+  if is_err(slr) {
+    return slr
+  }
+  let sl_parts = unwrap(slr)
+  let version = sl_parts[0]
+  let code = sl_parts[1]
+  let hr = parse_framing_headers(lines)
+  if is_err(hr) {
+    return hr
+  }
+  let headers = unwrap(hr)
+  let mut body = ""
+  let bodyless = req_method == "HEAD" || (code >= 100 && code < 200) || code == 204 || code == 304
+  if !bodyless {
+    let br = extract_framed_body(headers, hb[1], "incomplete HTTP response body")
+    if is_err(br) {
+      return br
+    }
+    body = unwrap(br)
+  }
+  let has_framing = bodyless || headers.has("content-length") || headers.get_or("transfer-encoding", "").lower().contains("chunked")
+  let ka = has_framing && is_keep_alive_conn(version, headers)
+  return Ok({"status": code, "version": version, "headers": headers, "body": body, "keep_alive": ka})
+}
+
+// Returns:
+//   -1: invalid/ambiguous framing
+//   -2: Transfer-Encoding: chunked
+//   -3: read until EOF (response without Content-Length or chunked)
+//   >=0: exact body byte count
+fn expected_body_mode(head: str, is_response: bool, req_method: str) -> i64 {
+  let lines = head.lines()
+  if len(lines) == 0 {
+    return -1
+  }
+  let mut code = 200
+  if is_response {
+    let slr = parse_status_line(lines[0].trim())
+    if is_err(slr) {
+      return -1
+    }
+    let slp = unwrap(slr)
+    code = slp[1]
+  }
+  let hr = parse_framing_headers(lines)
+  if is_err(hr) {
+    return -1
+  }
+  let headers = unwrap(hr)
+  if is_response && (req_method == "HEAD" || (code >= 100 && code < 200) || code == 204 || code == 304) {
+    return 0
+  }
+  if headers.has("transfer-encoding") {
+    if headers["transfer-encoding"].lower() != "chunked" {
+      return -1
+    }
+    return -2
+  }
+  if headers.has("content-length") {
+    let cr = parse_uint(headers["content-length"])
+    if is_err(cr) {
+      return -1
+    }
+    return unwrap(cr)
+  }
+  if is_response {
+    return -3
+  }
+  return 0
+}
+
+fn trim_body_chunks(head_prefix: str, body_chunks: vec[str], extra_bytes: i64) {
+  if extra_bytes <= 0 {
+    return Ok({"raw": head_prefix + body_chunks.join(""), "rest": ""})
+  }
+  let n_chunks = len(body_chunks)
+  let last_bs = utf8_bytes(body_chunks[n_chunks - 1])
+  let keep_n = len(last_bs) - extra_bytes
+  let keep_r = utf8_str(last_bs.slice(0, keep_n))
+  if is_err(keep_r) {
+    return keep_r
+  }
+  let rest_r = utf8_str(last_bs.slice(keep_n, len(last_bs)))
+  if is_err(rest_r) {
+    return rest_r
+  }
+  let mut pref = body_chunks.slice(0, n_chunks - 1)
+  let keep_s = unwrap(keep_r)
+  if len(keep_s) > 0 {
+    pref.push(keep_s)
+  }
+  return Ok({"raw": head_prefix + pref.join(""), "rest": unwrap(rest_r)})
+}
+
+// Incremental O(N) wire reader returning Ok({"raw": msg_str, "rest": leftover_str})
+fn recv_wire_message(conn: i64, initial_buf: str, max_bytes: i64, recv_sz: i64, is_response: bool, req_method: str) {
+  let mut over_err = "HTTP request exceeds max_bytes limit"
+  if is_response {
+    over_err = "HTTP response exceeds 16 MiB"
+  }
+  let mut head_buf = initial_buf + ""
+  let mut total_bytes = len(utf8_bytes(head_buf))
+  let mut err = ""
+  if total_bytes > max_bytes {
+    err = over_err + ""
+  }
+  let mut framed = false
+  let mut head_prefix = ""
+  let mut body_chunks = []
+  let mut body_byte_len = 0
+  let mut exp_mode = 0
+  let mut chunk_need = 0
+  let mut done_extra = -1
+  let mut eof_raw = ""
+  let mut eof_hit = false
+
+  while len(err) == 0 && done_extra < 0 && !eof_hit {
+    if !framed {
+      let mut sep = "\r\n\r\n"
+      let mut idx = head_buf.index_of(sep)
+      if is_none(idx) {
+        sep = "\n\n"
+        idx = head_buf.index_of(sep)
+      }
+      if !is_none(idx) {
+        exp_mode = expected_body_mode(head_buf.slice(0, idx), is_response, req_method)
+        if exp_mode == -1 {
+          err = "invalid or ambiguous HTTP message framing"
+          break
+        }
+        head_prefix = head_buf.slice(0, idx + len(sep))
+        if exp_mode >= 0 && len(utf8_bytes(head_prefix)) + exp_mode > max_bytes {
+          err = over_err + ""
+          break
+        }
+        let first_body = head_buf.slice(idx + len(sep), len(head_buf))
+        head_buf = ""
+        if len(first_body) > 0 {
+          body_byte_len = len(utf8_bytes(first_body))
+          body_chunks.push(first_body)
+        }
+        framed = true
+      }
+    }
+    if framed {
+      if exp_mode >= 0 && body_byte_len >= exp_mode {
+        done_extra = body_byte_len - exp_mode
+        break
+      }
+      if exp_mode == -2 && body_byte_len >= chunk_need {
+        let sc = scan_chunked(utf8_bytes(body_chunks.join("")), false)
+        if sc[0] == -1 {
+          err = str(sc[2])
+          break
+        }
+        if sc[0] == 1 {
+          done_extra = body_byte_len - sc[1]
+          break
+        }
+        chunk_need = sc[1] + 0
+        if len(utf8_bytes(head_prefix)) + chunk_need > max_bytes {
+          err = over_err + ""
+          break
+        }
+      }
+    }
+
+    let rr = tcp_recv(conn, recv_sz)
+    if is_err(rr) {
+      err = err_str(rr)
+      break
+    }
+    let chunk = unwrap(rr)
+    if len(chunk) == 0 {
+      if !framed && len(head_buf) == 0 {
+        if is_response {
+          err = "peer closed connection before sending HTTP response"
+        } else {
+          err = "peer closed connection before sending request"
+        }
+      } else {
+        if !framed {
+          eof_raw = head_buf + ""
+          eof_hit = true
+        } else {
+          let joined = body_chunks.join("")
+          if exp_mode == -2 {
+            let sc = scan_chunked(utf8_bytes(joined), false)
+            if sc[0] != 1 {
+              err = str(sc[2])
+            } else {
+              eof_raw = head_prefix + joined
+              eof_hit = true
+            }
+          } else {
+            eof_raw = head_prefix + joined
+            eof_hit = true
+          }
+        }
+      }
+    } else {
+      let clen = len(utf8_bytes(chunk))
+      total_bytes = total_bytes + clen
+      if !framed {
+        if total_bytes > max_bytes {
+          err = over_err + ""
+        } else {
+          head_buf = head_buf + chunk
+        }
+      } else {
+        body_byte_len = body_byte_len + clen
+        if (exp_mode >= 0 && body_byte_len < exp_mode && total_bytes > max_bytes) || (exp_mode < 0 && total_bytes > max_bytes) {
+          err = over_err + ""
+        } else {
+          body_chunks.push(chunk)
+        }
+      }
+    }
+  }
+
+  if len(err) > 0 {
+    return Err(err)
+  }
+  if done_extra >= 0 {
+    return trim_body_chunks(head_prefix, body_chunks, done_extra)
+  }
+  return Ok({"raw": eof_raw, "rest": ""})
+}
+
+fn emit_wire_message(start_line: str, base_hdrs, headers, forbid_host: bool, body: str) {
+  let mut hmap = {}
+  let bkeys = base_hdrs.keys()
+  for bk in bkeys {
+    hmap.set(bk, base_hdrs.get(bk))
+  }
+  if is_map(headers) {
+    let uks = headers.keys().sort()
+    for uk in uks {
+      let hk = str(uk)
+      let hv = str(headers.get(uk))
+      if !valid_http_token(hk) {
+        return Err("invalid HTTP header name: " + hk)
+      }
+      if !valid_header_value(hv) {
+        return Err("CR/LF or control byte in HTTP header value for: " + hk)
+      }
+      let hlo = hk.lower()
+      if hlo == "content-length" || hlo == "transfer-encoding" || hlo == "connection" || (forbid_host && hlo == "host") {
+        return Err("framing/connection header cannot be overridden: " + hk)
+      }
+      hmap.set(hk, hv)
+    }
+  }
+  let hkeys = hmap.keys().sort()
+  let mut wire = start_line + "\r\n"
+  for hk in hkeys {
+    wire = wire + hk + ": " + hmap.get(hk) + "\r\n"
+  }
+  return Ok(wire + "\r\n" + body)
+}
+
+fn build_request_wire(method: str, info, headers, body: str, conn_val: str) {
+  if !valid_http_token(method) {
+    return Err("invalid HTTP method token")
+  }
+  let path = info["path"]
+  if has_ctl_or_space(path) {
+    return Err("invalid characters in HTTP request target")
+  }
+  let mut def_port = 80
+  if info["scheme"] == "https" {
+    def_port = 443
+  }
+  let mut host_hdr = info["host"] + ""
+  if info["port"] != def_port {
+    host_hdr = host_hdr + ":" + str(info["port"])
+  }
+  let mut base = {}
+  base.set("Host", host_hdr)
+  base.set("Connection", conn_val)
+  let blen = len(utf8_bytes(body))
+  if blen > 0 {
+    base.set("Content-Length", str(blen))
+  }
+  return emit_wire_message(method + " " + path + " HTTP/1.1", base, headers, true, body)
+}
+
+fn send_recv_conn(conn: i64, wire: str, method: str, always_close: bool) {
+  let sr = tcp_send(conn, wire)
+  if is_err(sr) {
+    let _c = tcp_close(conn)
+    return sr
+  }
+  let mr = recv_wire_message(conn, "", 16777216, 65536, true, method)
+  if is_err(mr) {
+    let _c = tcp_close(conn)
+    return mr
+  }
+  let msg = unwrap(mr)
+  let pr = parse_response_for_method(msg["raw"], method)
+  let mut need_close = always_close
+  if is_err(pr) {
+    need_close = true
+  } else {
+    let rp = unwrap(pr)
+    if !rp["keep_alive"] {
+      need_close = true
+    }
+  }
+  if need_close {
+    let _c = tcp_close(conn)
+  }
+  return pr
+}
+
+pub fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str) {
+  let ur = parse_url(url)
+  if is_err(ur) {
+    return ur
+  }
+  let info = unwrap(ur)
+  let wr = build_request_wire(method, info, headers, body, "close")
+  if is_err(wr) {
+    return wr
+  }
+  let wire = unwrap(wr)
+  if info["scheme"] == "https" {
+    let tr = https_request_raw(info["dial"], info["host"], wire, ca_file)
+    if is_err(tr) {
+      return tr
+    }
+    return parse_response_for_method(unwrap(tr), method)
+  }
+  let cr = tcp_connect(info["dial"])
+  if is_err(cr) {
+    return cr
+  }
+  return send_recv_conn(unwrap(cr), wire, method, true)
+}
+
+pub fn open_keep_alive(url: str) {
+  let ur = parse_url(url)
+  if is_err(ur) {
+    return ur
+  }
+  let info = unwrap(ur)
+  if info["scheme"] != "http" {
+    return Err("open_keep_alive supports http:// URLs; use request_tls_ca for https://")
+  }
+  return tcp_connect(info["dial"])
+}
+
+pub fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str) {
+  let ur = parse_url(url)
+  if is_err(ur) {
+    return ur
+  }
+  let info = unwrap(ur)
+  if info["scheme"] != "http" {
+    return Err("request_keep_alive requires an http:// URL")
+  }
+  let wr = build_request_wire(method, info, headers, body, "keep-alive")
+  if is_err(wr) {
+    return wr
+  }
+  return send_recv_conn(conn, unwrap(wr), method, false)
+}
+
+pub fn get_keep_alive(conn: i64, url: str) {
+  return request_keep_alive(conn, "GET", url, {}, "")
+}
+
+pub fn close_keep_alive(conn: i64) {
+  return tcp_close(conn)
+}
+
+pub fn request_headers(method: str, url: str, headers, body: str) {
+  return request_tls_ca(method, url, headers, body, "")
+}
+
+pub fn request_ex(method: str, url: str, headers, body: str) {
+  return request_headers(method, url, headers, body)
+}
+
+pub fn request(method: str, url: str, content_type: str, body: str) {
+  let mut hdrs = {}
+  if len(content_type) > 0 {
+    hdrs.set("Content-Type", content_type)
+  }
+  return request_headers(method, url, hdrs, body)
+}
+
+pub fn get(url: str) {
+  return request("GET", url, "", "")
+}
+
+pub fn get_ca(url: str, ca_file: str) {
+  return request_tls_ca("GET", url, {}, "", ca_file)
+}
+
+pub fn get_follow(url: str, max_redirects: i64) {
+  let mut cur = url + ""
+  let mut hops = 0
+  while hops <= max_redirects {
+    let rr = get(cur)
+    if is_err(rr) {
+      return rr
+    }
+    let resp = unwrap(rr)
+    let code = resp["status"]
+    let hdrs = resp["headers"]
+    if !(code == 301 || code == 302 || code == 303 || code == 307 || code == 308) || !hdrs.has("location") {
+      return Ok(resp)
+    }
+    let loc = hdrs["location"]
+    if has_ctl_or_space(loc) {
+      return Err("invalid redirect Location header")
+    }
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+      cur = loc + ""
+    } else {
+      let info = unwrap(parse_url(cur))
+      let scheme = info["scheme"]
+      let mut auth = info["host"] + ""
+      if (scheme == "https" && info["port"] != 443) || (scheme == "http" && info["port"] != 80) {
+        auth = auth + ":" + str(info["port"])
+      }
+      if loc.starts_with("//") {
+        cur = scheme + ":" + loc
+      } else {
+        if loc.starts_with("/") {
+          cur = scheme + "://" + auth + loc
+        } else {
+          let mut segs = info["path"].split("?")[0].split("/")
+          if len(segs) > 0 {
+            let _dropped = segs.pop()
+          }
+          cur = scheme + "://" + auth + segs.join("/") + "/" + loc
+        }
+      }
+    }
+    hops = hops + 1
+  }
+  return Err("too many HTTP redirects")
+}
+
+pub fn post_json(url: str, json_body: str) {
+  return request("POST", url, "application/json", json_body)
+}
+
+pub fn status_text(code: i64) -> str {
+  let table = "|200:OK|201:Created|202:Accepted|204:No Content|301:Moved Permanently|302:Found|303:See Other|304:Not Modified|307:Temporary Redirect|308:Permanent Redirect|400:Bad Request|401:Unauthorized|403:Forbidden|404:Not Found|405:Method Not Allowed|409:Conflict|413:Payload Too Large|422:Unprocessable Entity|429:Too Many Requests|500:Internal Server Error|502:Bad Gateway|503:Service Unavailable|"
+  let key = "|" + str(code) + ":"
+  let idx = table.index_of(key)
+  if is_none(idx) {
+    return "Status"
+  }
+  let rest = table.slice(idx + len(key), len(table))
+  return rest.slice(0, rest.index_of("|"))
+}
+
+fn parse_req_line(rline: str) {
+  let sp1 = rline.index_of(" ")
+  if is_none(sp1) {
+    return Err("malformed HTTP request line: " + rline)
+  }
+  let method = rline.slice(0, sp1)
+  if !valid_http_token(method) {
+    return Err("invalid HTTP method token: " + method)
+  }
+  let rest = rline.slice(sp1 + 1, len(rline)).trim()
+  let sp2 = rest.index_of(" ")
+  if is_none(sp2) {
+    return Err("malformed HTTP request line (missing version): " + rline)
+  }
+  let target = rest.slice(0, sp2)
+  let version = rest.slice(sp2 + 1, len(rest)).trim()
+  if version != "HTTP/1.1" && version != "HTTP/1.0" {
+    return Err("unsupported HTTP version: " + version)
+  }
+  if len(target) == 0 || has_ctl_or_space(target) || (!target.starts_with("/") && target != "*") {
+    return Err("invalid HTTP request target: " + target)
+  }
+  let qm = target.index_of("?")
+  if is_none(qm) {
+    return Ok([method, target, target + "", "", version])
+  }
+  return Ok([method, target, target.slice(0, qm), target.slice(qm + 1, len(target)), version])
+}
+
+pub fn parse_request(raw: str) {
+  let hb = split_head_body(raw)
+  if len(hb) == 0 {
+    return Err("malformed HTTP request: missing header separator")
+  }
+  let lines = hb[0].lines()
+  if len(lines) == 0 {
+    return Err("empty HTTP request line")
+  }
+  let rl = parse_req_line(lines[0].trim())
+  if is_err(rl) {
+    return rl
+  }
+  let parts = unwrap(rl)
+  let pq = parse_query(parts[3])
+  if is_err(pq) {
+    return pq
+  }
+  let hr = parse_framing_headers(lines)
+  if is_err(hr) {
+    return hr
+  }
+  let headers = unwrap(hr)
+  let br = extract_framed_body(headers, hb[1], "incomplete HTTP request body")
+  if is_err(br) {
+    return br
+  }
+  let version = parts[4]
+  return Ok({
+    "method": parts[0], "target": parts[1], "path": parts[2],
+    "query": parts[3], "params": unwrap(pq), "version": version,
+    "headers": headers, "body": unwrap(br), "keep_alive": is_keep_alive_conn(version, headers)
+  })
+}
+
+fn format_response_mode(status: i64, headers, body: str, conn_val: str) {
+  if status < 100 || status > 599 {
+    return Err("invalid HTTP status code: " + str(status))
+  }
+  let base = {"Connection": conn_val, "Content-Length": str(len(utf8_bytes(body)))}
+  return emit_wire_message("HTTP/1.1 " + str(status) + " " + status_text(status), base, headers, false, body)
+}
+
+pub fn format_response(status: i64, headers, body: str) {
+  return format_response_mode(status, headers, body, "close")
+}
+
+pub fn read_request(conn: i64, max_bytes: i64) {
+  let mut limit = max_bytes
+  if limit <= 0 {
+    limit = 1048576
+  }
+  let mr = recv_wire_message(conn, "", limit, 4096, false, "")
+  if is_err(mr) {
+    return mr
+  }
+  let msg = unwrap(mr)
+  return parse_request(msg["raw"])
+}
+
+pub fn respond(conn: i64, status: i64, headers, body: str) {
+  let fr = format_response(status, headers, body)
+  if is_err(fr) {
+    let _c = tcp_close(conn)
+    return fr
+  }
+  let sr = tcp_send(conn, unwrap(fr))
+  let _c = tcp_close(conn)
+  return sr
+}
+
+pub fn respond_text(conn: i64, status: i64, body: str) {
+  let mut hdrs = {}
+  hdrs.set("Content-Type", "text/plain; charset=utf-8")
+  return respond(conn, status, hdrs, body)
+}
+
+pub fn respond_json(conn: i64, status: i64, json_body: str) {
+  let mut hdrs = {}
+  hdrs.set("Content-Type", "application/json; charset=utf-8")
+  return respond(conn, status, hdrs, json_body)
+}
+
+pub fn listen(addr: str) {
+  return tcp_listen(addr)
+}
+
+pub fn accept_request(srv_fd: i64, max_bytes: i64) {
+  let ar = tcp_accept(srv_fd)
+  if is_err(ar) {
+    return ar
+  }
+  let conn = unwrap(ar)
+  let rr = read_request(conn, max_bytes)
+  match rr {
+    Ok(req) => {
+      let mut out = {}
+      out.set("conn", conn)
+      out.set("req", req)
+      return Ok(out)
+    },
+    Err(msg) => {
+      let mut code = 400
+      if str(msg).contains("max_bytes") {
+        code = 413
+      }
+      let _s = respond_text(conn, code, str(msg) + "\n")
+      return Err(msg)
+    }
+  }
+  return Err("unreachable")
+}
+
+fn unpack_reply(reply) {
+  let mut status = 200
+  let mut hdrs = {}
+  let mut body = ""
+  if is_map(reply) {
+    if reply.has("status") {
+      status = reply["status"]
+    }
+    if reply.has("headers") {
+      hdrs = reply["headers"]
+    }
+    if reply.has("body") {
+      body = reply["body"]
+    }
+  } else {
+    body = str(reply)
+  }
+  return [status, hdrs, body]
+}
+
+pub fn serve_once(srv_fd: i64, handler) {
+  let got = accept_request(srv_fd, 1048576)
+  if is_err(got) {
+    return got
+  }
+  let pair = unwrap(got)
+  let rep = unpack_reply(handler(pair["req"]))
+  let sr = respond(pair["conn"], rep[0], rep[1], rep[2])
+  if is_err(sr) {
+    return sr
+  }
+  return Ok(rep[0])
+}
+
+pub fn serve_keep_alive(srv_fd: i64, max_requests: i64, handler) {
+  let ar = tcp_accept(srv_fd)
+  if is_err(ar) {
+    return ar
+  }
+  let conn = unwrap(ar)
+  let mut cap = max_requests
+  if cap <= 0 {
+    cap = 64
+  }
+  let mut served = 0
+  let mut leftover = ""
+  let mut err = ""
+  let mut closed = false
+  while served < cap {
+    let mr = recv_wire_message(conn, leftover, 1048576, 4096, false, "")
+    if is_err(mr) {
+      let emsg = err_str(mr)
+      if !(served > 0 && emsg == "peer closed connection before sending request") {
+        let mut code = 400
+        if emsg.contains("max_bytes") {
+          code = 413
+        }
+        let _s = respond_text(conn, code, emsg + "\n")
+        closed = true
+        err = emsg
+      }
+      break
+    }
+    let msg = unwrap(mr)
+    leftover = msg["rest"]
+    let pr = parse_request(msg["raw"])
+    if is_err(pr) {
+      let emsg = err_str(pr)
+      let _s = respond_text(conn, 400, emsg + "\n")
+      closed = true
+      err = emsg
+      break
+    }
+    let req = unwrap(pr)
+    let rep = unpack_reply(handler(req))
+    let stay_open = req["keep_alive"] && (served + 1 < cap)
+    let mut conn_hdr = "close"
+    if stay_open {
+      conn_hdr = "keep-alive"
+    }
+    let fr = format_response_mode(rep[0], rep[1], rep[2], conn_hdr)
+    if is_err(fr) {
+      err = err_str(fr)
+      break
+    }
+    let sr = tcp_send(conn, unwrap(fr))
+    if is_err(sr) {
+      err = err_str(sr)
+      break
+    }
+    served = served + 1
+    if !stay_open {
+      break
+    }
+  }
+  if !closed {
+    let _c = tcp_close(conn)
+  }
+  if len(err) > 0 {
+    return Err(err)
+  }
+  return Ok(served)
+}

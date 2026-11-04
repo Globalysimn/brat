@@ -1,21 +1,18 @@
 """A rebind must reclaim the overwritten value while a value aliased elsewhere
 stays alive: the unfixed emitter either grows per pass or aborts under RLIMIT_AS."""
+import _cxx
 import _scratch
 import importlib.util
 import os
 import resource
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-reclaim-')
 BRAT = os.path.join(ENGINE, 'brat.py')
 
-_spec = importlib.util.spec_from_file_location('cc_reclaim', os.path.join(ENGINE, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
 
 _spec = importlib.util.spec_from_file_location('tc_reclaim', os.path.join(ENGINE, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_spec)
@@ -67,7 +64,7 @@ for n in (40000, 100000):
     cfile = os.path.join(TMP, 'concat%d.c' % n)
     exe = os.path.join(TMP, 'concat%d.exe' % n)
     with open(cfile, 'w', encoding='utf-8') as f:
-        f.write(cc.emit(SRC % n, TMP))
+        f.write(_cxx.emit_source(SRC % n, TMP))
     rb = subprocess.run(_tc.resolve_cc().argv(cfile, exe) + ['-O2', '-I', ENGINE, '-lm'],
                         capture_output=True, text=True, timeout=300)
     check(rb.returncode == 0, 'n=%d build: %s' % (n, (rb.stdout + rb.stderr)[-300:]))
@@ -102,15 +99,9 @@ F5 = ('fn main() -> i64 {\n'
       '  return 0\n'
       '}\n')
 
-# Alias state is per-function, hence a second import.
-_spec = importlib.util.spec_from_file_location(
-    'cc_reclaim_mrt', os.path.join(ENGINE, 'codegen_c.py'))
-cc_mrt = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc_mrt)
-
-for name, src, want, emit in (('f4', F4, '1\n100000', cc.emit),
-                              ('f4_mrt', F4, '1\n100000', cc_mrt.emit),
-                              ('f5', F5, '2000000', cc.emit)):
+for name, src, want, emit in (('f4', F4, '1\n100000', _cxx.emit_source),
+                              ('f4_mrt', F4, '1\n100000', _cxx.emit_source),
+                              ('f5', F5, '2000000', _cxx.emit_source)):
     cfile = os.path.join(TMP, name + '.c')
     exe = os.path.join(TMP, name + '.exe')
     with open(cfile, 'w', encoding='utf-8') as f:

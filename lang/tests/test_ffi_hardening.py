@@ -14,7 +14,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -145,6 +144,9 @@ def run(cmd, timeout=300):
     if cmd and cmd[0] in ("build", "run", "emit-c", "dist") \
             and "--interp" not in cmd:
         cmd = [cmd[0], "--unsafe-ffi"] + list(cmd[1:])
+    elif cmd and cmd[0] == "run" and "--interp" in cmd and "--unsafe-ffi" not in cmd:
+        i = cmd.index("--interp") + 1
+        cmd = list(cmd[:i]) + ["--unsafe-ffi"] + list(cmd[i:])
     return subprocess.run([sys.executable, CLI] + cmd, capture_output=True,
                           timeout=timeout)
 
@@ -176,11 +178,15 @@ def main():
     n += 1
     print("ffihard ok: nul_str")
 
-    # Unknown argument type: native build refuses, matching the interpreter.
+    # Unknown argument type: native build and gated `--interp` refuse statically,
+    # and `--interp --no-check` still refuses at the runtime FFI guard.
     path = write("unknown_arg", UNKNOWN_ARG)
-    ri = run(["run", "--interp", path], 120)
+    ri_chk = run(["run", "--interp", path], 120)
+    assert ri_chk.returncode != 0 and b"unsupported FFI type `u128`" in (ri_chk.stdout + ri_chk.stderr), \
+        "unknown_arg interp gate should refuse: rc=%d" % ri_chk.returncode
+    ri = run(["run", "--interp", "--no-check", path], 120)
     assert ri.returncode != 0 and b"unsupported type u128" in (ri.stdout + ri.stderr), \
-        "unknown_arg interp should refuse: rc=%d" % ri.returncode
+        "unknown_arg interp --no-check should refuse: rc=%d" % ri.returncode
     exe = os.path.join(TMP, "unknown_arg.exe")
     b = run(["build", path, "-o", exe])
     assert b.returncode != 0 and not os.path.exists(exe), \
@@ -401,14 +407,15 @@ def main():
     n += 1
     print("ffihard ok: layout asserted for padded, packed and pointer structs")
 
-    # Both emitters must produce that same C, assertion text included.
+    # The interpreter-selected Python CLI path must delegate to the same C,
+    # assertion text included.
     import os as _os
     env = dict(_os.environ, BRAT_INTERP="1")
-    py_c = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", path], capture_output=True,
-                          timeout=120, env=env).stdout.decode("utf-8")
-    assert py_c == cs, "layout_asserts: the two emitters disagree on emitted C"
+    cli_c = subprocess.run([sys.executable, CLI, "emit-c", "--unsafe-ffi", path], capture_output=True,
+                           timeout=120, env=env).stdout.decode("utf-8")
+    assert cli_c == cs, "layout_asserts: Python CLI delegation changed the emitted C"
     n += 1
-    print("ffihard ok: both emitters emit the same assertions")
+    print("ffihard ok: Python CLI emits the same layout assertions")
 
     # The assertions are live: a wrong expectation must stop the C compiler.
     # This is the mutation half -- an assertion that never fails proves nothing.

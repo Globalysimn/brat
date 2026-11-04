@@ -7,8 +7,9 @@ which reached the caller as a number invented by the compiler ("94700151231784"
 from a program that raised `bad 2`), and the process exited 0.
 
 Now the wrapper reports the error exactly as an uncaught one at the top level and
-exits 1. Both backends must agree byte for byte, so this test compares exit code
-and stderr, and includes a clean call to prove the check does not fire on success.
+exits 1. Both backends must agree on exit code, stdout, and the runtime error. The CLI's
+FFI proof notice is checked separately; a clean call proves the callback check
+does not fire on success.
 """
 
 import _scratch
@@ -33,6 +34,9 @@ with open(os.path.join(TMP, "libcbraise.c"), "w", encoding="utf-8") as f:
 built = subprocess.run(["cc", "-shared", "-fPIC", "-O2", os.path.join(TMP, "libcbraise.c"),
                         "-o", LIB], capture_output=True, text=True, timeout=120)
 assert built.returncode == 0, built.stderr
+HEADER = os.path.join(TMP, "libcbraise.h")
+with open(HEADER, "w", encoding="utf-8") as f:
+    f.write("long long apply_cb(long long n, long long (*cb)(long long));\n")
 
 HEAD = ('extern "%s" fn apply_cb(n: i64, cb: fn(i64) -> i64) -> i64;\n\n' % LIB)
 
@@ -84,13 +88,15 @@ def native(src, name):
 
 # a raise in the callback: both backends say the same thing and exit 1
 path, built_run = native(RAISES, "raises")
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
-                        timeout=300)
+interp = subprocess.run(
+    [sys.executable, CLI, "run", "--interp", "--header", HEADER, path], capture_output=True,
+    text=True, timeout=300)
 want_err = "unhandled: ('err', 'bad 2')\n"
 assert interp.returncode == 1, "interp rc=%d, want 1 (stdout=%r)" % (interp.returncode,
                                                                     interp.stdout)
 assert interp.stdout == "", "interp printed a value from an abandoned callback: %r" % interp.stdout
-assert interp.stderr == want_err, "interp stderr=%r want=%r" % (interp.stderr, want_err)
+assert interp.stderr.endswith(want_err), "interp stderr=%r want suffix=%r" % (interp.stderr, want_err)
+assert "binding(s) proven against" in interp.stderr, "FFI proof notice missing: %r" % interp.stderr
 assert built_run.returncode == 1, "native rc=%d, want 1 (stdout=%r)" % (built_run.returncode,
                                                                       built_run.stdout)
 assert built_run.stdout == "", "native printed a value from an abandoned callback: %r" % built_run.stdout
@@ -98,12 +104,13 @@ assert built_run.stderr == want_err, "native stderr=%r want=%r" % (built_run.std
 
 # a callback that returns normally does not trip the check
 path, built_run = native(CLEAN, "clean")
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
-                        timeout=300)
+interp = subprocess.run(
+    [sys.executable, CLI, "run", "--interp", "--header", HEADER, path], capture_output=True,
+    text=True, timeout=300)
 assert interp.returncode == 0 and interp.stdout == "20\n", \
     "interp rc=%d out=%r err=%r" % (interp.returncode, interp.stdout, interp.stderr)
 assert built_run.returncode == 0 and built_run.stdout == "20\n", \
     "native rc=%d out=%r err=%r" % (built_run.returncode, built_run.stdout, built_run.stderr)
 
-print("CALLBACK RAISE ALL GREEN (raise in a callback: both backends exit 1 with the same "
-      "stderr, a clean callback still returns)")
+print("CALLBACK RAISE ALL GREEN (runtime error is preserved across both backends, "
+      "a clean callback still returns)")

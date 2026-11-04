@@ -9,10 +9,11 @@ the two ways out:
     brat build prog.brat --header lib.h    the declarations compared to C
     brat build prog.brat --unsafe-ffi      build it anyway, on your head
 
-`--interp` is the reference implementation, not a binary, and is not gated.
+`--interp` still crosses the C ABI through ctypes, so it takes the same proof gate.
 """
 import _scratch
 
+import json
 import os
 import subprocess
 import sys
@@ -70,15 +71,15 @@ plain = write("plain.brat", 'fn main() -> i64 {\n  print(7);\n  return 0\n}\n')
 REFUSAL = "calls C and no header was given"
 HATCHES = ("--header FILE", "--unsafe-ffi")
 
-# `brat run` compiles a binary only when the native runner is there; without it
-# the reference interpreter runs the program, and that path is not gated on
-# purpose (section 6).
+# Native `brat run` gates before exec; `--interp` uses the same proof because
+# ctypes crosses the C ABI in the current process.
 NATIVE = os.path.isfile(CXX) and os.access(CXX, os.X_OK)
 
 # 1. Every command that builds or runs a binary refuses the same way
 COMMANDS = [("build", ["-o", os.path.join(TMP, "a.exe")]),
             ("dist", ["-o", os.path.join(TMP, "dist")]),
-            ("emit-c", [])]
+            ("emit-c", []),
+            ("run", ["--interp"])]
 if NATIVE:
     COMMANDS.append(("run", []))
 for cmd, extra in COMMANDS:
@@ -109,6 +110,24 @@ check(os.path.exists(exe), "no binary")
 ran = subprocess.run([exe], capture_output=True, text=True, timeout=120, env=env)
 check(ran.returncode == 0 and ran.stdout == "42\n", "the unproven build is wrong: %r" % ran.stdout)
 
+dist_dir = os.path.join(TMP, "dist-unsafe")
+r = cli("dist", prog, "--unsafe-ffi", "-o", dist_dir)
+check(r.returncode == 0, "dist --unsafe-ffi: %r" % (r.stdout + r.stderr))
+check(r.stderr.count("calls C without a proof (--unsafe-ffi)") == 1,
+      "dist must report the explicit FFI opt-out once: %r" % r.stderr)
+dist_manifest = json.load(open(os.path.join(dist_dir, "manifest.json"), encoding="utf-8"))
+dist_artifact = os.path.join(dist_dir, dist_manifest["artifacts"][0]["artifact"])
+ran = subprocess.run([dist_artifact], capture_output=True, text=True, timeout=120, env=env)
+check(ran.returncode == 0 and ran.stdout == "42\n",
+      "dist --unsafe-ffi artifact is wrong: %r" % (ran.stdout + ran.stderr))
+dist_repeat = os.path.join(TMP, "dist-unsafe-repeat")
+repeat = cli("dist", prog, "--unsafe-ffi", "-o", dist_repeat)
+check(repeat.returncode == 0, "repeat dist failed: %r" % (repeat.stdout + repeat.stderr))
+repeat_manifest = json.load(open(os.path.join(dist_repeat, "manifest.json"), encoding="utf-8"))
+check(repeat_manifest == dist_manifest,
+      "identical source/target dist runs were not reproducible: %r != %r"
+      % (dist_manifest, repeat_manifest))
+
 # The note is a warning about this build, so it goes to stderr and never into the
 # program's own stdout: a build log is not the program's output.
 check("42" not in r.stdout, "--unsafe-ffi wrote to stdout: %r" % r.stdout)
@@ -120,6 +139,10 @@ check(r.returncode == 0, "build --header: %r" % (r.stdout + r.stderr))
 check("--unsafe-ffi" not in r.stderr, "a proven build mentions the opt-out: %r" % r.stderr)
 ran = subprocess.run([good_exe], capture_output=True, text=True, timeout=120, env=env)
 check(ran.stdout == "42\n", "the proven build is wrong: %r" % ran.stdout)
+interp_proved = cli("run", "--interp", prog, "--header", GOOD)
+check(interp_proved.returncode == 0 and interp_proved.stdout == "42\n",
+      "the interpreter must run a C call after the same header proof: %r"
+      % (interp_proved.stdout + interp_proved.stderr))
 
 # A header that disagrees is a refusal, not a warning with a binary next to it.
 r = cli("build", prog, "--header", BAD, "-o", os.path.join(TMP, "bad.exe"))
@@ -148,11 +171,46 @@ else:
 r = cli("build", plain, "-o", os.path.join(TMP, "plain.exe"))
 check(r.returncode == 0, "a program with no externs was refused: %r" % (r.stdout + r.stderr))
 check("--unsafe-ffi" not in r.stderr, "%r" % r.stderr)
+unused = write("unused.brat", ('extern "%s" fn triple(x: i64) -> i64;\n'
+                                'fn main() -> i64 { return 0 }\n') % LIB)
+r = cli("run", "--interp", unused)
+check(r.returncode == 0 and r.stdout == "" and "proof" not in r.stderr,
+      "an unused extern declaration triggered the interpreter gate: %r"
+      % (r.stdout + r.stderr))
 
-# 6. The interpreter is the reference and stays ungated
+# 6. The interpreter uses ctypes and therefore requires an explicit unsafe
+# acknowledgement when no header or .bratbind proves the foreign prototype.
 r = cli("run", "--interp", prog)
+check(r.returncode != 0 and REFUSAL in r.stderr, r.stderr)
+r = cli("run", "--interp", "--no-check", prog)
+check(r.returncode != 0 and REFUSAL in r.stderr,
+      "--no-check bypassed the interpreter's FFI proof gate: %r" % (r.stdout + r.stderr))
+r = cli("run", "--interp", "--unsafe-ffi", prog)
 check(r.returncode == 0 and r.stdout == "42\n",
-      "--interp is the reference implementation, not a binary: %r" % (r.stdout + r.stderr))
+      "--interp --unsafe-ffi: %r" % (r.stdout + r.stderr))
+check("calls C without a proof (--unsafe-ffi)" in r.stderr, r.stderr)
+
+# Calls inside an imported module cross the same boundary and require the same proof.
+module_dir = os.path.join(TMP, "ffi")
+os.makedirs(module_dir)
+with open(os.path.join(module_dir, "calls.brat"), "w", encoding="utf-8") as f:
+    f.write(('extern "%s" fn triple(x: i64) -> i64;\n'
+             'pub fn run() -> i64 { return triple(14) }\n') % LIB)
+imported = write("imported.brat", 'import ffi.calls\n'
+                 'fn main() -> i64 { print(ffi.calls.run()); return 0 }\n')
+r = cli("run", "--interp", imported)
+check(r.returncode != 0 and REFUSAL in r.stderr,
+      "an imported module's C call bypassed the interpreter gate: %r" % (r.stdout + r.stderr))
+r = cli("run", "--interp", "--no-check", imported)
+check(r.returncode != 0 and REFUSAL in r.stderr,
+      "--no-check bypassed an imported module's FFI gate: %r" % (r.stdout + r.stderr))
+r = cli("run", "--interp", "--unsafe-ffi", imported)
+check(r.returncode == 0 and r.stdout == "42\n",
+      "an imported module's C call failed with the explicit opt-out: %r" % (r.stdout + r.stderr))
+if NATIVE:
+    r = cli("run", imported)
+    check(r.returncode != 0 and REFUSAL in r.stderr,
+          "an imported module's C call bypassed the native gate: %r" % (r.stdout + r.stderr))
 
 # 7. `brat run` refuses before it execs
 # The native path replaces this process with the compiled binary; a gate that

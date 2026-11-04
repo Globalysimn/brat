@@ -4,7 +4,8 @@ Tokens are compared as `(kind, text, line)` triples against literal lists. The
 cases are the ones where a scanner that walks the text once can differ from one
 that re-enters the regex at every position: a quote inside a `{...}` placeholder,
 a `..` next to a `.`, comments, CRLF, non-ASCII text, a number glued to a
-method call, and an unterminated string at end of file.
+method call, and an unterminated string at end of file. A character that starts
+no token is an error, not a gap: see `test_lexer_strays.py` for both front ends.
 """
 
 import os
@@ -26,6 +27,15 @@ def check(cond, msg):
 
 def toks(src):
     return [(t.k, t.v, t.line) for t in lex(src)]
+
+
+def rejects(src):
+    """The error the lexer raises for `src`, or None when it lexes."""
+    try:
+        lex(src)
+    except SyntaxError as e:
+        return str(e)
+    return None
 
 
 check(toks("") == [], "empty source")
@@ -70,21 +80,21 @@ check(toks("1.5 1e3 2.5e-2") == [("NUM", "1.5", 1), ("NUM", "1e3", 1),
       "numbers: %r" % (toks("1.5 1e3 2.5e-2"),))
 
 # Strings and comments may hold any text; identifiers are ASCII, so a Cyrillic
-# name is skipped like any other character with no token. That is the language
-# as it is, and the test says so instead of pretending otherwise.
-check(toks('s = "привет" // мир\nп') == [
+# name is an error rather than a name the scanner steps over.
+check(toks('s = "привет" // мир') == [
     ("ID", "s", 1), ("OP", "=", 1), ("STR", '"привет"', 1)],
-      "non-ASCII: %r" % (toks('s = "привет" // мир\nп'),))
+      "non-ASCII: %r" % (toks('s = "привет" // мир'),))
+check(rejects('s = 1\nп') == "unexpected character U+043F at line 2",
+      "a Cyrillic name: %r" % (rejects('s = 1\nп'),))
+check(toks("\ufefflet x = 1") == toks("let x = 1"), "a byte order mark is not a character")
 
 check(toks("a\r\nb") == [("ID", "a", 1), ("ID", "b", 2)],
       "CRLF: %r" % (toks("a\r\nb"),))
 
-# A quote with no closing quote is not a string at all: the quote is skipped and
-# the text lexes as names, so the parser reports a syntax error instead of a
-# token that swallowed the rest of the file.
-check(toks('x = "abc\ny') == [("ID", "x", 1), ("OP", "=", 1), ("ID", "abc", 1),
-                               ("ID", "y", 2)],
-      "unterminated string: %r" % (toks('x = "abc\ny'),))
+# A quote with no closing quote names itself in the error, on its own line, instead of
+# a token that swallows the rest of the file or a quote the scanner steps over.
+check(rejects('x = 1\ny = "abc\nz') == "unterminated string literal at line 2",
+      "unterminated string: %r" % (rejects('x = 1\ny = "abc\nz'),))
 
 check(toks("fn f() -> i64 { return 1 }") == [
     ("KW", "fn", 1), ("ID", "f", 1), ("OP", "(", 1), ("OP", ")", 1),
@@ -92,10 +102,13 @@ check(toks("fn f() -> i64 { return 1 }") == [
     ("NUM", "1", 1), ("OP", "}", 1)],
       "declaration: %r" % (toks("fn f() -> i64 { return 1 }"),))
 
-# A character the language has no token for is skipped, not fatal: the parser
-# reports the real error.
-check(toks("a @ b") == [("ID", "a", 1), ("ID", "b", 1)],
-      "unknown character: %r" % (toks("a @ b"),))
+# A character the language has no token for is an error. The scanner used to skip it,
+# which read `6 | 1` as `6 1` and `~x` as `x`.
+check(rejects("a @ b") == "unexpected character '@' at line 1",
+      "unknown character: %r" % (rejects("a @ b"),))
+check(rejects("6 | 1") == "unexpected character '|' at line 1", "a lone bar")
+check(toks('"a | b ^ ~ @" // | ^ ~ @') == [("STR", '"a | b ^ ~ @"', 1)],
+      "stray characters inside a string and a comment are text")
 
 # The cursor the parser walks is built from the same list.
 c = Cur(lex("let x = 1\nlet y = 2\n"))

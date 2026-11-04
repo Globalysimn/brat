@@ -113,7 +113,7 @@ env = dict(os.environ, LD_LIBRARY_PATH=TMP)
 
 def run(args, timeout=600, **kw):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+            and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
     return subprocess.run([sys.executable, CLI] + args, capture_output=True, text=True,
                           timeout=timeout, env=env, **kw)
@@ -145,7 +145,7 @@ check(again.returncode == 0 and again.stdout == WANT, "second interp run %r" % (
 cold = os.path.join(TMP, "cold")
 os.makedirs(cold, exist_ok=True)
 no_cc = dict(env, CC=os.path.join(TMP, "definitely-not-a-compiler"), TMPDIR=cold)
-broken = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True,
+broken = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True,
                         text=True, timeout=120, env=no_cc)
 out = broken.stdout + broken.stderr
 check(broken.returncode != 0, "a missing compiler must not silently pass")

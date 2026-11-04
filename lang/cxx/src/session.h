@@ -2,8 +2,7 @@
 //
 // A `chan(n)` has two ends in one scope and nothing in the syntax says how many
 // values cross. A straight-line pipe whose send and receive counts differ cannot
-// finish, and that is what this pass refuses. Loops, branches and channels handed
-// to a helper are printed by `brat check --proto` but never counted.
+// finish, and that is what this pass refuses.
 // The message is byte-identical to the reference implementation.
 #pragma once
 

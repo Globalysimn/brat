@@ -1,0 +1,50 @@
+// std.sqlite — confined & parameterized SQLite3 database bindings
+
+pub fn open(path: str) {
+  return sql_open(path)
+}
+
+pub fn open_memory() {
+  return sql_open(":memory:")
+}
+
+pub fn close(db: i64) {
+  return sql_close(db)
+}
+
+pub fn exec(db: i64, sql: str) {
+  return sql_exec(db, sql)
+}
+
+pub fn query(db: i64, sql: str, params) {
+  return sql_query(db, sql, params)
+}
+
+pub fn query_one(db: i64, sql: str, params) {
+  let r = sql_query(db, sql, params)
+  if is_err(r) {
+    return r
+  }
+  let rows = unwrap(r)
+  if len(rows) == 0 {
+    return Ok(None)
+  }
+  return Ok(Some(rows[0]))
+}
+
+pub fn scalar_int(db: i64, sql: str, params) {
+  let r = sql_query(db, sql, params)
+  if is_err(r) {
+    return r
+  }
+  let rows = unwrap(r)
+  if len(rows) == 0 {
+    return Err("scalar_int query returned 0 rows")
+  }
+  let row = rows[0]
+  let ks = row.keys()
+  if len(ks) == 0 {
+    return Err("scalar_int query returned 0 columns")
+  }
+  return Ok(row.get(ks[0]))
+}

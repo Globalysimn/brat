@@ -16,6 +16,9 @@ struct ModuleError : std::runtime_error {
     explicit ModuleError(const std::string &msg) : std::runtime_error(msg) {}
 };
 
+using ModuleInterface =
+    std::map<std::string, std::pair<std::vector<std::string>, std::string>>;
+
 struct SourceFile {
     std::string path;                  // real path, as the reference reports it
     std::string src;
@@ -32,20 +35,24 @@ struct SourceFile {
     // diagnostic instead of whichever statement ran last.
     std::map<std::string, std::pair<std::string, std::string>> reexports;
     // A sibling `.bri` promises names, arity, parameter types and return type.
-    std::optional<std::map<std::string, std::pair<std::vector<std::string>, std::string>>> iface;
+    std::optional<ModuleInterface> iface;
 };
 
 struct ModuleSet {
     std::vector<SourceFile> files;
     // The root's body with every `import` spliced in place and every name
-    // mangled: exactly what `codegen_c.py` emits from.
+    // mangled: exactly what the native emitter consumes.
     std::vector<StmtP> flat;
+    bool mangled = false;
 };
 
 // Throws a plain runtime_error for the root file (unreadable, bad syntax) and
 // ModuleError for an import.
+void set_stdlib_root(const std::string &dir);
+ModuleInterface read_interface(const std::string &path);
 ModuleSet load_modules(const std::string &path);
 ModuleSet load_modules(const std::string &path, const std::string &root_source);
+void mangle_modules(ModuleSet &set);
 // Mangles names and fills `flat`. Prints nothing; throws ModuleError when the
 // program breaks one of the reference's link-time rules.
 void flatten(ModuleSet &set);

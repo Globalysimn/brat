@@ -1,9 +1,7 @@
 import _scratch
-import ctypes
 import os
 import subprocess
 import sys
-import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENG = os.path.join(ROOT, "lang", "engine")
@@ -41,7 +39,7 @@ def run_interp(src):
     path = os.path.join(TMP, "t.brat")
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
-    p = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True, timeout=120)
+    p = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True, text=True, timeout=120)
     return p.returncode, p.stdout.replace("\r\n", "\n")
 
 
@@ -190,17 +188,16 @@ def main():
     epath = os.path.join(TMP, "export.brat")
     with open(epath, "w", encoding="utf-8") as f:
         f.write(src)
-    # Both emitters, because the wrapper packs the C arguments into a `Vec` and a
-    # missed push is an argument the callee never sees: the `f64` case was dropped
-    # by the Python emitter alone, and only the C++ one was exercised by default.
-    for tag, env in (("", None), ("_py", dict(os.environ, BRAT_CXX=os.path.join(TMP, "none")))):
-        libpath = os.path.join(TMP, "libexport%s.so" % tag)
-        p = subprocess.run([sys.executable, CLI, "build", "--unsafe-ffi", epath, "--shared", "-o", libpath],
-                           capture_output=True, text=True, timeout=300, env=env)
-        assert p.returncode == 0, "shared build failed:\n" + (p.stdout + p.stderr)[-500:]
-        check_export(libpath, tag or "default")
-        n += 1
-    print("ffi ok: export_shared (both emitters)")
+    # The wrapper packs the C arguments into a `Vec`; a missed push is an
+    # argument the callee never sees, so every exported width is called here.
+    libpath = os.path.join(TMP, "libexport.so")
+    p = subprocess.run([sys.executable, CLI, "build", "--unsafe-ffi", epath,
+                        "--shared", "-o", libpath],
+                       capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0, "shared build failed:\n" + (p.stdout + p.stderr)[-500:]
+    check_export(libpath, "native")
+    n += 1
+    print("ffi ok: export_shared (native emitter)")
 
     print("FFI ALL GREEN (%d cases)" % n)
 

@@ -1,7 +1,7 @@
 """BRAT language package: lexer, parser, runtime."""
 import sys as _sys
 
-__version__ = "0.1"
+from .version import __version__
 
 # The parser is a recursive descent, and the grammar is one Python frame per
 # precedence level per nesting level. The default limit of 1000 therefore runs
@@ -14,3 +14,5 @@ if _sys.getrecursionlimit() < 20000:
 from .lexer import Cur, lex
 from .runtime import Done, run
 from .parser import parse_prog
+
+__all__ = ["Cur", "Done", "__version__", "lex", "parse_prog", "run"]

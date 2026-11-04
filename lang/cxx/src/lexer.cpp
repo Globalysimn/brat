@@ -1,6 +1,7 @@
 #include "lexer.h"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "parser.h"
 
@@ -74,6 +75,21 @@ bool seq_ok(std::string_view s, size_t i, size_t n, uint32_t min_cp) {
     return !(cp >= 0xD800 && cp <= 0xDFFF);             // a lone surrogate
 }
 
+// The sentence for a character no token starts with, worded as `_stray` in lexer.py words it.
+// The text is valid UTF-8 by now, so a lead byte says how long the sequence is.
+std::string stray_message(std::string_view src, size_t i) {
+    const unsigned char c = static_cast<unsigned char>(src[i]);
+    if (c == '"') return "unterminated string literal";
+    if (c >= 0x20 && c < 0x7F) return std::string("unexpected character '") + static_cast<char>(c) + "'";
+    const size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+    uint32_t cp = len == 1 ? c : (c & (0xFFu >> (len + 1)));
+    for (size_t k = 1; k < len && i + k < src.size(); ++k)
+        cp = (cp << 6) | (static_cast<unsigned char>(src[i + k]) & 0x3Fu);
+    char buf[16];
+    std::snprintf(buf, sizeof buf, "U+%04X", static_cast<unsigned>(cp));
+    return std::string("unexpected character ") + buf;
+}
+
 }  // namespace
 
 // Source is UTF-8: the Python front end decodes it with `encoding="utf-8"`, so a
@@ -81,8 +97,8 @@ bool seq_ok(std::string_view s, size_t i, size_t n, uint32_t min_cp) {
 // here -- before the first token, with the line the bad byte sits on -- keeps
 // `check`, `cc` and `run` on one answer for one file instead of one of them
 // silently compiling garbage.
-bool utf8_valid(std::string_view s, uint32_t &bad_line) {
-    uint32_t line = 1;
+bool utf8_valid(std::string_view s, uint32_t &bad_line, uint32_t start_line) {
+    uint32_t line = start_line;
     for (size_t i = 0; i < s.size();) {
         unsigned char c = static_cast<unsigned char>(s[i]);
         if (c < 0x80) {
@@ -103,13 +119,13 @@ bool utf8_valid(std::string_view s, uint32_t &bad_line) {
     return true;
 }
 
-std::vector<Tok> lex(std::string_view src) {
-    uint32_t bad_line = 1;
-    if (!utf8_valid(src, bad_line)) throw ParseError("source is not valid UTF-8", bad_line);
+std::vector<Tok> lex(std::string_view src, uint32_t start_line) {
+    uint32_t bad_line = start_line;
+    if (!utf8_valid(src, bad_line, start_line)) throw ParseError("source is not valid UTF-8", bad_line);
     std::vector<Tok> out;
     out.reserve(src.size() / 4 + 8);
-    size_t i = 0;
-    uint32_t line = 1;
+    size_t i = src.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    uint32_t line = start_line;
 
     while (i < src.size()) {
         unsigned char c = static_cast<unsigned char>(src[i]);
@@ -134,14 +150,12 @@ std::vector<Tok> lex(std::string_view src) {
                     j++;
                 }
             }
-            if (!closed) {   // an unterminated literal is not a string
-                i++;
-                continue;
-            }
+            if (!closed) throw ParseError(stray_message(src, i), line);
             size_t end = j;
             if (src.substr(i, j - i).find('{') != std::string_view::npos) {
                 size_t real = str_end(src, i);
-                end = (real == std::string_view::npos) ? src.size() : real + 1;
+                if (real == std::string_view::npos) throw ParseError(stray_message(src, i), line);
+                end = real + 1;
             }
             std::string_view text = src.substr(i, end - i);
             out.push_back({TK::Str, text, line});
@@ -204,9 +218,9 @@ std::vector<Tok> lex(std::string_view src) {
             }
         }
         if (paired) continue;
-        if (std::string_view("+-*/%<>=!&{}()[],:;?.").find(src[i]) != std::string_view::npos) {
-            out.push_back({TK::Op, src.substr(i, 1), line});
-        }
+        if (std::string_view("+-*/%<>=!&{}()[],:;?.").find(src[i]) == std::string_view::npos)
+            throw ParseError(stray_message(src, i), line);
+        out.push_back({TK::Op, src.substr(i, 1), line});
         i++;
     }
 
@@ -214,6 +228,6 @@ std::vector<Tok> lex(std::string_view src) {
     // the trailing newline: `lang/engine/diag.py` reports "unexpected end of
     // file" against `c.t[-1].line`, and a one-line difference here shows up as
     // a one-line disagreement between the two front ends.
-    out.push_back({TK::Eof, {}, out.empty() ? 1u : out.back().line});
+    out.push_back({TK::Eof, {}, out.empty() ? start_line : out.back().line});
     return out;
 }

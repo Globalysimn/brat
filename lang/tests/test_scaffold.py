@@ -5,7 +5,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -318,8 +318,8 @@ void pat(const Pat &p, std::string &o) {
 }  // namespace
 
 std::string repr_f64(double v) {
-    // The reference is `repr(float)` in `codegen_c.py`: the emitter contract is
-    // byte-identical C, and `std::to_chars` shortest form is not Python's. Two
+    // Format like Python's `repr(float)`, the established decimal spelling for
+    // BRAT values; `std::to_chars` shortest form is not Python's. Two
     // rules differ. Python switches to scientific notation outside
     // [1e-4, 1e16) -- `to_chars` uses its own threshold -- and Python writes
     // `1e-320`, not `1.0e-320`. Checked against 60 000 doubles, including
@@ -723,7 +723,12 @@ void stmt(const Stmt &s, std::string &o) {
             opt(o, s.fields[i].ann);
             o.push_back(')');
         }
-        o += "])";
+        o.push_back(']');
+        boolean(o, s.opt1 && *s.opt1 == "packed");
+        if (s.opt1 && *s.opt1 == "union") {
+            boolean(o, true);
+        }
+        o.push_back(')');
         break;
     }
 }

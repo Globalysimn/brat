@@ -19,4 +19,5 @@ struct ParseOut {
     std::vector<std::pair<uint32_t, std::string>> stray;
 };
 
-ParseOut parse(std::string_view src);
+ParseOut parse(std::string_view src, uint32_t start_line = 1);
+StmtP clone_stmt_header(const Stmt &s);

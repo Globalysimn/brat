@@ -8,7 +8,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -65,8 +64,9 @@ def write(name, text):
 env = dict(os.environ, LD_LIBRARY_PATH=TMP)
 ok = write("ok.brat", SRC)
 
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", ok], capture_output=True, text=True,
-                        timeout=120, env=env)
+interp = subprocess.run(
+    [sys.executable, CLI, "run", "--interp", "--unsafe-ffi", ok], capture_output=True,
+    text=True, timeout=120, env=env)
 check(interp.returncode == 0, "run exit=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
 check(interp.stdout == "42\n105\n5\n", "run stdout %r" % (interp.stdout,))
 
@@ -127,8 +127,9 @@ app = write("callback_module.brat",
 checked = subprocess.run([sys.executable, CLI, "check", app], capture_output=True, text=True,
                          timeout=120)
 assert checked.returncode == 0, checked.stdout + checked.stderr
-interpreted = subprocess.run([sys.executable, CLI, "run", "--interp", app], capture_output=True, text=True,
-                             timeout=120, env=env)
+interpreted = subprocess.run(
+    [sys.executable, CLI, "run", "--interp", "--unsafe-ffi", app], capture_output=True,
+    text=True, timeout=120, env=env)
 assert interpreted.returncode == 0 and interpreted.stdout == "42\n", (
     interpreted.returncode, interpreted.stdout, interpreted.stderr)
 module_exe = os.path.join(TMP, "callback_module.exe")

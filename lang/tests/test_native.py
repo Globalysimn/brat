@@ -1,10 +1,10 @@
+import _cxx
 import _scratch
 import importlib.util
 import os
 import re
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
@@ -12,9 +12,6 @@ LANG_EX = os.path.join(HERE, '..', 'examples')
 TMP = _scratch.mkdtemp(prefix='brat-native-')
 os.makedirs(TMP, exist_ok=True)
 
-_spec = importlib.util.spec_from_file_location('cc_native', os.path.join(ENGINE, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
 
 _tc_spec = importlib.util.spec_from_file_location('cc_toolchain', os.path.join(ENGINE, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_tc_spec)
@@ -53,7 +50,7 @@ def build(path):
     cfile = os.path.join(TMP, tag + '.c')
     exe = os.path.join(TMP, tag + '.exe')
     with open(cfile, 'w', encoding='utf-8') as f:
-        f.write(cc.emit_file(path))
+        f.write(_cxx.emit_file(path))
     r = _tc.cc_cached(_tc.resolve_cc().argv(cfile, exe, static=True) + ["-O2", "-I", ENGINE, "-lm"],
                       cfile, exe)
     assert r.returncode == 0, 'cc failed for %s:\n%s' % (tag, (r.stdout + r.stderr)[-2000:])

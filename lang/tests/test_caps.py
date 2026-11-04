@@ -187,13 +187,6 @@ def main():
                   % (name, diags(py.stdout), diags(cx.stdout)))
         print("%-28s %s" % (name, "green" if not expect else "refused as expected"))
 
-    # The lattice also has to *show* its work, or nobody can argue with it.
-    table = run([sys.executable, CLI, "check", "--caps",
-                 os.path.join(ENGINE, "..", "examples", "own_paths.brat")])
-    check(table.returncode == 0, "check --caps failed")
-    for word in ("moved", "line"):
-        check(word in table.stdout, "check --caps prints no `%s`" % word)
-
     if FAILED:
         print("\nCAPS FAILED (%d)" % len(FAILED))
         for f in FAILED:

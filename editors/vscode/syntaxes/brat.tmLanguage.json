@@ -1,0 +1,84 @@
+{
+  "name": "BRAT",
+  "scopeName": "source.brat",
+  "fileTypes": [
+    "brat",
+    "bri"
+  ],
+  "patterns": [
+    {
+      "name": "comment.line.documentation.brat",
+      "match": "///.*$"
+    },
+    {
+      "name": "comment.line.double-slash.brat",
+      "match": "//.*$"
+    },
+    {
+      "name": "string.quoted.raw.brat",
+      "begin": "r\"",
+      "end": "\"",
+      "patterns": []
+    },
+    {
+      "name": "string.quoted.double.brat",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.brat",
+          "match": "\\\\."
+        },
+        {
+          "name": "meta.interpolation.brat",
+          "begin": "\\{",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.interpolation.begin.brat" }
+          },
+          "end": "\\}",
+          "endCaptures": {
+            "0": { "name": "punctuation.section.interpolation.end.brat" }
+          },
+          "patterns": [
+            {
+              "name": "variable.other.brat",
+              "match": "[A-Za-z_][A-Za-z0-9_.]*"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "keyword.control.brat",
+      "match": "\\b(if|else|while|for|in|match|return|break|continue|try|catch|defer|spawn|scope|par|arena|unsafe)\\b"
+    },
+    {
+      "name": "storage.modifier.brat",
+      "match": "\\b(pub|use|import|fn|export|extern|packed|struct|union|enum|trait|impl|let|mut|move|const)\\b"
+    },
+    {
+      "name": "constant.language.brat",
+      "match": "\\b(true|false|none)\\b"
+    },
+    {
+      "name": "support.type.primitive.brat",
+      "match": "\\b(i8|u8|i16|u16|i32|u32|i64|u64|usize|f32|f64|bool|str|ptr|slice|vec|map|dyn)\\b"
+    },
+    {
+      "name": "constant.numeric.brat",
+      "match": "\\b0x[0-9A-Fa-f]+\\b|\\b\\d+\\.\\d+\\b|\\b\\d+\\b"
+    },
+    {
+      "name": "entity.name.type.brat",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    {
+      "name": "entity.name.function.brat",
+      "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\()"
+    },
+    {
+      "name": "keyword.operator.brat",
+      "match": "=>|->|==|!=|<=|>=|&&|\\|\\||\\.\\.|\\+=|-=|\\*=|/=|%=|[+\\-*/%=<>!&?]"
+    }
+  ]
+}

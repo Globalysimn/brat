@@ -20,7 +20,9 @@ struct EmitError : std::runtime_error {
 // runs the interval pass over the i64 fast-path functions and drops the checks
 // it proves dead. `proofs`, when not null, collects one entry per dropped check.
 std::string emit_program(const std::vector<StmtP> &prog, const std::string &base, int opt = 0,
-                         std::vector<ir::Proof> *proofs = nullptr);
+                         std::vector<ir::Proof> *proofs = nullptr,
+                         const std::string &target = "",
+                         bool trace_lines = false);
 
 // Sorted, unique library names the program's `extern` blocks ask to link.
 std::vector<std::string> extern_libs(const std::vector<StmtP> &prog);

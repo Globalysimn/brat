@@ -7,9 +7,8 @@ every append of a call or of a `+` result leaked one allocation per iteration --
 12028 bytes over 181 allocations for `lang/examples/csv.brat`.
 
 The three shapes below are the ones that leaked: a call in a loop, a
-concatenation in a loop, and a single append. Both emitters are compiled for each
-one: the C++ front end (`emit-c`) and the Python one (`codegen_c.emit_file`),
-because the two are separate code paths and only one of them was ever exercised.
+concatenation in a loop, and a single append. The native emitter's C is
+compiled and run under AddressSanitizer for each one.
 """
 
 import _scratch
@@ -69,15 +68,9 @@ def run(cmd, env=None):
 
 
 def emit(kind, path):
-    """The emitted C for `path` from the named emitter."""
-    if kind == "cxx":
-        r = run([sys.executable, CLI, "emit-c", path])
-        assert r.returncode == 0, "%s emit-c: %r" % (kind, (r.stdout + r.stderr)[-800:])
-        return r.stdout
-    code = ("import sys; sys.path.insert(0, %r); import codegen_c; "
-            "sys.stdout.write(codegen_c.emit_file(%r))" % (ENGINE, path))
-    r = run([sys.executable, "-c", code])
-    assert r.returncode == 0, "%s emit: %r" % (kind, (r.stdout + r.stderr)[-800:])
+    """The emitted C for `path` from the native emitter."""
+    r = run([sys.executable, CLI, "emit-c", path])
+    assert r.returncode == 0, "%s emit-c: %r" % (kind, (r.stdout + r.stderr)[-800:])
     return r.stdout
 
 
@@ -93,7 +86,7 @@ for name in sorted(CASES):
         print("FAIL %s: interpreter %r, want %r" % (name, interp.stdout, want))
         bad += 1
 
-    for kind in ("cxx", "py"):
+    for kind in ("cxx",):
         cfile = os.path.join(TMP, "%s.%s.c" % (name, kind))
         with open(cfile, "w", encoding="utf-8") as f:
             f.write(emit(kind, path))
@@ -116,5 +109,5 @@ for name in sorted(CASES):
 if bad:
     print("APPEND LEAK: %d case(s) failed" % bad)
     sys.exit(1)
-print("APPEND LEAK ALL GREEN (%d shapes x 2 emitters, LSan clean, interpreter == native)"
+print("APPEND LEAK ALL GREEN (%d shapes, LSan clean, interpreter == native)"
       % len(CASES))

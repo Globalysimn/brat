@@ -161,6 +161,9 @@ def run(args, **kw):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
             and "--interp" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
+    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
+        i = args.index("--interp") + 1
+        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     return subprocess.run([sys.executable, CLI] + args, capture_output=True,
                           text=True, timeout=600, **kw)
 
@@ -225,11 +228,11 @@ def main():
     assert "extern int64_t widen(short, signed char);" in out, out
     assert "extern float apply_f32(float, float (*) (float));" in out, out
 
-    # both front ends emit the same C for the same file
+    # Both CLI doors produce the same C for the same file.
     p = subprocess.run([CXX, "cc", widths], capture_output=True, text=True, timeout=600,
                        env=CXX_ENV)
     assert p.returncode == 0, p.stdout + p.stderr
-    assert p.stdout == out, "the two emitters disagree on the extern declarations"
+    assert p.stdout == out, "the CLI doors disagree on the extern declarations"
 
     # and both backends agree on the values
     assert interp(widths) == WIDTHS_WANT, interp(widths)
@@ -297,7 +300,7 @@ fn main() -> i64 { return 0 }
     assert "leaked" not in r.stderr, r.stderr
 
     # --link carries the flags a library name cannot express
-    r = subprocess.run([CXX, "build", widths, "-o", os.path.join(TMP, "linked.bin"),
+    r = subprocess.run([CXX, "build", "--unsafe-ffi", widths, "-o", os.path.join(TMP, "linked.bin"),
                         "--link", "-lm"], capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stdout + r.stderr
 

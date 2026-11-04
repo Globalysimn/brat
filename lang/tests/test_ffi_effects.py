@@ -228,15 +228,13 @@ def check_races():
 
 def check_emitted_attribute():
     """The promise must reach C, or it is a comment the compiler cannot read."""
-    sys.path.insert(0, os.path.join(HERE, "..", "engine"))
-    import codegen_c
     cases = (("pure", "pure", "BRAT_ATTR_CONST"),
              ("pure_reads", "pure reads(p)", "BRAT_ATTR_PURE"),
              ("nothrow", "nothrow", "BRAT_ATTR_NOTHROW"),
              ("none", "", ""))
     for name, tail, want in cases:
         src = 'extern "libprobe.so" {\n  extern fn probe(p: ptr) -> i64 %s\n}\nfn main() { }\n' % tail
-        text = codegen_c.emit(src, TMP)
+        text = _cxx.emit_source(src, TMP)
         line = [l for l in text.splitlines() if " probe(" in l and "extern" in l]
         if not line:
             fail("attribute_" + name, "no prototype emitted for probe")

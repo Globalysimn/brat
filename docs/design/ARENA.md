@@ -23,7 +23,7 @@ arena {
 ```
 
 The parser desugars the block into
-`if true { __arena_enter(); defer __arena_leave(); body }`, so every backend
+`if true { $arena_enter(); defer $arena_leave(); body }`, so every backend
 reuses the existing defer handling and an error that unwinds out of the block
 still resets the arena. Nesting is capped at 64.
 
@@ -75,26 +75,6 @@ only safe with the check.
   case helpers), so a block that parses and joins text is freed in one reset.
 - An arena object still carries a refcount; the reset drops the whole chunk
   instead of decrementing, which is exactly why the escape rule has to hold.
-
-## Measured
-
-A request-shaped workload -- 3000 requests, 600 of them failing -- stays under a
-16 MiB hard limit with an arena and exceeds it without one, because a failed
-request releases its block whole instead of walking what it allocated.
-LeakSanitizer reports 2.3 MB against 25 MB for the same pair. The chunk pool
-moved peak RSS by a third and wall clock not at all.
-
-`test_arena_strings.py`, five string operations per round, 50k rounds, best of 3:
-
-| shape | wall | peak RSS |
-|---|---|---|
-| no arena | 0.03 s | 14 MB |
-| one block per round | 0.04 s | 14 MB |
-| one block around the loop | 0.05 s | 49 MB |
-
-A long block keeps every string it built, so peak memory grows, and a bump
-allocator is not faster than `malloc` for a few dozen bytes. Use an arena where
-a request-shaped workload justifies it, not by default.
 
 ## Not covered
 

@@ -14,7 +14,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -163,7 +162,7 @@ fn main() -> i64 {
 }
 '''
 path = write("runtime.brat", RUNTIME)
-r = run(["run", "--interp", path])
+r = run(["run", "--interp", "--no-check", path])
 check(r.returncode == 0 and "refused bad socket slot" in r.stdout,
       "runtime guard: %r" % (r.stdout + r.stderr))
 

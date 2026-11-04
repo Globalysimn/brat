@@ -14,7 +14,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -147,8 +146,8 @@ fn main() -> i64 {
 '''
 path = write("use.brat", PROG)
 
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True,
-                        text=True, timeout=300)
+interp = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path],
+                        capture_output=True, text=True, timeout=300)
 want_out = "3.0\n2.0\n12.0\n3\n"
 check(interp.returncode == 0 and interp.stdout == want_out,
       "interp: rc=%d out=%r err=%r" % (interp.returncode, interp.stdout, interp.stderr))
@@ -165,6 +164,15 @@ check(native.returncode == 0 and native.stdout == want_out,
 plain = subprocess.run([sys.executable, CLI, "bindgen", rust_path],
                        capture_output=True, text=True, timeout=120)
 check(plain.stdout == WANT, "stdout form: %r" % plain.stdout)
+
+# The Python CLI is the fallback when the C++ binary is not built, and the one
+# a fresh checkout starts with. It must write the same bytes; it used to die
+# with a NameError on `ffi`, which the native binary hid from this file.
+py_only = subprocess.run([sys.executable, CLI, "bindgen", rust_path],
+                         capture_output=True, text=True, timeout=120,
+                         env=dict(os.environ, BRAT_NO_NATIVE_CLI="1"))
+check(py_only.returncode == 0 and py_only.stdout == WANT,
+      "python bindgen: rc=%d out=%r err=%r" % (py_only.returncode, py_only.stdout, py_only.stderr[-400:]))
 
 # A file with no FFI surface is not an error: the block is empty and the
 # skip comment says why.

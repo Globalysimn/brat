@@ -50,18 +50,21 @@ BUILTINS = {
     "trace.span",
     "join_all",
     "len", "__at", "Ok", "Err", "Some", "unwrap", "is_err", "is_none", "is_vec", "is_str", "is_map", "tagof",
-    "str", "read_file", "write_file", "assert",
+    "str", "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
+    "utf8_bytes", "utf8_str", "fs_rename", "fs_remove", "assert",
+    "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
+    "sql_open", "sql_close", "sql_exec", "sql_query",
     "args", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get",
     "ptr_null", "ptr_is_null", "ptr_offset", "ptr_read_i64", "ptr_write_i64",
     "ptr_read_f64", "ptr_write_f64", "ptr_read_f32", "ptr_write_f32",
     "ptr_read_struct", "ptr_write_struct",
     "ptr_read_ptr", "ptr_read_str",
     "ptr_write_ptr", "ptr_of_str", "ptr_write_str", "errno", "strerror",
-    "__arena_enter", "__arena_leave", "own",
+    "$arena_enter", "$arena_leave", "own",
     "slice_of", "slice_of_ptr", "slice_of_struct", "slice_struct_of",
     "slice_len", "slice_get", "slice_set", "str_from_ptr",
     "lib_open", "lib_sym", "lib_close", "call",
-    "re_match",
+    "re_match", "re_find", "re_captures", "re_replace",
     "tcp_listen", "tcp_connect", "tcp_accept",
     "tcp_send", "tcp_recv", "tcp_close",
     "sbuf", "sbuf_add", "sbuf_len", "sbuf_str",
@@ -72,14 +75,15 @@ BUILTIN_HEADS = set(b.split(".", 1)[0] for b in BUILTINS if "." in b)
 
 MUTATORS = {"push", "pop", "sort", "sort_by", "ins", "del", "set"}
 
-COPY_ANNS = {"i32", "i64", "u64", "f32", "f64", "bool"}
+COPY_ANNS = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
+             "f32", "f64", "bool"}
 
 # Every slot the C boundary can return by value is a copy: a `long` from a C
 # function is a number, not a view into the callee's storage. Without this a
 # `let n = compressBound(x)` stayed "untypized, therefore a conservative borrow",
 # and the very next `let mut out_len = n` -- the shape of every out-parameter in
 # C -- was refused with "cannot borrow immutable `n` as mut".
-FFI_COPY_RETS = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize",
+FFI_COPY_RETS = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
                  "f32", "f64", "bool"}
 _EXTERN_COPY = {}      # extern fn name -> True when its result is a copy type
 
@@ -97,6 +101,7 @@ class Sig(dict):
         self.heads = set()
         self.umeth = {}
         self.owned_ret = set()   # extern fns whose `-> move` result must be freed or returned
+        self.borrows_ret = {}    # extern fn -> [param_idx, ...] from `borrows(p)`
 
 
 def fn_table(extra=None):
@@ -209,6 +214,32 @@ def elem_copy(decl, base):
     return a in COPY_ANNS
 
 
+def is_borrowed_ptr_expr(e, decl, funcs, seen=None):
+    while isinstance(e, tuple) and len(e) > 1 and e[0] in ("quest", "move"):
+        e = e[1]
+    if not isinstance(e, tuple) or not e:
+        return False
+    e = deref_place(e, decl, funcs)
+    k = e[0]
+    if k == "var":
+        if seen is None:
+            seen = set()
+        if e[1] in seen:
+            return False
+        seen.add(e[1])
+        d = decl.get(e[1])
+        return bool(d and d.get("borrowed_ptr"))
+    if k == "call":
+        bret = getattr(funcs, "borrows_ret", None) or {}
+        if e[1] in bret:
+            return True
+        if e[1] == "ptr_of_str" and e[2] and e[1] not in funcs:
+            return True
+        if e[1] == "ptr_offset" and e[2]:
+            return is_borrowed_ptr_expr(e[2][0], decl, funcs, seen)
+    return False
+
+
 def borrow_srcs(e, decl, funcs):
     """Locals whose storage `e` aliases, so `let y = e` borrows them.
 
@@ -251,7 +282,13 @@ def borrow_srcs(e, decl, funcs):
     if k == "or":
         return borrow_srcs(e[1], decl, funcs) + borrow_srcs(e[2], decl, funcs)
     if k == "call":
-        if e[1] in ("ref", "borrow") and e[1] not in funcs and e[2]:
+        if e[1] in ("ref", "borrow", "ptr_of_str") and e[1] not in funcs and e[2]:
+            return borrow_srcs(e[2][0], decl, funcs)
+        bret = getattr(funcs, "borrows_ret", None) or {}
+        if e[1] in bret:
+            return _flat(borrow_srcs(e[2][ix], decl, funcs)
+                         for ix in bret[e[1]] if ix < len(e[2]))
+        if e[1] == "ptr_offset" and e[2] and is_borrowed_ptr_expr(e[2][0], decl, funcs):
             return borrow_srcs(e[2][0], decl, funcs)
         return []
     return []
@@ -367,14 +404,15 @@ def _edit_distance(a, b):
 
 
 def _name_suggestion(name, decl, funcs):
-    if len(name) < 3:
-        return None
-    candidates = set(decl) | set(funcs) | BUILTINS
-    ranked = sorted((_edit_distance(name, candidate), candidate)
-                    for candidate in candidates if candidate != name)
-    if not ranked:
+    if len(name) < 3 or len(name) > 128:
         return None
     limit = 1 if len(name) <= 4 else 2
+    candidates = set(decl) | set(funcs) | BUILTINS
+    ranked = sorted((_edit_distance(name, candidate), candidate)
+                    for candidate in candidates
+                    if candidate != name and abs(len(name) - len(candidate)) <= limit)
+    if not ranked:
+        return None
     best = ranked[0][0]
     if best > limit or (len(ranked) > 1 and ranked[1][0] == best):
         return None
@@ -507,6 +545,13 @@ def check_expr(e, decl, errs, funcs, inpath=False, callable_ok=False):
         if not callee_known(e[1], decl, funcs):
             errs.note("use of undeclared var `%s`" % name_root(e[1]),
                       rel=undeclared_rel(name_root(e[1]), decl=decl, funcs=funcs))
+        elif e[1] == "ptr_of_str" and e[1] not in funcs and e[2]:
+            a0 = e[2][0]
+            while isinstance(a0, tuple) and len(a0) > 1 and a0[0] == "quest":
+                a0 = a0[1]
+            if not (isinstance(a0, tuple) and a0 and a0[0] in ("str", "rstr")) \
+                    and not borrow_srcs(a0, decl, funcs):
+                errs.note("`ptr_of_str` wants a string binding or string literal, not a temporary")
     else:
         errs.note("bad expr node `%s`" % k)
 
@@ -722,6 +767,9 @@ def scan_moves(e, decl, borrows, errs):
             if borrowed is not None:
                 errs.note("cannot move borrowed parameter `%s`: declare it `move` to take ownership"
                           % borrowed)
+            elif d.get("borrowed_ptr"):
+                errs.note("cannot move borrowed pointer `%s`: only its owner may be moved or freed"
+                          % root)
         if verb == "sent" and d.get("copy"):
             # A channel copies a value that costs nothing to copy: integers,
             # floats and booleans are not owned, so sending one hands over a
@@ -1282,6 +1330,8 @@ def walk_stmt(s, decl, borrows, errs, funcs):
                       "pinned": ann in COPY_ANNS, "ann": ann, "dl": errs.line}
         if isinstance(e, tuple) and e and e[0] == "call" and e[1] in getattr(funcs, "owned_ret", ()):
             decl[name]["owned"] = True
+        if is_borrowed_ptr_expr(e, decl, funcs):
+            decl[name]["borrowed_ptr"] = True
     elif k == "set":
         check_expr(s[2], decl, errs, funcs)
         scan_moves(s[2], decl, borrows, errs)
@@ -1572,7 +1622,8 @@ def unused_in(body, warns):
                 declared.append((s[1], _LINES.get(id(s))))
             elif s[0] == "pub":
                 if isinstance(s[1], tuple) and s[1] and s[1][0] == "let":
-                    declared.append((s[1][1], _LINES.get(id(s[1]))))
+                    if not (len(s[1]) > 4 and s[1][4]):
+                        declared.append((s[1][1], _LINES.get(id(s[1]))))
     used = set(used_in_block(body, []))
     for name, ln in declared:
         if name.startswith("_"):
@@ -1642,17 +1693,24 @@ PARFOR_OUTER = ("the `par for` body writes `%s`, which lives outside the loop (a
                 "fold may not touch outer mutable state)")
 
 
-def _row_of(body, rows):
+def _row_of(body, rows, by_short=None):
     """Effects of a body, its callees included, in the fixed order effects.py uses."""
     eff = _effects_mod()
     if eff is None:
         return None
     got = set()
     eff._walk(body, got)
-    called = set()
-    eff._calls(body, called)
-    for c in called:
+    fcalls = set()
+    mcalls = set()
+    eff._calls(body, fcalls, mcalls)
+    for c in fcalls:
         got |= set(rows.get(c, ()))
+    for m in mcalls:
+        if by_short and m in by_short:
+            for k in by_short[m]:
+                got |= set(rows.get(k, ()))
+        else:
+            got |= set(rows.get(m, ()))
     return tuple(n for n in eff.ORDER if n in got)
 
 
@@ -1677,14 +1735,42 @@ def parfor_rules(prog, funcs):
     """A `par for` needs a monoid: a pure two-place fold, and a pure body.
 
     Purity is what makes the parallel result equal the sequential one, so it is
-    the one thing this v0.1 refuses to guess at. Effects come from the same rows
-    `check --effects` prints, which keeps the error readable: it names what the
-    function does (`io`, `spawn`, ...) instead of saying "not pure".
+    the one thing this v0.1 refuses to guess at. Effects come from `effects.py`,
+    which keeps the error readable: it names what the function does (`io`,
+    `spawn`, ...) instead of saying "not pure".
     """
     eff = _effects_mod()
     if eff is None:
         return []
     rows = eff.summarise(prog)
+    by_short = {}
+    fn_gwrites = {}
+    fn_edges = {}
+    for _fn_nm, _fn_ps, _fn_bd in eff._bodies(prog):
+        if "." in _fn_nm:
+            by_short.setdefault(_fn_nm.rsplit(".", 1)[-1], []).append(_fn_nm)
+        if _fn_bd is not None:
+            _pnames = {p[0] if isinstance(p, tuple) else p for p in _fn_ps}
+            fn_gwrites[_fn_nm] = list(_outer_writes(_fn_bd, _pnames))
+            _fc, _mc = set(), set()
+            eff._calls(_fn_bd, _fc, _mc)
+            fn_edges[_fn_nm] = (_fc, _mc)
+    _chg = True
+    while _chg:
+        _chg = False
+        for _fn_nm, (_fc, _mc) in fn_edges.items():
+            _cur = fn_gwrites[_fn_nm]
+            for _c in _fc:
+                for _w in fn_gwrites.get(_c, ()):
+                    if _w not in _cur:
+                        _cur.append(_w)
+                        _chg = True
+            for _m in _mc:
+                for _k in by_short.get(_m, ()):
+                    for _w in fn_gwrites.get(_k, ()):
+                        if _w not in _cur:
+                            _cur.append(_w)
+                            _chg = True
     out = []
 
     def walk(node, binders):
@@ -1703,10 +1789,24 @@ def parfor_rules(prog, funcs):
                     row = rows.get(op, ())
                     if row:
                         out.append((line, PARFOR_IMPURE % (op, ", ".join(row))))
-                brow = _row_of(body, rows)
+                    for name in fn_gwrites.get(op, ()):
+                        out.append((line, PARFOR_OUTER % name))
+                brow = _row_of(body, rows, by_short)
                 if brow:
                     out.append((line, PARFOR_BODY % ", ".join(brow)))
-                for name in _outer_writes(body, {var}):
+                writes = list(_outer_writes(body, {var}, funcs))
+                _fc, _mc = set(), set()
+                eff._calls(body, _fc, _mc)
+                for _c in sorted(_fc):
+                    for _w in fn_gwrites.get(_c, ()):
+                        if _w != var and _w not in writes:
+                            writes.append(_w)
+                for _m in sorted(_mc):
+                    for _k in by_short.get(_m, ()):
+                        for _w in fn_gwrites.get(_k, ()):
+                            if _w != var and _w not in writes:
+                                writes.append(_w)
+                for name in writes:
                     out.append((line, PARFOR_OUTER % name))
                 walk(body, binders | {var})
                 return
@@ -1721,34 +1821,62 @@ def parfor_rules(prog, funcs):
     return out
 
 
-def _outer_writes(body, local):
+def _outer_writes(body, local, funcs=None):
     """Names the body writes that it did not bind itself. The loop var is local."""
     bound = set(local)
-    for stmt in body if isinstance(body, list) else []:
-        if isinstance(stmt, tuple) and stmt and stmt[0] == "let":
-            bound.add(stmt[1])
-    hits = []
 
-    def note(target):
-        """`set` carries the bare name; the indexed forms carry an expression."""
-        name = target if isinstance(target, str) else None
-        if name is None and isinstance(target, tuple) and target and target[0] == "var":
-            name = target[1]
-        if name is not None and name not in bound and name not in hits:
+    def collect_bound(node):
+        if isinstance(node, tuple) and node:
+            if node[0] in ("let", "forrange", "foriter") and isinstance(node[1], str):
+                bound.add(node[1])
+            for sub in node[1:]:
+                if isinstance(sub, (tuple, list)):
+                    collect_bound(sub)
+        elif isinstance(node, list):
+            for sub in node:
+                collect_bound(sub)
+
+    collect_bound(body)
+    hits = []
+    ptr_writes = {"ptr_write_i64", "ptr_write_i32", "ptr_write_f64", "ptr_write_f32",
+                  "ptr_write_u8", "ptr_write_str", "ptr_write_ptr", "ptr_write_struct",
+                  "slice_set"}
+
+    def note_var(name):
+        if name and name not in bound and name not in hits:
             hits.append(name)
+
+    def note_expr(expr):
+        if isinstance(expr, tuple) and expr:
+            if expr[0] == "var" and isinstance(expr[1], str):
+                note_var(expr[1])
+                return
+            for sub in expr[1:]:
+                if isinstance(sub, (tuple, list)):
+                    note_expr(sub)
+        elif isinstance(expr, list):
+            for sub in expr:
+                note_expr(sub)
 
     def scan(node):
         if isinstance(node, tuple):
             if not node:
                 return
             head = node[0]
-            if head == "set":
-                note(node[1])
+            if head == "set" and isinstance(node[1], str):
+                note_var(node[1].split(".", 1)[0])
             elif head in ("setidx", "setfield"):
-                note(node[1])
-            elif head == "mcall" and node[2] in ("push", "pop", "ins", "del", "set",
-                                                 "sort", "sort_by", "clear"):
-                note(node[1])
+                note_expr(node[1])
+            elif head == "mcall" and (node[2] in ("push", "pop", "ins", "del", "set",
+                                                  "sort", "sort_by", "clear", "send", "close")
+                                      or (funcs is not None and funcs.umeth.get(node[2]))):
+                note_expr(node[1])
+            elif head == "call" and node[1] in ptr_writes and node[2]:
+                note_expr(node[2][0])
+            elif head == "call" and funcs is not None and isinstance(node[1], str) and node[1] in funcs:
+                for _i, (_pn, _pm) in enumerate(funcs[node[1]]):
+                    if _pm == "mut" and _i < len(node[2]):
+                        note_expr(node[2][_i])
             for sub in node[1:]:
                 if isinstance(sub, (tuple, list)):
                     scan(sub)
@@ -1765,20 +1893,45 @@ def _outer_writes(body, local):
 # else is refused here, at `check`, so `check` stays the verdict it claims to
 # be: a program whose signature the emitter cannot spell used to pass `check`
 # and die in `build`.
-FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize",
+FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
              "f32", "f64", "str", "ptr"}
 
 FFI_HINT = ("a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
             "ptr[T], fn(...), an `extern struct`, or `none`")
 
 
-def ffi_slot_ok(ann, structs):
+def _valid_cb_slot(ann):
+    rest = ann[2:].lstrip()
+    if not rest.startswith("("):
+        return False
+    depth = 0
+    for ch in rest:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def ffi_slot_ok(ann, structs, allow_array=False):
     if ann is None or ann == "none":
         return True
     if not isinstance(ann, str):
         return False
-    return (ann in FFI_SLOTS or ann in structs
-            or ann.startswith("fn") or ann.startswith("ptr"))
+    if allow_array and "[" in ann and ann.endswith("]") and not ann.startswith("ptr["):
+        lb = ann.find("[")
+        elem, cnt = ann[:lb].strip(), ann[lb + 1:-1].strip()
+        if cnt.isdigit() and len(cnt) <= 7 and 1 <= int(cnt) <= 1048576:
+            return elem in FFI_SLOTS or elem in structs
+    if ann in FFI_SLOTS or ann in structs:
+        return True
+    if ann.startswith("ptr[") and ann.endswith("]"):
+        return bool(ann[4:-1].strip())
+    if ann.startswith("fn"):
+        return _valid_cb_slot(ann)
+    return False
 
 
 def ffi_signatures(prog, errs):
@@ -1836,17 +1989,33 @@ def ffi_signatures(prog, errs):
                 bad(varargs, "in the variadic tail of extern fn `%s`" % (name,), line)
         elif node[0] == "externstruct":
             for f in node[2]:
-                if not ffi_slot_ok(f[1], structs):
+                if not ffi_slot_ok(f[1], structs, allow_array=True):
                     bad(f[1], "for field `%s` of extern struct `%s`" % (f[0], node[1]), line)
 
 
-def check(prog, extra=None):
+def _extern_borrows_indices(node):
+    if not (isinstance(node, tuple) and len(node) > 8 and node[8]):
+        return None
+    pnames = [p[0] if isinstance(p, tuple) else p for p in node[3]]
+    idxs = []
+    for eff in node[8]:
+        if isinstance(eff, str) and eff.startswith("borrows:"):
+            bp = eff.split(":", 1)[1]
+            if bp in pnames and pnames.index(bp) not in idxs:
+                idxs.append(pnames.index(bp))
+    return idxs or None
+
+
+def check(prog, extra=None, extra_consts=None, extra_copy_rets=None,
+          extra_borrows_rets=None, extra_owned_rets=None):
     errs = Errs()
     warns = []
     if not isinstance(prog, tuple) or not prog or prog[0] != "prog":
         return [(None, "bad prog node")], warns
     _CUT_PARTS.clear()
     _EXTERN_COPY.clear()
+    for _cn in (extra_copy_rets or ()):
+        _EXTERN_COPY[_cn] = True
     for _s in prog[1]:
         _n = _s[1] if (isinstance(_s, tuple) and _s and _s[0] == "pub") else _s
         if isinstance(_n, tuple) and _n and _n[0] == "extern":
@@ -1854,12 +2023,19 @@ def check(prog, extra=None):
                 _EXTERN_COPY[_n[2]] = True
     ffi_signatures(prog, errs)
     funcs = fn_table(extra)
+    if extra_borrows_rets:
+        funcs.borrows_ret.update(extra_borrows_rets)
+    if extra_owned_rets:
+        funcs.owned_ret.update(extra_owned_rets)
     traits = {}
     for s in prog[1]:
         node = s[1] if (isinstance(s, tuple) and s and s[0] == "pub") else s
         if isinstance(node, tuple) and node and node[0] in ("fn", "extern", "exportfn"):
             if node[0] == "extern":
                 funcs[node[2]] = fn_modes(node[3])
+                _bix = _extern_borrows_indices(node)
+                if _bix:
+                    funcs.borrows_ret[node[2]] = _bix
                 # An owned result the declaration already refused (`-> move i64`,
                 # reported by ffi_signatures) must not also become a phantom leak.
                 _ret = node[4] if len(node) > 4 else None
@@ -1900,7 +2076,20 @@ def check(prog, extra=None):
                 for m in missing:
                     errs.note("impl %s for %s missing %s" % (node[1], node[2], m))
     cut_string_warns(prog[1], warns)
-    walk_block(prog[1], {}, {}, errs, funcs)
+    init_decl = {}
+    for _cname in (extra_consts or ()):
+        init_decl[_cname] = {"mut": False, "ref": False, "src": None, "srcs": [],
+                             "moved": False, "const": True, "alias": False,
+                             "copy": True, "pinned": True, "ann": None, "dl": None}
+    for _s in prog[1]:
+        _u = _s[1] if (isinstance(_s, tuple) and _s and _s[0] == "pub") else _s
+        if isinstance(_u, tuple) and _u and _u[0] == "let" and len(_u) > 4 and _u[4]:
+            init_decl[_u[1]] = {"mut": False, "ref": False, "src": None, "srcs": [],
+                                "moved": False, "const": True, "alias": False,
+                                "copy": True, "pinned": True,
+                                "ann": _u[5] if len(_u) > 5 else None,
+                                "dl": _LINES.get(id(_u))}
+    walk_block(prog[1], init_decl, {}, errs, funcs)
     # Sharing: cycles (a refcount cannot reclaim them) and writes that escape a
     # spawn. Separate pass because it asks different questions of the same tree.
     for ln, msg in (capability.check_sharing(prog) if capability else ()):
@@ -1923,7 +2112,8 @@ def check(prog, extra=None):
     # Capability lattice: what each place still allows, joined at every branch.
     # A line the lexical walk already judged is left alone, so these verdicts
     # only ever add what a list of live borrows cannot see.
-    for ln, msg, rel in (caps.verdicts(prog) if caps else ()):
+    cap_modes = {fn_nm: [pm[1] for pm in pms] for fn_nm, pms in funcs.items()}
+    for ln, msg, rel in (caps.verdicts(prog, cap_modes) if caps else ()):
         if any(e[0] == ln for e in errs):
             continue
         errs.append((ln, msg, rel))
@@ -1993,28 +2183,63 @@ def main(argv):
             return 2
         for source in loaded.files:
             srcs[source.path] = source.src
-            progs.append((source.path, source.prog))
-    def pub_sigs(prog):
+            exp_fns = {source.functions[n] for n in source.public if n in source.functions}
+            progs.append((source.path, source.prog, exp_fns))
+    def pub_sigs(prog, exp_fns):
         out = {}
+        consts = set()
+        copy_rets = set()
+        borrows_rets = {}
+        owned_rets = set()
         for s in prog[1]:
-            if isinstance(s, tuple) and s and s[0] == "pub":
+            if isinstance(s, tuple) and s and s[0] == "extern":
+                out[s[2]] = fn_modes(s[3])
+                if len(s) > 4 and s[4] in FFI_COPY_RETS:
+                    copy_rets.add(s[2])
+                elif len(s) > 6 and s[6]:
+                    owned_rets.add(s[2])
+                _bix = _extern_borrows_indices(s)
+                if _bix:
+                    borrows_rets[s[2]] = _bix
+            elif isinstance(s, tuple) and s and s[0] == "fn" and s[1] in exp_fns:
+                out[s[1]] = fn_modes(s[2])
+            elif isinstance(s, tuple) and s and s[0] == "pub":
                 inner = s[1]
                 if isinstance(inner, tuple) and inner:
                     if inner[0] == "fn":
                         out[inner[1]] = fn_modes(inner[2])
+                    elif inner[0] == "extern":
+                        out[inner[2]] = fn_modes(inner[3])
+                        if len(inner) > 4 and inner[4] in FFI_COPY_RETS:
+                            copy_rets.add(inner[2])
+                        elif len(inner) > 6 and inner[6]:
+                            owned_rets.add(inner[2])
+                        _bix = _extern_borrows_indices(inner)
+                        if _bix:
+                            borrows_rets[inner[2]] = _bix
                     elif inner[0] == "enum":
                         for vname, _fields in inner[2]:
                             out[vname] = []
-        return out
+                    elif inner[0] == "let" and len(inner) > 4 and inner[4]:
+                        consts.add(inner[1])
+        return out, consts, copy_rets, borrows_rets, owned_rets
 
-    per_file = [pub_sigs(prog) for _, prog in progs]
+    per_file = [pub_sigs(prog, exp_fns) for _, prog, exp_fns in progs]
     code = 0
-    for idx, (f, prog) in enumerate(progs):
+    for idx, (f, prog, _) in enumerate(progs):
         merged = {}
-        for j, sigs in enumerate(per_file):
+        merged_consts = set()
+        merged_copy = set()
+        merged_borrows = {}
+        merged_owned = set()
+        for j, (sigs, cset, crset, brset, orset) in enumerate(per_file):
             if j != idx:
                 merged.update(sigs)
-        errs, warns = check(prog, merged)
+                merged_consts.update(cset)
+                merged_copy.update(crset)
+                merged_borrows.update(brset)
+                merged_owned.update(orset)
+        errs, warns = check(prog, merged, merged_consts, merged_copy, merged_borrows, merged_owned)
         print("%s: %d error(s), %d warning(s)" % (f, len(errs), len(warns)))
         report(f, errs, srcs.get(f, ""))
         report(f, warns, srcs.get(f, ""), kind="warning")

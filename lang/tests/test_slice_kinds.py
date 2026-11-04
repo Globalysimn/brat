@@ -8,7 +8,7 @@ so the window has to carry the element width.
 `slice_of_ptr(p, n, kind)` takes `"i64"`, `"i32"`, `"f64"`, `"f32"` and `"u8"`,
 steps by that width, and stays range-checked in every kind: an `i32` store
 outside `-2^31..2^31-1` and a `u8` store outside `0..255` are refused rather
-than truncated. Same program, three implementations, same output.
+than truncated. Same program, interpreter and native routes, same output.
 """
 import _scratch
 
@@ -101,12 +101,12 @@ def main():
         f.write(PROGRAM.replace("LIB", lib))
 
     # 1. Interpreter: ctypes with the declared width and stride.
-    p = subprocess.run([sys.executable, CLI, "run", "--interp", prog],
+    p = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", prog],
                        capture_output=True, text=True, timeout=300)
     check(p.returncode == 0, "interp rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
     check(p.stdout == WANT, "interp:\nwant %r\ngot  %r" % (WANT, p.stdout))
 
-    # 2. Python emitter.
+    # 2. Python CLI native build.
     exe = os.path.join(TMP, "kinds.exe")
     b = subprocess.run([sys.executable, CLI, "build", "--unsafe-ffi", prog, "-o", exe],
                        capture_output=True, text=True, timeout=600)
@@ -114,7 +114,7 @@ def main():
     q = subprocess.run([exe], capture_output=True, text=True, timeout=120)
     check(q.stdout == WANT, "native:\nwant %r\ngot  %r" % (WANT, q.stdout))
 
-    # 3. C++ emitter, the second opinion on the same program.
+    # 3. Native `cc` plus a manual C compile.
     if os.path.exists(CXX):
         c = subprocess.run([CXX, "cc", prog], capture_output=True, text=True, timeout=300)
         check(c.returncode == 0, "brat-cxx cc failed: %s" % (c.stdout + c.stderr)[-300:])

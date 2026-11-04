@@ -5,15 +5,14 @@ alternatives and UTF-8 `.`), and nested `join_all` termination. Interpreter and
 C binary must agree on stdout and exit code; nested-spawn output is compared as
 a sorted line set because the two backends schedule workers differently.
 """
+import _cxx
 import _scratch
-import importlib.util, os, subprocess, sys, tempfile
+import importlib.util, os, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENG = os.path.join(ROOT, 'lang', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-sec-')
 
-spec = importlib.util.spec_from_file_location('cc', os.path.join(ENG, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(spec); spec.loader.exec_module(cc)
 _tc_spec = importlib.util.spec_from_file_location('tc', os.path.join(ENG, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_tc_spec); _tc_spec.loader.exec_module(_tc)
 
@@ -75,7 +74,7 @@ def build(name, src):
     cf = os.path.join(TMP, name + '.c')
     exe = os.path.join(TMP, name + '.exe')
     with open(cf, 'w', encoding='utf-8') as f:
-        f.write(cc.emit(src, TMP))
+        f.write(_cxx.emit_source(src, TMP))
     rb = subprocess.run(_tc.resolve_cc().argv(cf, exe) + ['-O1', '-lm', '-I', ENG],
                         capture_output=True, text=True, timeout=300)
     return rb, exe

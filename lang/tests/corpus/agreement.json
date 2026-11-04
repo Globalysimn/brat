@@ -867,14 +867,64 @@
    "note": "`sort`, `sort_by`, `min` and `max` use the ordering rule above, so a container that is not all of one class is refused instead of being ordered by an arbitrary tie-break."
   },
   {
-   "name": "parse_int_wraps",
-   "src": "fn main() -> i64 {\n  print(\"9223372036854775808\".parse_int())\n  print(\"-9223372036854775809\".parse_int())\n  print(\" 12\".parse_int())\n  print(\"+5\".parse_int())\n  print(\"1e3\".parse_int())\n  print(\"99999999999999999999999\".parse_float())\n  return 0\n}\n",
+   "name": "parse_int_range",
+   "src": "fn main() -> i64 {\n  print(\"9223372036854775807\".parse_int())\n  print(\"9223372036854775808\".parse_int())\n  print(\"-9223372036854775808\".parse_int())\n  print(\"-9223372036854775809\".parse_int())\n  print(\"99999999999999999999999\".parse_int())\n  print(\"00000000000000000000000012\".parse_int())\n  print(\" 12\".parse_int())\n  print(\"+5\".parse_int())\n  print(\"1e3\".parse_int())\n  print(\"1 \".parse_int())\n  print(\"99999999999999999999999\".parse_float())\n  return 0\n}\n",
    "wrap": false,
    "rc": 0,
-   "out": "('ok', -9223372036854775808)\n('ok', 9223372036854775807)\n('ok', 12)\n('ok', 5)\n('err', 'not a number')\n('ok', 1e+23)\n",
+   "out": "('ok', 9223372036854775807)\n('err', 'number out of range')\n('ok', -9223372036854775808)\n('err', 'number out of range')\n('err', 'number out of range')\n('ok', 12)\n('ok', 12)\n('ok', 5)\n('err', 'not a number')\n('err', 'not a number')\n('ok', 1e+23)\n",
    "asan": false,
    "from": "round3-2026-10-30",
-   "note": "`parse_int` parses into an `i64` and wraps on overflow, as SPEC §10 says the interpreter holds no bignums; the digits past the range are not an error."
+   "note": "`parse_int` is an `Err` when the digits do not fit in an `i64`. It used to wrap (`99999999999999999999999` parsed as `Ok(200376420520689663)`), which turns a too-large input into a different valid number."
+  },
+  {
+   "name": "str_ascii_space",
+   "src": "fn main() -> i64 {\n  print(\" x \".trim() == \" x \")\n  print(\" \\t\u000b\f\\r\\nx \\t\u000b\f\\r\\n\".trim())\n  print(\"a b\\tc\\nd\\re\u000bf\fg\".split())\n  print(len(\"a b c　d\".split()))\n  print(len(\"a b\".lines()))\n  print(len(\"a\u000bb\fc\u001cde\".lines()))\n  print(\"a\\r\\nb\\rc\\n\\nd\\n\".lines())\n  print(\"\".lines())\n  print(\"\\n\".lines())\n  print(\"　 1\".parse_int())\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "True\nx\n['a', 'b', 'c', 'd', 'e', 'f', 'g']\n1\n1\n1\n['a', 'b', 'c', '', 'd']\n[]\n['']\n('err', 'not a number')\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "Whitespace for `trim`, `split()` and the `parse_*` methods is the six ASCII characters space, tab, newline, vertical tab, form feed and carriage return; `lines` breaks on `\\n`, `\\r\\n` and `\\r` only. The interpreter used Python's Unicode definitions (NBSP, U+2028, U+0085, ...) while the native runtime used three different ASCII sets."
+  },
+  {
+   "name": "split_empty_sep",
+   "src": "fn main() -> i64 {\n  try { print(\"abc\".split(\"\")) } catch e { print(\"E \" + e) }\n  try { print(\"abc\".split_once(\"\")) } catch e { print(\"E \" + e) }\n  print(\"abc\".split_once(\"b\"))\n  print(\"abc\".split_once(\"x\"))\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "E empty separator\nE empty separator\n['a', 'c']\nNone\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "`split_once(\"\")` is an error like `split(\"\")`; the native runtime used to return `['', s]`."
+  },
+  {
+   "name": "replace_empty_utf8",
+   "src": "fn main() -> i64 {\n  print(\"é\".replace(\"\", \"-\"))\n  print(len(\"é\".replace(\"\", \"-\")))\n  print(\"日本\".replace(\"\", \"x\"))\n  print(\"a😀\".replace(\"\", \"·\"))\n  print(\"\".replace(\"\", \"x\"))\n  print(\"ab\".replace(\"\", \"\"))\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "-é-\n3\nx日x本x\n·a·😀·\nx\nab\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "Replacing the empty string inserts at code point boundaries. The native runtime inserted between bytes and produced invalid UTF-8 for any non-ASCII input."
+  },
+  {
+   "name": "float_nan_print",
+   "src": "fn main() -> i64 {\n  let inf = 1e300 * 1e300\n  let n = inf - inf\n  print(n)\n  print(-n)\n  print(\"{n} {-n}\")\n  print(str(n))\n  print([n, -n])\n  print(n == n)\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "nan\nnan\nnan nan\nnan\n[nan, nan]\nFalse\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "A NaN prints as `nan` whatever its sign bit is. glibc's printf writes `-nan` for a negative NaN, and `inf - inf` produces one on x86."
+  },
+  {
+   "name": "parse_float_grammar",
+   "src": "fn main() -> i64 {\n  print(\"١٢\".parse_float())\n  print(\"-0x1p3\".parse_float())\n  print(\"+0x10\".parse_float())\n  print(\"0x10\".parse_float())\n  print(\"nan(1)\".parse_float())\n  print(\"1_0.5\".parse_float())\n  print(\" 1.5 \".parse_float())\n  print(\"1e\".parse_float())\n  print(\"e1\".parse_float())\n  print(\".\".parse_float())\n  print(\"+\".parse_float())\n  print(\"1e5\".parse_float())\n  print(\"-inf\".parse_float())\n  print(\" INFINITY \".parse_float())\n  print(\"-.5e-3\".parse_float())\n  print(\"5.\".parse_float())\n  print(\".5\".parse_float())\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('err', 'not a float')\n('ok', 100000.0)\n('ok', -inf)\n('ok', inf)\n('ok', -0.0005)\n('ok', 5.0)\n('ok', 0.5)\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "`parse_float` accepts digits `0-9`, an optional fraction and exponent, and `inf`, `infinity` and `nan` in any case. The interpreter accepted Arabic-Indic digits; the native runtime accepted signed hex floats and `nan(...)`."
   },
   {
    "name": "depth_budget",
@@ -885,6 +935,76 @@
    "asan": false,
    "from": "round3-2026-10-30",
    "note": "Values nest to BRAT_MAX_VALUE_DEPTH (2000) for print, str and comparison, and past it both backends stop with `recursion too deep`. The interpreter used to answer `w == None` with that error (the native side short-circuits on class) and used to print a 2200-deep value that C refuses to walk."
+  },
+  {
+   "name": "caught_error_frame_function",
+   "src": "fn f(op, a) {\n  return a + [1]\n}\n\nfn main() -> i64 {\n  for op in [\"a\", \"b\", \"c\"] {\n    try {\n      print(f(op, 1))\n    } catch e {\n      print(op)\n    }\n  }\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "a\nb\nc\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+  },
+  {
+   "name": "caught_error_frame_method",
+   "src": "impl Point {\n  fn bad(self, op) {\n    return self.x + [1]\n  }\n}\n\nfn main() -> i64 {\n  let p = Point { x: 1, y: 2 }\n  for op in [\"a\", \"b\", \"c\"] {\n    try {\n      print(p.bad(op))\n    } catch e {\n      print(op)\n    }\n  }\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "a\nb\nc\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+  },
+  {
+   "name": "caught_error_frame_local",
+   "src": "fn g(n) {\n  let total = n * 2\n  return total + [1]\n}\n\nfn main() -> i64 {\n  let total = 100\n  let mut i = 0\n  while i < 3 {\n    try {\n      print(g(i))\n    } catch e {\n      print(total + i)\n    }\n    i += 1\n  }\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "100\n101\n102\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+  },
+  {
+   "name": "ownership_of_logical_operands",
+   "src": "fn main() -> i64 {\n  let y = \"abc\".repeat(30)\n  let v = [1, 2, 3]\n  let none = None\n  let mut total = 0\n  for i in 0..3 {\n    let x = y or \"d\"\n    let z = none or y\n    let w = v && y\n    let u = 0 || v\n    total += len(x) + len(z) + len(w) + len(u)\n    if y && v {\n      total += 1\n    }\n    if !(y && v) {\n      total += 1000\n    }\n    while v && false {\n      total += 1000000\n    }\n  }\n  print(total)\n  print(len(y))\n  print(v)\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "822\n90\n[1, 2, 3]\n",
+   "asan": true,
+   "from": "audit-2026-11",
+   "note": "`a && b`, `a || b` and `x or y` evaluate to one of their operands. The native code took a variable operand as an alias and the receiver released it, so `let x = y or \"d\"` freed the string `y` still named (heap-use-after-free under ASan). A condition that is such an expression has to release the operand it was handed."
+  },
+  {
+   "name": "ownership_of_logical_operands_dynamic",
+   "src": "fn both(a, b) {\n  return a && b\n}\n\nfn either(a, b) {\n  return a || b\n}\n\nfn first(a, b) {\n  return a or b\n}\n\nfn main() -> i64 {\n  let vals = [1, [1, 2], 0, [3], None, \"text\"]\n  for round in 0..2 {\n    print(both(vals[0], vals[1]))\n    print(either(vals[2], vals[3]))\n    print(first(vals[4], vals[5]))\n    print(first(vals[1], vals[5]))\n  }\n  print(vals)\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "[1, 2]\n[3]\ntext\n[1, 2]\n[1, 2]\n[3]\ntext\n[1, 2]\n[1, [1, 2], 0, [3], None, 'text']\n",
+   "asan": true,
+   "from": "audit-2026-11",
+   "note": "`a && b`, `a || b` and `x or y` evaluate to one of their operands. The native code took a variable operand as an alias and the receiver released it, so `let x = y or \"d\"` freed the string `y` still named (heap-use-after-free under ASan). A condition that is such an expression has to release the operand it was handed."
+  },
+  {
+   "name": "index_must_be_whole",
+   "src": "fn at(a, i) {\n  return a[i]\n}\n\nfn main() -> i64 {\n  let inf = 1e308 * 10.0\n  let nan = inf - inf\n  let idxs = [1, 1.0, 2.0, 1.5, true, nan, inf, 1e30, -1]\n  for a in [[10, 20, 30], \"abc\"] {\n    for i in idxs {\n      try {\n        print(at(a, i))\n      } catch e {\n        print(e)\n      }\n    }\n  }\n  let mut v = [10, 20, 30]\n  for i in idxs {\n    try {\n      v[i] = 7\n      print(v)\n    } catch e {\n      print(e)\n    }\n  }\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "20\n20\n30\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\nb\nb\nc\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n[10, 7, 30]\n[10, 7, 30]\n[10, 7, 7]\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "An index is an integer or a float with a whole value. The native read truncated `v[1.5]` to `v[1]`, took NaN and infinity through an undefined float-to-int cast, and the interpreter accepted a bool and leaked CPython's `cannot convert float NaN to integer`."
+  },
+  {
+   "name": "operator_type_errors",
+   "src": "fn div(a, b) {\n  return a / b\n}\n\nfn rem(a, b) {\n  return a % b\n}\n\nfn has(a, b) {\n  return a in b\n}\n\nfn at(a, i) {\n  return a[i]\n}\n\nfn main() -> i64 {\n  let inf = 1e308 * 10.0\n  try { print(div(1.5, \"\")) } catch e { print(e) }\n  try { print(div(\"\", 0)) } catch e { print(e) }\n  try { print(div(1, 0)) } catch e { print(e) }\n  try { print(div([1], 2.5)) } catch e { print(e) }\n  try { print(rem(\"\", 0)) } catch e { print(e) }\n  try { print(rem(5, 0)) } catch e { print(e) }\n  try { print(rem(inf, 1)) } catch e { print(e) }\n  try { print(rem(-7.5, 2)) } catch e { print(e) }\n  try { print(has(0, \"abc\")) } catch e { print(e) }\n  try { print(has(\"b\", \"abc\")) } catch e { print(e) }\n  try { print(has([], {})) } catch e { print(e) }\n  try { print(has(\"a\", {\"a\": 1})) } catch e { print(e) }\n  try { print(has(2, [1, 2])) } catch e { print(e) }\n  try { print(at({}, [])) } catch e { print(e) }\n  try { print(at({\"a\": 1}, [1, 2])) } catch e { print(e) }\n  return 0\n}\n",
+   "wrap": false,
+   "rc": 0,
+   "out": "type error in /\ntype error in /\ndiv by zero\ntype error in /\ntype error in %\ndiv by zero\nnan\n0.5\nin of non-container\nTrue\nFalse\nTrue\nTrue\nno key []\nno key [1, 2]\n",
+   "asan": false,
+   "from": "audit-2026-11",
+   "note": "The interpreter answered `/` and `%` on the wrong types with CPython's `unsupported operand type(s)` or, for a zero divisor, `div by zero` before looking at the types; `inf % 1` was `math domain error`; `in` with a non-string left of a string leaked CPython's text; a vector as a map key was `unhashable map key` for a read where the native answer is `no key`."
   }
  ]
 }

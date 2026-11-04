@@ -8,7 +8,7 @@ ambiguous name is a diagnostic, the same rule direct imports already follow.
 
 Every case runs on both backends (`brat run` and `brat build`), and the flattened
 program the C++ loader produces must match the Python one byte for byte, because
-that tree is what both emitters consume.
+that tree is the shared flattened form consumed by the native emitter.
 """
 
 import _scratch
@@ -58,9 +58,9 @@ def flat_cxx(path):
     return r.stdout if r.returncode == 0 else None
 
 
-def both(path, want):
+def both(path, want, build_flags=()):
     """Interpreter and native agree with each other and with `want`."""
-    interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True,
+    interp = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True,
                             text=True, timeout=120)
     if interp.returncode != 0 or interp.stdout != want:
         fail("%s: run rc=%d out=%r want=%r"
@@ -69,7 +69,7 @@ def both(path, want):
         return
     exe = os.path.join(TMP, "bin", path.replace(TMP, "").strip(os.sep).replace(os.sep, "-") + ".exe")
     os.makedirs(os.path.dirname(exe), exist_ok=True)
-    built = subprocess.run([sys.executable, CLI, "build", path, "-o", exe],
+    built = subprocess.run([sys.executable, CLI, "build"] + list(build_flags) + [path, "-o", exe],
                            capture_output=True, text=True, timeout=300)
     if built.returncode != 0:
         fail("%s: build %r" % (os.path.basename(path), (built.stdout + built.stderr)[-300:]))
@@ -198,7 +198,7 @@ refused(private, "module `m` has no function `h`")
 check_cxx_agrees(private, "module `m` has no function `h`")
 
 # Extern callbacks in a module must resolve the callback string to the same
-# mangled BRAT symbol in the interpreter, Python emitter and C++ loader.
+# mangled BRAT symbol in the interpreter and the native loader/emitter.
 callback_lib = os.path.join(TMP, "callback", "libcallback.so")
 callback_c = write("callback/libcallback.c",
                    "long long apply_cb(long long (*cb)(long long)) { return cb(21); }\n")
@@ -212,7 +212,7 @@ write("callback/lib/callbacks.brat",
 both(write("callback/app.brat",
            "import lib.callbacks\n"
            "fn main() -> i64 { print(lib.callbacks.run()); return 0 }\n"),
-     "42\n")
+     "42\n", build_flags=("--unsafe-ffi",))
 
 if fails:
     print("DEEP MODULES FAILED (%d)" % len(fails))

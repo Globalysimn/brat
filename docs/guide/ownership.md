@@ -1,6 +1,6 @@
 # Ownership
 
-**Status:** v0.1 is experimental. A clean check is not a proof of memory safety or
+**Status:** BRAT is experimental. A clean check is not a proof of memory safety or
 data-race freedom. The checker is intra-function plus the call modes a signature
 declares; FFI pointers and `unsafe` blocks stay outside it. Holes are listed in
 `../project/LEDGER.md`.
@@ -161,13 +161,14 @@ let ch = chan(1)
 ch.send(1); ch.close(); print(ch.recv()); print(ch.recv())   # fine: None
 ```
 
-`brat check --proto` prints the inferred shape: `!i64` for a send, `?i64` for a
-receive, `dynamic` when a loop or a branch makes the count unknowable.
+The session pass infers the channel shape (`!i64` for a send, `?i64` for a
+receive, `dynamic` when a loop or a branch makes the count unknowable) and
+refuses unbalanced straight-line protocols during `brat check`.
 
 ## Which mechanism, and why
 
-`brat check --ownership` prints the choice per binding and the reason, from four
-counters: reads, writes, escapes and thread crossings.
+The borrow and capability passes classify each binding from four counters:
+reads, writes, escapes and thread crossings.
 
 | counters | mechanism | why |
 |---|---|---|

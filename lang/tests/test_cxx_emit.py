@@ -1,18 +1,19 @@
-"""`brat-cxx cc FILE` is `codegen_c.emit_file(FILE)`, byte for byte.
+"""The native emitter over every shipped BRAT program.
 
-The emitter is the part of the port where "close enough" is not a thing: the C
-it writes carries the ownership decisions (what is dropped, where, and how many
-times), so a diff in one line is a program that behaves differently. The oracle
-is therefore the reference emitter itself and the comparison is exact.
+This corpus test pins the emitter's outer contract now that it is the only C
+emitter:
 
-A program the reference refuses to emit — a private function called across a
-module boundary — has to be refused here too, not emitted into bad C.
+* every accepted program emits non-empty, deterministic C;
+* the one private-cross-module program is refused by name;
+* ownership-rejected programs produce no C unless `--no-check` is explicit;
+* `--no-check` output carries exactly the unverified banner; and
+* the `BRAT_MOVE_RT=0` bisection switch changes the drops without refusing
+  the corpus.
 """
 
 import _cxx
 import _scratch
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -20,53 +21,29 @@ import time
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 BIN = _cxx.BIN
 TMP = _scratch.mkdtemp(prefix="brat-emit-")
 
-sys.path.insert(0, ENGINE)
-import brat.parser as P  # noqa: E402,F401  (the engine expects its sibling imports)
-
-_CG = [None]
-
-
-def oracle():
-    """`codegen_c.py`, loaded by path so it cannot shadow a package."""
-    if _CG[0] is None:
-        spec = importlib.util.spec_from_file_location(
-            "brat_oracle_emit", os.path.join(ENGINE, "codegen_c.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _CG[0] = mod
-    return _CG[0]
+REFUSED = {"own_priv.brat": "function `helper` is private in module `modapi`"}
+OWNERSHIP_REFUSED = {
+    "own_bad.brat",
+    "own_move.brat",
+    "own_paths_bad.brat",
+    "own_sig.brat",
+}
+BANNER = "/* BRAT: UNVERIFIED -- ownership not checked */\n"
 
 
 def corpus():
     out = []
     for base, dirs, files in os.walk(ROOT):
-        # The corpus is the programs the repository ships. A test that writes a
-        # scratch .brat into the tree must not change the count for a sibling
-        # test running in parallel, so generated directories are skipped.
-        dirs[:] = [d for d in dirs if d not in ("vendor", "bin", ".git", "__pycache__",
-                                                "scratch", "tmp", "out")]
+        dirs[:] = [d for d in dirs if d not in (
+            "vendor", "bin", ".git", "__pycache__", "scratch", "tmp", "out")]
         for f in files:
             if f.endswith(".brat") and not f.startswith((".", "_")):
                 out.append(os.path.join(base, f))
     return sorted(out)
-
-
-# The one program the reference emitter gives up on: `own_priv.brat` calls a
-# private function of another module, and the loader refuses it before any code
-# is written. The C++ front end has to refuse it with the same words.
-REFUSED = {"own_priv.brat": "function `helper` is private in module `modapi`"}
-
-# Programs the reference emitter *could* write C for, but `brat emit-c` refuses
-# because the ownership checker rejects them. `brat-cxx cc` has the same gate now,
-# so the property here is: the same refusal, no C on stdout, and `--no-check`
-# still produces the reference bytes -- the emitter itself is unchanged, only the
-# door in front of it.
-OWNERSHIP_REFUSED = {"own_bad.brat", "own_move.brat", "own_paths_bad.brat", "own_sig.brat"}
 
 
 def emit(path, env=None, no_check=False):
@@ -85,84 +62,73 @@ def main():
     _cxx.build()
     t0 = time.time()
     files = corpus()
-    bad = refused = 0
+    bad = 0
+    refused = 0
+    accepted = []  # (path, no-check C without the banner)
+
     for path in files:
         name = os.path.basename(path)
-        P._seq = 0
-        try:
-            want = oracle().emit_file(path)
-        except Exception as e:  # the reference refuses to emit this program
-            got_out, got_err, rc = emit(path)
-            if name not in REFUSED:
-                print("FAIL %s: reference raised %s: %s" % (name, type(e).__name__, e))
+        out, err, rc = emit(path)
+
+        if name in REFUSED:
+            if rc == 0 or out or REFUSED[name] not in err:
+                print("FAIL %s: expected the named private-function refusal "
+                      "(rc=%d, %d bytes, err=%r)"
+                      % (name, rc, len(out), err.strip()[-300:]))
                 bad += 1
-                continue
-            if str(e) != REFUSED[name] or rc == 0:
-                print("FAIL %s: refusal (reference %r, brat-cxx rc=%d)" % (name, str(e), rc))
-                bad += 1
-                continue
-            refused += 1
+            else:
+                refused += 1
             continue
-        got_out, got_err, rc = emit(path)
+
         if name in OWNERSHIP_REFUSED:
-            # The gate: a checker error refuses emission, stdout stays empty, and
-            # the words are the reference emitter's.
-            if rc == 0 or got_out:
-                print("FAIL %s: the ownership gate let a rejected program through "
-                      "(rc=%d, %d bytes)" % (name, rc, len(got_out)))
-                bad += 1
-                continue
-            if "--no-check" not in got_err:
-                print("FAIL %s: the refusal must name --no-check, got %r"
-                      % (name, got_err.strip()[-200:]))
+            if rc == 0 or out or "--no-check" not in err:
+                print("FAIL %s: ownership gate must refuse without C "
+                      "(rc=%d, %d bytes)" % (name, rc, len(out)))
                 bad += 1
                 continue
             nout, nerr, nrc = emit(path, no_check=True)
-            if nrc != 0 or nout != "/* BRAT: UNVERIFIED -- ownership not checked */\n" + want:
-                print("FAIL %s: --no-check must emit the reference bytes (rc=%d, %d of %d)"
-                      % (name, nrc, len(nout), len(want)))
+            if nrc != 0 or not nout.startswith(BANNER) or len(nout) <= len(BANNER):
+                print("FAIL %s: --no-check must emit bannered C (rc=%d, %r)"
+                      % (name, nrc, nerr.strip()[-300:]))
                 bad += 1
                 continue
+            accepted.append((path, nout[len(BANNER):]))
             refused += 1
             continue
-        if rc != 0:
-            print("FAIL %s: brat-cxx exited %d: %s" % (name, rc, got_err.strip()[:400]))
+
+        if rc != 0 or not out:
+            print("FAIL %s: native emitter exited %d: %s"
+                  % (name, rc, err.strip()[:400]))
             bad += 1
             continue
-        if got_out == want:
+        out2, _err2, rc2 = emit(path)
+        if rc2 != 0 or out2 != out:
+            print("FAIL %s: emitter output is not deterministic" % name)
+            bad += 1
             continue
-        want_l, got_l = want.split("\n"), got_out.split("\n")
-        line = next((i for i in range(min(len(want_l), len(got_l))) if want_l[i] != got_l[i]),
-                    min(len(want_l), len(got_l)))
-        print("FAIL %s: line %d\n  want %r\n  got  %r"
-              % (name, line + 1, want_l[line] if line < len(want_l) else "<eof>",
-                 got_l[line] if line < len(got_l) else "<eof>"))
+        accepted.append((path, out))
+
+    changed_without_drops = 0
+    for path, want in accepted:
+        out, err, rc = emit(path, env={"BRAT_MOVE_RT": "0"}, no_check=True)
+        if rc != 0 or not out.startswith(BANNER):
+            print("FAIL %s (BRAT_MOVE_RT=0): rc=%d, err=%r"
+                  % (os.path.basename(path), rc, err.strip()[-300:]))
+            bad += 1
+            continue
+        if out[len(BANNER):] != want:
+            changed_without_drops += 1
+    if accepted and changed_without_drops == 0:
+        print("FAIL: BRAT_MOVE_RT=0 changed no corpus output")
         bad += 1
-    # The same bytes with the drops turned off: BRAT_MOVE_RT is the bisect knob
-    # and the C++ emitter has to honour it, or a bisect would compare two
-    # different emitters. The reference reads the variable once, at import.
-    oracle()._MOVE_RT = False
-    env = {"BRAT_MOVE_RT": "0"}
-    nodrop = 0
-    for path in files:
-        name = os.path.basename(path)
-        if name in REFUSED or name in OWNERSHIP_REFUSED:
-            continue
-        P._seq = 0
-        want = oracle().emit_file(path)
-        got_out, got_err, rc = emit(path, env)
-        if rc != 0 or got_out != want:
-            print("FAIL %s (BRAT_MOVE_RT=0): rc=%d, %d bytes of %d"
-                  % (name, rc, len(got_out), len(want)))
-            bad += 1
-        else:
-            nodrop += 1
-    oracle()._MOVE_RT = True
+
     if bad:
-        print("CXX EMIT FAILED (%d of %d files, %.1fs)" % (bad, len(files), time.time() - t0))
+        print("CXX EMIT FAILED (%d of %d files, %.1fs)"
+              % (bad, len(files), time.time() - t0))
         return 1
-    print("CXX EMIT ALL GREEN (%d files, %d refusal(s), %d without drops, same bytes, %.2fs)"
-          % (len(files), refused, nodrop, time.time() - t0))
+    print("CXX EMIT ALL GREEN (%d files, %d refusal(s), %d changed without "
+          "drops, deterministic, %.2fs)"
+          % (len(files), refused, changed_without_drops, time.time() - t0))
     return 0
 
 

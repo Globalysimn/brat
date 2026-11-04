@@ -45,9 +45,11 @@ struct FnTable {
     std::set<std::string> heads;       // legal dotted-callee heads
     std::map<std::string, bool> umeth;  // method name -> takes `mut self`
     std::set<std::string> owned_ret;   // `extern ... -> move`: free it or return it
+    std::map<std::string, std::vector<size_t>> borrows_ret;  // `borrows(p)` param indices
     // `extern` results that are scalar slots: a C function returning a number
     // returns a value, so a `let` bound to it is a copy and not a borrow.
     std::set<std::string> scalar_ret;
+    std::set<std::string> pub_consts;
 };
 
 struct BorrowOut {
@@ -57,10 +59,15 @@ struct BorrowOut {
 
 // The names another file exports: `pub fn` parameter modes and `pub enum`
 // variants, which the reference merges per file before checking the set.
-FnTable pub_sigs(const std::vector<StmtP> &body);
+FnTable pub_sigs(const std::vector<StmtP> &body,
+                 const std::set<std::string> &exp_fns = {});
 
 // `stray` is what the parser kept as literal `{...}` text for this file.
 BorrowOut borrow_check(const std::vector<StmtP> &body,
                        const std::map<std::string, std::vector<ParamMode>> &extra,
                        const std::vector<std::pair<uint32_t, std::string>> &stray,
-                       const std::set<std::string> &module_heads = {});
+                       const std::set<std::string> &module_heads = {},
+                       const std::set<std::string> &extra_consts = {},
+                       const std::set<std::string> &extra_scalar_rets = {},
+                       const std::map<std::string, std::vector<size_t>> &extra_borrows_rets = {},
+                       const std::set<std::string> &extra_owned_rets = {});

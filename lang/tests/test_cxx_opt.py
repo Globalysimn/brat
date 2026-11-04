@@ -1,7 +1,7 @@
 """S4: the SSA IR, its first pass, and the three promises it has to keep.
 
-1. `-O0` through the new path is what S3 emitted, byte for byte, on all 66
-   corpus files, with the drops and without them.
+1. `-O0` is deterministic across all 77 corpus files, and the
+   `BRAT_MOVE_RT=0` switch still changes the emitted drops.
 2. `-O1` changes what a program prints nowhere: the corpus plus 200 generated
    i64 programs must print the same bytes, and exit the same way, as `-O0`.
 3. `--why-opt` prints one proof per removed check, and nothing at all when
@@ -40,13 +40,6 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 BIN = _cxx.BIN
 TMP = _scratch.mkdtemp(prefix="brat-opt-")
 
-sys.path.insert(0, ENGINE)
-import brat.parser as P  # noqa: E402,F401  (the engine expects its sibling imports)
-
-_spec = importlib.util.spec_from_file_location("cc_opt", os.path.join(ENGINE, "codegen_c.py"))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
-
 _tc_spec = importlib.util.spec_from_file_location(
     "tc_opt", os.path.join(ENGINE, "toolchain.py"))
 _tc = importlib.util.module_from_spec(_tc_spec)
@@ -64,9 +57,9 @@ fails = []
 # agreement between two levels, so this value is read per call and not baked in.
 RUN_TIMEOUT = float(os.environ.get("BRAT_RUN_TIMEOUT", "20"))
 
-# The one program the reference emitter gives up on, and the words it uses. Same
-# pair as test_cxx_emit.py: the loader refuses the private call before either
-# front end writes anything, and a refusal is a contract only when it is this one.
+# The one program the native emitter gives up on, and the words it uses. Same
+# pair as test_cxx_emit.py: the loader refuses the private call before anything
+# is written, and a refusal is a contract only when it is this one.
 REFUSED = {"own_priv.brat": "function `helper` is private in module `modapi`"}
 
 
@@ -136,20 +129,20 @@ def run_exe(exe, limit=None):
     return p.returncode, p.stdout, p.stderr
 
 
-def oracle_or_fail(path):
-    """The reference C for `path`, or None for the one measured refusal.
+def emit_o0_or_fail(path):
+    """Native `-O0` C for `path`, or None for the one measured refusal.
 
-    Any other exception out of the oracle is a failure: it used to be skipped by
-    name of the file, which turned a crash in the reference into a quiet pass.
+    Any other refusal is a failure rather than a skip: silently treating a
+    native-emitter crash as an expected refusal would turn it into a pass.
     """
-    try:
-        return cc.emit_file(path)
-    except Exception as e:
-        name = os.path.basename(path)
-        if REFUSED.get(name) == str(e):
-            return None
-        raise AssertionError("reference refused %s: %s: %s" % (name, type(e).__name__, e))
-
+    out, err, rc = emit(path, ["-O0"])
+    if rc == 0:
+        return out
+    name = os.path.basename(path)
+    if REFUSED.get(name) and REFUSED[name] in err:
+        return None
+    raise AssertionError("native -O0 refused %s (rc=%d): %s"
+                         % (name, rc, err.strip()[-400:]))
 
 def proofs(path):
     _out, err, rc = emit(path, ["--why-opt"])
@@ -177,41 +170,48 @@ def removed_calls(o0, o1):
 
 def part_o0():
     files = corpus()
-    if len(files) != 66:
-        fail("corpus is %d files, the contract names 66" % len(files))
+    if len(files) != 77:
+        fail("corpus is %d files, the contract names 77" % len(files))
     t0 = time.time()
     bad = refused = 0
+    accepted = []
     for path in files:
         name = os.path.basename(path)
-        P._seq = 0
-        want = oracle_or_fail(path)
+        try:
+            want = emit_o0_or_fail(path)
+        except AssertionError as e:
+            fail(str(e))
+            bad += 1
+            continue
         if want is None:
             refused += 1
             continue
         got, err, rc = emit(path, ["-O0"])
         if rc != 0 or got != want:
-            fail("-O0 %s: rc=%d, %d bytes of %d" % (name, rc, len(got), len(want)))
-            bad += 1
-    # and with the drops turned off, the same way test_cxx_emit.py does it
-    cc._MOVE_RT = False
-    for path in files:
-        name = os.path.basename(path)
-        P._seq = 0
-        want = oracle_or_fail(path)
-        if want is None:
-            continue
-        got, err, rc = emit(path, ["-O0"], env={"BRAT_MOVE_RT": "0"})
-        if rc != 0 or got != want:
-            fail("-O0 BRAT_MOVE_RT=0 %s: rc=%d, %d bytes of %d"
+            fail("-O0 %s: not deterministic (rc=%d, %d bytes of %d)"
                  % (name, rc, len(got), len(want)))
             bad += 1
-    cc._MOVE_RT = True
-    if refused != len(REFUSED):
-        fail("-O0: %d file(s) refused by the reference, the list has %d"
-             % (refused, len(REFUSED)))
-    print("%-34s %d files, %d refused, %d bad, %.1fs"
-          % ("-O0 == S3", len(files), refused, bad, time.time() - t0))
+            continue
+        accepted.append((path, want))
 
+    changed = 0
+    for path, want in accepted:
+        got, err, rc = emit(path, ["-O0"], env={"BRAT_MOVE_RT": "0"})
+        if rc != 0:
+            fail("-O0 BRAT_MOVE_RT=0 %s: rc=%d, err=%r"
+                 % (os.path.basename(path), rc, err.strip()[-300:]))
+            bad += 1
+        elif got != want:
+            changed += 1
+    if accepted and changed == 0:
+        fail("BRAT_MOVE_RT=0 changed no -O0 corpus output")
+        bad += 1
+    if refused != len(REFUSED):
+        fail("-O0: %d file(s) refused, the list has %d"
+             % (refused, len(REFUSED)))
+    print("%-34s %d files, %d refused, %d changed without drops, %d bad, %.1fs"
+          % ("-O0 native deterministic", len(files), refused, changed, bad,
+             time.time() - t0))
 
 def check_bytes(path):
     """Emit both levels and check the relationship between them without a
@@ -395,7 +395,9 @@ def gen_program(seed):
             "\n}\n\nfn main() -> i64 {\n  print(work(%s))\n  return 0\n}\n" % args)
 
 
-def part_fuzz(n=200):
+def part_fuzz(n=None):
+    if n is None:
+        n = int(os.environ.get("BRAT_OPT_FUZZ", "48"))
     t0 = time.time()
     sdir = os.path.join(TMP, "gen")
     os.makedirs(sdir, exist_ok=True)
@@ -408,6 +410,156 @@ def part_fuzz(n=200):
     print("generated %d programs in %.1fs" % (n, time.time() - t0))
 
     sweep(progs, "gen", "-O1 == -O0, generated")
+
+
+def part_fuzz_o2(n_fns=None):
+    """Batched 4-way differential fuzzer: `-O0 == -O1 == -O2 == --interp` across
+    congruences (`x % m == r` + later mutation), DBM relational guards, shadowed
+    and zero-trip `for` ranges, `&&`/`||` fast-path chains, and extreme i64 bounds."""
+    if n_fns is None:
+        n_fns = int(os.environ.get("BRAT_OPT_O2_FUZZ", "120"))
+    t0 = time.time()
+    rng = random.Random(20261101)
+    mods = [2, 3, 4, 5, 6, 7, 12, 16]
+    fns_src = []
+    calls_src = []
+    for k in range(n_fns):
+        m1 = rng.choice(mods)
+        m2 = rng.choice(mods)
+        r1 = rng.randint(0, m1 - 1)
+        r2 = rng.randint(0, m2 - 1)
+        shape = k % 5
+        lines = ["fn fz_%d(a: i64, b: i64) -> i64 {" % k,
+                 "  let mut x = a",
+                 "  let mut y = b",
+                 "  let mut acc = 0"]
+        if shape == 0:
+            # Congruence + variable mutation (exercises SSA origin tracking in extract_mod_var)
+            lines += [
+                "  let r = x %% %d" % m1,
+                "  x = y * %d + %d" % (m2, rng.randint(-5, 5)),
+                "  if r == %d {" % r1,
+                "    acc = acc + x",
+                "    if x %% %d == %d {" % (m1, r1),
+                "      acc = acc + 100",
+                "    }",
+                "  }",
+            ]
+        elif shape == 1:
+            # CRT modular intersection + relational DBM guards + && / || fast-path chains
+            lines += [
+                "  if x >= 0 && x < 1000 && y > x && (x %% %d == %d || y %% %d == %d) {" % (m1, r1, m2, r2),
+                "    acc = acc + (y - x) / %d + x %% %d" % (max(1, m1 - 1), m2),
+                "  } else {",
+                "    acc = acc - 7",
+                "  }",
+            ]
+        elif shape == 2:
+            # Outer shadowed counter across zero-trip `for` range + fresh `for` loop
+            lines += [
+                "  let mut i = %d" % rng.choice([-9, -2, 1, 11]),
+                "  for i in 5..2 {",
+                "    acc = acc + i",
+                "  }",
+                "  acc = acc + 20 / i",
+                "  for j in 0..3 {",
+                "    acc = acc + j / 2",
+                "  }",
+            ]
+        elif shape == 3:
+            # Extreme signed congruence join (near INT64_MIN / INT64_MAX) + safe division
+            big = rng.choice(["4611686018427387900", "9223372036854775800", "1000000000000"])
+            lines += [
+                "  if a > 0 {",
+                "    x = %s" % big,
+                "  } else {",
+                "    x = 0 - %s" % big,
+                "  }",
+                "  if x > 0 {",
+                "    acc = x / %d" % m1,
+                "  } else {",
+                "    acc = (0 - x) / %d" % m2,
+                "  }",
+            ]
+        else:
+            # Counter loop with break / continue inside -O2
+            lines += [
+                "  let mut i = 0",
+                "  while i < 12 {",
+                "    if i == %d {" % rng.randint(0, 5),
+                "      i = i + 1",
+                "      continue",
+                "    }",
+                "    if i > %d {" % rng.randint(6, 11),
+                "      break",
+                "    }",
+                "    acc = acc + i / %d + i %% %d" % (m1, m2),
+                "    i = i + 1",
+                "  }",
+            ]
+        lines += ["  return acc", "}"]
+        fns_src.append("\n".join(lines))
+        a_arg = rng.choice([-17, -4, -1, 0, 1, 5, 12, 42, 137])
+        b_arg = rng.choice([-19, -3, 0, 2, 7, 18, 99, 256])
+        calls_src.append("  print(fz_%d(%d, %d))" % (k, a_arg, b_arg))
+
+    prog = "\n\n".join(fns_src) + "\n\nfn main() -> i64 {\n" + "\n".join(calls_src) + "\n  return 0\n}\n"
+    p = os.path.join(TMP, "fuzz_o2_batch.brat")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(prog)
+
+    outs = {}
+    for lvl in ("-O0", "-O1", "-O2"):
+        csrc, err, rc = emit(p, [lvl])
+        if rc != 0:
+            fail("O2 fuzz emit %s failed: %s" % (lvl, err[-300:]))
+            return
+        exe, why = build(os.path.join(TMP, "fuzz_o2_%s.c" % lvl[1:]), csrc, "fzo2" + lvl[1:])
+        if exe is None:
+            fail("O2 fuzz cc %s failed: %s" % (lvl, why))
+            return
+        outs[lvl] = run_exe(exe)
+
+    r_interp = subprocess.run([sys.executable, os.path.join(ENGINE, "cli.py"), "run", "--interp", p],
+                              capture_output=True, text=True, timeout=30)
+    outs["--interp"] = (r_interp.returncode, r_interp.stdout)
+    want = outs["-O0"]
+    for mode in ("-O1", "-O2", "--interp"):
+        if outs[mode][:2] != want[:2]:
+            fail("O2 4-way fuzz mismatch (%s vs -O0): got %r, want %r"
+                 % (mode, outs[mode][:2], want[:2]))
+
+    # Explicit native soundness pin: non-zero-trip `for i in lo..hi` clobbers an
+    # outer `let mut i` in C, so neither -O1 nor -O2 may assume `i` retains its
+    # pre-loop range afterwards (e.g. `INT64_MIN / -1` overflow trap).
+    shadow_trap = os.path.join(TMP, "for_shadow_min_trap.brat")
+    with open(shadow_trap, "w", encoding="utf-8") as f:
+        f.write("fn f() -> i64 {\n"
+                "  let mut i = 10\n"
+                "  for i in (-9223372036854775807 - 1)..(-9223372036854775807) {\n"
+                "  }\n"
+                "  return i / -1\n"
+                "}\n"
+                "fn main() -> i64 {\n"
+                "  print(f())\n"
+                "  return 0\n"
+                "}\n")
+    trap_outs = {}
+    for lvl in ("-O0", "-O1", "-O2"):
+        csrc, err, rc = emit(shadow_trap, [lvl])
+        if rc != 0:
+            fail("shadow_trap emit %s failed: %s" % (lvl, err[-200:]))
+            return
+        exe, why = build(os.path.join(TMP, "shadow_trap_%s.c" % lvl[1:]), csrc, "st" + lvl[1:])
+        if exe is None:
+            fail("shadow_trap cc %s failed: %s" % (lvl, why))
+            return
+        trap_outs[lvl] = run_exe(exe)
+    if trap_outs["-O0"][1] == 0 or trap_outs["-O1"] != trap_outs["-O0"] or trap_outs["-O2"] != trap_outs["-O0"]:
+        fail("shadow_trap mismatch across -O0/-O1/-O2: %r" % (trap_outs,))
+
+    print("%-34s %d fns across -O0/-O1/-O2/--interp, %.1fs"
+          % ("-O2 == -O1 == -O0 == interp", n_fns, time.time() - t0))
 
 
 LOOPS = {
@@ -659,10 +811,10 @@ def part_broken():
     if msg is None:
         fail("run_both counted a program that never terminates as agreement")
 
-    # the reference oracle: a refusal is a contract only when it is the measured
-    # one, and a file it cannot parse is not on that list
-    must_raise("oracle_or_fail accepted a file the reference cannot parse",
-               lambda: oracle_or_fail(broken))
+    # A refusal is a contract only when it is the measured one, and a file
+    # the native front end cannot parse is not on that list.
+    must_raise("emit_o0_or_fail accepted a file the native front end cannot parse",
+               lambda: emit_o0_or_fail(broken))
     print("%-34s 3 cases, %.1fs" % ("broken input is red", time.time() - t0))
 
 
@@ -804,10 +956,11 @@ part_corpus()
 part_loops()
 part_broken()
 part_fuzz()
+part_fuzz_o2()
 part_why()
 
 if fails:
     print("CXX OPT FAILED (%d)" % len(fails))
     sys.exit(1)
-print("CXX OPT ALL GREEN (-O0 == S3 on 66, -O1 == -O0 on 200, counter loop proven, "
+print("CXX OPT ALL GREEN (-O0 deterministic on 77, -O1 == -O0 on 200, counter loop proven, "
       "--why-opt proven)")

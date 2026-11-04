@@ -1,23 +1,23 @@
 """A script-level binding, read and written from a function.
 
 This was the "accepted but unbuildable" shape: the interpreter ran it, both
-checkers reported `0 error(s)`, and neither emitter produced a working binary.
-Two separate defects, one per emitter, and each was a decision about the *fast*
-path rather than about globals:
+checkers reported `0 error(s)`, and the native emitter did not produce a
+working binary. Two defects in the emitter caused that, both decisions about
+the *fast* path rather than about globals themselves:
 
 * the fast path is raw C over `int64_t`/`double`, while a script-level `let` is
   a `Val` in the file scope. A function that names one was classified fast
-  anyway, so the body was emitted as C with no symbol for the name: `KeyError:
-  'total'` from the Python emitter's `fx`, `return ;` and `(long long)()` from
-  the C++ one, which C then refuses.
+  anyway, so the body was emitted as C with no usable symbol for the name:
+  forms such as `return ;` and `(long long)()`, which C refuses.
 * the slow path declared a *local* of the same name as the global, so a write
   inside a function landed in the local and the file-scope value the top level
   had written stayed `vnil()` -- `type error in +` on the next read.
 
-Both emitters now keep globals off the fast path (and let the fixpoint drop
-their callers) and leave globals out of the local declaration list. The three
-backends must agree again, which is what the cases below assert -- the point is
-not that globals work, it is that they work *identically*.
+The native emitter now keeps globals off the fast path (and lets the fixpoint
+drop their callers) and leaves globals out of the local declaration list. The
+interpreter and the two CLI build paths must agree, which is what the cases
+below assert -- the point is not that globals work, it is that they work
+*identically*.
 
 Run: python3 test_globals_in_fns.py
 """
@@ -170,7 +170,7 @@ def main():
         for tag, out in sorted(got.items()):
             if out != want:
                 fail(name, "%s stdout %r, want %r" % (tag, out, want))
-    print("GLOBALS ALL GREEN (%d cases, interpreter + both emitters)" % len(CASES))
+    print("GLOBALS ALL GREEN (%d cases, interpreter + both CLI build paths)" % len(CASES))
 
 
 if __name__ == "__main__":

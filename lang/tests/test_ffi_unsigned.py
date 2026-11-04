@@ -9,7 +9,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -83,7 +82,7 @@ CASES = {
 
 
 def run_interp(path):
-    p = subprocess.run([sys.executable, CLI, "run", "--interp", path],
+    p = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path],
                        capture_output=True, timeout=120)
     return p.returncode, p.stdout
 

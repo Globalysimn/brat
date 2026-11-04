@@ -1,5 +1,6 @@
 #include "session.h"
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -88,7 +89,7 @@ struct Chan {
     // pass the checker and then hang, in both backends, forever. Two sides mean
     // a `spawn`, and a spawn orders nothing: no prefix, nothing said.
     int first_blocking_send() const {
-        if (!cap) return 0;
+        if (!cap || events.empty() || !known()) return 0;
         const std::string &first = events.front().side;
         for (const auto &e : events)
             if (e.side != first) return 0;
@@ -157,7 +158,8 @@ void collect(const View &stmts, Chans &chans, const std::string &side,
                 Chan c;
                 c.name = s->a;
                 if (!s->e1->kids.empty() && s->e1->kids[0]->k == EK::Num &&
-                    !s->e1->kids[0]->is_float) {
+                    !s->e1->kids[0]->is_float && s->e1->kids[0]->i >= 1 &&
+                    s->e1->kids[0]->i <= 1048576) {
                     c.cap = static_cast<int>(s->e1->kids[0]->i);
                 }
                 chans[s->a] = c;
@@ -213,6 +215,47 @@ void collect(const View &stmts, Chans &chans, const std::string &side,
     }
 }
 
+void mark_escaped_expr(const Expr *e, const std::set<std::string> &shadow, Chans &chans);
+
+void mark_escaped_stmts(const std::vector<StmtP> &stmts, std::set<std::string> shadow, Chans &chans) {
+    for (const auto &sp : stmts) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        mark_escaped_expr(s.e1.get(), shadow, chans);
+        mark_escaped_expr(s.e2.get(), shadow, chans);
+        mark_escaped_expr(s.e3.get(), shadow, chans);
+        if ((s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::ForRange || s.k == SK::ForIter) &&
+            !s.a.empty()) {
+            shadow.insert(s.a);
+        }
+        mark_escaped_stmts(s.body, shadow, chans);
+        {
+            std::set<std::string> sub2 = shadow;
+            if (s.k == SK::Try && s.opt1 && !s.opt1->empty()) sub2.insert(*s.opt1);
+            mark_escaped_stmts(s.body2, sub2, chans);
+        }
+        for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get()) {
+            mark_escaped_expr(el->e1.get(), shadow, chans);
+            mark_escaped_stmts(el->body, shadow, chans);
+        }
+    }
+}
+
+void mark_escaped_expr(const Expr *e, const std::set<std::string> &shadow, Chans &chans) {
+    if (!e) return;
+    if (e->k == EK::Var && !shadow.count(e->a)) {
+        auto it = chans.find(e->a);
+        if (it != chans.end()) it->second.escaped = true;
+        return;
+    }
+    for (const auto &k : e->kids) mark_escaped_expr(k.get(), shadow, chans);
+    if (e->fn) {
+        std::set<std::string> sub = shadow;
+        for (const auto &p : e->fn->params) sub.insert(p.name);
+        mark_escaped_stmts(e->fn->body, std::move(sub), chans);
+    }
+}
+
 void collect_expr(const Expr *e, Chans &chans, const std::string &side,
                   const std::string &quant, int line) {
     if (e == nullptr) return;
@@ -234,6 +277,11 @@ void collect_expr(const Expr *e, Chans &chans, const std::string &side,
         return;
     }
     for (const auto &k : e->kids) collect_expr(k.get(), chans, side, quant, line);
+    if (e->fn) {
+        std::set<std::string> shadow;
+        for (const auto &p : e->fn->params) shadow.insert(p.name);
+        mark_escaped_stmts(e->fn->body, std::move(shadow), chans);
+    }
 }
 
 void one_body(const View &stmts, std::vector<BorrowDiag> &out) {
@@ -268,21 +316,29 @@ void one_body(const View &stmts, std::vector<BorrowDiag> &out) {
 std::vector<BorrowDiag> session_check(const std::vector<StmtP> &body) {
     std::vector<BorrowDiag> out;
     View top;
-    for (const auto &sp : body) {
-        const Stmt *node = sp.get();
-        while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
-        if (node->k == SK::Fn && !node->fns.empty()) {
-            one_body(view(node->fns[0].body), out);
-            continue;
-        }
-        if (kDecls.count(node->k)) {
-            if (node->k == SK::Impl) {
-                for (const auto &f : node->fns) one_body(view(f.body), out);
+    std::function<void(const std::vector<StmtP> &)> visit_top =
+        [&](const std::vector<StmtP> &stmts) {
+            for (const auto &sp : stmts) {
+                const Stmt *node = sp.get();
+                while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
+                if (node->k == SK::Block) {
+                    visit_top(node->body);
+                    continue;
+                }
+                if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
+                    one_body(view(node->fns[0].body), out);
+                    continue;
+                }
+                if (kDecls.count(node->k)) {
+                    if (node->k == SK::Impl) {
+                        for (const auto &f : node->fns) one_body(view(f.body), out);
+                    }
+                    continue;
+                }
+                top.push_back(node);
             }
-            continue;
-        }
-        top.push_back(sp.get());
-    }
+        };
+    visit_top(body);
     one_body(top, out);
     return out;
 }

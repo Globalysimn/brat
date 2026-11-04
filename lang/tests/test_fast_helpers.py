@@ -4,7 +4,7 @@
 function, while the emitter also emits the call inside an `i64v` function — a
 function whose parameters are `i64`/`vec[i64]` in any mix. The result was a
 program `brat check` accepted and `brat build` could not compile, because the
-helper was never written out. Both emitters had the bug, so a program with
+helper was never written out. The native emitter had the bug, so a program with
 `t += x / 2` in a vector loop failed on the C compiler and passed in the
 interpreter.
 

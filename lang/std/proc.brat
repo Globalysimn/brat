@@ -1,0 +1,35 @@
+pub fn run(cmd: str, argv: vec[str]) {
+  return proc_run(cmd, argv)
+}
+
+pub fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64) {
+  return proc_run(cmd, argv, timeout_ms)
+}
+
+pub fn status(cmd: str, argv: vec[str]) {
+  match proc_run(cmd, argv) {
+    Err(e) => return Err(e),
+    Ok(res) => {
+      let c = res["code"]
+      return Ok(c)
+    }
+  }
+}
+
+pub fn output(cmd: str, argv: vec[str]) {
+  match proc_run(cmd, argv) {
+    Err(e) => return Err(e),
+    Ok(res) => {
+      let code = res["code"]
+      if code != 0 {
+        let err_s = res["err"].trim()
+        if len(err_s) > 0 {
+          return Err(cmd + " exited with code " + str(code) + ": " + err_s)
+        }
+        return Err(cmd + " exited with code " + str(code))
+      }
+      let out_s = res["out"]
+      return Ok(out_s)
+    }
+  }
+}

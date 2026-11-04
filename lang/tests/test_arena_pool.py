@@ -4,8 +4,6 @@ import _scratch
 import importlib.util
 import os
 import subprocess
-import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -50,7 +48,7 @@ int main(void) {
     {
         BMark m = barena_enter();
         Val s = vstr("kept");
-        CHECK(strcmp(s.as.str, "kept") == 0);
+        CHECK(strcmp(vstr_c(&s), "kept") == 0);
         barena_leave(m);
     }
 

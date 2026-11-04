@@ -1,12 +1,12 @@
-// The SSA form and the first optimization pass: a proof-carrying elision of
-// division checks over wrapping i64 intervals.
-//
-// Scope of this first step, on purpose: one function, i64 values, no loops, no
-// ownership, no containers, no floats. A body with a shape outside that set is
-// refused whole and keeps every check, so `-O1` can only ever change a function
-// it models completely.
+// The SSA form and proof-carrying abstract interpretation passes:
+// - `-O1` (`ir::analyze`): wrapping `i64` intervals on fast `i64` functions.
+// - `-O2` (`ir::analyze_o2`): reduced-product relational abstract interpreter
+//   (`IV × Granger Congruence mZ+r × Potential-Graph DBM`) with interprocedural
+//   return summaries, nested/strided loops, and `vec[i64]` bounds-check elision.
 #pragma once
 
+#include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -23,16 +23,34 @@ struct Proof {
 };
 
 struct Result {
-    // The `Bin` nodes whose div/mod check this pass proved unnecessary.
+    // The `Bin` nodes whose div/mod check this pass proved unnecessary (raw C `/` or `%`).
     std::set<const Expr *> unchecked;
-    // One proof per element of `unchecked`, in the order they were proven.
+    // `-O2`: `Bin` nodes whose divisor is proven non-zero (`bf_idiv_nz` / `bf_imod_nz`, no trap).
+    std::set<const Expr *> nonzero_div;
+    // `-O2`: `EK::Idx` (`v[i]`) and `SK::SetIdx` (`v[i] = x`) nodes proven in-bounds.
+    std::set<const Expr *> unchecked_idx;
+    std::set<const Stmt *> unchecked_setidx;
+    // One proof per elided check, in the order they were proven.
     std::vector<Proof> proofs;
 };
 
-// Builds the IR for `body` and runs the interval pass over it. Returns false
-// when the function falls outside the modelled subset, in which case `out` is
-// empty: no proof, no elision, no change to the emitted C.
+struct FnSummary {
+    bool valid = false;
+    bool top = true;
+    int64_t lo = 0, hi = 0;
+    uint64_t mod = 1;   // 0 => constant (int64_t)rem, 1 => top, >=2 => mod*Z + rem
+    uint64_t rem = 0;
+};
+
+// `-O1` interval pass (preserved byte-for-byte for `-O1` callers).
 bool analyze(const std::string &fn, const std::vector<Param> &params,
              const std::vector<StmtP> &body, Result &out);
+
+// `-O2` reduced-product relational pass (`IV × Cong × DBM` + summaries).
+bool analyze_o2(const std::string &fn, const std::vector<Param> &params,
+                const std::set<std::string> &vec_params,
+                const std::vector<StmtP> &body,
+                const std::map<std::string, FnSummary> &summaries,
+                Result &out, FnSummary *out_summary = nullptr);
 
 }  // namespace ir

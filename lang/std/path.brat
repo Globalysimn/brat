@@ -1,0 +1,156 @@
+fn rfind_char(p: str, ch: str) -> i64 {
+  let mut i = len(p) - 1
+  while i >= 0 {
+    if p[i] == ch {
+      return i
+    }
+    i -= 1
+  }
+  return -1
+}
+
+pub fn is_abs(p: str) -> bool {
+  return p.starts_with("/")
+}
+
+pub fn join(a: str, b: str) -> str {
+  if len(a) == 0 {
+    return b
+  }
+  if len(b) == 0 {
+    return a
+  }
+  if b.starts_with("/") {
+    return b
+  }
+  if a.ends_with("/") {
+    return a + b
+  }
+  return a + "/" + b
+}
+
+pub fn dir(p: str) -> str {
+  let i = rfind_char(p, "/")
+  if i < 0 {
+    return "."
+  }
+  if i == 0 {
+    return "/"
+  }
+  return p.slice(0, i)
+}
+
+pub fn base(p: str) -> str {
+  let i = rfind_char(p, "/")
+  if i < 0 {
+    return p
+  }
+  return p.slice(i + 1, len(p))
+}
+
+pub fn ext(p: str) -> str {
+  let b = base(p)
+  let i = rfind_char(b, ".")
+  if i <= 0 {
+    return ""
+  }
+  return b.slice(i, len(b))
+}
+
+pub fn stem(p: str) -> str {
+  let b = base(p)
+  let i = rfind_char(b, ".")
+  let mut end = len(b)
+  if i > 0 {
+    end = i
+  }
+  return b.slice(0, end)
+}
+
+pub fn with_ext(p: str, new_ext: str) -> str {
+  let d = dir(p)
+  let s = stem(p)
+  let mut suffix = ""
+  if len(new_ext) > 0 {
+    if new_ext.starts_with(".") {
+      suffix = new_ext + ""
+    } else {
+      suffix = "." + new_ext
+    }
+  }
+  let name = s + suffix
+  if d == "." && !p.starts_with("./") {
+    return name
+  }
+  return join(d, name)
+}
+
+pub fn norm(p: str) -> str {
+  let abs = p.starts_with("/")
+  let mut parts = []
+  for seg in p.split("/") {
+    if seg == "" || seg == "." {
+      continue
+    }
+    if seg == ".." {
+      if len(parts) > 0 && parts[len(parts) - 1] != ".." {
+        parts = parts.slice(0, len(parts) - 1)
+      } else {
+        if !abs {
+          parts.push("..")
+        }
+      }
+      continue
+    }
+    parts.push(seg)
+  }
+  if len(parts) == 0 {
+    if abs {
+      return "/"
+    }
+    return "."
+  }
+  if abs {
+    return "/" + parts.join("/")
+  }
+  return parts.join("/")
+}
+
+fn split_norm_segs(np: str) -> vec[str] {
+  if np == "." || np == "/" {
+    return []
+  }
+  if np.starts_with("/") {
+    return np.slice(1, len(np)).split("/")
+  }
+  return np.split("/")
+}
+
+pub fn rel(from_dir: str, to_path: str) -> str {
+  let nf = norm(from_dir)
+  let nt = norm(to_path)
+  if nf.starts_with("/") != nt.starts_with("/") {
+    return nt
+  }
+  let fs = split_norm_segs(nf)
+  let ts = split_norm_segs(nt)
+  let mut common = 0
+  while common < len(fs) && common < len(ts) && fs[common] == ts[common] {
+    common = common + 1
+  }
+  let mut out = []
+  let mut i = common
+  while i < len(fs) {
+    out.push("..")
+    i = i + 1
+  }
+  let mut j = common
+  while j < len(ts) {
+    out.push(ts[j])
+    j = j + 1
+  }
+  if len(out) == 0 {
+    return "."
+  }
+  return out.join("/")
+}

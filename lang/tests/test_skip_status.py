@@ -1,8 +1,9 @@
 """A test that cannot run says so: exit 77 and the word SKIPPED, never 0.
 
 A green `ok` that means "there was no compiler" is a lie the suite tells itself:
-`test_cxx_emit.py` proves the C++ emitter writes the same C as the reference,
-and on a machine without `c++` it proved nothing while closing its block in the
+`test_cxx_emit.py` proves the native emitter handles the shipped corpus
+deterministically, and on a machine without `c++` it proved nothing while
+closing its block in the
 summary. The contract this file pins:
 
 - a test that skips exits 77 and prints a `SKIPPED:` line with the reason;
@@ -99,7 +100,7 @@ for name in ("test_cxx_frontend.py", "test_cxx_checker.py", "test_cxx_borrow.py"
     check("no c++" in out, "%s names the reason" % name)
 
 # 3. With a compiler the same files are still green, so the skip is not a way
-#    out: the emitter test compares C bytes against the reference oracle.
+#    out: the emitter test checks corpus refusals and deterministic C.
 #    The binary the suite builds for the real tree is copied in, so the control
 #    costs one corpus walk instead of a 36 s compile of the front end.
 if shutil.which("c++") or shutil.which("g++"):
@@ -111,7 +112,8 @@ if shutil.which("c++") or shutil.which("g++"):
     out = (p.stdout + p.stderr).strip()
     check(p.returncode == 0, "test_cxx_emit goes green with a compiler (got %d: %r)"
           % (p.returncode, out[-400:]))
-    check("same bytes" in out, "test_cxx_emit compares the bytes: %r" % out[-200:])
+    check("deterministic" in out,
+          "test_cxx_emit reports deterministic corpus emission: %r" % out[-200:])
 else:
     print("SKIP: no compiler on this machine, the green direction is untested")
     print("SMOKE %d check(s) failed" % len(fails))

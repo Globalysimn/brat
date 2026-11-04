@@ -56,7 +56,7 @@ def write(name, src):
 
 def both_checks(path):
     """(python rc, text, cxx rc, text, cxx text without the type-error tail)."""
-    py = run([sys.executable, CLI, "check", path])
+    py = run([sys.executable, CLI, "check", "--py", path])
     cx = run([CXX, "check", path])
     ptext = py.stdout + py.stderr
     ctext = cx.stdout + cx.stderr

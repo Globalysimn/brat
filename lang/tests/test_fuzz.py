@@ -63,6 +63,10 @@ def gen_inputs(n):
         deep.append("[" * d + "]" * d)
         deep.append('"unterminated' + "x" * d)
         deep.append("let x = " + "(" * d)
+        # Interpolation braces have their own matching pass. It used to
+        # rescan from every opening, so these two shapes were quadratic.
+        deep.append('print("' + "{" * d + "1" + "}" * d + '")')
+        deep.append('print("' + "{1+" * d + '1}")')
     out[-len(deep):] = deep[:len(deep)] if len(deep) <= len(out) else out
     return out
 

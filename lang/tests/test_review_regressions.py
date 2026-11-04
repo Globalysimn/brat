@@ -1,30 +1,10 @@
-"""Six defects found by an outside differential run, each pinned by a case.
+"""Emitter and runtime regression corpus for ownership and ABI defects.
 
-Every case here failed on the tree of 2026-10-30 and passes after the fix. Three
-of them were invisible to the suite because it compares two implementations that
-were both wrong the same way, which is the blind spot `LEDGER.md` names:
-
-* `move x` as a call argument retained an extra reference, so the value leaked
-  once per call and without bound inside a loop (1000 passes: 3000 allocations,
-  188890 bytes). Both emitters emitted the same wrong `vrc_inc(vmove(&b))`, so
-  the byte-identity test could not see it.
-* `-> bool` on a fast function was dropped on the way back: the raw C body
-  answered 1/0, the wrapper built `vint(1)`, and the program printed `1` where
-  the interpreter printed `True`, with `0 error(s)` from both checkers.
-* an `i64v` wrapper checked the argument's tag and not its elements, so
-  `total([1, "a"])` ran a raw body over a `str` and raised `vec elem not int`
-  where the interpreter printed `1a`.
-* `v[0].x` read a field out of a receiver nobody owned and released it never
-  (4 allocations per program), and `v[0].x = 5` stored through the same kind of
-  reference.
-* a moved value reaching a printer printed nothing, because `V_MOVED` was not
-  handled in four exhaustive switches (`-Wswitch` was the only witness).
-* the emitted C carried 82-86 `-Wall -Wextra` warnings, so the README's
-  "compiles as C99 without warnings" was false and untested.
-
-Each case runs on both emitters (`brat-cxx cc` and `codegen_c.emit_file`),
-compares the interpreter against the native binary, and compiles with ASan so a
-leak or a use-after-free fails here.
+The corpus pins dynamic ownership cases found during review: retained local
+aliases, closure-call results, field extraction from an owned receiver, and
+heap values returned through a scalar annotation. Every case compares
+interpreter/native output and compiles the native emitter's C under
+sanitizers; a leak, use-after-free, or warning fails here.
 """
 
 import _scratch
@@ -119,6 +99,54 @@ fn main() -> i64 {
   return 0
 }
 """, "7\n", True),
+    # A local alias takes a reference in the emitted C and must own/release it;
+    # marking the binding as borrowed leaked the vector at every call.
+    "local_alias_released": ("""fn alias_len() -> i64 {
+  let values = [1, 2, 3, 4]
+  let alias = values
+  return len(alias)
+}
+fn main() -> i64 {
+  print(alias_len())
+  return 0
+}
+""", "4\n", True),
+    # Calling a closure through a local variable returns an owned Val even when
+    # its source-level return is dynamic. Both discarded and bound results must
+    # be released without freeing the closure's environment.
+    "closure_call_result_released": ("""let append = fn(x) { return x + "abcdefghijklmnop" }
+print(append("hi_"))
+let result = append("yo_")
+print(result)
+""", "hi_abcdefghijklmnop\nyo_abcdefghijklmnop\n", True),
+    # Returning a field out of an owned local consumes the container reference;
+    # the exit epilogue must not release that already-consumed reference again.
+    "field_return_consumes_receiver_once": ("""fn get_s() -> str {
+  let box = Box { s: "this_is_a_long_heap_string_over_14_bytes" }
+  return box.s
+}
+fn main() -> i64 {
+  print(get_s())
+  return 0
+}
+""", "this_is_a_long_heap_string_over_14_bytes\n", True),
+    # A dynamic heap value may escape a function whose annotation says i64.
+    # Return ownership must follow the value actually transferred, not just the
+    # annotation, so repeated calls remain leak-free.
+    "typed_return_dynamic_heap_released": ("""fn total(values) -> i64 {
+  let mut sum = 0
+  for value in values { sum += value }
+  return sum
+}
+fn main() -> i64 {
+  let mut i = 0
+  while i < 16 {
+    print(total([1, "a"]))
+    i += 1
+  }
+  return 0
+}
+""", "1a\n" * 16, True),
 }
 
 WARN_FLAGS = ["-std=c99", "-Wall", "-Wextra"]
@@ -130,12 +158,7 @@ def run(cmd, env=None):
 
 
 def emit(kind, path):
-    if kind == "cxx":
-        r = run([sys.executable, CLI, "emit-c", path])
-    else:
-        code = ("import sys; sys.path.insert(0, %r); import codegen_c; "
-                "sys.stdout.write(codegen_c.emit_file(%r))" % (ENGINE, path))
-        r = run([sys.executable, "-c", code])
+    r = run([sys.executable, CLI, "emit-c", path])
     assert r.returncode == 0, "%s emit: %r" % (kind, (r.stdout + r.stderr)[-800:])
     return r.stdout
 
@@ -153,7 +176,7 @@ for name in sorted(CASES):
         bad += 1
         continue
 
-    for kind in ("cxx", "py"):
+    for kind in ("cxx",):
         cfile = os.path.join(TMP, "%s.%s.c" % (name, kind))
         with open(cfile, "w", encoding="utf-8") as f:
             f.write(emit(kind, path))
@@ -186,5 +209,5 @@ for name in sorted(CASES):
 if bad:
     print("REVIEW REGRESSIONS: %d case(s) failed" % bad)
     sys.exit(1)
-print("REVIEW REGRESSIONS ALL GREEN (%d cases x 2 emitters, LSan clean, "
+print("REVIEW REGRESSIONS ALL GREEN (%d cases, LSan clean, "
       "interpreter == native, no -Wall warnings)" % len(CASES))

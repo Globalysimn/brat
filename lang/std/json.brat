@@ -1,0 +1,609 @@
+fn is_ws(ch: str) -> bool {
+  return ch == " " || ch == "\t" || ch == "\n" || ch == "\r"
+}
+
+fn is_digit(ch: str) -> bool {
+  return ch >= "0" && ch <= "9"
+}
+
+fn skip_ws(s: str, pos: i64) -> i64 {
+  let mut i = pos
+  let n = len(s)
+  while i < n && is_ws(s[i]) {
+    i = i + 1
+  }
+  return i
+}
+
+fn jres(val, next: i64) {
+  let mut r = {}
+  r.set("val", val)
+  r.set("next", next)
+  return r
+}
+
+fn jbad(msg: str, pos: i64) {
+  let mut r = {}
+  r.set("err", msg + " at byte " + str(pos))
+  return r
+}
+
+fn jhex_digit(ch: str) -> i64 {
+  if ch >= "0" && ch <= "9" {
+    let idx = "0123456789".index_of(ch)
+    if !is_none(idx) {
+      return idx
+    }
+  }
+  let lo = ch.lower()
+  let idx = "abcdef".index_of(lo)
+  if is_none(idx) {
+    return -1
+  }
+  return 10 + idx
+}
+
+fn jhex4(s: str, pos: i64) -> i64 {
+  if pos + 4 > len(s) {
+    return -1
+  }
+  let d0 = jhex_digit(s[pos])
+  let d1 = jhex_digit(s[pos + 1])
+  let d2 = jhex_digit(s[pos + 2])
+  let d3 = jhex_digit(s[pos + 3])
+  if d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0 {
+    return -1
+  }
+  return d0 * 4096 + d1 * 256 + d2 * 16 + d3
+}
+
+fn codepoint_utf8(cp: i64) {
+  if cp <= 0 || cp > 1114111 {
+    return Err("invalid unicode scalar")
+  }
+  if cp >= 55296 && cp <= 57343 {
+    return Err("lone surrogate")
+  }
+  let mut bs = []
+  if cp < 128 {
+    bs.push(cp)
+  } else {
+    if cp < 2048 {
+      bs.push(192 + (cp / 64))
+      bs.push(128 + (cp % 64))
+    } else {
+      if cp < 65536 {
+        bs.push(224 + (cp / 4096))
+        bs.push(128 + ((cp / 64) % 64))
+        bs.push(128 + (cp % 64))
+      } else {
+        bs.push(240 + (cp / 262144))
+        bs.push(128 + ((cp / 4096) % 64))
+        bs.push(128 + ((cp / 64) % 64))
+        bs.push(128 + (cp % 64))
+      }
+    }
+  }
+  return utf8_str(bs)
+}
+
+fn jparse_str(s: str, pos: i64) {
+  let n = len(s)
+  let mut i = pos + 1
+  let mut run_start = i
+  let mut out = ""
+  let mut has_esc = false
+  while i < n {
+    let ch = s[i]
+    if ch == "\"" {
+      if !has_esc {
+        return jres(s.slice(run_start, i), i + 1)
+      }
+      if i > run_start {
+        out = out + s.slice(run_start, i)
+      }
+      return jres(out, i + 1)
+    }
+    if ch < " " {
+      return jbad("unescaped control character in string", i)
+    }
+    if ch == "\\" {
+      has_esc = true
+      if i > run_start {
+        out = out + s.slice(run_start, i)
+      }
+      i = i + 1
+      if i >= n {
+        return jbad("unterminated escape", i)
+      }
+      let esc = s[i]
+      if esc == "\"" {
+        out = out + "\""
+        i = i + 1
+      } else {
+        if esc == "\\" {
+          out = out + "\\"
+          i = i + 1
+        } else {
+          if esc == "/" {
+            out = out + "/"
+            i = i + 1
+          } else {
+            if esc == "b" {
+              out = out + unwrap(utf8_str([8]))
+              i = i + 1
+            } else {
+              if esc == "f" {
+                out = out + unwrap(utf8_str([12]))
+                i = i + 1
+              } else {
+                if esc == "n" {
+                  out = out + "\n"
+                  i = i + 1
+                } else {
+                  if esc == "r" {
+                    out = out + "\r"
+                    i = i + 1
+                  } else {
+                    if esc == "t" {
+                      out = out + "\t"
+                      i = i + 1
+                    } else {
+                      if esc == "u" {
+                        let u1 = jhex4(s, i + 1)
+                        if u1 < 0 {
+                          return jbad("invalid \\uXXXX escape", i)
+                        }
+                        if u1 >= 55296 && u1 <= 56319 {
+                          if i + 10 >= n || s[i + 5] != "\\" || s[i + 6] != "u" {
+                            return jbad("unpaired high surrogate", i)
+                          }
+                          let u2 = jhex4(s, i + 7)
+                          if u2 < 56320 || u2 > 57343 {
+                            return jbad("invalid low surrogate", i + 6)
+                          }
+                          let cp = 65536 + (u1 - 55296) * 1024 + (u2 - 56320)
+                          let dec = codepoint_utf8(cp)
+                          if is_err(dec) {
+                            return jbad("invalid surrogate pair", i)
+                          }
+                          out = out + unwrap(dec)
+                          i = i + 11
+                        } else {
+                          let dec = codepoint_utf8(u1)
+                          if is_err(dec) {
+                            return jbad("invalid unicode escape", i)
+                          }
+                          out = out + unwrap(dec)
+                          i = i + 5
+                        }
+                      } else {
+                        return jbad("unsupported escape \\" + esc, i)
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      run_start = i
+    } else {
+      i = i + 1
+    }
+  }
+  return jbad("unterminated string", pos)
+}
+
+fn jparse_num(s: str, pos: i64) {
+  let n = len(s)
+  let mut i = pos
+  if i < n && s[i] == "-" {
+    i = i + 1
+  }
+  let start_digits = i
+  while i < n && is_digit(s[i]) {
+    i = i + 1
+  }
+  if i == start_digits {
+    return jbad("expected digit", pos)
+  }
+  if s[start_digits] == "0" && i > start_digits + 1 {
+    return jbad("leading zero in number", pos)
+  }
+  let mut is_f = false
+  if i < n && s[i] == "." {
+    is_f = true
+    i = i + 1
+    let frac_start = i
+    while i < n && is_digit(s[i]) {
+      i = i + 1
+    }
+    if i == frac_start {
+      return jbad("expected fractional digit", i)
+    }
+  }
+  if i < n && (s[i] == "e" || s[i] == "E") {
+    is_f = true
+    i = i + 1
+    if i < n && (s[i] == "+" || s[i] == "-") {
+      i = i + 1
+    }
+    let exp_start = i
+    while i < n && is_digit(s[i]) {
+      i = i + 1
+    }
+    if i == exp_start {
+      return jbad("expected exponent digit", i)
+    }
+  }
+  let raw = s.slice(pos, i)
+  if is_f {
+    let pf = raw.parse_float()
+    if is_err(pf) {
+      return jbad("invalid float " + raw, pos)
+    }
+    return jres(unwrap(pf), i)
+  }
+  let pi = raw.parse_int()
+  if is_err(pi) {
+    return jbad("invalid integer " + raw, pos)
+  }
+  return jres(unwrap(pi), i)
+}
+
+fn jparse_val(s: str, pos: i64, depth: i64) {
+  if depth > 128 {
+    return jbad("JSON nesting exceeds maximum depth 128", pos)
+  }
+  let i = skip_ws(s, pos)
+  let n = len(s)
+  if i >= n {
+    return jbad("unexpected end of JSON", i)
+  }
+  let ch = s[i]
+  if ch == "\"" {
+    return jparse_str(s, i)
+  }
+  if ch == "-" || is_digit(ch) {
+    return jparse_num(s, i)
+  }
+  if ch == "t" {
+    if i + 4 <= n && s.slice(i, i + 4) == "true" {
+      return jres(true, i + 4)
+    }
+    return jbad("expected true", i)
+  }
+  if ch == "f" {
+    if i + 5 <= n && s.slice(i, i + 5) == "false" {
+      return jres(false, i + 5)
+    }
+    return jbad("expected false", i)
+  }
+  if ch == "n" {
+    if i + 4 <= n && s.slice(i, i + 4) == "null" {
+      return jres(None, i + 4)
+    }
+    return jbad("expected null", i)
+  }
+  if ch == "[" {
+    let mut arr = []
+    let mut k = skip_ws(s, i + 1)
+    if k < n && s[k] == "]" {
+      return jres(arr, k + 1)
+    }
+    while true {
+      let elem = jparse_val(s, k, depth + 1)
+      if elem.has("err") {
+        return elem
+      }
+      arr.push(elem.get("val"))
+      k = skip_ws(s, elem.get("next"))
+      if k >= n {
+        return jbad("unterminated array", i)
+      }
+      if s[k] == "]" {
+        return jres(arr, k + 1)
+      }
+      if s[k] != "," {
+        return jbad("expected ',' or ']'", k)
+      }
+      k = k + 1
+    }
+  }
+  if ch == "{" {
+    let mut obj = {}
+    let mut k = skip_ws(s, i + 1)
+    if k < n && s[k] == "}" {
+      return jres(obj, k + 1)
+    }
+    while true {
+      k = skip_ws(s, k)
+      if k >= n || s[k] != "\"" {
+        return jbad("expected string key", k)
+      }
+      let key_r = jparse_str(s, k)
+      if key_r.has("err") {
+        return key_r
+      }
+      k = skip_ws(s, key_r.get("next"))
+      if k >= n || s[k] != ":" {
+        return jbad("expected ':'", k)
+      }
+      let val_r = jparse_val(s, k + 1, depth + 1)
+      if val_r.has("err") {
+        return val_r
+      }
+      obj.set(key_r.get("val"), val_r.get("val"))
+      k = skip_ws(s, val_r.get("next"))
+      if k >= n {
+        return jbad("unterminated object", i)
+      }
+      if s[k] == "}" {
+        return jres(obj, k + 1)
+      }
+      if s[k] != "," {
+        return jbad("expected ',' or '}'", k)
+      }
+      k = k + 1
+    }
+  }
+  return jbad("unexpected character '" + ch + "'", i)
+}
+
+pub fn parse(s: str) {
+  let r = jparse_val(s, 0, 0)
+  if r.has("err") {
+    return Err(r.get("err"))
+  }
+  let end = skip_ws(s, r.get("next"))
+  if end != len(s) {
+    return Err("trailing characters at byte " + str(end))
+  }
+  return Ok(r.get("val"))
+}
+
+fn ctrl_u00(b: i64) -> str {
+  let hex = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+  return "\\u00" + hex[(b / 16) % 16] + hex[b % 16]
+}
+
+fn jescape_str(s: str) -> str {
+  let n = len(s)
+  let mut i = 0
+  let mut run_start = 0
+  let mut out = "\""
+  let mut has_esc = false
+  while i < n {
+    let ch = s[i]
+    if ch == "\"" || ch == "\\" || ch < " " {
+      has_esc = true
+      if i > run_start {
+        out = out + s.slice(run_start, i)
+      }
+      if ch == "\"" {
+        out = out + "\\\""
+      } else {
+        if ch == "\\" {
+          out = out + "\\\\"
+        } else {
+          if ch == "\n" {
+            out = out + "\\n"
+          } else {
+            if ch == "\r" {
+              out = out + "\\r"
+            } else {
+              if ch == "\t" {
+                out = out + "\\t"
+              } else {
+                let bs = utf8_bytes(ch)
+                let cb = bs[0]
+                if cb == 8 {
+                  out = out + "\\b"
+                } else {
+                  if cb == 12 {
+                    out = out + "\\f"
+                  } else {
+                    out = out + ctrl_u00(cb)
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      run_start = i + 1
+    }
+    i = i + 1
+  }
+  if !has_esc {
+    return "\"" + s + "\""
+  }
+  if n > run_start {
+    out = out + s.slice(run_start, n)
+  }
+  return out + "\""
+}
+
+pub fn stringify(v) -> str {
+  if is_none(v) {
+    return "null"
+  }
+  if is_str(v) {
+    return jescape_str(v)
+  }
+  if is_vec(v) {
+    let mut out = "["
+    let mut first = true
+    for x in v {
+      if !first {
+        out = out + ","
+      }
+      out = out + stringify(x)
+      first = false
+    }
+    return out + "]"
+  }
+  if is_map(v) {
+    let ks = v.keys().sort()
+    let mut out = "{"
+    let mut first = true
+    for k in ks {
+      if !first {
+        out = out + ","
+      }
+      out = out + jescape_str(str(k)) + ":" + stringify(v.get(k))
+      first = false
+    }
+    return out + "}"
+  }
+  let sv = str(v)
+  if sv == "True" {
+    return "true"
+  }
+  if sv == "False" {
+    return "false"
+  }
+  return sv
+}
+
+fn spaces(count: i64) -> str {
+  let mut out = ""
+  let mut i = 0
+  while i < count {
+    out = out + " "
+    i = i + 1
+  }
+  return out
+}
+
+fn stringify_depth(v, indent: i64, depth: i64) -> str {
+  if indent <= 0 {
+    return stringify(v)
+  }
+  if is_none(v) || is_str(v) || (!is_vec(v) && !is_map(v)) {
+    return stringify(v)
+  }
+  let pad_in = spaces((depth + 1) * indent)
+  let pad_out = spaces(depth * indent)
+  if is_vec(v) {
+    if len(v) == 0 {
+      return "[]"
+    }
+    let mut out = "[\n"
+    let mut first = true
+    for x in v {
+      if !first {
+        out = out + ",\n"
+      }
+      out = out + pad_in + stringify_depth(x, indent, depth + 1)
+      first = false
+    }
+    return out + "\n" + pad_out + "]"
+  }
+  if is_map(v) {
+    let ks = v.keys().sort()
+    if len(ks) == 0 {
+      return "{}"
+    }
+    let mut out = "{\n"
+    let mut first = true
+    for k in ks {
+      if !first {
+        out = out + ",\n"
+      }
+      out = out + pad_in + jescape_str(str(k)) + ": " + stringify_depth(v.get(k), indent, depth + 1)
+      first = false
+    }
+    return out + "\n" + pad_out + "}"
+  }
+  return stringify(v)
+}
+
+pub fn stringify_indent(v, indent: i64) -> str {
+  return stringify_depth(v, indent, 0)
+}
+
+fn get_path_segs(cur, segs: vec[str], pos: i64) {
+  if pos >= len(segs) {
+    return Some(cur)
+  }
+  let seg = segs[pos]
+  if is_map(cur) {
+    if !cur.has(seg) {
+      return None
+    }
+    let next_m = get_path_segs(cur.get(seg), segs, pos + 1)
+    return next_m
+  }
+  if is_vec(cur) {
+    let idx_r = seg.parse_int()
+    if is_err(idx_r) {
+      return None
+    }
+    let idx = unwrap(idx_r)
+    if idx < 0 || idx >= len(cur) {
+      return None
+    }
+    let next_v = get_path_segs(cur[idx], segs, pos + 1)
+    return next_v
+  }
+  return None
+}
+
+pub fn get_path(v, dotted: str) {
+  if len(dotted) == 0 {
+    return Some(v)
+  }
+  let res = get_path_segs(v, dotted.split("."), 0)
+  return res
+}
+
+pub fn get_str(m, key: str, fallback: str) -> str {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if !is_str(val) {
+    return fallback
+  }
+  return val
+}
+
+pub fn get_int(m, key: str, fallback: i64) -> i64 {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if is_none(val) || is_str(val) || is_vec(val) || is_map(val) {
+    return fallback
+  }
+  let sv = str(val)
+  if sv == "True" || sv == "False" {
+    return fallback
+  }
+  let pr = sv.parse_int()
+  if is_err(pr) {
+    return fallback
+  }
+  return unwrap(pr)
+}
+
+pub fn get_bool(m, key: str, fallback: bool) -> bool {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if is_none(val) || is_str(val) || is_vec(val) || is_map(val) {
+    return fallback
+  }
+  let sv = str(val)
+  if sv == "True" {
+    return true
+  }
+  if sv == "False" {
+    return false
+  }
+  return fallback
+}

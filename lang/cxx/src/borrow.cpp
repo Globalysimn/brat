@@ -29,18 +29,21 @@ const std::set<std::string> BUILTINS = {
     "join_all",
     "len", "__at", "Ok", "Err", "Some", "unwrap", "is_err", "is_none", "is_vec",
     "is_str", "is_map", "tagof",
-    "str", "read_file", "write_file", "assert",
+    "str", "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
+    "utf8_bytes", "utf8_str", "fs_rename", "fs_remove", "assert",
+    "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
+    "sql_open", "sql_close", "sql_exec", "sql_query",
     "args", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get",
     "ptr_null", "ptr_is_null", "ptr_offset", "ptr_read_i64", "ptr_write_i64",
     "ptr_read_f64", "ptr_write_f64", "ptr_read_f32", "ptr_write_f32",
     "ptr_read_struct", "ptr_write_struct",
     "ptr_read_ptr", "ptr_read_str",
     "ptr_write_ptr", "ptr_of_str", "ptr_write_str", "errno", "strerror",
-    "__arena_enter", "__arena_leave", "own",
+    "$arena_enter", "$arena_leave", "own",
     "slice_of", "slice_of_ptr", "slice_of_struct", "slice_struct_of",
     "slice_len", "slice_get", "slice_set", "str_from_ptr",
     "lib_open", "lib_sym", "lib_close", "call",
-    "re_match",
+    "re_match", "re_find", "re_captures", "re_replace",
     "tcp_listen", "tcp_connect", "tcp_accept",
     "tcp_send", "tcp_recv", "tcp_close",
     "sbuf", "sbuf_add", "sbuf_len", "sbuf_str",
@@ -58,8 +61,10 @@ std::set<std::string> builtin_heads() {
 
 const std::set<std::string> BUILTIN_HEADS = builtin_heads();
 const std::set<std::string> MUTATORS = {"push", "pop", "sort", "sort_by", "ins", "del", "set"};
-const std::set<std::string> COPY_ANNS = {"i32", "i64", "u64", "f32", "f64", "bool"};
-const std::set<std::string> TYPE_WORDS = {"i32", "i64", "u64", "f32", "f64", "bool", "str"};
+const std::set<std::string> COPY_ANNS = {"i8", "u8", "i16", "u16", "i32", "u32",
+                                         "i64", "u64", "usize", "isize", "f32", "f64", "bool"};
+const std::set<std::string> TYPE_WORDS = {"i8", "u8", "i16", "u16", "i32", "u32",
+                                          "i64", "u64", "usize", "isize", "f32", "f64", "bool", "str"};
 
 // A handle that is taken away by a consuming builtin: closing a socket twice is
 // a use of a moved value, not a runtime guess.
@@ -104,6 +109,7 @@ struct Decl {
     bool param = false;
     std::optional<Mode> mode;
     bool owned = false;
+    bool borrowed_ptr = false;
     bool spawn_frozen = false;
     std::optional<std::pair<std::string, int>> frozen_by;
 };
@@ -333,7 +339,7 @@ bool paths_conflict(const std::string &p, const std::string &q) {
 }
 
 
-bool is_copy_expr(const Expr *e, const Decls &decl) {
+bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullptr) {
     if (!e) return false;
     switch (e->k) {
     case EK::Num:
@@ -342,10 +348,13 @@ bool is_copy_expr(const Expr *e, const Decls &decl) {
         const Decl *d = decl.find(e->a);
         return d && d->copy;
     }
-    case EK::Un: return is_copy_expr(e->kids[0].get(), decl);
-    case EK::Move: return is_copy_expr(e->kids[0].get(), decl);
+    case EK::Call:
+        return funcs != nullptr && funcs->scalar_ret.count(e->a) > 0;
+    case EK::Un: return is_copy_expr(e->kids[0].get(), decl, funcs);
+    case EK::Move: return is_copy_expr(e->kids[0].get(), decl, funcs);
     case EK::Bin:
-        return is_copy_expr(e->kids[0].get(), decl) && is_copy_expr(e->kids[1].get(), decl);
+        return is_copy_expr(e->kids[0].get(), decl, funcs) &&
+               is_copy_expr(e->kids[1].get(), decl, funcs);
     default: return false;
     }
 }
@@ -353,9 +362,7 @@ bool is_copy_expr(const Expr *e, const Decls &decl) {
 // The same question, asked with the function table in hand: a call to an extern
 // whose *declared* result is a scalar slot produces a fresh value.
 static bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable &funcs) {
-    if (!e) return false;
-    if (e->k == EK::Call) return funcs.scalar_ret.count(e->a) > 0;
-    return is_copy_expr(e, decl);
+    return is_copy_expr(e, decl, &funcs);
 }
 
 // Only an annotation settles whether an element is Copy: `vec[i64]` reads an
@@ -409,6 +416,36 @@ void add_unique(std::vector<std::string> &out, const std::vector<std::string> &m
     }
 }
 
+bool is_borrowed_ptr_expr(const Expr *e, const Decls &decl, FnTable &funcs,
+                          std::set<std::string> &seen) {
+    while (e && (e->k == EK::Quest || e->k == EK::Move) && !e->kids.empty())
+        e = e->kids[0].get();
+    if (!e) return false;
+    if (auto v = deref_var(e, decl, funcs)) {
+        if (!seen.insert(*v).second) return false;
+        const Decl *d = decl.find(*v);
+        return d && d->borrowed_ptr;
+    }
+    if (e->k == EK::Var) {
+        if (!seen.insert(e->a).second) return false;
+        const Decl *d = decl.find(e->a);
+        return d && d->borrowed_ptr;
+    }
+    if (e->k == EK::Call) {
+        if (funcs.borrows_ret.count(e->a) > 0) return true;
+        if (e->a == "ptr_of_str" && funcs.sigs.count(e->a) == 0 && !e->kids.empty())
+            return true;
+        if (e->a == "ptr_offset" && !e->kids.empty())
+            return is_borrowed_ptr_expr(e->kids[0].get(), decl, funcs, seen);
+    }
+    return false;
+}
+
+bool is_borrowed_ptr_expr(const Expr *e, const Decls &decl, FnTable &funcs) {
+    std::set<std::string> seen;
+    return is_borrowed_ptr_expr(e, decl, funcs, seen);
+}
+
 std::vector<std::string> borrow_srcs(const Expr *e, const Decls &decl, FnTable &funcs);
 std::vector<std::string> borrow_srcs_at(const std::string &name, const Decls &decl,
                                         FnTable &funcs);
@@ -456,12 +493,24 @@ std::vector<std::string> borrow_srcs(const Expr *e, const Decls &decl, FnTable &
         add_unique(out, borrow_srcs(e->kids[0].get(), decl, funcs));
         add_unique(out, borrow_srcs(e->kids[1].get(), decl, funcs));
         return out;
-    case EK::Call:
-        if ((e->a == "ref" || e->a == "borrow") && funcs.sigs.count(e->a) == 0 &&
-            !e->kids.empty()) {
+    case EK::Call: {
+        if ((e->a == "ref" || e->a == "borrow" || e->a == "ptr_of_str") &&
+            funcs.sigs.count(e->a) == 0 && !e->kids.empty()) {
+            return borrow_srcs(e->kids[0].get(), decl, funcs);
+        }
+        auto bit = funcs.borrows_ret.find(e->a);
+        if (bit != funcs.borrows_ret.end()) {
+            for (size_t ix : bit->second)
+                if (ix < e->kids.size())
+                    add_unique(out, borrow_srcs(e->kids[ix].get(), decl, funcs));
+            return out;
+        }
+        if (e->a == "ptr_offset" && !e->kids.empty() &&
+            is_borrowed_ptr_expr(e->kids[0].get(), decl, funcs)) {
             return borrow_srcs(e->kids[0].get(), decl, funcs);
         }
         return out;
+    }
     default: return out;
     }
 }
@@ -676,7 +725,8 @@ int edit_distance(const std::string &a, const std::string &b) {
 std::optional<std::string> name_suggestion(const std::string &name,
                                            const Decls *decl,
                                            const FnTable *funcs) {
-    if (name.size() < 3) return std::nullopt;
+    if (name.size() < 3 || name.size() > 128) return std::nullopt;
+    int limit = name.size() <= 4 ? 1 : 2;
     std::set<std::string> candidates = BUILTINS;
     if (decl) {
         for (const auto &[candidate, _] : decl->v) candidates.insert(candidate);
@@ -686,11 +736,15 @@ std::optional<std::string> name_suggestion(const std::string &name,
     }
     std::vector<std::pair<int, std::string>> ranked;
     for (const std::string &candidate : candidates) {
-        if (candidate != name) ranked.emplace_back(edit_distance(name, candidate), candidate);
+        if (candidate == name) continue;
+        const size_t diff = name.size() > candidate.size()
+                                ? (name.size() - candidate.size())
+                                : (candidate.size() - name.size());
+        if (diff > static_cast<size_t>(limit)) continue;
+        ranked.emplace_back(edit_distance(name, candidate), candidate);
     }
     if (ranked.empty()) return std::nullopt;
     std::sort(ranked.begin(), ranked.end());
-    int limit = name.size() <= 4 ? 1 : 2;
     if (ranked[0].first > limit ||
         (ranked.size() > 1 && ranked[1].first == ranked[0].first)) {
         return std::nullopt;
@@ -849,6 +903,12 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
         if (!callee_known(e->a, decl, funcs)) {
             errs.note("use of undeclared var `" + root_of(e->a) + "`",
                       undeclared_rel(root_of(e->a), nullptr, &decl, &funcs));
+        } else if (e->a == "ptr_of_str" && funcs.sigs.count(e->a) == 0 && !e->kids.empty()) {
+            const Expr *a0 = skip_quest(e->kids[0].get());
+            if (!(a0 && (a0->k == EK::Str || a0->k == EK::RStr)) &&
+                borrow_srcs(a0, decl, funcs).empty()) {
+                errs.note("`ptr_of_str` wants a string binding or string literal, not a temporary");
+            }
         }
         break;
     }
@@ -931,6 +991,9 @@ void scan_moves(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs) {
             if (auto borrowed = borrowed_param_source(root, decl, seen)) {
                 errs.note("cannot move borrowed parameter `" + *borrowed +
                           "`: declare it `move` to take ownership");
+            } else if (d->borrowed_ptr) {
+                errs.note("cannot move borrowed pointer `" + root +
+                          "`: only its owner may be moved or freed");
             }
         }
         if (verb == "sent" && d->copy) continue;
@@ -1446,10 +1509,10 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
     if (!check_write(path, decl, borrows, errs, true)) return;
     Decl *d = decl.find(tgt);
     d->moved = false;
-    if (d->pinned && is_copy_expr(value, decl)) {
+    if (d->pinned && is_copy_expr(value, decl, funcs)) {
         d->copy = true;
     } else {
-        d->copy = is_copy_expr(value, decl);
+        d->copy = is_copy_expr(value, decl, funcs);
         d->pinned = false;
     }
     if (path.find('.') == std::string::npos) {
@@ -1513,6 +1576,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         d.dl = errs.line;
         bool owned_call = e && e->k == EK::Call && funcs.owned_ret.count(e->a) > 0;
         if (owned_call) d.owned = true;
+        if (is_borrowed_ptr_expr(e, decl, funcs)) d.borrowed_ptr = true;
         decl.set(s.a, std::move(d));
         return;
     }
@@ -1768,7 +1832,8 @@ void unused_in(const Body &body, std::vector<BorrowDiag> &warns) {
             declared.emplace_back(s.a, s.line);
         } else if (s.k == SK::Pub && !s.body.empty()) {
             const Stmt &in = *s.body[0];
-            if (in.k == SK::Let || in.k == SK::LetTmp) declared.emplace_back(in.a, in.line);
+            if ((in.k == SK::Let || in.k == SK::LetTmp) && !in.konst)
+                declared.emplace_back(in.a, in.line);
         }
     }
     std::vector<std::string> used_list;
@@ -2048,15 +2113,56 @@ static void register_nested(const std::vector<StmtP> &body, FnTable &funcs) {
 }
 
 
-FnTable pub_sigs(const std::vector<StmtP> &body) {
+static std::vector<size_t> extern_borrows_indices(const ExternDecl &ext) {
+    std::vector<size_t> out;
+    for (const std::string &eff : ext.effects) {
+        if (eff.rfind("borrows:", 0) == 0) {
+            std::string bp = eff.substr(8);
+            for (size_t i = 0; i < ext.params.size(); i++) {
+                if (ext.params[i].name == bp &&
+                    std::find(out.begin(), out.end(), i) == out.end())
+                    out.push_back(i);
+            }
+        }
+    }
+    return out;
+}
+
+FnTable pub_sigs(const std::vector<StmtP> &body,
+                 const std::set<std::string> &exp_fns) {
+    static const std::set<std::string> copy_rets = {
+        "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
+        "f32", "f64",
+    };
     FnTable out;
     for (const auto &sp : body) {
+        if (sp->k == SK::Extern) {
+            out.sigs[sp->ext.name] = fn_modes(sp->ext.params);
+            if (sp->ext.ret && copy_rets.count(*sp->ext.ret)) out.scalar_ret.insert(sp->ext.name);
+            else if (sp->ext.owned) out.owned_ret.insert(sp->ext.name);
+            auto bix = extern_borrows_indices(sp->ext);
+            if (!bix.empty()) out.borrows_ret[sp->ext.name] = std::move(bix);
+            continue;
+        }
+        if (sp->k == SK::Fn && !sp->fns.empty()) {
+            const std::string fnm = sp->fns[0].name.value_or("");
+            if (exp_fns.count(fnm)) out.sigs[fnm] = fn_modes(sp->fns[0].params);
+            continue;
+        }
         if (sp->k != SK::Pub || sp->body.empty()) continue;
         const Stmt &in = *sp->body[0];
         if (in.k == SK::Fn) {
             out.sigs[in.fns[0].name.value_or("")] = fn_modes(in.fns[0].params);
+        } else if (in.k == SK::Extern) {
+            out.sigs[in.ext.name] = fn_modes(in.ext.params);
+            if (in.ext.ret && copy_rets.count(*in.ext.ret)) out.scalar_ret.insert(in.ext.name);
+            else if (in.ext.owned) out.owned_ret.insert(in.ext.name);
+            auto bix = extern_borrows_indices(in.ext);
+            if (!bix.empty()) out.borrows_ret[in.ext.name] = std::move(bix);
         } else if (in.k == SK::Enum) {
             for (const Variant &v : in.variants) out.sigs[v.name] = {};
+        } else if ((in.k == SK::Let || in.k == SK::LetTmp) && in.konst) {
+            out.pub_consts.insert(in.a);
         }
     }
     return out;
@@ -2069,18 +2175,53 @@ FnTable pub_sigs(const std::vector<StmtP> &body) {
 // be: a program whose signature the emitter cannot spell used to pass `check`
 // and die in `build`. Same text and order as `borrow.py`.
 const std::set<std::string> FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32",
-                                         "i64", "u64", "usize", "f32", "f64",
+                                         "i64", "u64", "usize", "isize", "f32", "f64",
                                          "str", "ptr"};
 
 const char *FFI_HINT =
     "a supported extern slot is bool, i8..u64, usize, f32, f64, str, ptr, "
     "ptr[T], fn(...), an `extern struct`, or `none`";
 
-bool ffi_slot_ok(const std::optional<std::string> &ann, const std::set<std::string> &structs) {
+bool valid_cb_slot(const std::string &a) {
+    size_t i = 2;
+    while (i < a.size() && std::isspace(static_cast<unsigned char>(a[i]))) i++;
+    if (i >= a.size() || a[i] != '(') return false;
+    int depth = 0;
+    for (; i < a.size(); i++) {
+        if (a[i] == '(') depth++;
+        else if (a[i] == ')') {
+            depth--;
+            if (depth < 0) return false;
+        }
+    }
+    return depth == 0;
+}
+
+bool ffi_slot_ok(const std::optional<std::string> &ann, const std::set<std::string> &structs,
+                 bool allow_array = false) {
     if (!ann || *ann == "none") return true;
     const std::string &a = *ann;
+    if (allow_array && a.rfind("ptr[", 0) != 0 && a.find('[') != std::string::npos && !a.empty() && a.back() == ']') {
+        auto lb = a.find('[');
+        std::string elem = a.substr(0, lb);
+        auto ef = elem.find_first_not_of(" \t");
+        auto el = elem.find_last_not_of(" \t");
+        elem = (ef == std::string::npos) ? "" : elem.substr(ef, el - ef + 1);
+        std::string cnt = a.substr(lb + 1, a.size() - lb - 2);
+        bool dig = !cnt.empty() && cnt.size() <= 7;
+        for (char ch : cnt) if (!std::isdigit(static_cast<unsigned char>(ch))) dig = false;
+        if (dig) {
+            long long n = std::stoll(cnt);
+            if (n >= 1 && n <= 1048576) return FFI_SLOTS.count(elem) > 0 || structs.count(elem) > 0;
+        }
+    }
     if (FFI_SLOTS.count(a) || structs.count(a)) return true;
-    return a.rfind("fn", 0) == 0 || a.rfind("ptr", 0) == 0;
+    if (a.rfind("ptr[", 0) == 0 && a.back() == ']') {
+        std::string inner = a.substr(4, a.size() - 5);
+        return inner.find_first_not_of(" \t") != std::string::npos;
+    }
+    if (a.rfind("fn", 0) == 0) return valid_cb_slot(a);
+    return false;
 }
 
 void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {
@@ -2119,7 +2260,7 @@ void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {
                 if (!t) return false;
                 static const std::set<std::string> k = {
                     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-                    "usize", "f32", "f64", "bool"};
+                    "usize", "isize", "f32", "f64", "bool"};
                 return k.count(*t) > 0;
             };
             for (const Param &p : e.params) {
@@ -2137,7 +2278,7 @@ void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {
             }
         } else if (node->k == SK::ExternStruct) {
             for (const StructField &f : node->fields) {
-                if (ffi_slot_ok(f.ann, structs)) continue;
+                if (ffi_slot_ok(f.ann, structs, true)) continue;
                 errs.line = line;
                 errs.note("unsupported FFI type `" + *f.ann + "` for field `" + f.name +
                           "` of extern struct `" + node->a + "` (hint: " + FFI_HINT + ")");
@@ -2149,7 +2290,11 @@ void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {
 BorrowOut borrow_check(const std::vector<StmtP> &body,
                        const std::map<std::string, std::vector<ParamMode>> &extra,
                        const std::vector<std::pair<uint32_t, std::string>> &stray,
-                       const std::set<std::string> &module_heads) {
+                       const std::set<std::string> &module_heads,
+                       const std::set<std::string> &extra_consts,
+                       const std::set<std::string> &extra_scalar_rets,
+                       const std::map<std::string, std::vector<size_t>> &extra_borrows_rets,
+                       const std::set<std::string> &extra_owned_rets) {
     BorrowOut out;
     Errs errs;
     std::vector<BorrowDiag> warns;
@@ -2158,6 +2303,9 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
 
     FnTable funcs;
     for (const auto &kv : extra) funcs.sigs[kv.first] = kv.second;
+    funcs.scalar_ret.insert(extra_scalar_rets.begin(), extra_scalar_rets.end());
+    for (const auto &kv : extra_borrows_rets) funcs.borrows_ret[kv.first] = kv.second;
+    funcs.owned_ret.insert(extra_owned_rets.begin(), extra_owned_rets.end());
     std::map<std::string, std::vector<std::string>> traits;
     for (const auto &sp : body) {
         const Stmt *node = pub_inner(*sp);
@@ -2166,19 +2314,21 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
             funcs.sigs[f.name.value_or("")] = fn_modes(f.params);
         } else if (node->k == SK::Extern) {
             funcs.sigs[node->ext.name] = fn_modes(node->ext.params);
+            auto bix = extern_borrows_indices(node->ext);
+            if (!bix.empty()) funcs.borrows_ret[node->ext.name] = std::move(bix);
             // An owned result the declaration already refused must not also
             // become a phantom leak.
             {
                 static const std::set<std::string> copies = {
                     "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-                    "usize", "f32", "f64", "bool"};
+                    "usize", "isize", "f32", "f64", "bool"};
                 if (node->ext.ret && copies.count(*node->ext.ret))
                     funcs.scalar_ret.insert(node->ext.name);
             }
             if (node->ext.owned) {
                 static const std::set<std::string> copies = {
                     "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-                    "usize", "f32", "f64", "bool"};
+                    "usize", "isize", "f32", "f64", "bool"};
                 if (!(node->ext.ret && copies.count(*node->ext.ret)))
                     funcs.owned_ret.insert(node->ext.name);
             }
@@ -2235,6 +2385,25 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
 
     cut_body(wrap(body), warns);
     Decls decl;
+    for (const std::string &cn : extra_consts) {
+        Decl d;
+        d.konst = true;
+        d.copy = true;
+        d.pinned = true;
+        decl.set(cn, std::move(d));
+    }
+    for (const auto &sp : body) {
+        const Stmt *node = pub_inner(*sp);
+        if ((node->k == SK::Let || node->k == SK::LetTmp) && node->konst) {
+            Decl d;
+            d.konst = true;
+            d.copy = true;
+            d.pinned = true;
+            d.ann = node->ann;
+            d.dl = node->line;
+            decl.set(node->a, std::move(d));
+        }
+    }
     Borrows borrows;
     register_nested(body, funcs);
     walk_block(wrap(body), decl, borrows, errs, funcs);
@@ -2247,7 +2416,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
     }
     for (const auto &sp : body) {
         const Stmt *node = pub_inner(*sp);
-        if (node->k == SK::Fn) {
+        if (node->k == SK::Fn || node->k == SK::ExportFn) {
             unused_in(wrap(node->fns[0].body), warns);
         } else if (node->k == SK::Impl) {
             for (const FnDecl &f : node->fns) unused_in(wrap(f.body), warns);

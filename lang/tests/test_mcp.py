@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -88,7 +87,8 @@ c.send({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
 
 listed = c.request("tools/list")
 names = [t["name"] for t in listed["result"]["tools"]]
-check(names == ["brat_check", "brat_run", "brat_build", "brat_api", "brat_deps"],
+check(names == ["brat_check", "brat_run", "brat_build", "brat_api", "brat_deps",
+                "brat_abi_matrix", "brat_pkg_verify", "brat_doc", "brat_opt_proofs"],
       "tool order: %r" % (names,))
 check(all("inputSchema" in t and t["inputSchema"]["type"] == "object"
           for t in listed["result"]["tools"]), "every tool has an object schema")

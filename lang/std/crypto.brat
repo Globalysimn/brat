@@ -1,0 +1,136 @@
+// std.crypto — FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, timing-safe eq & CSPRNG
+
+fn bytes_to_hex(bs) -> str {
+  let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+  let mut out = []
+  for b in bs {
+    out.push(digits[b / 16] + digits[b % 16])
+  }
+  return out.join("")
+}
+
+fn bit_xor_byte(a: i64, b: i64) -> i64 {
+  let mut x = a
+  let mut y = b
+  let mut res = 0
+  let mut bit = 1
+  let mut k = 0
+  while k < 8 {
+    let ba = x % 2
+    let bb = y % 2
+    if ba != bb {
+      res = res + bit
+    }
+    x = x / 2
+    y = y / 2
+    bit = bit * 2
+    k = k + 1
+  }
+  return res
+}
+
+pub fn sha256(data) {
+  return sha256_bytes(data)
+}
+
+pub fn sha256_hex(data) {
+  let r = sha256_bytes(data)
+  if is_err(r) {
+    return r
+  }
+  return Ok(bytes_to_hex(unwrap(r)))
+}
+
+fn to_byte_vec(v) {
+  if is_str(v) {
+    return Ok(utf8_bytes(v))
+  }
+  if is_vec(v) {
+    let chk = sha256_bytes(v)
+    if is_err(chk) {
+      return Err("byte out of range 0..255")
+    }
+    return Ok(v)
+  }
+  return Err("expected str or vec[i64]")
+}
+
+pub fn hmac_sha256(key, msg) {
+  let kr = to_byte_vec(key)
+  if is_err(kr) {
+    return kr
+  }
+  let mr = to_byte_vec(msg)
+  if is_err(mr) {
+    return mr
+  }
+  let mut kb = unwrap(kr)
+  let mb = unwrap(mr)
+  if len(kb) > 64 {
+    let hk = sha256_bytes(kb)
+    if is_err(hk) {
+      return hk
+    }
+    kb = unwrap(hk)
+  }
+  let mut kpad = []
+  for b in kb {
+    kpad.push(b)
+  }
+  while len(kpad) < 64 {
+    kpad.push(0)
+  }
+  let mut inner = []
+  let mut outer = []
+  for b in kpad {
+    inner.push(bit_xor_byte(b, 54))
+    outer.push(bit_xor_byte(b, 92))
+  }
+  for b in mb {
+    inner.push(b)
+  }
+  let ih = sha256_bytes(inner)
+  if is_err(ih) {
+    return ih
+  }
+  for b in unwrap(ih) {
+    outer.push(b)
+  }
+  return sha256_bytes(outer)
+}
+
+pub fn hmac_sha256_hex(key, msg) {
+  let r = hmac_sha256(key, msg)
+  if is_err(r) {
+    return r
+  }
+  return Ok(bytes_to_hex(unwrap(r)))
+}
+
+pub fn constant_time_eq(a: str, b: str) -> bool {
+  let ba = utf8_bytes(a)
+  let bb = utf8_bytes(b)
+  if len(ba) != len(bb) {
+    return false
+  }
+  let n = len(ba)
+  let mut diff = 0
+  let mut i = 0
+  while i < n {
+    diff = diff + bit_xor_byte(ba[i], bb[i])
+    i = i + 1
+  }
+  return diff == 0
+}
+
+pub fn rand_bytes(n: i64) {
+  return random_bytes(n)
+}
+
+pub fn rand_hex(n_bytes: i64) {
+  let r = random_bytes(n_bytes)
+  if is_err(r) {
+    return r
+  }
+  return Ok(bytes_to_hex(unwrap(r)))
+}

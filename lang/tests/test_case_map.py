@@ -8,8 +8,6 @@ are covered by their own tests.
 import _scratch
 import os
 import subprocess
-import sys
-import tempfile
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -16,11 +16,11 @@ extern struct Point { x: i64, y: f64 }
 ```
 
 Types: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `usize`, `f32`,
-`f64`, `str`, `ptr`, `ptr[T]`, `fn(...) -> T`, `none`, and names declared by
-`extern struct`.
+`f64`, `bool`, `str`, `ptr`, `ptr[T]`, `fn(...) -> T`, `none`, and names
+declared by `extern struct`.
 
-Every width has one C spelling, and one table decides it (`_FFI_C` in
-`codegen_c.py`, `ffi_scalar_c()` in `emit.cpp`): the declaration and the call site
+Every width has one C spelling, and one table decides it
+(`ffi_scalar_c()` in `emit.cpp`): the declaration and the call site
 read the same entry, so a `short` cannot be declared `int64_t` in one place and
 called as two bytes in another. A width with no entry is refused at emit time
 rather than spelled as a machine word. Narrow results widen on return, so a
@@ -38,9 +38,10 @@ matters on a 32-bit target). A fixed-width type is the width it names:
 widened to `i32`, which is two bytes short of the truth in both directions: a
 generated `extern struct` holding an `int8_t` was refused by the layout proof
 that generated it, and a narrow *result* was read as four bytes out of a
-register where the ABI only promises one. `bool`/`_Bool` are one byte, so they
-bind as `u8` -- a BRAT `bool` is not an extern slot, and `u8` is the spelling
-that is one byte wide and range-checked.
+register where the ABI only promises one. C `bool`/`_Bool` bind as BRAT
+`bool`, not as `u8`: the boundary converts between C's boolean and BRAT's
+`true`/`false`, while `u8` remains the distinct `unsigned char` slot and is
+refused by a header proof for a `_Bool` declaration.
 
 The widths a declaration is compared against come from a **data model**, and a
 `--target` triple picks it: `lp64` (Linux, macOS; `long` 8 bytes), `llp64`
@@ -439,11 +440,9 @@ honest state of affairs: an effect not declared is a fact not known.
 `pure` reaches the emitted C as `BRAT_ATTR_CONST` (or `BRAT_ATTR_PURE` when it
 also reads through a parameter) and `nothrow` as `BRAT_ATTR_NOTHROW`. The macros
 are empty on a compiler without `__attribute__`, so the promise is advice, not a
-requirement. Measured on this emitter the advice buys nothing yet: a `Val` is
-24 bytes, past the limit for passing in registers, so every operand lives in
-memory and the C compiler cannot keep one across the call it would have to
-reuse. The attribute is correct and costs nothing; the win is behind the size of
-`Val`, not behind the effect.
+requirement. With the 16-byte `Val` representation operands pass in
+two 64-bit registers on SysV x86-64/ARM64, and `borrows(p)` records that a
+foreign callee does not retain `p` past the call return.
 
 ## Callback contracts
 
@@ -527,8 +526,9 @@ for the duration of a call. A signature is checked against BRAT arguments but
 cannot be checked against an arbitrary C function's real prototype. Supplying a
 signature that disagrees with that prototype is still undefined behaviour. A
 returned `ptr` is not owned or pinned by BRAT; its validity remains the
-plugin's contract, especially after closing the library. Dynamic plugin loading
-is currently unavailable on Windows.
+plugin's contract, especially after closing the library. On POSIX `lib_open`
+uses `dlopen`/`dlsym`/`dlclose`; on Windows it uses
+`LoadLibraryW`/`GetProcAddress`/`FreeLibrary`.
 
 ## Generating and exporting
 
@@ -548,9 +548,10 @@ signatures may use `i32`, `i64`, `f64`, `str`, `ptr` and `extern struct`.
 
 ## Safety
 
-- FFI misuse is a BRAT error, never a segfault: a wrong argument type, a
-  non-integer where an integer is declared, a negative or null pointer, a
-  `str` with a NUL byte in the interpreter.
+- Checked FFI misuse is a BRAT error rather than a segfault: a wrong argument
+  type, a non-integer where an integer is declared, a negative or null pointer,
+  a `str` with a NUL byte in the interpreter. A prototype that does not match
+  the real C function is outside the check and is undefined behavior.
 - `brat build` and `brat dist` refuse what the checker rejects, so the native
   path is not reached with a wrong type.
 - `i32` returns are read as 32-bit ints in both backends: `strcmp` returning -1
@@ -583,8 +584,8 @@ Three witnesses, and each one sees something the others cannot:
 |---|---|---|
 | declarations | same width, arity, field order, variadic tail? | the header text |
 | callbacks | same parameter and result widths *inside* the `(*)(...)`? | the header text |
-| layout | same struct size and member offsets? | the C compiler, via `_Static_assert` |
-| symbols | does the library export the name? | `dlopen` |
+| layout | same struct size and member offsets? | the C compiler, via `_Static_assert` (and DWARF DIEs under `--object`) |
+| symbols | does the library export the name? | static ELF / Mach-O / PE-COFF symbol tables (no `dlopen` on file paths) |
 
 A callback parameter is compared as a signature, not as a pointer: BRAT's
 `fn(f32)->f32` against C's `float (*cb)(float)` is one argument and one result,
@@ -595,13 +596,16 @@ Width, not kind, is what protects the ABI: `long long` and `int64_t` are the
 same eight bytes and BRAT calls them `i64`; `float` and `double` are not, and
 BRAT calls them `f32` and `f64`. That is the distinction the command exists for.
 
-`--json` prints the same verdict for a build gate, in both front ends:
-`brat-cxx check --json` hands the request to the CLI that owns the format rather
-than growing a second copy of it, and a flag it does not know is a usage error
-instead of a file named `--json`.
+`--json` prints the same verdict for a build gate in both front ends (`brat-cxx`
+emits structured JSON directly via `JsonWriter`), and an unknown flag is a usage
+error instead of a file named `--json`.
 
 Without `--header` the symbol check still runs, and the output says the
-comparison was not made.
+comparison was not made. Passing `--object libfoo.so` (or `.o`, `.a`, `.dylib`,
+`.dll`) additionally verifies every `extern fn`, `extern struct`, and
+`extern union` directly against compiled ELF/Mach-O/PE-COFF symbols and DWARF
+v2–v5 type DIEs (`brat ffi --header api.h --object libfoo.so --emit-manifest
+foo.bratbind` writes a SHA-256-pinned `.bratbind` manifest).
 
 ## What the binary carries
 
@@ -642,9 +646,10 @@ part no other C interop has: rustc, cgo, ctypes and bindgen compare declarations
 once and the executable forgets, so the drift is found by the corrupted value it
 causes.
 
-What it still cannot do: a header may disagree with the object file beside it,
-and only the linker knows that. The contract records what was compared, not a
-promise that the bytes follow it.
+What `--header` alone cannot see — a header that disagrees with the compiled
+object beside it — `--object` checks directly against the binary's symbol table
+and DWARF v2–v5 DIEs; stripped objects without DWARF still check exported symbol
+names and header `_Static_assert` layouts.
 
 `brat emit-c` writes the same block (`--header` proves it first), and an
 `extern struct` is laid out by the target's rules -- `emit-c --target i686-linux-gnu`
@@ -718,15 +723,19 @@ thrown away. So the choice is made out loud:
   (--unsafe-ffi)` on stderr, and records `proved: against no header` in the
   contract, so a reader of the binary learns the same thing.
 
-`--interp` is not gated: it is the reference implementation, not a binary, and it
-has no ABI to get wrong. A program with no `extern` is not gated either -- there
-is nothing to prove. Both flags belong to `brat` only up to `--`; after it an
-argument is the program's, even one called `--header`.
+`--interp` is gated too: it crosses the C ABI through `ctypes`, so a mismatched
+prototype can still corrupt or terminate the process. Use `--header FILE` or a
+verified `.bratbind`; `--unsafe-ffi` is the explicit escape hatch for test
+fixtures and callers who accept that risk. The interpreter scans loaded source
+for C-call sites; a declaration with no call site does not trigger this scan.
+The scan is conservative and does not prove control-flow reachability, so a call
+inside an uncalled function can still require a proof. FFI flags belong to
+`brat` only up to `--`; after it an argument is the program's, even one called
+`--header`.
 
-The gate is the driver's. `lang/cxx/bin/brat-cxx build` is the backend `brat`
-calls, not the documented way to build a program: run directly it asks for no
-header and refuses nothing, and the binary it produces carries no contract. Use
-`brat build`.
+Both `brat` and `lang/cxx/bin/brat-cxx` (`build`, `run`, `dist`, `emit-c`)
+enforce the exact same `--header` / `.bratbind` / `--unsafe-ffi` gate and embed
+the `BRATFFI1` contract block in compiled binaries.
 
 ## Structs behind a pointer
 

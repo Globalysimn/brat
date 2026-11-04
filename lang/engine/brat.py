@@ -36,9 +36,17 @@ from brat.runtime import Done, run, RECURSION_BUDGET
 from brat.parser import parse_prog, take_stray_braces
 from brat.modules import load_file, load_source, ModuleError
 
+__all__ = [
+    "Cur", "Done", "ModuleError", "RECURSION_BUDGET", "lex", "load_file",
+    "load_source", "parse_prog", "run", "take_stray_braces",
+]
+
 HERE = _o.path.dirname(_o.path.abspath(__file__))
 
-SUBCOMMANDS = ('run', 'check', 'fmt', 'build', 'emit-c', 'test', 'pkg', 'dist')
+SUBCOMMANDS = (
+    'run', 'check', 'fmt', 'build', 'emit-c', 'test', 'pkg', 'dist',
+    'new', 'deps', 'api', 'bindgen', 'ffi', 'lsp', 'mcp', 'explain',
+)
 
 _CLI = None
 

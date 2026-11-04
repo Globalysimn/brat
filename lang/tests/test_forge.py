@@ -17,7 +17,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -51,7 +50,7 @@ def write(name, src):
 
 def run(name):
     path = os.path.join(TMP, name)
-    p = subprocess.run([sys.executable, "-X", "utf8", CLI, "run", "--interp", path],
+    p = subprocess.run([sys.executable, "-X", "utf8", CLI, "run", "--interp", "--no-check", path],
                        capture_output=True, text=True, encoding="utf-8",
                        timeout=120, env=ENV)
     return p.returncode, p.stdout + p.stderr

@@ -221,7 +221,7 @@ def check_name(name):
         raise ScaffoldError("NAME is required")
     if name != name.strip() or name in (".", ".."):
         raise ScaffoldError("bad project name %r" % (name,))
-    if any(c in name for c in "/\\:*?\"<>|") or name[0] in "-.":
+    if any(c in name for c in "/\\:*?\"<>|") or name[0] in "-." or any(ord(c) < 0x20 or ord(c) == 0x7F for c in name):
         raise ScaffoldError("bad project name %r" % (name,))
     if len(name) > 64:
         raise ScaffoldError("project name too long (%d chars)" % len(name))

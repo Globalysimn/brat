@@ -53,6 +53,16 @@ CASES = {
     "too_deep_expr": "fn main() -> i64 {\n  let a = 1\n  let b = 2\n  let x = %s1%s\n  return 0\n}\n"
                      % ("(" * 300, ")" * 300),
     "too_deep_block": "fn main() -> i64 {\n%s\n  return 0\n}\n" % ("if true {\n" * 300),
+    # An extern result had no body or required semicolon to end it, and the
+    # collector kept reading: `-> bool` before `print(...)` became the
+    # unsupported type `boolprint(...)`, hiding the real line-2 type error.
+    "extern_result_before_expr": "extern fn flip(x: bool) -> bool\nprint(flip(2))\n",
+    "extern_result_same_line_expr": "extern fn f(x: i64) -> i64 print(1)\n",
+    "extern_result_generic_before_expr": "extern fn f() -> vec[i64]\nprint(1)\n",
+    "extern_result_errno_before_expr": "extern fn f() -> i32 errno\nprint(1)\n",
+    # The snippet limit is 200 characters, not bytes: clipping this line
+    # by bytes cut it earlier in C++ and could split a UTF-8 character.
+    "long_unicode_line": 'print("' + ("Ж" * 250) + '" ++ 1)\n',
 }
 
 
@@ -87,6 +97,24 @@ def main():
         if a.returncode and ": error: " not in py:
             print("FAIL %s: rejected without a `file:line: error: ` line:\n%s" % (name, py))
             bad += 1
+    # Invalid UTF-8 follows a different load path in Python, so the text
+    # need not match there. The C++ diagnostic itself must still be valid
+    # UTF-8: echoing byte 0xff into a terminal, pipe or JSON consumer just
+    # moves the decoding failure into the tool reading the diagnostic.
+    bad_path = os.path.join(TMP, "invalid_utf8.brat")
+    with open(bad_path, "wb") as f:
+        f.write(b'let x = "\xff"\n')
+    raw = subprocess.run([cxx, "check", bad_path], capture_output=True, timeout=600)
+    try:
+        text = (raw.stdout + raw.stderr).decode("utf-8")
+    except UnicodeDecodeError:
+        print("FAIL invalid_utf8: C++ diagnostic is not valid UTF-8")
+        bad += 1
+    else:
+        if raw.returncode == 0 or "source is not valid UTF-8" not in text or "\ufffd" not in text:
+            print("FAIL invalid_utf8: unexpected diagnostic:\n%s" % text)
+            bad += 1
+
     if bad:
         print("PARSE DIAG: %d case(s) failed" % bad)
         return 1

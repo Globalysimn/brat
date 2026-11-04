@@ -86,12 +86,12 @@ def main():
         f.write(PROGRAM.replace("LIB", lib))
 
     # 1. The interpreter: ctypes c_float in, out, and inside a struct.
-    p = subprocess.run([sys.executable, CLI, "run", "--interp", path],
+    p = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path],
                        capture_output=True, text=True, timeout=300)
     check(p.returncode == 0, "interp rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
     check(p.stdout == WANT, "interp stdout:\nwant %r\ngot  %r" % (WANT, p.stdout))
 
-    # 2. The Python emitter: the same program through C.
+    # 2. The Python CLI build: the same program through native C.
     exe = os.path.join(TMP, "f32.exe")
     b = subprocess.run([sys.executable, CLI, "build", "--unsafe-ffi", path, "-o", exe],
                        capture_output=True, text=True, timeout=600)
@@ -100,7 +100,7 @@ def main():
     check(q.returncode == 0 and q.stdout == WANT,
           "native stdout:\nwant %r\ngot  %r" % (WANT, q.stdout))
 
-    # 3. The C++ emitter: a second opinion on the same program, byte for byte.
+    # 3. Native `cc` plus a manual C compile: the driver-independent route.
     if os.path.exists(CXX):
         c = subprocess.run([CXX, "cc", "--no-check", path], capture_output=True,
                            text=True, timeout=300)
@@ -136,7 +136,7 @@ def main():
     check(bs.returncode != 0, "slice_of_ptr accepted a kind it cannot describe")
     n += 1
 
-    print("F32 FFI ALL GREEN (%d asserts, interpreter + both emitters agree byte for byte)" % n)
+    print("F32 FFI ALL GREEN (%d asserts, interpreter + native routes agree)" % n)
     return 0
 
 

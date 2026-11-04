@@ -131,18 +131,13 @@ empty = run([sys.executable, CLI, "ffi", "--bin", "plain.exe"])
 assert empty.returncode == 1, "a binary without a contract must be reported, not passed"
 assert "carries no FFI contract" in empty.stderr, empty.stderr
 
-# the block is added by the driver, so both emitters produce the same C
+# the native driver appends exactly one contract block to the emitted C
 emitted = run([sys.executable, CLI, "emit-c", "--unsafe-ffi", "prog.brat"])
 assert emitted.returncode == 0, "emit-c: %r" % (emitted.stdout + emitted.stderr)[-800:]
 assert emitted.stdout.count("BRATFFI1 {") == 1, "exactly one contract block"
-body, block = emitted.stdout.rsplit("\n/* BRAT FFI contract", 1)
+_body, block = emitted.stdout.rsplit("\n/* BRAT FFI contract", 1)
 assert block.count("static const char brat_ffi_contract[]") == 1, block
-py = run([sys.executable, "-c",
-          "import sys; sys.path.insert(0, %r); import codegen_c; "
-          "sys.stdout.write(codegen_c.emit_file('prog.brat'))" % ENGINE])
-assert py.returncode == 0, "python emitter: %r" % (py.stdout + py.stderr)[-800:]
-assert body + "\n" == py.stdout, "the C++ and Python emitters must agree under the block"
 plain_c = run([sys.executable, CLI, "emit-c", "--unsafe-ffi", "plain.brat"])
 assert "BRATFFI1" not in plain_c.stdout, "no extern surface, no contract block"
 
-print("FFI CONTRACT ALL GREEN (embedded, re-proved, drift named, both emitters agree)")
+print("FFI CONTRACT ALL GREEN (embedded, re-proved, drift named, native emitter)")

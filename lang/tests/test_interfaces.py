@@ -3,7 +3,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -40,7 +39,6 @@ def build(path, exe):
 
 
 def case(name, impl, bri, main_src):
-    d = os.path.join(TMP, name)
     write(os.path.join(name, "circle.brat"), impl)
     if bri is not None:
         write(os.path.join(name, "circle.bri"), bri)

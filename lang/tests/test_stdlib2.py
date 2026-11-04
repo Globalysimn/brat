@@ -1,9 +1,9 @@
+import _cxx
 import _scratch
 import importlib.util
 import os
 import subprocess
 import sys
-import tempfile
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -12,9 +12,6 @@ EXAMPLES = os.path.abspath(os.path.join(HERE, '..', 'examples'))
 BRAT = os.path.join(ENGINE, 'brat.py')
 TMP = _scratch.mkdtemp(prefix='brat-stdlib-')
 
-_spec = importlib.util.spec_from_file_location('cc_stdlib', os.path.join(ENGINE, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
 
 _tc_spec = importlib.util.spec_from_file_location('cc_toolchain', os.path.join(ENGINE, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_tc_spec)
@@ -48,7 +45,7 @@ for lib in LIBS:
     cfile = os.path.join(TMP, tag + '.c')
     exe = os.path.join(TMP, tag + '.exe')
     with open(cfile, 'w', encoding='utf-8') as f:
-        f.write(cc.emit_file(path))
+        f.write(_cxx.emit_file(path))
     r = subprocess.run(_tc.resolve_cc().argv(cfile, exe, static=True) + ["-O2", "-I", ENGINE],
                         capture_output=True, text=True, timeout=300)
     check(r.returncode == 0, lib + ' build failed: ' + (r.stdout + r.stderr)[-300:])

@@ -1,4 +1,4 @@
-# Единый стиль редактирования. Чтобы диффы не состояли из пробелов.
+# Keep whitespace consistent across editors so diffs stay minimal.
 root = true
 
 [*]

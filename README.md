@@ -1,148 +1,181 @@
 # BRAT
 
-A systems language with ownership checking, compiled to C99.
+BRAT is an experimental programming language with Python-like syntax, explicit
+`move`, `ref` and `mut` at function boundaries, a checker that rejects
+use-after-move and aliasing mistakes, and a compiler that emits C. There is also
+an interpreter, written in Python, that defines the behaviour the compiler is
+tested against.
 
-One owner per value, `move` at the point of transfer, borrows that end at their
-last use, and no lifetime annotations anywhere. Programs become portable C99
-with no runtime to install; a second, independent front end written in C++20
-emits the same C and prints the same diagnostics.
+It is not production software. The sections [What does not work](#what-does-not-work)
+and [How far to trust this](#how-far-to-trust-this) are as much a part of this
+README as the examples.
 
+## Why it exists
+
+The question is whether Rust's most useful error, "you used that after you gave
+it away", can be had without lifetime annotations and without giving up a
+scripting-style surface. BRAT's answer is to check ownership inside one function
+and to read everything else from the signature: a parameter is `move`, `ref` or
+`mut`, and the call site is checked against that. Types are optional; code
+without annotations runs on tagged dynamic values.
+
+The price is real. The checker is not a soundness proof, there is no way to
+return a reference, generics are erased, and recursion is capped at 2000
+frames. If you need memory safety you can rely on, use Rust or a garbage-collected
+language. If you want a small compiled language with a C ABI and mature tooling,
+use Zig, Odin or Go. If you want a scripting language with libraries, use
+Python. BRAT is for people who want to look at this particular trade-off.
+
+## What it looks like
+
+Errors are values, and `?` propagates them. A number outside `i64` is an error,
+not a wrapped number:
+
+```brat run
+fn parse_port(s: str) -> i64 {
+  let p = s.parse_int()
+  if is_err(p) {
+    return 80
+  }
+  return unwrap(p)
+}
+
+print(parse_port("8080"))
+print(parse_port("http"))
+print(parse_port("99999999999999999999"))
 ```
+
+```output
+8080
+80
+80
+```
+
+The checker tracks `move` and reports where the value went:
+
+```brat check
+fn eat(x: move str) {
+  print(x)
+}
+
 fn main() -> i64 {
-  let name = "world"
-  print("hello {name}")
-  let port = unwrap("8080".parse_int())
-  print(port)
+  let s = "hi"
+  eat(move s)
+  print(s)
   return 0
 }
 ```
 
+```diagnostics
+example.brat: 1 error(s), 0 warning(s)
+example.brat:8: error: use of moved `s` (hint: the value was moved; use a copy or re-bind)
+  |   print(s)
+example.brat:7: note: `s` moved here
+  |   eat(move s)
+example.brat: 0 type error(s)
 ```
-$ python3 lang/engine/cli.py run hello.brat
-hello world
-8080
-$ python3 lang/engine/cli.py build hello.brat -o hello && ./hello
-hello world
-8080
-```
 
-Status: v0.1, experimental.
+More in the [language tour](docs/guide/tour.md). Every program printed in this
+README and in the guides marked `brat run` or `brat check` is executed on two
+implementations by `lang/tests/test_docs_examples.py`.
 
-## Install
+## Running it
 
-Nothing to install. Python 3.12+ (standard library only) and any C compiler.
+You need Python 3 and, to compile, a C compiler (`cc`, or `$BRAT_CC`). From a
+checkout:
 
 ```sh
 git clone https://github.com/Nefor229883984/d.git brat && cd brat
-
-# optional: the C++20 front end, same tree, same C
-c++ -std=c++20 -O2 lang/cxx/src/*.cpp -o lang/cxx/bin/brat-cxx
+python3 lang/engine/cli.py run --interp hello.brat    # the Python interpreter
+python3 lang/engine/cli.py build hello.brat -o hello  # emit C, call cc
+./hello
 ```
 
-The CLI is `python3 lang/engine/cli.py`; the documentation calls it `brat`.
-With `brat-cxx` present, `brat run` and `brat build` use it and never start
-Python. Without it, the Python engine is the reference implementation and the
-same programs behave the same way.
+`hello.brat` is any file, for example `print(40 + 2)`.
 
-## Language
-
-| | |
-|---|---|
-| Ownership | one owner, `move`, `ref`/`mut` at call sites, checked per function with a line, a snippet and a hint; a `for` refuses a write into the container it walks. No `'a` |
-| Errors | `Ok`/`Err`/`Some`/`None`, `?`, `or`, `try`/`catch`, `defer` on every exit path including error unwinding |
-| Memory | refcounted strings, containers and tags, released at scope and loop exit; `arena { }` frees a block wholesale; `own(x)` copies a value out |
-| Data | `i64`, `f64`, `bool`, `str`, `vec[T]`, `map`, structs, enums, `match` with guards, closures, generics by erasure |
-| Threads | `spawn { }`, `scope { }`, `join_all()`, `chan(cap)`; real OS threads in both backends |
-| Data races | one writer: while a `spawn` runs exactly one side may write a shared value, and both checkers refuse a program that breaks it before it runs |
-| C interop | `extern fn` with every width the ABI distinguishes (`i8`..`u64`, `f32`, `f64`), `extern struct` by value in and out, out-parameters `&x` at `ptr[T]`, callbacks (`f32` and records included), variadic tails, `--link` for flags a library name cannot express, `brat bindgen`, `brat ffi --emit/--header`, `export fn`, `lib_open`/`call` at run time; `build`, `run`, `dist` and `emit-c` refuse a program that calls C until a `--header` proves the declarations, or `--unsafe-ffi` says to skip it |
-| Modules | `import a.b`, typed `.bri` interfaces, `pub use`, `brat deps`, `brat api`, `brat pkg` with a sha256 lockfile |
-| Tooling | `run`, `check --json`, `explain`, `test`, `fmt`, `emit-c`, `build`, `dist`, `deps`, `api`, `bindgen`, `ffi`, `lsp`, `mcp` |
-
-`brat check --json` prints stable codes with a `helps` remedy — `E0382` moved
-value, `E0505` move while borrowed, `E0499` double mutable borrow, `E0515`
-borrow escapes, `E0596` write to an immutable place, `E0502` write into the
-container a `for` is walking, `F0001` unsupported FFI type, `B0521` borrow captured by
-`spawn`, `B0522` two threads on one value, `T0001` type error, `P0001` syntax
-error — so a tool branches on the code, not on the English. `brat explain B0522`
-turns one back into the rule and the fix, offline.
-
-## Limits
-
-What the language and the checker do not promise. Neither list is a to-do file;
-`docs/project/ROADMAP.md` is.
-
-| | |
-|---|---|
-| Checker soundness | a clean `brat check` is not a proof of memory safety or data-race freedom. Guarantees and their boundaries are in [`lang/spec/SPEC.md`](lang/spec/SPEC.md) §11 |
-| Function values | a fn name is a callback (`v.map(f)`, `run("f")`), not a value; `let g = f` is a checker error |
-| Ownership across calls | checked from the signature's `move`/`ref`/`mut`; what a callee does afterwards is an agreement, not a proof |
-| Plugin prototypes | a `call` signature is checked against the `extern fn` the program declares; a name with no declaration is undefined behaviour |
-| Data races through FFI | the sharing rule reads the program, not foreign memory: a `ptr` from a plugin and anything behind `unsafe` is the author's responsibility. Writes C makes through a pointer (`ptr_write_*`, `slice_set`, `fill`) and a `move` that ends a value's life do count as writes on this side |
-| Deep values | `print`, `str()` and comparison stop at 2000 levels of nesting with `recursion too deep`; the C walkers are recursive |
-| Packages | local index, `publish`, transitive resolution, sha256 lock; no hosted registry |
-| Generics | erased, not monomorphized; no trait objects, no macros, no async |
-
-Known holes with reproductions: [`docs/project/LEDGER.md`](docs/project/LEDGER.md)
-and [`docs/guide/ownership.md`](docs/guide/ownership.md).
-
-## Build from source
-
-The build is the source tree; there is no configure step and no generated code
-checked in. `lang/cxx/bin/brat-cxx` is the only binary, and it is optional:
+`cli.py run` without `--interp` runs native code only if the C++ compiler has
+been built and is not older than its sources. Otherwise it says so on stderr and
+runs the interpreter. Build it once:
 
 ```sh
 mkdir -p lang/cxx/bin
 c++ -std=c++20 -O2 lang/cxx/src/*.cpp -o lang/cxx/bin/brat-cxx
-python3 lang/engine/cli.py check lang/examples/hello.brat
 ```
 
-Tests:
+GCC 14 builds the sources. Clang 19 accepts all 24 files with `-fsyntax-only`;
+nobody has linked and run a Clang build. A single `c++` command compiles the 24
+files one after another: 134 and 148 seconds in two runs, and 540 MB for the largest compiler
+process, on a 2-core 2.6 GHz Xeon (two parallel jobs took 69 seconds). Only
+Linux x86-64 has been exercised. Nothing verifies the Windows and macOS code
+paths the repository contains.
 
-```sh
-python3 lang/tests/run_all.py -j 2     # every file, one line each
-python3 lang/tests/test_lang.py        # or a single file
-```
+## What works
 
-116 files, one per area, about 230 s on four cores (measured, `-j 4`). A test that cannot run exits
-77 and is reported as `skipped`, never as `ok`; the C++ files skip themselves
-when there is no `c++`, which is why CI builds `brat-cxx` before it runs the
-suite. Three properties are checked by construction rather than by example: the
-interpreter and the C backend print the same bytes and return the same exit
-code, the two checkers produce the same diagnostics, and the emitted C compiles
-as `-std=c99 -Wall -Wextra` without warnings.
+| Part | State |
+|---|---|
+| Interpreter (`lang/engine/brat/`) | Reference semantics. A tree walker on CPython, about 60 thousand calls a second; treat it as the specification you can step through, not as a way to run programs. |
+| Native C emitter (C++) | The only C emitter; generated programs use the runtime `lang/engine/crt.h` (9.8k lines). The Python CLI delegates C generation and native builds to it. |
+| Checker | Ownership, effects and optional static types. Intra-function, so it is a lint with teeth, not a proof. |
+| Standard library | 12 modules: `bytes`, `cli`, `crypto`, `csv`, `env`, `fs`, `http`, `json`, `path`, `proc`, `sqlite`, `time`. Several need system libraries. |
+| C interop | `extern fn`, `extern struct`, callbacks, header verification, `bindgen`, plugins. A trusted boundary: the verifier checks declarations, not the library behind them. |
+| Tools | `lsp`, `mcp`, `pkg`, `dist`, `api`, `ffi`, `fmt`, `test`, `explain`. They exist and the repository tests them; the audit read the package code and fuzzed the archive reader, and did not go further. |
 
-## Repository
+## What does not work
 
-```
-lang/engine/     parser, checkers, interpreter, C emitter, runtime (crt.h), CLI, LSP, MCP
-lang/cxx/        C++20 front end: the same tree, the same diagnostics, the same C
-lang/examples/   64 programs; the tests run most of them on both backends
-lang/spec/       SPEC.md, the language contract
-lang/tests/      116 files, one per area; run_all.py drives the whole suite
-lang/servers/    example server programs
-editors/         syntax highlighting and editor support
-docs/            guide, design notes, ledger, roadmap
-```
+| Limit | Consequence |
+|---|---|
+| Recursion depth is 2000 BRAT frames in both implementations | Deeper recursion raises the catchable error `recursion too deep`. `BRAT_RECURSION_BUDGET` raises it; a compiled program on Linux also stops with that error when its stack is nearly used up (at 8 MiB, after 10,000 to 20,000 frames), elsewhere it dies with SIGSEGV past that depth. See [limits](docs/guide/limits.md). |
+| The checker is not a soundness proof | A clean `brat check` means the program passes the checks that were implemented. See [ownership](docs/guide/ownership.md#what-is-not-checked). |
+| Foreign code, raw pointers and `--unsafe-ffi` are trusted | A wrong signature corrupts memory. See [SECURITY.md](SECURITY.md). |
+| No isolation | Running untrusted BRAT code, packages or plugins is not safe. Use an OS sandbox. |
+| Two implementations can disagree | They are compared on the 109 programs of `lang/tests/corpus/agreement.json` and on a matrix of 9550 operator cases. Known differences are listed in [limits](docs/guide/limits.md#where-the-backends-differ); outside what was compared, assume nothing. |
+| Integers are `i64` and wrap; there are no bitwise operators, shifts or `**`, and no `abs`, `min`, `max` or `sqrt` builtins | The lexer refuses `|`, `^` and `~` instead of skipping them. Do it with arithmetic or call C. |
+| Generics are erased; no trait objects, macros or async | See [the tour](docs/guide/tour.md#13-not-implemented). |
+| Named functions are not values | A function is passed to `map` and friends as a callback; `let g = f` is a checker error. |
+| Compile time grows with the square of the size of one function | 200 string locals in one function take 26 seconds; the C compiler is killed after 120. See [limits](docs/guide/limits.md#compile-time). |
+| No hosted package registry | `brat pkg` works against a local or HTTP index you provide. |
+| No compatibility promise | Syntax, library and tools may change in any commit. |
+
+## How far to trust this
+
+`lang/tests/` holds 154 test files that pass on Linux x86-64 with GCC 14 and
+Python 3.13. `run_all.py` counts skips separately from passes, and a test that
+cannot run says so. Most behaviour is pinned by examples; the strongest
+evidence is differential: `test_agreement.py` runs 109 cases through the
+interpreter and the native C backend, and `test_ffi_front_ends_agree.py` feeds both
+FFI verifiers thousands of generated declarations and requires identical
+verdicts.
+
+The tree has been audited once: by reading, by differential probes, with ASan,
+UBSan and LSan builds of the C++ compiler and of generated programs, and with
+four minutes of libFuzzer on each of the archive reader and the front end. That
+produced 35 findings, among them a use-after-free in generated code. What came
+out of it is kept in [known risks](docs/project/LEDGER.md). Four minutes of
+fuzzing find shallow bugs only. Nothing here has been run in production, and
+nobody outside the project has reviewed it.
 
 ## Documentation
 
-| | |
-|---|---|
-| [`docs/guide/tour.md`](docs/guide/tour.md) | the language, section by section, with runnable snippets |
-| [`docs/guide/ownership.md`](docs/guide/ownership.md) | what the checker proves, and what it does not |
-| [`docs/guide/ffi.md`](docs/guide/ffi.md) | C interop: declarations, generated bindings, the build gate |
-| [`docs/guide/modules.md`](docs/guide/modules.md) | imports, interfaces, packages |
-| [`lang/spec/SPEC.md`](lang/spec/SPEC.md) | the language contract, including §11 on limits |
-| [`docs/design/ARCHITECTURE.md`](docs/design/ARCHITECTURE.md) | how the pieces fit |
-| [`docs/project/LEDGER.md`](docs/project/LEDGER.md) | known holes, each with the file that proves it |
-| [`docs/project/ROADMAP.md`](docs/project/ROADMAP.md) | where it stands, what comes next |
+- [Tour](docs/guide/tour.md), [language reference](lang/spec/SPEC.md)
+- [Ownership and what it does not check](docs/guide/ownership.md),
+  [limits](docs/guide/limits.md)
+- [C interop](docs/guide/ffi.md), [modules and packages](docs/guide/modules.md)
+- [Architecture](docs/design/ARCHITECTURE.md), [arenas](docs/design/ARENA.md),
+  [parallel loops](docs/design/PARFOR.md)
+- [Known risks](docs/project/LEDGER.md),
+  [priorities](docs/project/ROADMAP.md)
+- [Security](SECURITY.md), [contributing](CONTRIBUTING.md)
 
-## Contributing
+## Source tree
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) — a change ships with a test that fails
-before it and passes after, and safety-related changes need a case in the
-interpreter and in the generated C. Security reports: [`SECURITY.md`](SECURITY.md).
+```
+lang/engine/     Python implementation (interpreter/checker) and crt.h runtime
+lang/cxx/src/    C++20 compiler, sole C emitter and tools
+lang/std/        standard library
+lang/examples/   64 example programs
+lang/tests/      154 test files; run_all.py drives them
+editors/         VS Code extension and grammar
+docs/            guides, design notes, audit report
+```
 
-## License
-
-Apache-2.0, see [`LICENSE`](LICENSE).
+License: [Apache-2.0](LICENSE).

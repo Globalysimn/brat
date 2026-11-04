@@ -1,20 +1,17 @@
 """The -O2 error paths: the interpreter and the native build must agree, and a
 credential-shaped env name is refused in both."""
+import _cxx
 import _scratch
 import importlib.util
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-o2-')
 BRAT = os.path.join(ENGINE, 'brat.py')
 
-_spec = importlib.util.spec_from_file_location('cc_o2', os.path.join(ENGINE, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
 
 _spec = importlib.util.spec_from_file_location('cc_tc_o2', os.path.join(ENGINE, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_spec)
@@ -84,7 +81,7 @@ for name, src in CASES.items():
     cfile = os.path.join(TMP, name + '.c')
     exe = os.path.join(TMP, name + '.exe')
     with open(cfile, 'w', encoding='utf-8') as f:
-        f.write(cc.emit(src, TMP))
+        f.write(_cxx.emit_source(src, TMP))
     rb = subprocess.run(_tc.resolve_cc().argv(cfile, exe, static=True) + ['-O2', '-I', ENGINE, '-lm'],
                         capture_output=True, text=True, timeout=300)
     check(rb.returncode == 0, '%s build: %s' % (name, (rb.stdout + rb.stderr)[-300:]))

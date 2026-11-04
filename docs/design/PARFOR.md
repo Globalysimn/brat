@@ -21,12 +21,12 @@ message:
 | the body has an empty effect row | ``` the `par for` body cannot io ``` |
 | the body writes only places it binds | ``` the `par for` body writes `seen`, which lives outside the loop ``` |
 
-The rows are the ones `brat check --effects` prints, so the error names what the
-function actually does instead of saying "not pure". `alloc` counts as pure: a
+The inferred effect rows name what the function actually does (`io`, `fs`,
+`net`, `ffi`, `err`, `spawn`) instead of saying "not pure". `alloc` counts as pure: a
 body that builds a vector or a string is fine, because a fresh value cannot be
 shared with another task.
 
-Associativity is not checked, and it cannot be in v0.1 — `add` is only a monoid
+Associativity is not checked, by the checker — `add` is only a monoid
 if it really is one. What *is* guaranteed is determinism: the fold order is the
 index order, so the parallel result equals the sequential one, element by
 element. That is the difference from a goroutine with a shared counter, and from
@@ -42,9 +42,6 @@ element. That is the difference from a goroutine with a shared counter, and from
   the slots are folded with `op`. Every task owns a private slot, so there is no
   shared mutable state to race on. An error in any task reaches `join_all` and
   propagates like a `spawn` error.
-
-Measured on 2 cores, 400 elements of a 20 000-iteration body: 8 ms sequential,
-4 ms with `par for`.
 
 ## Costs and limits
 

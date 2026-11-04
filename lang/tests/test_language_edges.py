@@ -8,12 +8,12 @@ guard that refused everything would fail the test, not pass it.
 
 The recursion budget is pinned by test_recursion.py and is not duplicated here.
 """
+import _cxx
 import _scratch
 import importlib.util
 import os
 import subprocess
 import sys
-import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ENG = os.path.join(ROOT, 'lang', 'engine')
@@ -21,8 +21,6 @@ BASE = _scratch.mkdtemp(prefix='brat-edges-')
 PROG = os.path.join(BASE, 'prog')
 os.makedirs(PROG)
 
-_spec = importlib.util.spec_from_file_location('cc_edges', os.path.join(ENG, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(cc)
 
 _tc_spec = importlib.util.spec_from_file_location('tc_edges', os.path.join(ENG, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_tc_spec); _tc_spec.loader.exec_module(_tc)
@@ -146,7 +144,7 @@ for name, (src, want) in CASES.items():
     exe = os.path.join(PROG, name + '.exe')
     try:
         with open(cf, 'w', encoding='utf-8') as f:
-            f.write(cc.emit(src, PROG))
+            f.write(_cxx.emit_source(src, PROG))
         rb = subprocess.run(_tc.resolve_cc().argv(cf, exe) + ['-O1', '-lm', '-I', ENG],
                             capture_output=True, text=True, timeout=300)
         if rb.returncode != 0:

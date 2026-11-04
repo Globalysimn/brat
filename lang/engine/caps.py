@@ -62,7 +62,8 @@ WRITE_WHILE_READ = "cannot mutate immutable `%s` while borrowed by `%s`"
 ASSIGN_WHILE_READ = "cannot assign `%s` while borrowed by `%s`"
 MOVE_WHILE_READ = "cannot move `%s` while borrowed by `%s`"
 
-COPY_ANNS = {"i32", "i64", "u64", "f32", "f64", "bool"}
+COPY_ANNS = {"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
+             "f32", "f64", "bool"}
 MUTATORS = {"push", "pop", "sort", "sort_by", "ins", "del", "set", "clear"}
 
 
@@ -336,7 +337,7 @@ class Walk:
         for name in _used_in(s):
             self.last[name] = self.index
         kind = s[0]
-        if kind in ("fn", "impl", "trait", "enum", "extern", "externstruct", "pub"):
+        if kind in ("fn", "exportfn", "impl", "trait", "enum", "extern", "externstruct", "pub", "pubuse"):
             return state          # every body is walked on its own
         if kind == "let":
             return self.let_stmt(s, state)
@@ -577,12 +578,27 @@ class Walk:
                 state.verb[place] = ("moved", "." not in place, self.cur)
             return
         if kind == "closure":
-            body = e[2] if len(e) > 2 else []
+            cparams = e[2] if len(e) > 2 else []
+            body = e[3] if len(e) > 3 else []
             if isinstance(body, list):
-                self.block(body, state.copy())
+                inner = state.copy()
+                for cp in cparams:
+                    pn = cp[0] if isinstance(cp, tuple) else cp
+                    if isinstance(pn, str):
+                        inner.forget(pn)
+                self.block(body, inner)
+            return
+        if kind == "parfor":
+            self.expr(e[2], state, mutating)
+            self.expr(e[4], state, mutating)
+            body = e[5] if len(e) > 5 else []
+            if isinstance(body, list):
+                inner = state.copy()
+                if isinstance(e[1], str):
+                    inner.forget(e[1])
+                self.block(body, inner)
             return
         if kind == "mcall" and e[2] in CONSUMERS:
-            idx = CONSUMERS[e[2]] + 1                    # 0 is the receiver
             args = e[3] if len(e) > 3 else []
             for i, a in enumerate(args):
                 place = place_of(a)
@@ -605,8 +621,10 @@ class Walk:
                     self.note(self.cur, MOVED_USE % place)
                 if place in state.second:
                     other, oln = state.second[place]
-                    self.note(self.cur, TWO_WRITERS % (place, e[1][1] if e[1][0] == "var" else place, other),
-                              (oln, "first borrow `%s` here" % other))
+                    named = e[1][1] if e[1][0] == "var" else place
+                    if other != named:
+                        self.note(self.cur, TWO_WRITERS % (place, named, other),
+                                  (oln, "first borrow `%s` here" % other))
                 holder = _live_reader(state, place, place.split(".", 1)[0])
                 if holder:
                     self.note(self.cur, WRITE_WHILE_READ % (place, holder[0]),
@@ -672,7 +690,6 @@ def _index_uses(body, start=0):
     """
     last = {}
     index = start
-    stack = [body]
     order = []
 
     def flatten(stmts):
@@ -702,8 +719,10 @@ def param_modes(prog):
         node = stmt[1] if (isinstance(stmt, tuple) and stmt and stmt[0] == "pub") else stmt
         if not isinstance(node, tuple) or not node:
             continue
-        if node[0] == "fn":
+        if node[0] in ("fn", "exportfn"):
             out[node[1]] = [p[1] for p in node[2]]
+        elif node[0] == "extern":
+            out[node[2]] = [p[1] for p in node[3]]
         elif node[0] == "impl":
             for fn in node[3]:
                 out.setdefault(fn[1], [p[1] for p in fn[2]])
@@ -783,50 +802,14 @@ def verdicts(prog, funcs=None):
     return out
 
 
-def tables(prog, funcs=None):
-    """(body index, [(place, capability, holder, line)]) for `brat check --caps`."""
-    modes = param_modes(prog)
-    if funcs:
-        modes.update(funcs)
-    out = []
-    for i, (body, params) in enumerate(_bodies(prog)):
-        walk = Walk(modes)
-        walk.last = _index_uses(body)
-        state = State()
-        state.params = set(p[0] for p in params or [] if isinstance(p, tuple))
-        for p in params or []:
-            if isinstance(p, tuple) and len(p) > 2:
-                if p[2]:
-                    state.anns[p[0]] = p[2]
-                if p[2] in COPY_ANNS:
-                    state.copies.add(p[0])
-        walk.block(body, state)
-        rows = []
-        for place, cap in sorted(state.caps.items()):
-            holder, line = state.who.get(place, [("(none)", None, cap)])[-1][:2]
-            rows.append((place, CAP_NAME.get(cap, "?"), holder, line))
-        out.append((i, rows))
-    return out
-
-
-def format_caps(prog, funcs=None):
-    """One line per live place: its capability, who holds it and since when."""
-    lines = []
-    for _i, rows in tables(prog, funcs):
-        for place, cap, holder, line in rows:
-            where = ("line %d" % line) if line else ""
-            lines.append("%-22s %-7s %-10s %s" % (place, cap, holder, where))
-    return "\n".join(lines)
-
-
 def _bodies(prog):
-    """(body, params) for the script and for every function, in source order."""
-    yield prog[1], []
+    """(body, params) for every function and then the script, matching caps.cpp."""
     for stmt in prog[1]:
         node = stmt[1] if stmt[0] == "pub" else stmt
         if isinstance(node, tuple) and node:
-            if node[0] == "fn":
+            if node[0] in ("fn", "exportfn"):
                 yield node[3], node[2]
             elif node[0] == "impl":
                 for fn in node[3]:
                     yield fn[3], fn[2]
+    yield prog[1], []

@@ -4,7 +4,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, "..", "engine", "cli.py"))
@@ -101,7 +100,7 @@ want = ("hello\n"
         "str_from_ptr: invalid UTF-8\n"
         "null pointer dereference\n")
 
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", ok], capture_output=True, text=True,
+interp = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", ok], capture_output=True, text=True,
                         timeout=120, env=env)
 check(interp.returncode == 0 and interp.stdout == want,
       "run rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
@@ -179,7 +178,7 @@ for name, stmt, text in (
         ("null", 'let q: ptr[i64] = ptr_null();\n  let t = slice_of_ptr(q, 4, "i64");\n  print(slice_len(t));',
          "null pointer dereference")):
     path = write(name + ".brat", RUNTIME % stmt)
-    ri = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
+    ri = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True, text=True,
                         timeout=120, env=env)
     out = ri.stdout + ri.stderr
     check(ri.returncode != 0 and text in out, "%s run: rc=%d out=%r" % (name, ri.returncode, out))

@@ -43,8 +43,14 @@ def parse_interface(path):
     The line is parsed with an empty body, so the signature syntax matches the implementation.
     """
     sigs = {}
-    with open(path, encoding="utf-8") as f:
-        lines = f.read().split("\n")
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        lines = raw.decode("utf-8").split("\n")
+    except UnicodeDecodeError as error:
+        number = raw[:error.start].count(b"\n") + 1
+        raise ModuleError("%s:%d: bad interface line: source is not valid UTF-8 at line 1"
+                          % (path, number))
     for number, line in enumerate(lines, 1):
         text = line.strip()
         if not text or text.startswith("//"):
@@ -81,9 +87,36 @@ def load_source(src, base="."):
     return loader.finish()
 
 
+def _stdlib_root():
+    env = os.environ.get("BRAT_STDLIB")
+    if env:
+        return os.path.realpath(os.path.abspath(env))
+    # __file__ is <repo>/lang/engine/brat/modules.py -> <repo>/lang/std
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(os.path.dirname(os.path.dirname(here)), "std")
+    return os.path.realpath(cand) if os.path.isdir(cand) else None
+
+
+def _vendor_root(base):
+    direct = os.path.join(base, "vendor")
+    if os.path.isdir(direct):
+        return os.path.realpath(direct)
+    cur = base
+    while True:
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        if (os.path.isfile(os.path.join(parent, "brat.lock"))
+                and os.path.isdir(os.path.join(parent, "vendor"))):
+            return os.path.realpath(os.path.join(parent, "vendor"))
+        cur = parent
+
+
 class _Loader:
     def __init__(self, base):
         self.base = os.path.realpath(os.path.abspath(base))
+        self.std_base = _stdlib_root()
+        self.vendor_base = _vendor_root(self.base)
         self.files = []
         self._resolved = set()
         self.by_path = {}
@@ -141,25 +174,47 @@ class _Loader:
             tried.append(os.path.relpath(path, self.base))
             if self.confined(path) and os.path.isfile(path):
                 return path
+        if self.vendor_base is not None:
+            root_vendor = os.path.realpath(os.path.join(self.vendor_base, *parts) + ".brat")
+            if self._in_root(self.vendor_base, root_vendor) and os.path.isfile(root_vendor):
+                return root_vendor
+        if parts[0] == "std" and len(parts) >= 2 and self.std_base is not None:
+            std_cand = os.path.realpath(os.path.join(self.std_base, *parts[1:]) + ".brat")
+            if self._in_root(self.std_base, std_cand) and os.path.isfile(std_cand):
+                return std_cand
         where = os.path.relpath(base, self.base) if base != self.base else "the program root"
         hint = (" (tried `%s` from %s; imports are relative to the importing file, "
                 "so a module next to it is imported by its short name)"
                 % ("`, `".join(tried), where))
         raise ModuleError("no module %s" % name + hint)
 
-    def confined(self, path):
+    @staticmethod
+    def _in_root(root, path):
+        if not root:
+            return False
         try:
-            return os.path.commonpath((self.base, path)) == self.base
+            return os.path.commonpath((root, path)) == root
         except ValueError:
             return False
 
+    def confined(self, path):
+        return (self._in_root(self.base, path)
+                or self._in_root(self.std_base, path)
+                or self._in_root(self.vendor_base, path))
+
     def namespace(self, path):
+        if self._in_root(self.std_base, path) and not self._in_root(self.base, path):
+            rel = os.path.relpath(path, self.std_base)
+            return "std__" + "__".join(rel[:-5].split(os.sep))
+        if self._in_root(self.vendor_base, path) and not self._in_root(self.base, path):
+            rel = os.path.relpath(path, self.vendor_base)
+            return "vendor__" + "__".join(rel[:-5].split(os.sep))
         rel = os.path.relpath(path, self.base)
         return "__".join(rel[:-5].split(os.sep))
 
     def finish(self):
         for current in self.files:
-            if current.namespace is not None and os.path.isfile(current.path[:-5] + ".bri"):
+            if current.path and current.path.endswith(".brat") and os.path.isfile(current.path[:-5] + ".bri"):
                 current.iface = parse_interface(current.path[:-5] + ".bri")
         for current in self.files:
             arity = {}
@@ -236,10 +291,15 @@ class _Loader:
             if not (isinstance(st, tuple) and st and st[0] == "pubuse"):
                 continue
             qualifier, fn = st[1].rsplit(".", 1) if "." in st[1] else ("", st[1])
-            targets = [t for name, t in current.imports
-                       if qualifier and (name == qualifier or name.rsplit(".", 1)[-1] == qualifier)]
+            targets = []
+            for name, t in current.imports:
+                if qualifier and (name == qualifier or name.rsplit(".", 1)[-1] == qualifier):
+                    if t not in targets:
+                        targets.append(t)
             if not targets:
                 raise ModuleError("`pub use %s`: module `%s` is not imported" % (st[1], qualifier))
+            if len(targets) > 1:
+                raise ModuleError("`pub use %s`: module `%s` is ambiguous" % (st[1], qualifier))
             target = targets[0]
             if fn not in target.functions:
                 raise ModuleError("module `%s` has no function `%s`" % (qualifier, fn))
@@ -306,6 +366,12 @@ class _Loader:
                     args = [self.walk(a, current) for a in node[3]]
                     self.resolve_callback_args(args, path + "." + node[2], name, current)
                     return self.remap(node, ("call", name, args))
+        if kind == "parfor":
+            pvar, pit, pop, punit, pbody = node[1], node[2], node[3], node[4], node[5]
+            return self.remap(node, ("parfor", pvar, self.walk(pit, current),
+                                     self.resolve_call(pop, current),
+                                     self.walk(punit, current),
+                                     self.walk(pbody, current)))
         new = (kind,) + tuple(self.walk(x, current) for x in node[1:])
         return self.remap(node, new)
 
@@ -372,7 +438,11 @@ class _Loader:
         return target.functions[fn]
 
     def module_name(self, current):
-        return current.namespace.replace("__", ".")
+        if current.namespace is not None:
+            return current.namespace.replace("__", ".")
+        if current.path:
+            return os.path.splitext(os.path.basename(current.path))[0]
+        return "<root>"
 
 
 def name_path(node):

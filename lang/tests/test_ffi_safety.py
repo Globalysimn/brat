@@ -8,7 +8,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENG = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -69,9 +68,12 @@ def write(name, src):
     return p
 
 
-def run_interp(path):
-    p = subprocess.run([sys.executable, CLI, "run", "--interp", path],
-                       capture_output=True, timeout=120)
+def run_interp(path, no_check=False):
+    cmd = [sys.executable, CLI, "run", "--interp", "--unsafe-ffi"]
+    if no_check:
+        cmd.append("--no-check")
+    cmd.append(path)
+    p = subprocess.run(cmd, capture_output=True, timeout=120)
     return p.returncode, p.stdout
 
 
@@ -89,7 +91,7 @@ def run_native(src, tag):
 def main():
     n = 0
     for name, (src, want, want_rc) in CASES.items():
-        ri, oi = run_interp(write(name, src))
+        ri, oi = run_interp(write(name, src), no_check=(name == "arg_type_caught_interp"))
         assert oi == want and ri == want_rc, (
             "%s interp: rc=%d out=%r want rc=%d out=%r"
             % (name, ri, oi, want_rc, want))

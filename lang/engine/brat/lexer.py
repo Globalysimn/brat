@@ -6,7 +6,11 @@ import re
 # and `1__0` still lex as a number followed by a name -- a parse error that
 # names the token, which is what `parser.cpp` reports for the same text.
 _NUM = r'\d(?:_?\d)*(?:\.\d(?:_?\d)*)?(?:[eE][+-]?\d(?:_?\d)*)?'
-TOKEN_RE = re.compile(r'(?P<WS>\s+)|(?P<COMMENT>//[^\n]*)|(?P<STR>"(?:\\.|[^"\\])*")|(?P<NUM>' + _NUM + r')|(?P<DOT>\.(?!\.))|(?P<ID>[A-Za-z_][A-Za-z0-9_]*)|(?P<OP>\.\.|=>|->|==|!=|<=|>=|&&|\|\||\+=|-=|\*=|/=|%=|[+\-*/%<>=!&{}()\[\],:;?])')
+# ASCII only, like `lexer.cpp`: `\s` and `\d` would otherwise accept a no-break space and
+# Arabic-Indic digits that the native front end refuses. Anything that matches no token is
+# BAD, and `lex` refuses it: the scanner used to skip it, so `6 | 1` and `~x` were read as
+# `6 1` and `x`.
+TOKEN_RE = re.compile(r'(?P<WS>\s+)|(?P<COMMENT>//[^\n]*)|(?P<STR>"(?:\\[\s\S]|[^"\\])*")|(?P<NUM>' + _NUM + r')|(?P<DOT>\.(?!\.))|(?P<ID>[A-Za-z_][A-Za-z0-9_]*)|(?P<OP>\.\.|=>|->|==|!=|<=|>=|&&|\|\||\+=|-=|\*=|/=|%=|[+\-*/%<>=!&{}()\[\],:;?])|(?P<BAD>.)', re.ASCII)
 KEYWORDS = {'let', 'mut', 'fn', 'if', 'else', 'while', 'return', 'true', 'false', 'or', 'try', 'catch', 'spawn', 'match', 'for', 'in', 'import', 'defer', 'move', 'break', 'continue', 'impl', 'self', 'trait', 'enum', 'const', 'pub', 'extern', 'unsafe', 'export', 'use'}
 
 class Tok:
@@ -60,6 +64,14 @@ def _str_end(src, i):
     return None
 
 
+def _stray(ch, line):
+    """The sentence for a character no token starts with."""
+    if ch == '"':
+        return 'unterminated string literal at line %d' % line
+    shown = "'%s'" % ch if ch.isascii() and ch.isprintable() else 'U+%04X' % ord(ch)
+    return 'unexpected character %s at line %d' % (shown, line)
+
+
 def lex(src):
     """One scan over the source, one regex pass, line numbers counted forward.
 
@@ -69,46 +81,48 @@ def lex(src):
     forward, because tokens arrive in order; `bisect` per token was the other
     measurable slice.
     """
+    if src.startswith('\ufeff'):
+        src = src[1:]
     newlines = [m.start() for m in re.finditer('\n', src)]
     nls_len = len(newlines)
     out = []
     append = out.append
     li = 0
-    pos = 0
     total = len(src)
-    for m in TOKEN_RE.finditer(src):
-        start = m.start()
-        if start < pos:
-            continue                 # inside a string that ran past the regex
-        k = m.lastgroup
-        while li < nls_len and newlines[li] < start:
-            li += 1
-        if k == 'STR':
-            v = m.group()
-            if '{' in v:
-                # A placeholder may contain quotes, so the regex cannot see the
-                # end of the literal; rescan and resume after it.
-                end = _str_end(src, start)
-                if end is None:
-                    v = src[start:]
-                    pos = total
-                else:
-                    v = src[start:end + 1]
-                    pos = end + 1
-                append(Tok('STR', v, li + 1))
-                if pos >= total:
+    resume = 0
+    while resume < total:
+        again = None
+        for m in TOKEN_RE.finditer(src, resume):
+            start = m.start()
+            k = m.lastgroup
+            while li < nls_len and newlines[li] < start:
+                li += 1
+            if k == 'STR':
+                v = m.group()
+                if '{' in v:
+                    # A placeholder may contain quotes, so the regex cannot see the
+                    # end of the literal. Rescan, and start the regex again after it:
+                    # a match that began inside the literal may run past its end, and
+                    # carrying on from there would swallow what follows.
+                    end = _str_end(src, start)
+                    if end is None:
+                        raise SyntaxError(_stray('"', li + 1))
+                    append(Tok('STR', src[start:end + 1], li + 1))
+                    again = end + 1
                     break
+                append(Tok('STR', v, li + 1))
                 continue
-            pos = m.end()
-            append(Tok('STR', v, li + 1))
-            continue
-        pos = m.end()
-        if k == 'WS' or k == 'COMMENT':
-            continue
-        v = m.group()
-        if k == 'ID' and v in KEYWORDS:
-            k = 'KW'
-        append(Tok(k, v, li + 1))
+            if k == 'WS' or k == 'COMMENT':
+                continue
+            v = m.group()
+            if k == 'BAD':
+                raise SyntaxError(_stray(v, li + 1))
+            if k == 'ID' and v in KEYWORDS:
+                k = 'KW'
+            append(Tok(k, v, li + 1))
+        if again is None:
+            break
+        resume = again
     return out
 
 
@@ -139,12 +153,12 @@ class Cur:
     def want(self, v):
         x = self.step()
         if x.v != v:
-            raise SyntaxError('want %r have %r at line %d' % (v, x.v, x.line))
+            raise SyntaxError("want '%s' have '%s' at line %d" % (v, x.v, x.line))
         return x
     def want_id(self, what='identifier'):
         """Step, but only accept a name-shaped token (ID or keyword)."""
         x = self.step()
         if x.k not in ('ID', 'KW'):
-            raise SyntaxError('want %s (identifier) have %r at line %d'
+            raise SyntaxError("want %s (identifier) have '%s' at line %d"
                               % (what, x.v, x.line))
         return x

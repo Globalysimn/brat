@@ -181,16 +181,6 @@ def main():
                 print("FAIL %s: checkers disagree\n--- python\n%s\n--- cxx\n%s" % (name, py, cx))
                 failures += 1
 
-    proto = run([sys.executable, CLI, "check", "--proto", os.path.join(TMP, "balanced.brat")])
-    if "balanced" not in proto.stdout:
-        print("FAIL --proto did not report a balanced pipe:\n" + proto.stdout)
-        failures += 1
-    proto = run([sys.executable, CLI, "check", "--proto",
-                 os.path.join(TMP, "send_blocks.brat")])
-    if "DEADLOCK" not in proto.stdout:
-        print("FAIL --proto did not flag a deadlock:\n" + proto.stdout)
-        failures += 1
-
     if failures:
         raise SystemExit("SESSION FAILED (%d)" % failures)
     print("SESSION ALL GREEN (%d cases%s)" % (len(CASES), ", both checkers" if HAVE_CXX else ""))

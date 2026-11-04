@@ -7,8 +7,11 @@ Default: `$BRAT_CC`, else `cc`. `zig cc` is used only where it earns its size:
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
+
+_FALLBACK_CACHE = None
 
 
 class CcError(Exception):
@@ -86,25 +89,45 @@ def cache_dir():
     problem it was. A home directory is the right place for a cache; the
     temporary directory is the fallback only when `~` is not writable.
     """
+    global _FALLBACK_CACHE
     d = os.environ.get("BRAT_CACHE")
-    if not d:
-        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
-            os.path.expanduser("~"), ".cache")
-        candidate = os.path.join(base, "brat")
-        try:
-            os.makedirs(candidate, exist_ok=True)
-            d = candidate
-        except OSError:
-            d = os.path.join(tempfile.gettempdir(), "brat-cache")
-    os.makedirs(d, exist_ok=True)
-    return d
+    if d:
+        os.makedirs(d, exist_ok=True)
+        return d
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache")
+    candidate = os.path.join(base, "brat")
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        return candidate
+    except OSError:
+        pass
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    fb = os.path.join(tempfile.gettempdir(),
+                      "brat-cache-%d" % uid if uid is not None else "brat-cache")
+    try:
+        os.makedirs(fb, mode=0o700, exist_ok=True)
+        st = os.lstat(fb)
+        if not stat.S_ISLNK(st.st_mode) and stat.S_ISDIR(st.st_mode) and (
+                uid is None or st.st_uid == uid):
+            if uid is not None:
+                os.chmod(fb, 0o700)
+            return fb
+    except OSError:
+        pass
+    if _FALLBACK_CACHE is None or not os.path.isdir(_FALLBACK_CACHE):
+        _FALLBACK_CACHE = tempfile.mkdtemp(prefix="brat-cache-")
+    return _FALLBACK_CACHE
 
 
 # A cache that never shrinks is a leak with a nicer name: the ASan corpus alone
 # is 64 debug binaries, and a developer who edits crt.h invalidates all of them
 # at once. The cap is enforced on store, oldest-first by mtime, and only for
 # entries this module wrote (a plain file in the cache directory).
-_MAX_MB = int(os.environ.get("BRAT_CACHE_MAX_MB", "1024") or "1024")
+try:
+    _MAX_MB = max(1, int(os.environ.get("BRAT_CACHE_MAX_MB", "1024") or "1024"))
+except ValueError:
+    _MAX_MB = 1024
 CACHE_MAX_BYTES = _MAX_MB * 1024 * 1024
 
 # Below this much free space the cache gives way to the work that needs the disk.
@@ -194,7 +217,35 @@ def cc_cached(argv, cfile, out, timeout=300, env=None):
             # prune_cache in another process removed the entry between the check
             # and the copy. A miss is the correct answer, not a crash.
             pass
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+    raw_tmo = os.environ.get("BRAT_CC_TIMEOUT_MS", "").strip()
+    if raw_tmo:
+        try:
+            ms_v = int(raw_tmo)
+            if 0 < ms_v <= 3600000:
+                timeout = ms_v / 1000.0
+        except ValueError:
+            pass
+    pkw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+           "text": True, "env": env}
+    if os.name == "nt":
+        pkw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        pkw["start_new_session"] = True
+    proc = subprocess.Popen(argv, **pkw)
+    try:
+        out_s, err_s = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name != "nt":
+            try:
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+        else:
+            proc.kill()
+        proc.communicate()
+        raise
+    r = subprocess.CompletedProcess(argv, proc.returncode, out_s, err_s)
     if r.returncode == 0 and hit:
         try:
             tmp = hit + ".tmp%d" % os.getpid()

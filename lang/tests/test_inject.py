@@ -14,10 +14,10 @@ the file" proves nothing: the first draft of this test passed every case
 because the payload broke parsing on a comma, long before any name check.
 """
 import _scratch
+import json
 import os
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -122,7 +122,7 @@ def struct_type_name():
           "string as a type name (rc=%d)" % r2.returncode)
 
 
-CLIT_CASES = [
+ESCAPE_CASES = [
     ('a"b', 'a\\"b'),
     ("a\\b", "a\\\\b"),
     ("a\nb", "a\\nb"),
@@ -131,14 +131,18 @@ CLIT_CASES = [
 ]
 
 
-def clit_escapes_exactly():
-    sys.path.insert(0, ENGINE)
-    import codegen_c
-    sys.path.pop(0)
-    for raw, want in CLIT_CASES:
-        got = codegen_c._clit(raw)
-        check(got == want, "_clit(%r) = %r, want %r" % (raw, got, want))
-
+def emitted_string_escapes_exactly():
+    for i, (raw, want) in enumerate(ESCAPE_CASES):
+        literal = json.dumps(raw, ensure_ascii=False)
+        src = write("b0_escape_%d.brat" % i,
+                    'fn main() -> i64 {\n  let s = %s\n  print(len(s))\n  0\n}\n'
+                    % literal)
+        r = cli(["emit-c"], src)
+        check(r.returncode == 0, "native emit-c rejected a valid string literal "
+              "for %r (out=%r)" % (raw, (r.stdout + r.stderr)[:250]))
+        if r.returncode == 0:
+            check('"%s"' % want in r.stdout,
+                  "native C escape for %r did not contain %r" % (raw, want))
 
 def emitted_names_are_escaped():
     src = write("b1_ok.brat", 'fn main() -> i64 {\n  print("ab".upper())\n  0\n}\n')
@@ -194,7 +198,7 @@ def valid_programs_pass():
 def main():
     for fn in (struct_literal_key, field_access_name, method_call_name,
                impl_type_name, enum_type_name, struct_type_name,
-               clit_escapes_exactly, emitted_names_are_escaped,
+               emitted_string_escapes_exactly, emitted_names_are_escaped,
                payload_never_reaches_c, build_never_produces_binary,
                valid_programs_pass):
         try:

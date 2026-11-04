@@ -1,22 +1,19 @@
 """Recursion fast-fail: the depth budget is a language number, both backends agree.
 
-docs/design/DESIGN-fast-fail.md A1. The budget is driven small through the environment so
-the guard under test cannot itself be the slow path it exists to prevent.
+The budget is driven small through the environment so the guard under test cannot
+itself be the slow path it exists to prevent.
 """
+import _cxx
 import _scratch
 import importlib.util
 import os
 import re
 import subprocess
 import sys
-import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENG = os.path.join(HERE, '..', 'engine')
 
-_spec = importlib.util.spec_from_file_location('cc_rec', os.path.join(ENG, 'codegen_c.py'))
-cc = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cc)
 
 _tc_spec = importlib.util.spec_from_file_location('cc_toolchain', os.path.join(ENG, 'toolchain.py'))
 _tc = importlib.util.module_from_spec(_tc_spec)
@@ -104,7 +101,7 @@ def build(name, src):
     open(path, 'w', encoding='utf-8').write(src)
     cf = os.path.join(TMP, name + '.c')
     exe = os.path.join(TMP, name + '.exe')
-    open(cf, 'w', encoding='utf-8').write(cc.emit_file(path))
+    open(cf, 'w', encoding='utf-8').write(_cxx.emit_file(path))
     r = subprocess.run(_tc.resolve_cc().argv(cf, exe, static=True) + ['-O2', '-I', ENG, '-lm'],
                        capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, 'cc failed for %s:\n%s' % (name, (r.stdout + r.stderr)[-2000:])

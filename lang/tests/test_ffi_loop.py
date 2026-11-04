@@ -80,6 +80,9 @@ def run(args, **kw):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
             and "--interp" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
+    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
+        i = args.index("--interp") + 1
+        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     p = subprocess.run([sys.executable, CLI] + args, capture_output=True, text=True, timeout=600, **kw)
     return p.returncode, p.stdout, p.stderr
 

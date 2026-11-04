@@ -32,7 +32,7 @@ def run(*cmd):
 
 readme = open(README, encoding="utf-8").read()
 test_count = len(glob.glob(os.path.join(HERE, "test_*.py")))
-check("lang/tests/      %d files" % test_count in readme,
+check("lang/tests/      %d test files" % test_count in readme,
       "README test count is stale (runner has %d files)" % test_count)
 check("OWNER/BRAT" not in readme, "README CI badge still uses a placeholder")
 check("git clone https://github.com/Nefor229883984/d.git brat && cd brat" in readme,
@@ -68,7 +68,6 @@ own = os.path.join(HERE, "..", "engine", "borrow.py")
 p = run(own, NEWCOMER)
 check("0 error(s)" in p.stdout, "own newcomer wants 0 error(s) have %r" % p.stdout[-400:])
 
-import tempfile
 
 TMP = _scratch.mkdtemp(prefix="brat-newcomer-")
 

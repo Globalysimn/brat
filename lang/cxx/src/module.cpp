@@ -7,18 +7,91 @@
 #include "module.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 
+#include "lexer.h"
 #include "parser.h"
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace fs = std::filesystem;
 
 namespace {
 
+fs::path g_stdlib_override;
+
+fs::path stdlib_root() {
+    if (const char *env = std::getenv("BRAT_STDLIB"); env && *env) {
+        std::error_code ec;
+        fs::path p = fs::weakly_canonical(fs::absolute(env), ec);
+        if (!ec && fs::is_directory(p, ec)) return p;
+        return {};
+    }
+    if (!g_stdlib_override.empty()) {
+        std::error_code ec;
+        if (fs::is_directory(g_stdlib_override, ec)) return g_stdlib_override;
+    }
+#if defined(_WIN32)
+    char wbuf[32768];
+    DWORD wlen = GetModuleFileNameA(nullptr, wbuf, static_cast<DWORD>(sizeof(wbuf)));
+    if (wlen > 0 && wlen < sizeof(wbuf)) {
+        std::error_code ec;
+        fs::path exe(std::string(wbuf, wlen));
+        fs::path cand = fs::weakly_canonical(exe.parent_path().parent_path().parent_path() / "std", ec);
+        if (!ec && fs::is_directory(cand, ec)) return cand;
+    }
+#elif defined(__APPLE__)
+    uint32_t msz = 0;
+    (void)_NSGetExecutablePath(nullptr, &msz);
+    if (msz > 0 && msz < 32768) {
+        std::string mbuf(msz, '\0');
+        if (_NSGetExecutablePath(mbuf.data(), &msz) == 0) {
+            std::error_code ec;
+            fs::path exe(mbuf.c_str());
+            fs::path cand = fs::weakly_canonical(exe.parent_path().parent_path().parent_path() / "std", ec);
+            if (!ec && fs::is_directory(cand, ec)) return cand;
+        }
+    }
+#elif defined(__linux__)
+    std::error_code ec;
+    fs::path exe = fs::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+        fs::path cand = fs::weakly_canonical(exe.parent_path().parent_path().parent_path() / "std", ec);
+        if (!ec && fs::is_directory(cand, ec)) return cand;
+    }
+#endif
+    return {};
+}
+
+fs::path vendor_root(const fs::path &base) {
+    std::error_code ec;
+    fs::path direct = base / "vendor";
+    if (fs::is_directory(direct, ec)) return fs::weakly_canonical(direct, ec);
+    fs::path cur = base;
+    for (;;) {
+        fs::path parent = cur.parent_path();
+        if (parent.empty() || parent == cur) return {};
+        if (fs::is_regular_file(parent / "brat.lock", ec) &&
+            fs::is_directory(parent / "vendor", ec)) {
+            return fs::weakly_canonical(parent / "vendor", ec);
+        }
+        cur = parent;
+    }
+}
+
 bool confined(const fs::path &base, const fs::path &path) {
+    if (base.empty()) return false;
     auto b = base.begin();
     auto p = path.begin();
     for (; b != base.end(); ++b, ++p) {
@@ -105,10 +178,13 @@ std::string fn_ret(const FnDecl &f) {
 
 // Each `fn name(params) -> type` line is parsed with a body appended, so the
 // signature syntax is the same one an implementation uses.
-std::map<std::string, std::pair<std::vector<std::string>, std::string>>
-parse_interface(const fs::path &path) {
-    std::map<std::string, std::pair<std::vector<std::string>, std::string>> sigs;
+ModuleInterface parse_interface(const fs::path &path) {
+    ModuleInterface sigs;
     std::string src = read_all(path);
+    uint32_t bad_line = 1;
+    if (!utf8_valid(src, bad_line, 1))
+        throw ModuleError(path.string() + ":" + std::to_string(bad_line) +
+                          ": bad interface line: source is not valid UTF-8 at line 1");
     std::vector<std::string> lines;
     std::string cur;
     for (char c : src) {
@@ -132,8 +208,10 @@ parse_interface(const fs::path &path) {
         try {
             body = parse(text + " { return 0 }").body;
         } catch (ParseError &err) {
+            std::string detail = err.what();
+            if (err.line > 0) detail += " at line " + std::to_string(err.line);
             throw ModuleError(path.string() + ":" + std::to_string(number) +
-                              ": bad interface line: " + err.what());
+                              ": bad interface line: " + detail);
         }
         bool ok = body.size() == 1 && inner(*body[0])->k == SK::Fn;
         if (ok) {
@@ -152,8 +230,16 @@ parse_interface(const fs::path &path) {
 
 struct Loader {
     fs::path base;
+    fs::path std_base;
+    fs::path vendor_base;
     ModuleSet set;
     std::map<std::string, size_t> by_path;
+
+    bool is_allowed(const fs::path &path) const {
+        return confined(base, path) ||
+               (!std_base.empty() && confined(std_base, path)) ||
+               (!vendor_base.empty() && confined(vendor_base, path));
+    }
 
     size_t visit(const fs::path &raw, bool root, const std::string &import_name,
                  const std::string *root_source = nullptr) {
@@ -161,7 +247,7 @@ struct Loader {
         std::string key = path.string();
         auto seen = by_path.find(key);
         if (seen != by_path.end()) return seen->second;
-        if (!confined(base, path) || !fs::is_regular_file(path)) {
+        if (!is_allowed(path) || (!(root && root_source) && !fs::is_regular_file(path))) {
             if (root) throw std::runtime_error("cannot read " + key);
             throw ModuleError("no module " + import_name);
         }
@@ -176,7 +262,15 @@ struct Loader {
             if (root) throw;
             throw ParseError(std::string(e.what()) + " (module " + import_name + ")", e.line);
         }
-        if (!root) f.ns = module_namespace(base, path);
+        if (!root) {
+            if (!std_base.empty() && confined(std_base, path) && !confined(base, path)) {
+                f.ns = "std__" + module_namespace(std_base, path);
+            } else if (!vendor_base.empty() && confined(vendor_base, path) && !confined(base, path)) {
+                f.ns = "vendor__" + module_namespace(vendor_base, path);
+            } else {
+                f.ns = module_namespace(base, path);
+            }
+        }
         set.files.push_back(std::move(f));
         size_t idx = set.files.size() - 1;
         by_path[key] = idx;
@@ -195,8 +289,9 @@ struct Loader {
             }
         }
         for (const auto &name : names) {
+            std::vector<std::string> parts = split_name(name);
             std::string joined;
-            for (const auto &part : split_name(name)) {
+            for (const auto &part : parts) {
                 if (!joined.empty()) joined += "/";
                 joined += part;
             }
@@ -207,10 +302,29 @@ struct Loader {
                  {dir / (joined + ".brat"), dir / "vendor" / (joined + ".brat")}) {
                 fs::path real = fs::weakly_canonical(cand);
                 tried_paths.push_back(fs::relative(real, base).generic_string());
-                if (confined(base, real) && fs::is_regular_file(real)) {
+                if (is_allowed(real) && fs::is_regular_file(real)) {
                     target = real;
                     found = true;
                     break;
+                }
+            }
+            if (!found && !vendor_base.empty()) {
+                fs::path rv = fs::weakly_canonical(vendor_base / (joined + ".brat"));
+                if (confined(vendor_base, rv) && fs::is_regular_file(rv)) {
+                    target = rv;
+                    found = true;
+                }
+            }
+            if (!found && parts[0] == "std" && parts.size() >= 2 && !std_base.empty()) {
+                std::string sub;
+                for (size_t k = 1; k < parts.size(); k++) {
+                    if (!sub.empty()) sub += "/";
+                    sub += parts[k];
+                }
+                fs::path sc = fs::weakly_canonical(std_base / (sub + ".brat"));
+                if (confined(std_base, sc) && fs::is_regular_file(sc)) {
+                    target = sc;
+                    found = true;
                 }
             }
             if (!found) {
@@ -247,6 +361,12 @@ struct Mangler {
     }
 
     std::string module_name(size_t cur) {
+        if (!set.files[cur].ns) {
+            if (!set.files[cur].path.empty()) {
+                return fs::path(set.files[cur].path).stem().string();
+            }
+            return "<root>";
+        }
         const std::string &ns = *set.files[cur].ns;
         std::string out;
         for (size_t i = 0; i < ns.size(); i++) {
@@ -369,11 +489,14 @@ struct Mangler {
             }
         }
         for (auto &k : e->kids) k = walk_expr(std::move(k), cur);
-        if (e->k == EK::Closure && e->fn) {
+        if ((e->k == EK::Closure || e->k == EK::ParFor) && e->fn) {
             for (auto &p : e->fn->params) {
                 if (p.def) p.def = walk_expr(std::move(p.def), cur);
             }
             walk_body(e->fn->body, cur);
+        }
+        if (e->k == EK::ParFor && !e->b.empty()) {
+            e->b = resolve_call(e->b, cur);
         }
         return e;
     }
@@ -475,12 +598,19 @@ struct Mangler {
                     size_t tail = imported.rfind('.');
                     std::string last = tail == std::string::npos ? imported
                                                                  : imported.substr(tail + 1);
-                    if (imported == qualifier || last == qualifier) targets.push_back(target);
+                    if (imported == qualifier || last == qualifier) {
+                        if (std::find(targets.begin(), targets.end(), target) == targets.end())
+                            targets.push_back(target);
+                    }
                 }
             }
             if (targets.empty()) {
                 throw ModuleError("`pub use " + target_name + "`: module `" + qualifier +
                                   "` is not imported");
+            }
+            if (targets.size() > 1) {
+                throw ModuleError("`pub use " + target_name + "`: module `" + qualifier +
+                                  "` is ambiguous");
             }
             size_t target = targets[0];
             auto it = set.files[target].functions.find(fn);
@@ -500,6 +630,7 @@ struct Mangler {
             set.files[cur].reexports[fn] = source;
             set.files[cur].functions[fn] = it->second;
             set.files[cur].pub.insert(fn);
+            public_names[fn].emplace_back(cur, it->second);
         }
     }
 
@@ -520,7 +651,7 @@ struct Mangler {
     void run() {
         for (size_t i = 0; i < set.files.size(); i++) {
             SourceFile &f = set.files[i];
-            if (!f.ns) continue;
+            if (f.path.size() <= 5 || f.path.compare(f.path.size() - 5, 5, ".brat") != 0) continue;
             std::string bri = f.path.substr(0, f.path.size() - 5) + ".bri";
             std::error_code ec;
             if (fs::is_regular_file(bri, ec)) f.iface = parse_interface(bri);
@@ -570,11 +701,23 @@ struct Mangler {
 
 }  // namespace
 
+ModuleInterface read_interface(const std::string &path) {
+    return parse_interface(fs::path(path));
+}
+
+void set_stdlib_root(const std::string &dir) {
+    std::error_code ec;
+    fs::path p = fs::weakly_canonical(fs::absolute(dir), ec);
+    if (!ec) g_stdlib_override = p;
+}
+
 ModuleSet load_modules(const std::string &path) {
     fs::path abs = fs::weakly_canonical(fs::absolute(path));
     Loader l;
     l.base = abs.parent_path();
     if (l.base.empty()) l.base = ".";
+    l.std_base = stdlib_root();
+    l.vendor_base = vendor_root(l.base);
     l.visit(abs, true, "");
     return std::move(l.set);
 }
@@ -584,13 +727,21 @@ ModuleSet load_modules(const std::string &path, const std::string &root_source) 
     Loader l;
     l.base = abs.parent_path();
     if (l.base.empty()) l.base = ".";
+    l.std_base = stdlib_root();
+    l.vendor_base = vendor_root(l.base);
     l.visit(abs, true, "", &root_source);
     return std::move(l.set);
 }
 
-void flatten(ModuleSet &set) {
+void mangle_modules(ModuleSet &set) {
+    if (set.mangled) return;
     Mangler m{set};
     m.run();
+    set.mangled = true;
+}
+
+void flatten(ModuleSet &set) {
+    mangle_modules(set);
     std::set<std::string> expanded;
     std::vector<StmtP> flat;
     // A module's statements land where its `import` sits in the importer, not

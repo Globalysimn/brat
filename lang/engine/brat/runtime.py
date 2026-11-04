@@ -1,22 +1,101 @@
 import contextlib
 import copy
 import ctypes
-_STR_PTRS = []
+import errno as _errno
+import hashlib
 import json
 import math
 import os
 import re
+import select
+import signal
 import socket
+import sqlite3
+import ssl
+import stat
 import sys
 import threading
 import time
 
+_STR_PIN_LOCK = threading.Lock()
+_STR_PTRS = {}
+_STR_PIN_CAP = 32768
+_STR_PIN_BYTES_CAP = 64 << 20
+_STR_PIN_BYTES = 0
+
+
+def _pin_str_buf(raw_bytes):
+    global _STR_PIN_BYTES
+    with _STR_PIN_LOCK:
+        buf = _STR_PTRS.get(raw_bytes)
+        if buf is not None:
+            return buf
+        if (len(_STR_PTRS) >= _STR_PIN_CAP or
+                len(raw_bytes) + 1 > _STR_PIN_BYTES_CAP - _STR_PIN_BYTES):
+            raise RuntimeError('string pin limit exceeded')
+        buf = ctypes.create_string_buffer(raw_bytes)
+        _STR_PTRS[raw_bytes] = buf
+        _STR_PIN_BYTES += len(raw_bytes) + 1
+        return buf
+
+
+_MAX_FILE_BYTES = 64 << 20
+_MAX_READ_BYTES = 16 << 20
+_MAX_BYTE_VEC = 16 << 20
+_MAX_STR_BYTES = 1 << 30
+_MAX_SQL_ROWS = 100000
+_MAX_SQL_COLS = 1024
+_MAX_SQL_BLOB = 4 << 20
+_MAX_SQL_RESULT_BYTES = 64 << 20
+_MAX_TOTAL_CHAN_SLOTS = 4194304
+_CHAN_BUDGET_LOCK = threading.Lock()
+_CHAN_TOTAL_SLOTS = [0]
+
+_SQL_LOCK = threading.Lock()
+_SQL_DBS = {}
+_NEXT_SQL = [1]
+
+
+class _SqlEntry:
+    __slots__ = ('conn', 'lock', 'active', 'closing')
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.lock = threading.Lock()
+        self.active = 0
+        self.closing = False
+
+
+def _sql_acquire(sv):
+    with _SQL_LOCK:
+        ent = _SQL_DBS.get(sv)
+        if ent is None or ent.closing or ent.conn is None:
+            return None
+        ent.active += 1
+    ent.lock.acquire()
+    return ent
+
+
+def _sql_release(sv, ent):
+    ent.lock.release()
+    to_close = None
+    with _SQL_LOCK:
+        ent.active -= 1
+        if ent.closing and ent.active == 0:
+            to_close = ent.conn
+            ent.conn = None
+            _SQL_DBS.pop(sv, None)
+    if to_close is not None:
+        try:
+            to_close.close()
+        except Exception:
+            pass
+
 try:
-    from .lexer import Cur, lex
-    from .parser import parse_prog, _LINES
+    from .parser import _LINES
     from .modules import load_source
 except ImportError:
-    from parser import parse_prog, _LINES
+    from parser import _LINES
     from modules import load_source
 
 class Done(Exception):
@@ -56,10 +135,23 @@ _INTERP_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*
 
 _I64 = 1 << 63
 
-# Language recursion budget: BRAT frames, not Python frames (DESIGN-fast-fail A1).
-# 2000: measured refusal 0.4 s interpreter / instant C; a higher default is
-# unreachable in the interpreter and overflows the C stack (~29k frames).
-RECURSION_BUDGET = int(os.environ.get('BRAT_RECURSION_BUDGET', '2000'))
+# Language recursion budget: BRAT frames, not Python frames. 2000: measured
+# refusal 0.4 s interpreter / instant C; a higher default is unreachable in the
+# interpreter and overflows the C stack.
+_DEFAULT_RECURSION_BUDGET = 2000
+
+
+def _recursion_budget():
+    """BRAT_RECURSION_BUDGET under the rule bdepth_init in crt.h applies: an integer in
+    1..1000000, anything else is ignored."""
+    raw = os.environ.get('BRAT_RECURSION_BUDGET', '')
+    if not re.fullmatch(r'[ \t\n\v\f\r]*[+-]?[0-9]+', raw):
+        return _DEFAULT_RECURSION_BUDGET
+    value = int(raw)
+    return value if 0 < value <= 1000000 else _DEFAULT_RECURSION_BUDGET
+
+
+RECURSION_BUDGET = _recursion_budget()
 
 _DEPTH = threading.local()
 
@@ -123,7 +215,7 @@ def _kind(v):
 _MAX_VALUE_DEPTH = 2000
 
 
-def _too_deep(*vals):
+def _too_deep(*vals, skip_closure=True):
     """True when a nested container is deeper than the C runtime's budget.
 
     `==`, `!=` and the ordering operators walk a value graph recursively in the
@@ -132,7 +224,8 @@ def _too_deep(*vals):
     `==` on two deep lists is recursive too, but silently: it either answers or
     dies inside CPython. Measuring the nesting here first keeps the two backends
     on the same answer, and is the reason this walks iteratively."""
-    stack = [(v, 1) for v in vals if isinstance(v, (list, dict, tuple))]
+    stack = [(v, 1) for v in vals if isinstance(v, (list, dict, tuple))
+             and not (skip_closure and isinstance(v, tuple) and v and v[0] == 'closure')]
     while stack:
         v, d = stack.pop()
         if d > _MAX_VALUE_DEPTH:
@@ -140,7 +233,12 @@ def _too_deep(*vals):
         if isinstance(v, dict):
             kids = list(v.values())
         elif isinstance(v, tuple):
-            kids = [x for x in v[1:]]      # the first slot is the tag's name
+            if v and v[0] == 'closure':
+                if skip_closure:
+                    continue
+                kids = [v[4]] if len(v) > 4 and isinstance(v[4], dict) else []
+            else:
+                kids = [x for x in v[1:]]      # the first slot is the tag's name
         else:
             kids = v
         stack.extend((x, d + 1) for x in kids if isinstance(x, (list, dict, tuple)))
@@ -148,101 +246,189 @@ def _too_deep(*vals):
 
 
 def _eq_deep(a, b, _depth=0):
-    """`==` against `veq`'s recursion budget, for values past the C one.
-
-    Only reached when `_too_deep` said the pair is deeper than the budget, so
-    the shallow path keeps Python's C-speed comparison. Tag arguments, keys and
-    the struct type are compared, because that is what `veq_` compares.
-    """
-    if _depth >= _MAX_VALUE_DEPTH:
-        raise RuntimeError('recursion too deep')
-    an = isinstance(a, (bool, int, float))
-    bn = isinstance(b, (bool, int, float))
-    if an and bn:
-        return a == b
-    if _kind(a) != _kind(b):
-        return False
-    if isinstance(a, dict):
-        if a.get('$type', '') != b.get('$type', '') or len(a) != len(b):
-            return False
-        for kx, ky in zip(a.keys(), b.keys()):
-            if not _eq_deep(kx, ky, _depth + 1) or not _eq_deep(a[kx], b[ky], _depth + 1):
+    """Iterative `==` against `veq`'s recursion budget (`_MAX_VALUE_DEPTH`)."""
+    stk = []
+    while True:
+        if _depth + len(stk) >= _MAX_VALUE_DEPTH:
+            raise RuntimeError('recursion too deep')
+        an = isinstance(a, (bool, int, float))
+        bn = isinstance(b, (bool, int, float))
+        if an and bn:
+            if a != b:
                 return False
-        return True
-    if isinstance(a, (list, tuple)):
-        if len(a) != len(b):
+        elif _kind(a) != _kind(b):
             return False
-        for x, y in zip(a, b):
-            if not _eq_deep(x, y, _depth + 1):
+        elif isinstance(a, dict):
+            if a.get('$type', '') != b.get('$type', '') or len(a) != len(b):
                 return False
-        return True
-    return a == b
+            ks = [k for k in a.keys() if k != '$type']
+            if ks:
+                k0 = ks[0]
+                if k0 not in b:
+                    return False
+                stk.append(('d', a, b, ks, 0))
+                a, b = a[k0], b[k0]
+                continue
+        elif isinstance(a, tuple):
+            if len(a) != len(b) or (a and a[0] != b[0]):
+                return False
+            if len(a) > 1:
+                stk.append(('t', a, b, None, 1))
+                a, b = a[1], b[1]
+                continue
+        elif isinstance(a, list):
+            if len(a) != len(b):
+                return False
+            if a:
+                stk.append(('l', a, b, None, 0))
+                a, b = a[0], b[0]
+                continue
+        else:
+            if a != b:
+                return False
+        advanced = False
+        while stk:
+            knd, pa, pb, ks, idx = stk[-1]
+            nx = idx + 1
+            if knd == 'l':
+                if nx < len(pa):
+                    stk[-1] = ('l', pa, pb, None, nx)
+                    a, b = pa[nx], pb[nx]
+                    advanced = True
+                    break
+                stk.pop()
+            elif knd == 't':
+                if nx < len(pa):
+                    stk[-1] = ('t', pa, pb, None, nx)
+                    a, b = pa[nx], pb[nx]
+                    advanced = True
+                    break
+                stk.pop()
+            else:
+                if nx < len(ks):
+                    kn = ks[nx]
+                    if kn not in pb:
+                        return False
+                    stk[-1] = ('d', pa, pb, ks, nx)
+                    a, b = pa[kn], pb[kn]
+                    advanced = True
+                    break
+                stk.pop()
+        if not advanced:
+            return True
 
 
 def _ncmp(op, a, b, _depth=0):
-    """The three-way order `vcmp` gives, applied all the way down.
-
-    Mirrors `vcmp_` in `crt.h` case for case, because `str < i64` is refused at
-    the top level *and* inside a vector, a tag or a map, and the answer must be
-    the same three-way comparison the native side made: an element-wise order,
-    a length tie-break, `None` below everything and a tag compared by name
-    first. Python's own operators cannot stand in for it -- `[1, "x"] < [1, 2]`
-    is a `TypeError` there, whose text used to reach the program as its error.
-    """
-    if isinstance(a, str) and isinstance(b, str):
-        return (a > b) - (a < b)
-    an = isinstance(a, (bool, int, float))
-    bn = isinstance(b, (bool, int, float))
-    if an and bn:
-        # Exact: converting to float first answered `2^60 + 1 > 2^60` with
-        # "equal", and Python's own operators already compare an `int` against a
-        # `float` by value.
-        return (a > b) - (a < b)
-    if a is None or b is None:
-        if a is None and b is None:
+    """Iterative three-way order matching `vcmp_` in `crt.h`."""
+    stk = []
+    while True:
+        if _depth + len(stk) >= _MAX_VALUE_DEPTH:
+            raise RuntimeError('recursion too deep')
+        if isinstance(a, str) and isinstance(b, str):
+            c = (a > b) - (a < b)
+            if c:
+                return c
+        elif isinstance(a, (bool, int, float)) and isinstance(b, (bool, int, float)):
+            if a != a or b != b:
+                c = (a != a) - (b != b)
+                if c:
+                    return c
+            else:
+                c = (a > b) - (a < b)
+                if c:
+                    return c
+        elif a is None or b is None:
+            if a is not b:
+                return -1 if a is None else 1
+        elif _kind(a) != _kind(b) or _kind(a) == 'x':
+            raise RuntimeError('type error in ' + op)
+        elif isinstance(a, list):
+            nn = min(len(a), len(b))
+            if nn == 0:
+                if len(a) != len(b):
+                    return 1 if len(a) > len(b) else -1
+            else:
+                stk.append(('l', a, b, None, 0, 0))
+                a, b = a[0], b[0]
+                continue
+        elif isinstance(a, dict):
+            at, bt = a.get('$type', ''), b.get('$type', '')
+            if at != bt:
+                return 1 if at > bt else -1
+            ka = [k for k in a.keys() if k != '$type']
+            kb = [k for k in b.keys() if k != '$type']
+            nn = min(len(ka), len(kb))
+            if nn == 0:
+                if len(ka) != len(kb):
+                    return 1 if len(ka) > len(kb) else -1
+            else:
+                stk.append(('d', a, b, (ka, kb), 0, 0))
+                a, b = _munkey(ka[0]), _munkey(kb[0])
+                continue
+        elif isinstance(a, tuple):
+            if a[0] != b[0]:
+                return 1 if a[0] > b[0] else -1
+            nn = min(len(a), len(b))
+            if nn <= 1:
+                if len(a) != len(b):
+                    return 1 if len(a) > len(b) else -1
+            else:
+                stk.append(('t', a, b, None, 1, 0))
+                a, b = a[1], b[1]
+                continue
+        advanced = False
+        while stk:
+            knd, pa, pb, ks, idx, ph = stk[-1]
+            if knd == 'l':
+                nn = min(len(pa), len(pb))
+                nx = idx + 1
+                if nx < nn:
+                    stk[-1] = ('l', pa, pb, None, nx, 0)
+                    a, b = pa[nx], pb[nx]
+                    advanced = True
+                    break
+                if len(pa) != len(pb):
+                    return 1 if len(pa) > len(pb) else -1
+                stk.pop()
+            elif knd == 't':
+                nn = min(len(pa), len(pb))
+                nx = idx + 1
+                if nx < nn:
+                    stk[-1] = ('t', pa, pb, None, nx, 0)
+                    a, b = pa[nx], pb[nx]
+                    advanced = True
+                    break
+                if len(pa) != len(pb):
+                    return 1 if len(pa) > len(pb) else -1
+                stk.pop()
+            else:
+                ka, kb = ks
+                if ph == 0:
+                    stk[-1] = ('d', pa, pb, ks, idx, 1)
+                    a, b = pa[ka[idx]], pb[kb[idx]]
+                    advanced = True
+                    break
+                nn = min(len(ka), len(kb))
+                nx = idx + 1
+                if nx < nn:
+                    stk[-1] = ('d', pa, pb, ks, nx, 0)
+                    a, b = _munkey(ka[nx]), _munkey(kb[nx])
+                    advanced = True
+                    break
+                if len(ka) != len(kb):
+                    return 1 if len(ka) > len(kb) else -1
+                stk.pop()
+        if not advanced:
             return 0
-        return -1 if a is None else 1
-    if _kind(a) != _kind(b) or _kind(a) == 'x':
-        raise RuntimeError('type error in ' + op)
-    if _depth + 1 >= _MAX_VALUE_DEPTH:
-        raise RuntimeError('recursion too deep')
-    if isinstance(a, list):
-        for x, y in zip(a, b):
-            c = _ncmp(op, x, y, _depth + 1)
-            if c:
-                return c
-        return (len(a) > len(b)) - (len(a) < len(b))
-    if isinstance(a, dict):
-        at, bt = a.get('$type', ''), b.get('$type', '')
-        c = _ncmp(op, at, bt)
-        if c:
-            return c
-        ka, kb = list(a.keys()), list(b.keys())
-        for kx, ky in zip(ka, kb):
-            c = _ncmp(op, kx, ky, _depth + 1)
-            if c:
-                return c
-            c = _ncmp(op, a[kx], b[ky], _depth + 1)
-            if c:
-                return c
-        return (len(a) > len(b)) - (len(a) < len(b))
-    if isinstance(a, tuple):
-        # A tag: its name, then its arguments, then how many there are.
-        c = _ncmp(op, a[0], b[0], _depth + 1)
-        if c:
-            return c
-        for x, y in zip(a[1:], b[1:]):
-            c = _ncmp(op, x, y, _depth + 1)
-            if c:
-                return c
-        return (len(a) > len(b)) - (len(a) < len(b))
-    return 0
 
 
 def _compare(op, a, b):
     """`<`, `<=`, `>`, `>=` inside one comparable class, or the same error the
     native runtime raises. Mixed types are refused: a total order across `str`
     and `i64` would answer a question the program never asked."""
+    if isinstance(a, (bool, int, float)) and isinstance(b, (bool, int, float)):
+        if a != a or b != b:
+            return False
     c = _ncmp(op, a, b)
     if op == '<':
         return c < 0
@@ -325,14 +511,29 @@ def _checked_sort(v, key=None):
     the native side answered `type error in <`.
     """
     import functools
-    if len(set(_kind(x) for x in v)) > 1:
-        raise RuntimeError('type error in <')
     if key is None:
+        if len(set(_kind(x) for x in v)) > 1:
+            raise RuntimeError('type error in <')
         v.sort(key=functools.cmp_to_key(lambda a, b: _ncmp('<', a, b)))
     else:
-        # `sort_by` compares the keys, as `vsort_by` does; the key function is
-        # still called once per element, which is what the interpreter promised.
-        v.sort(key=functools.cmp_to_key(lambda a, b: _ncmp('<', key(a), key(b))))
+        # O(N) Schwartzian transform: evaluate `key(x)` once per element
+        # (including len == 1) and sort `(key, index, item)` stably, matching
+        # `vsort_by` in `crt.h`.
+        n = len(v)
+        if n <= 1:
+            if n == 1:
+                key(v[0])
+            return v
+        ents = [(key(v[i]), i, v[i]) for i in range(n)]
+        if len(set(_kind(e[0]) for e in ents)) > 1:
+            raise RuntimeError('type error in <')
+        def _cmp_ent(a, b):
+            c = _ncmp('<', a[0], b[0])
+            if c != 0:
+                return c
+            return -1 if a[1] < b[1] else (1 if a[1] > b[1] else 0)
+        ents.sort(key=functools.cmp_to_key(_cmp_ent))
+        v[:] = [e[2] for e in ents]
     return v
 
 
@@ -363,55 +564,117 @@ def _bstr(v):
     repr escapes control characters and non-printables C cannot reproduce."""
     if isinstance(v, str):
         return v
-    if _too_deep(v):
+    if _too_deep(v, skip_closure=True):
         raise RuntimeError('recursion too deep')
     return _brepr(v)
 
 
+def _brepr_qstr(v):
+    quote = '"' if ("'" in v and '"' not in v) else "'"
+    out = [quote]
+    for ch in v:
+        if ch == quote or ch == '\\':
+            out.append('\\' + ch)
+        elif ch == '\n':
+            out.append('\\n')
+        elif ch == '\r':
+            out.append('\\r')
+        elif ch == '\t':
+            out.append('\\t')
+        else:
+            out.append(ch)
+    out.append(quote)
+    return ''.join(out)
+
+
 def _brepr(v):
-    if isinstance(v, bool):
-        return 'True' if v else 'False'
-    if v is None:
-        return 'None'
-    if isinstance(v, (int, float)):
-        return str(v)
-    if isinstance(v, str):
-        quote = '"' if ("'" in v and '"' not in v) else "'"
-        out = [quote]
-        for ch in v:
-            if ch == quote or ch == '\\':
-                out.append('\\' + ch)
-            elif ch == '\n':
-                out.append('\\n')
-            elif ch == '\r':
-                out.append('\\r')
-            elif ch == '\t':
-                out.append('\\t')
+    out = []
+    stk = []
+    cur = v
+    while True:
+        if isinstance(cur, bool):
+            out.append('True' if cur else 'False')
+        elif cur is None:
+            out.append('None')
+        elif isinstance(cur, (int, float)):
+            out.append(str(cur))
+        elif isinstance(cur, str):
+            out.append(_brepr_qstr(cur))
+        elif isinstance(cur, list):
+            if not cur:
+                out.append('[]')
             else:
-                out.append(ch)
-        out.append(quote)
-        return ''.join(out)
-    if isinstance(v, list):
-        return '[' + ', '.join(_brepr(x) for x in v) + ']'
-    if isinstance(v, dict):
-        parts = []
-        if v.get('$type') is not None:
-            parts.append("'$type': '%s'" % v['$type'])
-        for k, x in v.items():
-            if k != '$type':
-                parts.append('%s: %s' % (_brepr(_munkey(k)), _brepr(x)))
-        return '{' + ', '.join(parts) + '}'
-    if isinstance(v, tuple):
-        # A closure is an internal object, not a value the language can write
-        # down; `crt.h` says `fn` for the same reason, and the interpreter used
-        # to print its AST here (`('closure', None, [('x', 'ref', ...)], ...)`),
-        # which was the last known place where two backends printed different
-        # bytes for one value.
-        if v and v[0] == 'closure':
-            return 'fn'
-        parts = ["'%s'" % v[0]] + [_brepr(x) for x in v[1:]]
-        return '(' + ', '.join(parts) + (',' if len(parts) == 1 else '') + ')'
-    return str(v)
+                out.append('[')
+                stk.append(('l', cur, 0, None))
+                cur = cur[0]
+                continue
+        elif isinstance(cur, dict):
+            has_type = cur.get('$type') is not None
+            items = [(k, x) for k, x in cur.items() if k != '$type']
+            out.append('{')
+            if has_type:
+                out.append("'$type': '%s'" % cur['$type'])
+            if not items:
+                out.append('}')
+            else:
+                if has_type:
+                    out.append(', ')
+                stk.append(('d', items, 0, 0))
+                cur = _munkey(items[0][0])
+                continue
+        elif isinstance(cur, tuple):
+            if cur and cur[0] == 'closure':
+                out.append('fn')
+            elif len(cur) <= 1:
+                out.append("('%s',)" % (cur[0] if cur else ''))
+            else:
+                out.append("('%s', " % cur[0])
+                stk.append(('t', cur, 1, None))
+                cur = cur[1]
+                continue
+        else:
+            out.append(str(cur))
+        advanced = False
+        while stk:
+            knd, seq, idx, ph = stk[-1]
+            if knd == 'l':
+                nx = idx + 1
+                if nx < len(seq):
+                    out.append(', ')
+                    stk[-1] = ('l', seq, nx, None)
+                    cur = seq[nx]
+                    advanced = True
+                    break
+                out.append(']')
+                stk.pop()
+            elif knd == 't':
+                nx = idx + 1
+                if nx < len(seq):
+                    out.append(', ')
+                    stk[-1] = ('t', seq, nx, None)
+                    cur = seq[nx]
+                    advanced = True
+                    break
+                out.append(')')
+                stk.pop()
+            else:
+                if ph == 0:
+                    out.append(': ')
+                    stk[-1] = ('d', seq, idx, 1)
+                    cur = seq[idx][1]
+                    advanced = True
+                    break
+                nx = idx + 1
+                if nx < len(seq):
+                    out.append(', ')
+                    stk[-1] = ('d', seq, nx, 0)
+                    cur = _munkey(seq[nx][0])
+                    advanced = True
+                    break
+                out.append('}')
+                stk.pop()
+        if not advanced:
+            return ''.join(out)
 
 
 def find_path(env, path):
@@ -440,6 +703,36 @@ def name_path(e):
             b = name_path(e[1])
             return b + '.' + e[2] if b else None
     return None
+
+
+def assoc_fn_name(recv, meth, env, funcs):
+    """`Type.f` for an `impl` function without `self`, or None.
+
+    A bare uppercase identifier parses as a zero-argument call because that is
+    how enum variants are written (`Red`), so `Point.make(1)` arrives as an
+    `mcall` whose receiver is `('call', 'Point', [])`. Resolving it as a path
+    is only correct when the `impl` really declares that name and the first
+    parameter is not `self`; otherwise `Red.code()` must keep evaluating the
+    receiver and dispatching on its variant.
+    """
+    if not (isinstance(recv, tuple) and len(recv) >= 3 and recv[0] == 'call'):
+        return None
+    tname = recv[1]
+    if recv[2] or not isinstance(tname, str) or '.' in tname:
+        return None
+    if not tname[:1].isupper() or find(env, tname) is not _MISS:
+        return None
+    info = funcs.get(tname + '.' + meth)
+    if not (isinstance(info, tuple) and len(info) == 2 and isinstance(info[0], list)):
+        return None
+    if info[0] and info[0][0][0] == 'self':
+        # `Color.code()` for a method that wants a receiver. The C++ emitter
+        # refuses this with the same sentence; without this the interpreter
+        # fell through to the builtin table and raised a CPython `NameError:
+        # no fn Color`, which no BRAT handler can catch and which names the
+        # type rather than the mistake.
+        raise RuntimeError(tname + '.' + meth + ' needs instance, use value.method()')
+    return tname + '.' + meth
 
 
 def find(env, n):
@@ -518,6 +811,7 @@ _SLICE_STRUCTS = {}
 
 # Records declared `extern packed struct`: no padding, so ctypes must not add any.
 _PACKED = set()
+_UNIONS = set()
 
 # The element a call's result carries, in call order. A `ptr[T]` return says
 # what the value points at; the `let` that binds it records that, so
@@ -545,6 +839,27 @@ def _forget_ptr_frame(frame):
     _PTRS.pop(id(frame), None)
 
 
+def _run_frame(frame, body, env, funcs, params=(), fallthrough=0):
+    """Run a function body in `frame`, which leaves `env` however the body ends.
+
+    A runtime error caught by a `try` further up used to leave the callee's frame on the
+    stack, where its parameters and locals shadowed the caller's variables from then on."""
+    with _frame():
+        _note_ptr_params(frame, params)
+        env.append(frame)
+        try:
+            run_block(body, env, funcs, frame=True)
+        except Propagate:
+            raise
+        except (Done, Ret) as r:
+            return r.v
+        finally:
+            _drop_all(frame)
+            _forget_ptr_frame(frame)
+            env.pop()
+        return fallthrough
+
+
 def _bind(frame, name, val):
     if _MANAGED:
         old = frame.get(name)
@@ -570,6 +885,18 @@ def check_map_key(k):
     if isinstance(k, (list, dict)):
         return 'unhashable map key'
     return None
+
+
+def _as_index(ix):
+    """The position an index names, as `vindex_of` in `crt.h` decides it.
+
+    A float counts when it is a whole number. A bool, a fraction, NaN and infinity are
+    refused: the last two used to escape as CPython's own ValueError and OverflowError text."""
+    if isinstance(ix, bool) or not isinstance(ix, (int, float)):
+        raise RuntimeError('index must be int')
+    if isinstance(ix, float) and not (math.isfinite(ix) and ix == math.floor(ix)):
+        raise RuntimeError('index must be int')
+    return int(ix)
 
 
 def ev(e, env, funcs):
@@ -615,18 +942,16 @@ def ev(e, env, funcs):
             # unreadable. Asking first whether the map is tagged raised even
             # when the field was there: `let p = Point { x: 1 }` then
             # `p["x"]` was `no field x` here and `1` from every other backend.
-            k = _mkey(ix)
+            k = None if isinstance(ix, (list, dict)) else _mkey(ix)
             if k == _TYPE_KEY:
                 raise RuntimeError('no field ' + str(ix))
-            if k not in base:
+            if k is None or k not in base:
                 raise RuntimeError(('no field ' if '$type' in base else 'no key ')
                                    + str(ix))
             return base[k]
-        if not isinstance(ix, (int, float)) or int(ix) != ix:
-            raise RuntimeError('index must be int')
+        ix = _as_index(ix)
         if not isinstance(base, (list, str)):
             raise RuntimeError('index of non-indexable')
-        ix = int(ix)
         if ix < 0 or ix >= len(base):
             raise RuntimeError('index out of range')
         return base[ix]
@@ -649,11 +974,11 @@ def ev(e, env, funcs):
                 _out_names(env)[src[1]] = True
                 return ('addr', env, src[1], 0, None)
             if src[0] == 'field' and isinstance(src[1], tuple) and src[1][0] == 'var':
-                whole = ev(src, env, funcs)
+                ev(src, env, funcs)
                 _out_names(env)[src[1][1]] = True
                 return ('addr', env, src[1][1], 0, None)
             if src[0] == 'idx' and isinstance(src[1], tuple) and src[1][0] == 'var':
-                whole = ev(src, env, funcs)
+                ev(src, env, funcs)
                 _out_names(env)[src[1][1]] = True
                 return ('addr', env, src[1][1], 0, None)
             raise RuntimeError('`&` takes a binding: `&x`, `&x.f` or `&x[i]`')
@@ -672,10 +997,9 @@ def ev(e, env, funcs):
     if k == 'closure':
         _, name, params, body = e
         cap = dict(env[-1])
-        node = ('closure', name, params, body, cap)
         if name:
-            cap[name] = node
-        return node
+            cap.pop(name, None)
+        return ('closure', name, params, body, cap)
     if k == 'bin':
         op = e[1]
         a = ev(e[2], env, funcs)
@@ -686,7 +1010,11 @@ def ev(e, env, funcs):
         b = ev(e[3], env, funcs)
         if op == '+':
             if isinstance(a, str) or isinstance(b, str):
-                return str(a) + str(b)
+                sa = a if isinstance(a, str) else str(a)
+                sb = b if isinstance(b, str) else str(b)
+                if len(sa.encode('utf-8')) + len(sb.encode('utf-8')) > MAX_STR:
+                    raise RuntimeError('out of memory')
+                return sa + sb
             if isinstance(a, list) and isinstance(b, list):
                 return a + b
             if isinstance(a, int) and isinstance(b, int):
@@ -726,30 +1054,31 @@ def ev(e, env, funcs):
                 return a * b
             raise RuntimeError('type error in *')
         if op == '/':
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                raise RuntimeError('type error in /')
             if b == 0:
                 raise RuntimeError('div by zero')
-            if isinstance(a, float) or isinstance(b, float):
-                return a / b
             if isinstance(a, int) and isinstance(b, int):
                 if a == -_I64 and b == -1:
                     return -_I64
                 return wrap64(a // b)
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                return a / b
-            raise RuntimeError('type error in /')
+            return a / b
         if op == '%':
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                raise RuntimeError('type error in %')
             if b == 0:
                 raise RuntimeError('div by zero')
             if isinstance(a, int) and isinstance(b, int):
                 if a == -_I64 and b == -1:
                     return 0
                 return wrap64(a % b)
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            try:
                 r = math.fmod(a, b)
-                if r != 0 and ((r < 0) != (b < 0)):
-                    r += b
-                return r
-            raise RuntimeError('type error in %')
+            except ValueError:
+                return math.nan
+            if r != 0 and ((r < 0) != (b < 0)):
+                r += b
+            return r
         if op == '==' or op == '!=':
             if (_kind(a) == _kind(b) and isinstance(a, (list, dict, tuple))
                     and _too_deep(a, b)):
@@ -758,7 +1087,10 @@ def ev(e, env, funcs):
                 # whose answer for a 2500-deep pair is a `RecursionError`.
                 same = _eq_deep(a, b)
             else:
-                same = a == b
+                try:
+                    same = a == b
+                except RecursionError:
+                    same = _eq_deep(a, b)
             return same if op == '==' else not same
         if op in ('<', '>', '<=', '>='):
             # The budget is `_ncmp`'s now: it counts as it descends, so a deep
@@ -767,8 +1099,8 @@ def ev(e, env, funcs):
             return _compare(op, a, b)
         if op == 'in':
             if isinstance(b, dict):
-                return _mkey(a) in b and a != '$type'
-            if isinstance(b, (list, str)):
+                return not isinstance(a, (list, dict)) and _mkey(a) in b and a != '$type'
+            if isinstance(b, list) or (isinstance(b, str) and isinstance(a, str)):
                 return a in b
             raise RuntimeError('in of non-container')
         raise RuntimeError('bad bin op ' + op)
@@ -788,6 +1120,13 @@ def ev(e, env, funcs):
             # Static path: `log.info`, `Type.method`, `Type.Variant`. The callee
             # is looked up by name, so nothing is evaluated as a receiver.
             return call(path + '.' + e[2], e[3], env, funcs)
+        sf = assoc_fn_name(e[1], e[2], env, funcs)
+        if sf is not None:
+            # `Type.make(x)`: an `impl` function that does not take `self`. A
+            # bare uppercase name parses as a zero-argument call, so name_path()
+            # above does not see it as a path. Both checkers accept the call, so
+            # refusing it here would be a backend disagreement (F-033).
+            return call(sf, e[3], env, funcs)
         obj = ev(e[1], env, funcs)
         if e[2] in ('map', 'filter', 'any', 'all', 'find', 'sort_by') and len(e[3]) == 1:
             return apply_hof(obj, e[2], e[3], env, funcs)
@@ -822,208 +1161,451 @@ def emit_hit(level, msg):
     _out_line(json.dumps({'ts': time.time(), 'lvl': level, 'msg': msg}, ensure_ascii=False))
 
 
-_RE_STEPS = threading.local()
-_RE_MAX_STEPS = 2000000
+_RE_MAX_INST = 65536
+_RE_MAX_REP = 1024
+_RE_MAX_GROUPS = 64
 
 
-def _re_parse(pat):
-    pos = [0]
-    n = len(pat)
-
-    def peek():
-        return pat[pos[0]] if pos[0] < n else None
-
-    def parse_alt():
-        alts = [parse_seq()]
-        while peek() == '|':
-            pos[0] += 1
-            alts.append(parse_seq())
-        if len(alts) == 1:
-            return alts[0]
-        return ('alt', alts)
-
-    def parse_seq():
-        items = []
-        while True:
-            c = peek()
-            if c is None or c in ('|', ')'):
-                return items
-            atom = parse_atom()
-            q = peek()
-            if q in ('*', '+', '?'):
-                pos[0] += 1
-                atom = ({'*': 'star', '+': 'plus', '?': 'opt'}[q], atom)
-            items.append(atom)
-
-    def parse_atom():
-        c = pat[pos[0]]
-        if c == '(':
-            pos[0] += 1
-            inner = parse_alt()
-            if peek() != ')':
-                raise SyntaxError('regex: unbalanced ( in ' + pat)
-            pos[0] += 1
-            return ('group', inner)
-        if c == '[':
-            j = pos[0] + 1
-            body = ''
-            if j < n and pat[j] == '^':
-                body += '^'
-                j += 1
-            while j < n and pat[j] != ']':
-                body += pat[j]
-                j += 1
-            pos[0] = j + 1
-            return ('set', body)
-        if c == '.':
-            pos[0] += 1
-            return ('dot', None)
-        if c == '^':
-            pos[0] += 1
-            return ('bol', None)
-        if c == '$':
-            pos[0] += 1
-            return ('eol', None)
-        if c == '\\':
-            e = pat[pos[0] + 1] if pos[0] + 1 < n else '\\'
-            pos[0] += 2
-            if e == 'd':
-                return ('set', '0-9')
-            if e == 'D':
-                return ('set', '^0-9')
-            if e == 'w':
-                return ('set', 'a-zA-Z0-9_')
-            if e == 'W':
-                return ('set', '^a-zA-Z0-9_')
-            if e == 's':
-                return ('set', ' \t\n\r')
-            if e == 'S':
-                return ('set', '^ \t\n\r')
-            if e == 'n':
-                return ('lit', '\n')
-            if e == 't':
-                return ('lit', '\t')
-            if e == 'r':
-                return ('lit', '\r')
-            return ('lit', e)
-        pos[0] += 1
-        return ('lit', c)
-
-    tree = parse_alt()
-    if pos[0] != n:
-        raise SyntaxError('regex: unbalanced ) in ' + pat)
-    return tree
+def _re_set_match(body: bytes, ch: int) -> bool:
+    neg = len(body) > 0 and body[0] == ord('^')
+    if neg:
+        body = body[1:]
+    found = False
+    i = 0
+    n = len(body)
+    while i < n:
+        if i + 2 < n and body[i + 1] == ord('-'):
+            if body[i] <= ch <= body[i + 2]:
+                found = True
+                break
+            i += 3
+        else:
+            if body[i] == ch:
+                found = True
+                break
+            i += 1
+    return (not found) if neg else found
 
 
-def _re_one(node, ch):
-    k = node[0]
-    if k == 'lit':
-        return ch == node[1]
-    if k == 'dot':
-        return True
-    if k == 'set':
-        body = node[1]
-        neg = body.startswith('^')
-        if neg:
-            body = body[1:]
-        found = False
-        i = 0
-        while i < len(body):
-            if i + 2 < len(body) and body[i + 1] == '-':
-                if body[i] <= ch <= body[i + 2]:
-                    found = True
-                    break
-                i += 3
+def _re_compile_pike(pat_bytes: bytes):
+    prog = []  # list of [op, q, ch, body, x, y]
+    plen = len(pat_bytes)
+    st = [0, 0]  # [pos, ngroups]
+
+    def emit(op, x=0, y=0, q='', ch=0, body=b''):
+        if len(prog) >= _RE_MAX_INST:
+            raise SyntaxError('bad regex pattern')
+        idx = len(prog)
+        prog.append([op, q, ch, body, x, y])
+        return idx
+
+    def parse_bounds():
+        st[0] += 1  # skip '{'
+        if st[0] >= plen or not (48 <= pat_bytes[st[0]] <= 57):
+            raise SyntaxError('bad regex pattern')
+        lo = 0
+        while st[0] < plen and 48 <= pat_bytes[st[0]] <= 57:
+            lo = lo * 10 + (pat_bytes[st[0]] - 48)
+            st[0] += 1
+            if lo > _RE_MAX_REP:
+                raise SyntaxError('bad regex pattern')
+        if st[0] >= plen:
+            raise SyntaxError('bad regex pattern')
+        if pat_bytes[st[0]] == ord('}'):
+            st[0] += 1
+            return lo, lo
+        if pat_bytes[st[0]] != ord(','):
+            raise SyntaxError('bad regex pattern')
+        st[0] += 1
+        if st[0] >= plen:
+            raise SyntaxError('bad regex pattern')
+        if pat_bytes[st[0]] == ord('}'):
+            st[0] += 1
+            return lo, -1
+        if not (48 <= pat_bytes[st[0]] <= 57):
+            raise SyntaxError('bad regex pattern')
+        hi = 0
+        while st[0] < plen and 48 <= pat_bytes[st[0]] <= 57:
+            hi = hi * 10 + (pat_bytes[st[0]] - 48)
+            st[0] += 1
+            if hi > _RE_MAX_REP:
+                raise SyntaxError('bad regex pattern')
+        if st[0] >= plen or pat_bytes[st[0]] != ord('}') or hi < lo:
+            raise SyntaxError('bad regex pattern')
+        st[0] += 1
+        return lo, hi
+
+    def emit_tpl(tpl, orig_body, orig_end):
+        dst = len(prog)
+        delta = dst - orig_body
+        for ins in tpl:
+            op, q, ch, b, x, y = ins
+            nx, ny = x, y
+            if op == 'j' and orig_body <= x <= orig_end:
+                nx = x + delta
+            elif op == 's':
+                if orig_body <= x <= orig_end:
+                    nx = x + delta
+                if orig_body <= y <= orig_end:
+                    ny = y + delta
+            emit(op, nx, ny, q, ch, b)
+        return dst
+
+    def r_atom():
+        sp = emit('s', 0, 0)
+        if st[0] >= plen:
+            raise SyntaxError('bad regex pattern')
+        c = pat_bytes[st[0]]
+        if c in (ord('*'), ord('+'), ord('?')):
+            raise SyntaxError('bad regex pattern')
+        if c == ord('('):
+            st[0] += 1
+            st[1] += 1
+            gid = st[1]
+            sv0 = emit('v', 2 * gid, 0) if gid <= _RE_MAX_GROUPS else -1
+            inner, _ = r_alt()
+            if st[0] >= plen or pat_bytes[st[0]] != ord(')'):
+                raise SyntaxError('bad regex pattern')
+            st[0] += 1
+            if gid <= _RE_MAX_GROUPS:
+                emit('v', 2 * gid + 1, 0)
+            body = sv0 if sv0 >= 0 else inner
+        elif c == ord('['):
+            j = st[0] + 1
+            m = j
+            while m < plen and pat_bytes[m] != ord(']'):
+                m += 1
+            if m >= plen:
+                raise SyntaxError('bad regex pattern')
+            cls_bytes = pat_bytes[j:m]
+            st[0] = m + 1
+            body = emit('c', 0, 0, 's', 0, cls_bytes)
+        elif c == ord('.'):
+            st[0] += 1
+            body = emit('c', 0, 0, 'd')
+        elif c == ord('^'):
+            st[0] += 1
+            body = emit('b', 0, 0)
+        elif c == ord('$'):
+            st[0] += 1
+            body = emit('e', 0, 0)
+        elif c == ord('\\'):
+            eb = pat_bytes[st[0] + 1] if st[0] + 1 < plen else ord('\\')
+            st[0] += 2
+            if eb == ord('d'):
+                body = emit('c', 0, 0, 's', 0, b'0-9')
+            elif eb == ord('D'):
+                body = emit('c', 0, 0, 's', 0, b'^0-9')
+            elif eb == ord('w'):
+                body = emit('c', 0, 0, 's', 0, b'a-zA-Z0-9_')
+            elif eb == ord('W'):
+                body = emit('c', 0, 0, 's', 0, b'^a-zA-Z0-9_')
+            elif eb == ord('s'):
+                body = emit('c', 0, 0, 's', 0, b' \t\n\r')
+            elif eb == ord('S'):
+                body = emit('c', 0, 0, 's', 0, b'^ \t\n\r')
+            elif eb == ord('n'):
+                body = emit('c', 0, 0, 'l', 10)
+            elif eb == ord('t'):
+                body = emit('c', 0, 0, 'l', 9)
+            elif eb == ord('r'):
+                body = emit('c', 0, 0, 'l', 13)
             else:
-                if body[i] == ch:
-                    found = True
+                body = emit('c', 0, 0, 'l', eb)
+        else:
+            st[0] += 1
+            body = emit('c', 0, 0, 'l', c)
+
+        body_end = len(prog)
+        if st[0] < plen and pat_bytes[st[0]] == ord('{'):
+            lo, hi = parse_bounds()
+            if hi == 0:
+                del prog[sp:]
+                nop = emit('j', 0, 0)
+                prog[nop][4] = len(prog)
+                return nop
+            tpl = [list(ins) for ins in prog[body:body_end]]
+            del prog[sp:]
+            entry = emit('j', 0, 0)
+            prog[entry][4] = len(prog)
+            for _ in range(lo):
+                emit_tpl(tpl, body, body_end)
+            if hi < 0:
+                star_sp = emit('s', 0, 0)
+                dst = emit_tpl(tpl, body, body_end)
+                emit('j', star_sp, 0)
+                prog[star_sp][4] = dst
+                prog[star_sp][5] = len(prog)
+            elif hi > lo:
+                for _ in range(hi - lo):
+                    opt_sp = emit('s', 0, 0)
+                    dst = emit_tpl(tpl, body, body_end)
+                    prog[opt_sp][4] = dst
+                    prog[opt_sp][5] = len(prog)
+            return entry
+
+        q = 0
+        if st[0] < plen and pat_bytes[st[0]] in (ord('*'), ord('+'), ord('?')):
+            q = pat_bytes[st[0]]
+            st[0] += 1
+        if q == 0:
+            prog[sp][0] = 'j'
+            prog[sp][4] = body
+            return sp
+        if q == ord('*'):
+            emit('j', sp, 0)
+            prog[sp][4] = body
+            prog[sp][5] = len(prog)
+            return sp
+        if q == ord('+'):
+            prog[sp][0] = 'j'
+            prog[sp][4] = body
+            sp2 = emit('s', body, 0)
+            prog[sp2][5] = len(prog)
+            return sp
+        prog[sp][4] = body
+        prog[sp][5] = len(prog)
+        return sp
+
+    def r_seq():
+        entry = emit('j', 0, 0)
+        first_atom = -1
+        while st[0] < plen:
+            c = pat_bytes[st[0]]
+            if c in (ord('|'), ord(')')):
+                break
+            a = r_atom()
+            if first_atom < 0:
+                first_atom = a
+        prog[entry][4] = entry if first_atom < 0 else first_atom
+        return entry, (first_atom < 0)
+
+    def r_alt():
+        head = emit('s', 0, 0)
+        _, empty0 = r_seq()
+        if not (st[0] < plen and pat_bytes[st[0]] == ord('|')):
+            prog[head][0] = 'j'
+            prog[head][4] = head + 1
+            return head, empty0
+        j1 = emit('j', 0, 0)
+        sps = []
+        jmps = []
+        while st[0] < plen and pat_bytes[st[0]] == ord('|'):
+            st[0] += 1
+            sp = emit('s', 0, 0)
+            sps.append(sp)
+            s0, emp = r_seq()
+            j = emit('j', 0, 0)
+            jmps.append(j)
+            if emp:
+                prog[s0][4] = j
+        fail = emit('f', 0, 0)
+        exit_pc = len(prog)
+        prog[head][4] = head + 1
+        prog[head][5] = sps[0] if sps else fail
+        prog[j1][4] = exit_pc
+        for k, sp in enumerate(sps):
+            prog[sp][4] = sp + 1
+            prog[sp][5] = sps[k + 1] if k + 1 < len(sps) else fail
+        for j in jmps:
+            prog[j][4] = exit_pc
+        return head, False
+
+    sv0 = emit('v', 0, 0)
+    r_alt()
+    if st[0] != plen:
+        raise SyntaxError('bad regex pattern')
+    emit('v', 1, 0)
+    emit('m', 0, 0)
+    target_end = len(prog) - 2
+    for k, ins in enumerate(prog):
+        if ins[0] == 'j' and ins[4] == k:
+            ins[4] = target_end
+    ng = min(st[1], _RE_MAX_GROUPS)
+    return prog, sv0, ng
+
+
+def _re_pike_add(prog, pc, sb, slen, si, out_threads, seen, work_slots, nslots):
+    stk = [(pc, 0, 0)]
+    while stk:
+        it_pc, sl, prev = stk.pop()
+        if it_pc == -1:
+            if 0 <= sl < nslots:
+                work_slots[sl] = prev
+            continue
+        if it_pc < 0 or seen[it_pc]:
+            continue
+        seen[it_pc] = True
+        op, _q, _ch, _body, x, y = prog[it_pc]
+        if op == 'j':
+            stk.append((x, 0, 0))
+        elif op == 's':
+            stk.append((y, 0, 0))
+            stk.append((x, 0, 0))
+        elif op == 'b':
+            if si == 0:
+                stk.append((it_pc + 1, 0, 0))
+        elif op == 'e':
+            if si == slen:
+                stk.append((it_pc + 1, 0, 0))
+        elif op == 'v':
+            if 0 <= x < nslots:
+                stk.append((-1, x, work_slots[x]))
+                work_slots[x] = si
+            stk.append((it_pc + 1, 0, 0))
+        elif op == 'f':
+            pass
+        else:
+            out_threads.append((it_pc, work_slots[:] if nslots > 0 else None))
+
+
+def _re_pike_search(prog, start, sb: bytes, min_from: int, nslots: int):
+    slen = len(sb)
+    nprog = len(prog)
+    best_slots = None
+    matched = False
+    for frm in range(min_from, slen + 1):
+        if matched:
+            break
+        cur = []
+        seen = [False] * (nprog + 1)
+        work_slots = [-1] * nslots
+        _re_pike_add(prog, start, sb, slen, frm, cur, seen, work_slots, nslots)
+        si = frm
+        while cur:
+            nxt = []
+            seen = [False] * (nprog + 1)
+            for pc, tslots in cur:
+                op, q, ch, body, _x, _y = prog[pc]
+                if op == 'm':
+                    matched = True
+                    if nslots > 0 and tslots is not None:
+                        best_slots = tslots[:]
                     break
-                i += 1
-        return (not found) if neg else found
-    return False
-
-
-def _re_node_ends(node, s, si):
-    k = node[0]
-    if k == 'lit' or k == 'set' or k == 'dot':
-        if si < len(s) and _re_one(node, s[si]):
-            yield si + 1
-        return
-    if k == 'bol':
-        if si == 0:
-            yield si
-        return
-    if k == 'eol':
-        if si == len(s):
-            yield si
-        return
-    if k == 'group':
-        inner = node[1]
-        if isinstance(inner, tuple) and inner and inner[0] == 'alt':
-            for alt in inner[1]:
-                for e in _re_items_ends(alt, s, si):
-                    yield e
-        else:
-            for e in _re_items_ends(inner, s, si):
-                yield e
-        return
-    if k == 'alt':
-        for alt in node[1]:
-            for e in _re_items_ends(alt, s, si):
-                yield e
-        return
-    if k in ('star', 'plus', 'opt'):
-        ends = [si]
-        i = si
-        while i < len(s):
-            nxt = None
-            for e in _re_node_ends(node[1], s, i):
-                nxt = e
+                if si >= slen or op != 'c':
+                    continue
+                b = sb[si]
+                if q == 'l':
+                    if b != ch:
+                        continue
+                elif q == 'd':
+                    pass
+                else:
+                    if not _re_set_match(body, b):
+                        continue
+                ws = tslots[:] if (nslots > 0 and tslots is not None) else []
+                _re_pike_add(prog, pc + 1, sb, slen, si + 1, nxt, seen, ws, nslots)
+            cur = nxt
+            if si >= slen:
                 break
-            if nxt is None or nxt == i:
-                break
-            i = nxt
-            ends.append(i)
-            if len(ends) > 100000:
-                break
-        if k == 'opt':
-            ends = [si + 1, si] if len(ends) > 1 else [si, si]
-        else:
-            if k == 'plus':
-                ends = ends[1:]
-            ends = list(reversed(ends))
-        for e in ends:
-            yield e
-        return
-
-
-def _re_items_ends(items, s, si):
-    _RE_STEPS.n = getattr(_RE_STEPS, 'n', 0) + 1
-    if _RE_STEPS.n > _RE_MAX_STEPS:
-        raise RuntimeError('regex too complex')
-    if not items:
-        yield si
-        return
-    for end in _re_node_ends(items[0], s, si):
-        for e in _re_items_ends(items[1:], s, end):
-            yield e
+            si += 1
+    return matched, best_slots
 
 
 def re_match(s, pat):
-    _RE_STEPS.n = 0
-    # C matches raw UTF-8 bytes; latin-1 maps each byte to one code point so the
-    # tree-walker indexes and matches by byte, keeping `.`/classes in parity.
-    s = s.encode('utf-8').decode('latin-1')
-    pat = pat.encode('utf-8').decode('latin-1')
+    sb = s.encode('utf-8')
+    pb = pat.encode('utf-8')
     try:
-        tree = _re_parse(pat)
+        prog, start, _ng = _re_compile_pike(pb)
     except SyntaxError:
         raise RuntimeError('bad regex pattern')
-    for i in range(len(s) + 1):
-        ends = _re_node_ends(tree, s, i) if isinstance(tree, tuple) else _re_items_ends(tree, s, i)
-        for _ in ends:
-            return True
-    return False
+    ok, _ = _re_pike_search(prog, start, sb, 0, 0)
+    return ok
+
+
+def re_find(s, pat):
+    sb = s.encode('utf-8')
+    pb = pat.encode('utf-8')
+    try:
+        prog, start, _ng = _re_compile_pike(pb)
+    except SyntaxError:
+        raise RuntimeError('bad regex pattern')
+    ok, slots = _re_pike_search(prog, start, sb, 0, 2)
+    if not ok or slots is None or slots[0] < 0 or slots[1] < slots[0]:
+        return None
+    return ('some', sb[slots[0]:slots[1]].decode('utf-8', errors='replace'))
+
+
+def re_captures(s, pat):
+    sb = s.encode('utf-8')
+    pb = pat.encode('utf-8')
+    try:
+        prog, start, ng = _re_compile_pike(pb)
+    except SyntaxError:
+        raise RuntimeError('bad regex pattern')
+    nslots = 2 * (ng + 1)
+    ok, slots = _re_pike_search(prog, start, sb, 0, nslots)
+    if not ok or slots is None or slots[0] < 0 or slots[1] < slots[0]:
+        return None
+    out = []
+    for k in range(ng + 1):
+        a0, a1 = slots[2 * k], slots[2 * k + 1]
+        if a0 >= 0 and a1 >= a0:
+            out.append(sb[a0:a1].decode('utf-8', errors='replace'))
+        else:
+            out.append('')
+    return ('some', out)
+
+
+def re_replace(s, pat, repl):
+    sb = s.encode('utf-8')
+    pb = pat.encode('utf-8')
+    rb = repl.encode('utf-8')
+    try:
+        prog, start, ng = _re_compile_pike(pb)
+    except SyntaxError:
+        raise RuntimeError('bad regex pattern')
+    slen = len(sb)
+    rlen = len(rb)
+    nslots = 2 * (ng + 1)
+    out = bytearray()
+    cur = 0
+    search_from = 0
+    while search_from <= slen:
+        ok, slots = _re_pike_search(prog, start, sb, search_from, nslots)
+        if not ok or slots is None:
+            break
+        m0, m1 = slots[0], slots[1]
+        if m0 > cur:
+            out.extend(sb[cur:m0])
+        ri = 0
+        while ri < rlen:
+            if rb[ri] == ord('$') and ri + 1 < rlen:
+                nxt = rb[ri + 1]
+                if nxt == ord('$'):
+                    out.append(ord('$'))
+                    ri += 2
+                    continue
+                if 48 <= nxt <= 57:
+                    gi = nxt - 48
+                    if gi <= ng and slots[2 * gi] >= 0 and slots[2 * gi + 1] >= slots[2 * gi]:
+                        out.extend(sb[slots[2 * gi]:slots[2 * gi + 1]])
+                    ri += 2
+                    continue
+            if rb[ri] == ord('\\') and ri + 1 < rlen and 49 <= rb[ri + 1] <= 57:
+                gi = rb[ri + 1] - 48
+                if gi <= ng and slots[2 * gi] >= 0 and slots[2 * gi + 1] >= slots[2 * gi]:
+                    out.extend(sb[slots[2 * gi]:slots[2 * gi + 1]])
+                ri += 2
+                continue
+            out.append(rb[ri])
+            ri += 1
+        cur = m1
+        if m1 == m0:
+            if m1 >= slen:
+                break
+            lead = sb[m1]
+            step = 1 if lead < 0x80 else (2 if (lead & 0xE0) == 0xC0 else (3 if (lead & 0xF0) == 0xE0 else 4))
+            if m1 + step > slen:
+                step = 1
+            out.extend(sb[m1:m1 + step])
+            cur = m1 + step
+            search_from = cur
+        else:
+            search_from = m1
+    if cur < slen:
+        out.extend(sb[cur:])
+    return bytes(out).decode('utf-8', errors='replace')
 
 def _coerce_arg(ann, val):
     """`fn f(x: f64)` binds a double in the emitted C, so an `i64` literal has to
@@ -1077,7 +1659,7 @@ def run_closure(node, vals, env, funcs):
     # the same name, and a script-level `let` is read live rather than copied at
     # creation. It used to be `inner = [frame]`, which cut the closure off from
     # the script: `let base = 5` + `fn(x) { return x + base }` raised `NameError:
-    # no var base` in the interpreter while both emitters printed the answer.
+    # no var base` in the interpreter while the native backend printed it.
     inner = ([env[0]] if env else []) + [frame]
     with _frame():
         try:
@@ -1195,8 +1777,15 @@ def run_defers(env, funcs):
 
 
 _STR_METH = {'split', 'lines', 'trim', 'lower', 'upper', 'starts_with', 'ends_with', 'contains', 'parse_int', 'replace', 'index_of', 'repeat', 'split_once', 'copy', 'chars', 'parse_float', 'slice'}
-_FLOAT_RE = re.compile(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z')
-_FLOAT_WORD = re.compile(r'[+-]?(?:inf(?:inity)?|nan)\Z', re.IGNORECASE)
+# The whitespace `trim`, `split()` and the `parse_*` methods agree on, and the
+# only line breaks `lines` knows. `crt.h` implements exactly these, byte-wise;
+# Python's own `strip`/`split`/`splitlines` also take NBSP, U+2028, U+0085 and
+# the information separators, which the native runtime does not.
+_WS = ' \t\n\v\f\r'
+_WS_RUN = re.compile('[ \t\n\v\f\r]+')
+_LINE_BREAK = re.compile('\r\n|\n|\r')
+_FLOAT_RE = re.compile(r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z')
+_FLOAT_WORD = re.compile(r'[+-]?(?:inf(?:inity)?|nan)\Z', re.IGNORECASE | re.ASCII)
 _VEC_METH = {'join', 'push', 'pop', 'first', 'last', 'sort', 'rev', 'ins', 'del', 'slice', 'sum', 'min', 'max', 'enumerate', 'copy', 'zip', 'chunks', 'pos'}
 _MAP_METH = {'get', 'has', 'keys', 'del', 'set', 'items', 'vals', 'copy', 'get_or'}
 
@@ -1204,7 +1793,7 @@ _MAP_METH = {'get', 'has', 'keys', 'del', 'set', 'items', 'vals', 'copy', 'get_o
 # `vals[0]` / `vals[1]`, so a wrong count used to leave the interpreter as a
 # CPython `IndexError: list index out of range` -- a host exception printed in a
 # BRAT program's place, naming a list nobody wrote. The counts are the checker's
-# ("method `set` wants 2 args"), and the emitters refuse the same calls.
+# ("method `set` wants 2 args"), and the native backend refuses the same calls.
 _METH_ARITY = {
     'split': (0, 1), 'lines': (0, 0), 'trim': (0, 0), 'lower': (0, 0),
     'upper': (0, 0), 'starts_with': (1, 1), 'ends_with': (1, 1),
@@ -1237,10 +1826,11 @@ def do_method(obj, meth, vals):
     _check_arity(meth, vals)
     try:
         return _do_method(obj, meth, vals)
-    except (TypeError, AttributeError, IndexError, KeyError):
+    except (TypeError, AttributeError, IndexError, KeyError, ValueError, OverflowError):
         # A host exception means the call was wrong for this receiver -- an i64
-        # where a separator belongs, a record with no such field. BRAT reports
-        # that in its own words; the CPython text names nothing the program has.
+        # where a separator belongs, a record with no such field, a string where
+        # a count belongs. BRAT reports that in its own words; the CPython text
+        # names nothing the program has.
         raise RuntimeError('method `%s`: bad argument' % meth)
 
 
@@ -1255,11 +1845,18 @@ def _do_method(obj, meth, vals):
         raise TypeError('channel has no method ' + meth)
     if isinstance(obj, str) and meth in _STR_METH:
         if meth == 'split':
-            return obj.split(vals[0] if vals else None)
+            if not vals:
+                return [w for w in _WS_RUN.split(obj) if w]
+            if vals[0] == '':
+                raise RuntimeError('empty separator')
+            return obj.split(vals[0])
         if meth == 'lines':
-            return obj.splitlines()
+            parts = _LINE_BREAK.split(obj)
+            if parts[-1] == '':
+                parts.pop()
+            return parts
         if meth == 'trim':
-            return obj.strip()
+            return obj.strip(_WS)
         if meth == 'lower':
             return _case_map(obj, False)
         if meth == 'upper':
@@ -1271,13 +1868,28 @@ def _do_method(obj, meth, vals):
         if meth == 'contains':
             return vals[0] in obj
         if meth == 'parse_int':
-            t = obj.strip()
+            t = obj.strip(_WS)
             body = t[1:] if t[:1] in ('+', '-') else t
             if body and all('0' <= ch <= '9' for ch in body):
-                return ('ok', wrap64(int(t)))
+                n = int(t)
+                if not -_I64 <= n < _I64:
+                    return ('err', 'number out of range')
+                return ('ok', n)
             return ('err', 'not a number')
         if meth == 'replace':
-            return obj.replace(vals[0], vals[1])
+            pat, rep = vals[0], vals[1]
+            cnt = (len(obj) + 1) if pat == '' else obj.count(pat)
+            if cnt > 0:
+                est = len(obj.encode('utf-8')) + cnt * (len(rep.encode('utf-8')) - len(pat.encode('utf-8')))
+                if est > MAX_STR:
+                    raise RuntimeError('out of memory')
+            try:
+                out = obj.replace(pat, rep)
+            except MemoryError:
+                raise RuntimeError('out of memory')
+            if len(out.encode('utf-8')) > MAX_STR:
+                raise RuntimeError('out of memory')
+            return out
         if meth == 'index_of':
             r = obj.find(vals[0])
             return None if r < 0 else r
@@ -1289,8 +1901,10 @@ def _do_method(obj, meth, vals):
             except MemoryError:
                 raise RuntimeError('out of memory')
         if meth == 'split_once':
+            if vals[0] == '':
+                raise RuntimeError('empty separator')
             h, sep, t = obj.partition(vals[0])
-            return None if not sep and vals[0] else [h, t]
+            return [h, t] if sep else None
         if meth == 'copy':
             return obj
         if meth == 'chars':
@@ -1298,7 +1912,7 @@ def _do_method(obj, meth, vals):
         if meth == 'slice':
             return obj[int(vals[0]):int(vals[1])]
         if meth == 'parse_float':
-            t = obj.strip()
+            t = obj.strip(_WS)
             if _FLOAT_RE.match(t) or _FLOAT_WORD.match(t):
                 try:
                     return ('ok', float(t))
@@ -1348,7 +1962,19 @@ def _do_method(obj, meth, vals):
             return dict(obj)
     if isinstance(obj, list) and meth in _VEC_METH:
         if meth == 'join':
-            return vals[0].join(str(x) for x in obj)
+            if len(vals) != 1 or not isinstance(vals[0], str):
+                raise RuntimeError('no method join')
+            sep_s = vals[0]
+            sep_b = len(sep_s.encode('utf-8'))
+            parts = []
+            tot_b = 0
+            for idx, x in enumerate(obj):
+                sx = _bstr(x)
+                tot_b += len(sx.encode('utf-8')) + (sep_b if idx else 0)
+                if tot_b > MAX_STR:
+                    raise RuntimeError('out of memory')
+                parts.append(sx)
+            return sep_s.join(parts)
         if meth == 'push':
             obj.append(vals[0])
             return len(obj)
@@ -1500,10 +2126,30 @@ def _ffi_invoke(name, info, vals, funcs):
         if isinstance(ty, str) and ty.startswith('fn'):
             return _callback_ptr(ty, v, funcs, i, name)
         if ty in _STRUCTS:
+            if not isinstance(v, dict):
+                raise RuntimeError('ffi: expected struct %s' % ty)
             cls = _struct_class(ty)
             inst = cls()
-            for f, ft in _STRUCTS[ty]:
+            is_un = ty in _UNIONS
+            flds = _STRUCTS[ty]
+            if is_un:
+                flds = sorted(flds, key=lambda kv: (0 if kv[1] in ('f32', 'f64') else 1))
+            for f, ft in flds:
+                if is_un and isinstance(v, dict) and f not in v:
+                    continue
                 fv = v.get(f) if isinstance(v, dict) else v
+                arr = _array_field_spec(ft)
+                if arr is not None:
+                    elem_t, cnt = arr
+                    if not isinstance(fv, list) or len(fv) != cnt:
+                        raise RuntimeError('ffi: field %s.%s wants vec of length %d' % (ty, f, cnt))
+                    act = _struct_ctype(ft)
+                    items = []
+                    for xv in fv:
+                        cv = to_c(elem_t, xv, i)
+                        items.append(cv.value if hasattr(cv, 'value') else cv)
+                    setattr(inst, f, act(*items))
+                    continue
                 # A scalar field assigns through the ctypes descriptor, which
                 # refuses a c_float where it declared c_long: unwrap first.
                 cv = to_c(ft, fv, i)
@@ -1618,7 +2264,10 @@ def _ffi_invoke(name, info, vals, funcs):
         out = {'$type': type_name}
         for f, ft in _STRUCTS[type_name]:
             val = getattr(inst, f)
-            if ft in _STRUCTS:
+            arr = _array_field_spec(ft)
+            if arr is not None:
+                out[f] = [_read_struct_elem(val[k], arr[0]) for k in range(arr[1])]
+            elif ft in _STRUCTS:
                 out[f] = _struct_val(ft, val)
             elif ft == 'str':
                 out[f] = val.decode('utf-8') if isinstance(val, bytes) else val
@@ -1719,9 +2368,7 @@ def _ptr_at(elem, base, ix):
     import ctypes
     if base <= 0:
         raise RuntimeError('null pointer dereference' if base == 0 else 'pointer is negative')
-    if not isinstance(ix, (int, float)) or int(ix) != ix:
-        raise RuntimeError('index must be int')
-    ix = int(ix)
+    ix = _as_index(ix)
     if elem in _STRUCTS:
         cls = _struct_class(elem)
         if cls is None:
@@ -1742,9 +2389,7 @@ def _ptr_put(elem, base, ix, v):
     import ctypes
     if base <= 0:
         raise RuntimeError('null pointer dereference' if base == 0 else 'pointer is negative')
-    if not isinstance(ix, (int, float)) or int(ix) != ix:
-        raise RuntimeError('index must be int')
-    ix = int(ix)
+    ix = _as_index(ix)
     if elem in _STRUCTS:
         raise RuntimeError('a table of C structs is read-only: '
                            'write the record with ptr_write_struct')
@@ -1784,25 +2429,7 @@ def call_value(name, vals, env, funcs):
             if _MANAGED:
                 vrc_inc(val)
             frame[nm] = val
-        with _frame():
-            env.append(frame)
-            try:
-                run_block(body, env, funcs, frame=True)
-            except Propagate:
-                _drop_all(frame)
-                env.pop()
-                raise
-            except (Done, Ret) as r:
-                _drop_all(frame)
-                env.pop()
-                return r.v
-            except Exception:
-                _drop_all(frame)
-                env.pop()
-                raise
-            _drop_all(frame)
-            env.pop()
-            return None
+        return _run_frame(frame, body, env, funcs, fallthrough=None)
     raise NameError(name)
 
 
@@ -1813,22 +2440,85 @@ _PLUGIN_SEQ = [0]
 _PLUGIN_LOCK = threading.RLock()
 
 
+def _norm_plugin_slot(raw):
+    s = ''.join((raw or '').split())
+    if s in ('ownptr', 'moveptr'):
+        return 'own ptr'
+    if s == 'outptr':
+        return 'out ptr'
+    if s in ('&ptr', 'refptr'):
+        return '&ptr'
+    if s.startswith('fn('):
+        while True:
+            hit = None
+            for w, vals in (('thread', ('same', 'any')), ('reenter', ('yes', 'no'))):
+                for v in vals:
+                    suf = '%s(%s)' % (w, v)
+                    if s.endswith(suf):
+                        hit = suf
+                        break
+                if hit:
+                    break
+            if not hit:
+                break
+            s = s[:-len(hit)]
+    return s
+
+
 def _sig_parts(text):
-    t = text.replace(' ', '')
-    if '(' not in t or not t.endswith(')'):
-        raise RuntimeError('call: bad signature `%s`' % t)
-    ret, rest = t.split('(', 1)
-    return ret, [p for p in rest[:-1].split(',') if p]
+    raw = text.strip() if isinstance(text, str) else ''
+    open_i = raw.find('(')
+    if open_i <= 0 or not raw.endswith(')'):
+        raise RuntimeError('call: bad signature `%s`' % (text.replace(' ', '') if isinstance(text, str) else ''))
+    depth = 0
+    for i in range(open_i, len(raw)):
+        if raw[i] == '(':
+            depth += 1
+        elif raw[i] == ')':
+            depth -= 1
+            if depth == 0 and i != len(raw) - 1:
+                raise RuntimeError('call: bad signature `%s`' % text.replace(' ', ''))
+    if depth != 0:
+        raise RuntimeError('call: bad signature `%s`' % text.replace(' ', ''))
+    ret = _norm_plugin_slot(raw[:open_i])
+    rest = raw[open_i + 1:-1]
+    params = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(rest):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            piece = _norm_plugin_slot(rest[start:i])
+            if piece:
+                params.append(piece)
+            start = i + 1
+    tail = _norm_plugin_slot(rest[start:])
+    if tail:
+        params.append(tail)
+    return ret, params
 
 
-_CTYPES = {'i64': 'c_longlong', 'f64': 'c_double', 'str': 'c_char_p', 'ptr': 'c_void_p'}
+_CTYPES = {'i64': 'c_longlong', 'f32': 'c_float', 'f64': 'c_double', 'str': 'c_char_p',
+           'ptr': 'c_void_p', 'own ptr': 'c_void_p', '&ptr': 'c_void_p', 'out ptr': 'c_void_p'}
 
 
-def _plugin(name, vals):
+def _plugin(name, vals, funcs=None):
     import ctypes
+    import _ctypes
 
-    if os.name == 'nt':
-        raise RuntimeError('%s: not supported on Windows' % name)
+    def _close_cdll(cdll):
+        if os.name != 'nt':
+            return
+        h = getattr(cdll, '_handle', None)
+        if h and hasattr(_ctypes, 'FreeLibrary'):
+            try:
+                _ctypes.FreeLibrary(h)
+                cdll._handle = 0
+            except Exception:
+                pass
 
     def next_id():
         if _PLUGIN_SEQ[0] >= (1 << 63) - 1:
@@ -1841,16 +2531,45 @@ def _plugin(name, vals):
             raise TypeError('lib_open wants 1 arg')
         if not isinstance(vals[0], str):
             raise RuntimeError('lib_open: want str')
+        load_target = vals[0]
+        if _MOD_BASE_SET[0] and ('/' in load_target or '\\' in load_target):
+            cp = confined_path(load_target)
+            if cp is None:
+                raise RuntimeError('lib_open: path outside the program directory')
+            load_target = cp
         try:
-            cdll = ctypes.CDLL(vals[0], mode=ctypes.RTLD_LOCAL)
+            if os.name == 'nt':
+                winmode = 0x00000008 if ('/' in load_target or '\\' in load_target) else 0x00000800
+                try:
+                    cdll = ctypes.CDLL(load_target, winmode=winmode)
+                except TypeError:
+                    cdll = ctypes.CDLL(load_target)
+            else:
+                cdll = ctypes.CDLL(load_target, mode=ctypes.RTLD_LOCAL)
         except OSError as e:
             raise RuntimeError('lib_open: %s' % e)
+        abi_map = {}
+        try:
+            class _CAbiEntry(ctypes.Structure):
+                _fields_ = [('name', ctypes.c_char_p), ('sig', ctypes.c_char_p)]
+            _abi_head = _CAbiEntry.in_dll(cdll, 'brat_plugin_abi_v1')
+            _abi_arr = ctypes.cast(ctypes.addressof(_abi_head), ctypes.POINTER(_CAbiEntry))
+            _ai = 0
+            while _abi_arr[_ai].name is not None:
+                _an = _abi_arr[_ai].name.decode('utf-8', 'replace')
+                _as = (_abi_arr[_ai].sig or b'').decode('utf-8', 'replace')
+                abi_map[_an] = _as
+                _ai += 1
+        except (ValueError, AttributeError, OSError):
+            abi_map = {}
         with _PLUGIN_LOCK:
             handle = next_id()
             _PLUGIN_LIBS[handle] = {
                 'library': cdll,
                 'active': 0,
                 'closing': False,
+                'abi': abi_map,
+                'sym_names': {},
             }
         return handle
     if name == 'lib_sym':
@@ -1871,6 +2590,7 @@ def _plugin(name, vals):
             symbol = next_id()
             _PLUGINS[symbol] = fn
             _PLUGIN_SYMBOL_OWNERS[symbol] = vals[0]
+            entry['sym_names'][symbol] = vals[1]
         return symbol
     if name == 'lib_close':
         if len(vals) != 1:
@@ -1887,13 +2607,18 @@ def _plugin(name, vals):
                     _PLUGIN_SYMBOL_OWNERS.pop(symbol, None)
                     _PLUGINS.pop(symbol, None)
             if not entry['active']:
+                _close_cdll(entry['library'])
                 del _PLUGIN_LIBS[vals[0]]
         return 0
     if len(vals) < 2:
         raise TypeError('call wants a function, a signature and arguments')
     ret, params = _sig_parts(vals[1])
-    for t in params + [ret]:
-        if t not in _CTYPES and t != 'none':
+    if (ret not in _CTYPES and ret != 'none') or ret in ('&ptr', 'out ptr'):
+        raise RuntimeError('call: unsupported type `%s`' % ret)
+    for t in params:
+        if t.startswith('fn(') and ')->' in t:
+            continue
+        if t not in _CTYPES:
             raise RuntimeError('call: unsupported type `%s`' % t)
     with _PLUGIN_LOCK:
         if type(vals[0]) is not int or vals[0] <= 0:
@@ -1906,27 +2631,65 @@ def _plugin(name, vals):
         if len(vals) - 2 != len(params):
             raise RuntimeError('call: signature wants %d argument(s), got %d'
                                % (len(params), len(vals) - 2))
+        sym_name = entry.get('sym_names', {}).get(vals[0])
+        abi_sig = entry.get('abi', {}).get(sym_name) if sym_name else None
+        if abi_sig is not None:
+            def _canon_pslot(s):
+                if s in ('own ptr', '&ptr', 'out ptr') or s.startswith('fn('):
+                    return 'ptr'
+                return s
+            call_sig = '%s(%s)' % (_canon_pslot(ret), ','.join(_canon_pslot(t) for t in params))
+            if abi_sig != call_sig:
+                raise RuntimeError(
+                    'call: ABI mismatch on `%s`: plugin exports `%s`, call site wrote `%s`'
+                    % (sym_name, abi_sig, call_sig))
         entry['active'] += 1
     try:
-        fn.argtypes = [getattr(ctypes, _CTYPES[t]) for t in params]
+        fn.argtypes = [(ctypes.c_void_p if t.startswith('fn(') else getattr(ctypes, _CTYPES[t]))
+                       for t in params]
         fn.restype = getattr(ctypes, _CTYPES[ret]) if ret != 'none' else None
         argv = []
-        for t, v in zip(params, vals[2:]):
-            argv.append(v.encode('utf-8') if t == 'str' and isinstance(v, str) else v)
+        boxes = []
+        for idx, (t, v) in enumerate(zip(params, vals[2:]), 1):
+            if t.startswith('fn('):
+                cb_ptr = _callback_ptr(t, v, funcs if funcs is not None else {}, idx, 'call')
+                with _PLUGIN_LOCK:
+                    entry.setdefault('callbacks', []).append(cb_ptr)
+                argv.append(ctypes.cast(cb_ptr, ctypes.c_void_p))
+            elif t == 'out ptr' and isinstance(v, tuple) and v and v[0] == 'addr':
+                _tag, oenv, oname, _w, _whole = v
+                _scope = next((sc for sc in reversed(oenv) if oname in sc), None)
+                cur = _scope.get(oname, 0) if _scope else 0
+                if isinstance(cur, float):
+                    box = ctypes.c_double(cur)
+                else:
+                    box = ctypes.c_longlong(int(cur))
+                boxes.append((_scope, oname, box))
+                argv.append(ctypes.byref(box))
+            elif t == 'str' and isinstance(v, str):
+                argv.append(v.encode('utf-8'))
+            else:
+                argv.append(v)
         r = fn(*argv)
+        for _scope, oname, box in boxes:
+            if _scope is not None:
+                _scope[oname] = box.value
         if ret == 'none':
             return 0
+        if ret == 'f32':
+            return float(r)
         if ret == 'str':
             if r is None:
                 raise RuntimeError('call: NULL str result')
             return r.decode('utf-8', 'replace') if isinstance(r, bytes) else r
-        if ret == 'ptr':
+        if ret in ('ptr', 'own ptr'):
             return r or 0
         return r
     finally:
         with _PLUGIN_LOCK:
             entry['active'] -= 1
             if entry['closing'] and not entry['active']:
+                _close_cdll(entry['library'])
                 del _PLUGIN_LIBS[owner]
 
 
@@ -1935,7 +2698,7 @@ _AMP = [0]          # >0 while the arguments of an extern call are evaluated
 
 def call(name, args, env, funcs):
     info = funcs.get(name)
-    if isinstance(info, tuple) and info and info[0] == 'extern':
+    if (isinstance(info, tuple) and info and info[0] == 'extern') or name == 'call':
         _AMP[0] += 1
         try:
             vals = [ev(a, env, funcs) for a in args]
@@ -2012,8 +2775,8 @@ def call(name, args, env, funcs):
         if len(vals) not in (1, 2):
             raise TypeError('assert wants 1-2 args')
         if not vals[0]:
-            raise RuntimeError(vals[1] if len(vals) == 2 else 'assert failed')
-        return 0
+            raise Propagate(('err', vals[1] if len(vals) == 2 else 'assert failed'))
+        return True
     if name == 'str':
         if len(vals) != 1:
             raise TypeError('str wants 1 arg')
@@ -2031,45 +2794,148 @@ def call(name, args, env, funcs):
             raise TypeError('read_file wants 1 arg')
         if not isinstance(vals[0], str):
             return ('err', 'read_file wants a string path')
+        if '\x00' in vals[0]:
+            return ('err', 'embedded NUL in file path')
+        path = confined_path(vals[0])
+        if path is None:
+            return ('err', 'path outside the program directory')
+        fd, ferr = _open_confined_fd(path, False, _MAX_FILE_BYTES, 'file exceeds 64 MiB limit')
+        if fd < 0:
+            return ('err', ferr)
         try:
-            path = confined_path(vals[0])
-            if path is None:
-                return ('err', 'path outside the program directory')
-            with open(path, encoding='utf-8') as f:
-                data = f.read()
-            if '\x00' in data:
+            chunks = []
+            total = 0
+            with os.fdopen(fd, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_FILE_BYTES:
+                        return ('err', 'file exceeds 64 MiB limit')
+                    chunks.append(chunk)
+            raw = b''.join(chunks)
+            if b'\x00' in raw:
                 return ('err', 'invalid utf-8')
-            return ('ok', data)
+            return ('ok', raw.decode('utf-8'))
         except UnicodeDecodeError:
             return ('err', 'invalid utf-8')
         except OSError as e:
             return ('err', str(e))
+    if name == 'read_bytes':
+        if len(vals) != 1:
+            raise TypeError('read_bytes wants 1 arg')
+        if not isinstance(vals[0], str):
+            return ('err', 'read_bytes wants a string path')
+        if '\x00' in vals[0]:
+            return ('err', 'embedded NUL in file path')
+        path = confined_path(vals[0])
+        if path is None:
+            return ('err', 'path outside the program directory')
+        fd, ferr = _open_confined_fd(path, False, _MAX_READ_BYTES, 'file exceeds 16 MiB byte vector limit')
+        if fd < 0:
+            return ('err', ferr)
+        try:
+            chunks = []
+            total = 0
+            with os.fdopen(fd, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_READ_BYTES:
+                        return ('err', 'file exceeds 16 MiB byte vector limit')
+                    chunks.append(chunk)
+            return ('ok', list(b''.join(chunks)))
+        except OSError as e:
+            return ('err', str(e))
+    if name == 'utf8_bytes':
+        if len(vals) != 1:
+            raise TypeError('utf8_bytes wants 1 arg')
+        if not isinstance(vals[0], str):
+            raise RuntimeError('utf8_bytes wants str')
+        enc = vals[0].encode('utf-8')
+        if len(enc) > _MAX_BYTE_VEC:
+            raise RuntimeError('utf8_bytes: string exceeds 16 MiB byte vector limit')
+        return list(enc)
+    if name == 'utf8_str':
+        if len(vals) != 1:
+            raise TypeError('utf8_str wants 1 arg')
+        if not isinstance(vals[0], list):
+            return ('err', 'utf8_str wants a byte vec')
+        buf = bytearray()
+        for b in vals[0]:
+            if isinstance(b, bool) or not isinstance(b, int) or b < 0 or b > 255:
+                return ('err', 'utf8_str byte out of range 0..255')
+            if b == 0:
+                return ('err', 'invalid utf-8')
+            buf.append(b)
+        try:
+            return ('ok', bytes(buf).decode('utf-8'))
+        except UnicodeDecodeError:
+            return ('err', 'invalid utf-8')
+    if name == 'fs_rename':
+        if len(vals) != 2:
+            raise TypeError('fs_rename wants 2 args')
+        if not isinstance(vals[0], str) or not isinstance(vals[1], str):
+            return ('err', 'fs_rename wants string paths')
+        if '\x00' in vals[0] or '\x00' in vals[1]:
+            return ('err', 'embedded NUL in file path')
+        src = confined_path(vals[0])
+        dst = confined_path(vals[1])
+        if src is None or dst is None:
+            return ('err', 'path outside the program directory')
+        rerr = _confined_rename(src, dst)
+        if rerr is not None:
+            return ('err', rerr)
+        return ('ok', 0)
+    if name == 'fs_remove':
+        if len(vals) != 1:
+            raise TypeError('fs_remove wants 1 arg')
+        if not isinstance(vals[0], str):
+            return ('err', 'fs_remove wants a string path')
+        if '\x00' in vals[0]:
+            return ('err', 'embedded NUL in file path')
+        path = confined_path(vals[0])
+        if path is None:
+            return ('err', 'path outside the program directory')
+        rerr = _confined_remove(path)
+        if rerr is not None:
+            return ('err', rerr)
+        return ('ok', 0)
     if name == 'sbuf':
         if len(vals) != 0:
             raise TypeError('sbuf wants 0 args')
-        return ['sb', '']
+        return ['sb', bytearray(), 0]
     if name == 'sbuf_add':
         if len(vals) != 2:
             raise TypeError('sbuf_add wants 2 args')
         h, part = vals
-        if not (isinstance(h, list) and h and h[0] == 'sb'):
+        if not (isinstance(h, list) and len(h) == 3 and h[0] == 'sb' and isinstance(h[1], bytearray)):
             raise TypeError('sbuf_add wants a builder')
-        h[1] = h[1] + part
-        return len(h[1])
+        if not isinstance(part, str):
+            return ('err', 'sbuf_add wants a string')
+        pb = part.encode('utf-8')
+        if len(h[1]) + len(pb) > _MAX_STR_BYTES:
+            return ('err', 'sbuf exceeds maximum string size')
+        h[1].extend(pb)
+        h[2] += len(part)
+        return h[2]
     if name == 'sbuf_len':
         if len(vals) != 1:
             raise TypeError('sbuf_len wants 1 arg')
         h, = vals
-        if not (isinstance(h, list) and h and h[0] == 'sb'):
+        if not (isinstance(h, list) and len(h) == 3 and h[0] == 'sb' and isinstance(h[1], bytearray)):
             raise TypeError('sbuf_len wants a builder')
-        return len(h[1])
+        return h[2]
     if name == 'sbuf_str':
         if len(vals) != 1:
             raise TypeError('sbuf_str wants 1 arg')
         h, = vals
-        if not (isinstance(h, list) and h and h[0] == 'sb'):
+        if not (isinstance(h, list) and len(h) == 3 and h[0] == 'sb' and isinstance(h[1], bytearray)):
             raise TypeError('sbuf_str wants a builder')
-        return ('ok', h[1])
+        return ('ok', bytes(h[1]).decode('utf-8'))
     if name == 'tcp_listen':
         if len(vals) != 1:
             raise TypeError('tcp_listen wants 1 arg')
@@ -2078,6 +2944,7 @@ def call(name, args, env, funcs):
             return ('err', 'address wants host:port with port 1..65535')
         try:
             s_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s_.set_inheritable(False)
         except OSError:
             return ('err', 'socket failed')
         s_.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -2100,6 +2967,7 @@ def call(name, args, env, funcs):
             return ('err', 'bad socket slot')
         try:
             conn, _ = s_.accept()
+            conn.set_inheritable(False)
         except OSError:
             return ('err', 'accept failed')
         conn.settimeout(_SOCK_TIMEOUT)
@@ -2112,6 +2980,7 @@ def call(name, args, env, funcs):
             return ('err', 'address wants host:port with port 1..65535')
         try:
             s_ = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s_.set_inheritable(False)
         except OSError:
             return ('err', 'socket failed')
         s_.settimeout(_SOCK_TIMEOUT)
@@ -2127,11 +2996,16 @@ def call(name, args, env, funcs):
         n = vals[1]
         if type(n) is not int or not 0 <= n <= _RECV_MAX:
             return ('err', 'recv wants 0 <= n <= 1048576')
-        s_ = _sock_get(vals[0])
+        fd = vals[0]
+        s_ = _sock_get(fd)
         if s_ is None:
             return ('err', 'bad socket slot')
+        if not _sock_apply_deadline(fd, s_):
+            return ('err', 'socket deadline exceeded')
         try:
             b = s_.recv(n)
+        except socket.timeout:
+            return ('err', 'socket deadline exceeded')
         except OSError:
             return ('err', 'recv failed')
         try:
@@ -2147,12 +3021,17 @@ def call(name, args, env, funcs):
         data = vals[1]
         if not isinstance(data, str):
             return ('err', 'tcp_send wants string data')
-        s_ = _sock_get(vals[0])
+        fd = vals[0]
+        s_ = _sock_get(fd)
         if s_ is None:
             return ('err', 'bad socket slot')
+        if not _sock_apply_deadline(fd, s_):
+            return ('err', 'socket deadline exceeded')
         payload = data.encode('utf-8')
         try:
             s_.sendall(payload)
+        except socket.timeout:
+            return ('err', 'socket deadline exceeded')
         except OSError:
             return ('err', 'send failed')
         return ('ok', len(payload))
@@ -2169,15 +3048,99 @@ def call(name, args, env, funcs):
             raise TypeError('write_file wants 2 args')
         if not isinstance(vals[0], str) or not isinstance(vals[1], str):
             return ('err', 'write_file wants string path and text')
+        if '\x00' in vals[0]:
+            return ('err', 'embedded NUL in file path')
+        path = confined_path(vals[0])
+        if path is None:
+            return ('err', 'path outside the program directory')
+        enc = vals[1].encode('utf-8')
+        fd, ferr = _open_confined_fd(path, True, 0, '')
+        if fd < 0:
+            return ('err', ferr)
         try:
-            path = confined_path(vals[0])
-            if path is None:
-                return ('err', 'path outside the program directory')
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write(vals[1])
-            return ('ok', len(vals[1]))
+            with os.fdopen(fd, 'wb') as f:
+                f.write(enc)
+            return ('ok', len(enc))
         except OSError as e:
             return ('err', str(e))
+    if name == 'write_bytes':
+        if len(vals) != 2:
+            raise TypeError('write_bytes wants 2 args')
+        if not isinstance(vals[0], str) or not isinstance(vals[1], list):
+            return ('err', 'write_bytes wants string path and byte vec')
+        if '\x00' in vals[0]:
+            return ('err', 'embedded NUL in file path')
+        for b in vals[1]:
+            if isinstance(b, bool) or not isinstance(b, int) or b < 0 or b > 255:
+                return ('err', 'write_bytes byte out of range 0..255')
+        path = confined_path(vals[0])
+        if path is None:
+            return ('err', 'path outside the program directory')
+        raw = bytes(vals[1])
+        fd, ferr = _open_confined_fd(path, True, 0, '')
+        if fd < 0:
+            return ('err', ferr)
+        try:
+            with os.fdopen(fd, 'wb') as f:
+                f.write(raw)
+            return ('ok', len(raw))
+        except OSError as e:
+            return ('err', str(e))
+    if name == 'proc_run':
+        if len(vals) not in (2, 3):
+            raise TypeError('proc_run wants 2-3 args')
+        cmd, argv = vals[0], vals[1]
+        tmo_arg = vals[2] if len(vals) == 3 else 0
+        if not isinstance(cmd, str) or not cmd:
+            return ('err', 'proc_run wants non-empty command string')
+        if not isinstance(argv, list) or any(not isinstance(x, str) for x in argv):
+            return ('err', 'proc_run wants vec[str] args')
+        if type(tmo_arg) is not int:
+            return ('err', 'proc_run timeout must be an integer (ms)')
+        if '\x00' in cmd or any('\x00' in x for x in argv):
+            return ('err', 'proc_run nul byte in argument')
+        if tmo_arg <= 0:
+            env_tmo = os.environ.get('BRAT_PROC_TIMEOUT_MS', '').strip()
+            try:
+                parsed_tmo = int(env_tmo) if env_tmo else 60000
+            except ValueError:
+                parsed_tmo = 60000
+            timeout_ms = parsed_tmo if 0 < parsed_tmo <= 3600000 else 60000
+        else:
+            timeout_ms = min(tmo_arg, 3600000)
+        exec_env = os.environ.get('BRAT_EXEC', '').strip().lower()
+        allowed = exec_env in ('1', 'yes', 'true', 'on')
+        if not allowed:
+            allow_raw = os.environ.get('BRAT_EXEC_ALLOW', '')
+            has_sep = ('/' in cmd or '\\' in cmd)
+            for item in allow_raw.split(','):
+                tok = item.strip()
+                if not tok:
+                    continue
+                if '/' in tok or '\\' in tok:
+                    if cmd == tok:
+                        allowed = True
+                        break
+                elif not has_sep and cmd == tok:
+                    allowed = True
+                    break
+        if not allowed:
+            return ('err', 'proc_run refused: set BRAT_EXEC=1 or BRAT_EXEC_ALLOW')
+        exe_path = cmd
+        if os.name != 'nt' and '/' not in cmd and '\\' not in cmd:
+            path_env = os.environ.get('PATH') or '/usr/local/bin:/usr/bin:/bin'
+            resolved = None
+            for d in path_env.split(':'):
+                if not d.startswith('/'):
+                    continue
+                cand = os.path.join(d, cmd)
+                if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                    resolved = cand
+                    break
+            if resolved is None:
+                return ('err', 'proc_run executable not found: ' + cmd)
+            exe_path = resolved
+        return _run_proc_bounded([exe_path] + list(argv), exe_path, timeout_ms)
     if name in funcs and isinstance(funcs[name], tuple) and funcs[name] and funcs[name][0] == 'ctor':
         _, tag, arity = funcs[name]
         if len(vals) != arity:
@@ -2209,21 +3172,7 @@ def call(name, args, env, funcs):
                             if _MANAGED:
                                 vrc_inc(val)
                             frame[nm] = val
-                        with _frame():
-                            env.append(frame)
-                            try:
-                                run_block(body, env, funcs, frame=True)
-                            except Propagate:
-                                _drop_all(frame)
-                                env.pop()
-                                raise
-                            except (Done, Ret) as r:
-                                _drop_all(frame)
-                                env.pop()
-                                return r.v
-                            _drop_all(frame)
-                            env.pop()
-                            return 0
+                        return _run_frame(frame, body, env, funcs)
                     raise NameError('no var ' + parts[0])
             else:
                 raise NameError('no var ' + parts[0])
@@ -2258,35 +3207,18 @@ def call(name, args, env, funcs):
             if _MANAGED:
                 vrc_inc(val)
             frame[nm] = val
-        _note_ptr_params(frame, params)
-        with _frame():
-            env.append(frame)
-            try:
-                run_block(body, env, funcs, frame=True)
-            except Propagate:
-                _drop_all(frame)
-                _forget_ptr_frame(frame)
-                env.pop()
-                raise
-            except (Done, Ret) as r:
-                _drop_all(frame)
-                _forget_ptr_frame(frame)
-                env.pop()
-                return r.v
-            _drop_all(frame)
-            _forget_ptr_frame(frame)
-            env.pop()
-            return 0
+        return _run_frame(frame, body, env, funcs, params)
     if name == 'chan':
         if len(vals) != 1 or not isinstance(vals[0], int) or isinstance(vals[0], bool):
             raise TypeError('chan wants 1 int arg')
         if vals[0] < 1:
             return ('err', 'chan: capacity must be at least 1')
         if vals[0] > 1048576:
-            # The same bound as crt.h: the C queue is preallocated, so an
-            # enormous capacity was an allocation failure there and a working
-            # channel here.
             return ('err', 'chan: capacity too large')
+        with _CHAN_BUDGET_LOCK:
+            if _CHAN_TOTAL_SLOTS[0] + vals[0] > _MAX_TOTAL_CHAN_SLOTS:
+                return ('err', 'chan: total channel capacity budget exceeded')
+            _CHAN_TOTAL_SLOTS[0] += vals[0]
         return _Chan(vals[0])
     if name == 'join_all':
         if vals:
@@ -2307,19 +3239,294 @@ def call(name, args, env, funcs):
             raise TypeError('raise wants 1 arg')
         raise Done(('err', vals[0]))
     if name == 'own':
+        if _too_deep(vals[0], skip_closure=False):
+            raise RuntimeError('recursion too deep')
         return copy.deepcopy(vals[0])
-    if name in ('__arena_enter', '__arena_leave'):
-        # The interpreter has no arena memory; the blocks only need to run.
+    if name == '$arena_enter':
+        _DEPTH.arena = getattr(_DEPTH, 'arena', 0) + 1
+        return 0
+    if name == '$arena_leave':
+        cur_a = getattr(_DEPTH, 'arena', 0)
+        if cur_a <= 0:
+            raise RuntimeError('arena stack underflow')
+        _DEPTH.arena = cur_a - 1
         return 0
     if name == 'time_ms':
         return int(time.time() * 1000)
+    if name == 'mono_ns':
+        if len(vals) != 0:
+            raise TypeError('mono_ns wants 0 args')
+        return int(time.monotonic_ns())
+    if name == 'sha256_bytes':
+        if len(vals) != 1:
+            raise TypeError('sha256_bytes wants 1 arg')
+        d = vals[0]
+        if isinstance(d, str):
+            dig = hashlib.sha256(d.encode('utf-8')).digest()
+            return ('ok', list(dig))
+        if isinstance(d, list):
+            buf = bytearray()
+            for el in d:
+                if type(el) is not int or not 0 <= el <= 255:
+                    return ('err', 'sha256_bytes byte out of range 0..255')
+                buf.append(el)
+            return ('ok', list(hashlib.sha256(bytes(buf)).digest()))
+        return ('err', 'sha256_bytes wants str or byte vec')
+    if name == 'random_bytes':
+        if len(vals) != 1:
+            raise TypeError('random_bytes wants 1 arg')
+        nv = vals[0]
+        if type(nv) is not int or not 0 <= nv <= 1048576:
+            return ('err', 'random_bytes wants 0 <= n <= 1048576')
+        return ('ok', list(os.urandom(nv)))
+    if name == 'https_request_raw':
+        if len(vals) != 4:
+            raise TypeError('https_request_raw wants 4 args')
+        addr_s, sname, wire, ca_file = vals
+        if not all(isinstance(x, str) for x in (addr_s, sname, wire, ca_file)):
+            return ('err', 'https_request_raw wants string arguments')
+        if '\x00' in addr_s or '\x00' in sname or '\x00' in ca_file:
+            return ('err', 'https_request_raw nul byte in argument')
+        host, sep, port_s = addr_s.rpartition(':')
+        if host.startswith('[') and host.endswith(']') and len(host) > 2:
+            host = host[1:-1]
+        if sname.startswith('[') and sname.endswith(']') and len(sname) > 2:
+            sname = sname[1:-1]
+        if not sep or not host or len(host.encode('utf-8')) > 255:
+            return ('err', 'address wants host:port with port 1..65535')
+        if not (port_s.isascii() and port_s.isdigit()) or not 1 <= int(port_s) <= 65535:
+            return ('err', 'address wants host:port with port 1..65535')
+        port = int(port_s)
+        ca_conf = None
+        if ca_file != '':
+            ca_conf = confined_path(ca_file)
+            if ca_conf is None:
+                return ('err', 'path outside the program directory')
+        try:
+            ctx = ssl.create_default_context(cafile=ca_conf)
+        except Exception:
+            return ('err', 'failed to load CA file')
+        try:
+            raw_sock = socket.create_connection((host, port), timeout=_SOCK_TIMEOUT)
+            raw_sock.set_inheritable(False)
+        except OSError:
+            return ('err', 'TLS TCP connect failed')
+        try:
+            tsock = ctx.wrap_socket(raw_sock, server_hostname=(sname if sname else host))
+        except Exception:
+            try:
+                raw_sock.close()
+            except OSError:
+                pass
+            return ('err', 'TLS handshake or certificate verification failed')
+        try:
+            tsock.sendall(wire.encode('utf-8'))
+            chunks = []
+            total = 0
+            while True:
+                part = tsock.recv(4096)
+                if not part:
+                    break
+                total += len(part)
+                if total > (16 << 20):
+                    return ('err', 'HTTPS response exceeds 16 MB')
+                chunks.append(part)
+        except OSError:
+            return ('err', 'TLS read/write failed')
+        finally:
+            try:
+                tsock.close()
+            except OSError:
+                pass
+        raw_bytes = b''.join(chunks)
+        if b'\x00' in raw_bytes:
+            return ('err', 'invalid utf-8')
+        try:
+            return ('ok', raw_bytes.decode('utf-8'))
+        except UnicodeDecodeError:
+            return ('err', 'invalid utf-8')
+    if name == 'sql_open':
+        if len(vals) != 1:
+            raise TypeError('sql_open wants 1 arg')
+        pv = vals[0]
+        if not isinstance(pv, str):
+            return ('err', 'sql_open wants string path')
+        if '\x00' in pv:
+            return ('err', 'path outside the program directory')
+        if pv == ':memory:':
+            use_path = ':memory:'
+        else:
+            use_path = confined_path(pv)
+            if use_path is None:
+                return ('err', 'path outside the program directory')
+            serr = _verify_sqlite_confined(use_path)
+            if serr is not None:
+                return ('err', serr)
+        try:
+            conn = sqlite3.connect(use_path, isolation_level=None, check_same_thread=False)
+        except Exception as e:
+            return ('err', str(e))
+        if use_path != ':memory:' and not (_FILES_FREE or _is_files_free()):
+            try:
+                pst = os.lstat(use_path)
+                if not stat.S_ISREG(pst.st_mode):
+                    conn.close()
+                    return ('err', 'path escaped during open')
+            except OSError:
+                pass
+        with _SQL_LOCK:
+            live_n = sum(1 for e in _SQL_DBS.values() if not e.closing)
+            if live_n >= 127:
+                conn.close()
+                return ('err', 'too many open sqlite databases')
+            sid = _NEXT_SQL[0]
+            _NEXT_SQL[0] += 1
+            _SQL_DBS[sid] = _SqlEntry(conn)
+        return ('ok', sid)
+    if name == 'sql_close':
+        if len(vals) != 1:
+            raise TypeError('sql_close wants 1 arg')
+        sv = vals[0]
+        if type(sv) is not int:
+            return ('err', 'bad sqlite handle')
+        to_close = None
+        with _SQL_LOCK:
+            ent = _SQL_DBS.get(sv)
+            if ent is None or ent.closing or ent.conn is None:
+                return ('err', 'bad sqlite handle')
+            if ent.active == 0:
+                to_close = ent.conn
+                ent.conn = None
+                ent.closing = True
+                _SQL_DBS.pop(sv, None)
+            else:
+                ent.closing = True
+        if to_close is not None:
+            try:
+                to_close.close()
+            except Exception:
+                pass
+        return ('ok', 0)
+    if name == 'sql_exec':
+        if len(vals) != 2:
+            raise TypeError('sql_exec wants 2 args')
+        sv, sql_s = vals
+        if type(sv) is not int or not isinstance(sql_s, str):
+            return ('err', 'sql_exec wants handle and sql string')
+        if '\x00' in sql_s:
+            return ('err', 'sql_exec nul byte in sql')
+        ent = _sql_acquire(sv)
+        if ent is None:
+            return ('err', 'bad sqlite handle')
+        try:
+            conn = ent.conn
+            before = conn.total_changes
+            cur = conn.cursor()
+            buf = ''
+            for piece in sql_s.splitlines(True):
+                buf += piece
+                while ';' in buf:
+                    semi = buf.find(';')
+                    cand = buf[:semi + 1]
+                    if sqlite3.complete_statement(cand):
+                        if cand.strip():
+                            cur.execute(cand)
+                        buf = buf[semi + 1:]
+                    else:
+                        nxt = buf.find(';', semi + 1)
+                        while nxt != -1 and not sqlite3.complete_statement(buf[:nxt + 1]):
+                            nxt = buf.find(';', nxt + 1)
+                        if nxt == -1:
+                            break
+                        cand = buf[:nxt + 1]
+                        if cand.strip():
+                            cur.execute(cand)
+                        buf = buf[nxt + 1:]
+            if buf.strip():
+                cur.execute(buf)
+            cur.close()
+            return ('ok', conn.total_changes - before)
+        except Exception as e:
+            return ('err', str(e))
+        finally:
+            _sql_release(sv, ent)
+    if name == 'sql_query':
+        if len(vals) != 3:
+            raise TypeError('sql_query wants 3 args')
+        sv, sql_s, pvec = vals
+        if type(sv) is not int or not isinstance(sql_s, str) or not isinstance(pvec, list):
+            return ('err', 'sql_query wants (handle, sql, params_vec)')
+        if '\x00' in sql_s:
+            return ('err', 'sql_query nul byte in sql')
+        bound = []
+        for el in pvec:
+            if el is None:
+                bound.append(None)
+            elif type(el) is bool:
+                bound.append(1 if el else 0)
+            elif type(el) is int or type(el) is float or isinstance(el, str):
+                bound.append(el)
+            else:
+                return ('err', 'unsupported sqlite parameter type')
+        ent = _sql_acquire(sv)
+        if ent is None:
+            return ('err', 'bad sqlite handle')
+        cur = None
+        try:
+            conn = ent.conn
+            cur = conn.cursor()
+            cur.execute(sql_s, bound)
+            desc = cur.description or ()
+            if len(desc) > _MAX_SQL_COLS:
+                return ('err', 'sql_query exceeded maximum column limit')
+            rows = []
+            total_bytes = 0
+            while True:
+                batch = cur.fetchmany(512)
+                if not batch:
+                    break
+                for r in batch:
+                    if len(rows) + 1 > _MAX_SQL_ROWS:
+                        return ('err', 'sql_query exceeded maximum row limit')
+                    m = {}
+                    for i, col in enumerate(desc):
+                        cname = col[0] or ''
+                        v = r[i]
+                        cell_cost = len(cname) + 32
+                        if isinstance(v, (bytes, bytearray, memoryview)):
+                            raw_b = bytes(v)
+                            if len(raw_b) > _MAX_SQL_BLOB:
+                                return ('err', 'sql_query blob exceeds 4 MiB limit')
+                            cell_cost += len(raw_b) * 16
+                            if total_bytes + cell_cost > _MAX_SQL_RESULT_BYTES:
+                                return ('err', 'sql_query exceeded result size limit')
+                            v = list(raw_b)
+                        elif isinstance(v, str):
+                            if '\x00' in v:
+                                return ('err', 'invalid utf-8 or embedded NUL in sqlite text result')
+                            cell_cost += len(v.encode('utf-8'))
+                        if total_bytes + cell_cost > _MAX_SQL_RESULT_BYTES:
+                            return ('err', 'sql_query exceeded result size limit')
+                        total_bytes += cell_cost
+                        m[cname] = v
+                    rows.append(m)
+            return ('ok', rows)
+        except Exception as e:
+            return ('err', str(e))
+        finally:
+            if cur is not None:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+            _sql_release(sv, ent)
     if name == 'sleep_ms':
         if len(vals) != 1 or not isinstance(vals[0], (int, float)):
             raise TypeError('sleep_ms wants 1 int arg')
         time.sleep(max(0, vals[0]) / 1000.0)
         return 0
     if name in ('lib_open', 'lib_sym', 'lib_close', 'call'):
-        return _plugin(name, vals)
+        return _plugin(name, vals, funcs)
     if name == 'slice_of_struct':
         if len(vals) != 3:
             raise TypeError('slice_of_struct wants 3 args')
@@ -2328,7 +3535,9 @@ def call(name, args, env, funcs):
             raise RuntimeError('slice_of_struct: %s is not an extern struct' % (sname,))
         if n0 < 0:
             raise RuntimeError('slice_of_struct: n must be >= 0')
-        if p0 <= 0 and n0 > 0:
+        if p0 < 0:
+            raise RuntimeError('pointer is negative')
+        if p0 == 0 and n0 > 0:
             raise RuntimeError('null pointer dereference')
         import ctypes
         sl = (p0, 0, n0, 6, ctypes.sizeof(_struct_class(sname)))
@@ -2357,6 +3566,8 @@ def call(name, args, env, funcs):
             raise RuntimeError('slice_of_ptr: kind must be i64, i32, f64, f32 or u8')
         if n < 0:
             raise RuntimeError('slice_of_ptr: n must be >= 0')
+        if p < 0:
+            raise RuntimeError('pointer is negative')
         if p == 0 and n > 0:
             raise RuntimeError('null pointer dereference')
         return [p, 0, n, {'i64': 1, 'i32': 4, 'f64': 2, 'f32': 5, 'u8': 3}[kind]]
@@ -2434,6 +3645,8 @@ def call(name, args, env, funcs):
         p, n = vals
         if n < 0:
             raise RuntimeError('str_from_ptr: n must be >= 0')
+        if p < 0:
+            raise RuntimeError('pointer is negative')
         if p == 0:
             if n == 0:
                 return ''
@@ -2488,8 +3701,16 @@ def call(name, args, env, funcs):
             def fill(inst, tname_, v):
                 if not isinstance(v, dict):
                     raise RuntimeError('ptr_write_struct: %s wants a struct value' % tname_)
-                for f, ft in _STRUCTS[tname_]:
+                is_un = tname_ in _UNIONS
+                if is_un:
+                    ctypes.memset(ctypes.addressof(inst), 0, ctypes.sizeof(inst))
+                flds = _STRUCTS[tname_]
+                if is_un:
+                    flds = sorted(flds, key=lambda kv: (0 if kv[1] in ('f32', 'f64') else 1))
+                for f, ft in flds:
                     if f not in v:
+                        if is_un:
+                            continue
                         raise RuntimeError('ptr_write_struct: %s has no field %s' % (tname_, f))
                     if ft in _STRUCTS:
                         # A nested struct is a ctypes object inside another one:
@@ -2559,21 +3780,19 @@ def call(name, args, env, funcs):
     if name == 'ptr_of_str':
         if len(vals) != 1:
             raise TypeError('ptr_of_str wants 1 arg')
-        _ct = __import__('ctypes')
+        import ctypes
         b = vals[0].encode('utf-8') if isinstance(vals[0], str) else vals[0]
-        buf = _ct.create_string_buffer(b)
-        _STR_PTRS.append(buf)
-        return _ct.cast(buf, _ct.c_void_p).value or 0
+        buf = _pin_str_buf(b)
+        return ctypes.cast(buf, ctypes.c_void_p).value or 0
     if name == 'ptr_write_str':
         if len(vals) != 2:
             raise TypeError('ptr_write_str wants 2 args')
+        import ctypes
         if vals[0] <= 0:
             raise RuntimeError('null pointer dereference' if vals[0] == 0 else 'pointer is negative')
-        _ct = __import__('ctypes')
         b = vals[1].encode('utf-8') if isinstance(vals[1], str) else vals[1]
-        buf = _ct.create_string_buffer(b)
-        _STR_PTRS.append(buf)
-        _ct.cast(vals[0], _ct.POINTER(_ct.c_void_p)).contents.value = _ct.cast(buf, _ct.c_void_p).value
+        buf = _pin_str_buf(b)
+        ctypes.cast(vals[0], ctypes.POINTER(ctypes.c_void_p)).contents.value = ctypes.cast(buf, ctypes.c_void_p).value
         return 0
     if name == 'ptr_write_ptr':
         if len(vals) != 2:
@@ -2595,21 +3814,25 @@ def call(name, args, env, funcs):
         if not isinstance(vals[0], str):
             return None
         key = vals[0]
-        allow = os.environ.get('BRAT_ENV_ALLOW', '')
-        allowed = {x.strip() for x in allow.split(',') if x.strip()} if allow else None
-        if allowed is not None and key not in allowed:
+        if os.environ.get('BRAT_ENV_DENY_ALL', '').strip().lower() in ('1', 'true'):
             return ('err', 'env_get refused: %r' % key)
+        if 'BRAT_ENV_ALLOW' in os.environ:
+            allow_raw = os.environ['BRAT_ENV_ALLOW']
+            allowed = {x.strip() for x in allow_raw.split(',') if x.strip()}
+            if key not in allowed:
+                return ('err', 'env_get refused: %r' % key)
         upper = key.upper()
         for bad in ("SECRET", "KEY", "TOKEN", "PASS", "PASSWORD", "CREDENTIAL",
                     "PRIVATE", "DATABASE", "DB_", "AUTH", "DSN", "CONN", "COOKIE",
                     "SESSION", "BEARER", "REDIS", "MONGO", "POSTGRES", "MYSQL",
-                    "AMQP", "AWS_", "GCP_", "AZURE_", "GITHUB_", "OPENAI_",
-                    "ANTHROPIC_", "STRIPE_", "WEBHOOK", "SIGNING", "CERT",
+                    "AMQP", "AWS_", "GCP_", "AZURE_", "GITHUB_", "GITLAB_",
+                    "OPENAI_", "ANTHROPIC_", "STRIPE_", "SLACK_", "CLOUDFLARE_",
+                    "VAULT_", "KUBECONFIG", "WEBHOOK", "SIGNING", "CERT",
                     "SALT", "SEED"):
             if bad in upper:
                 return ('err', 'env_get refused: %r' % key)
         val = os.environ.get(key)
-        if val is not None and (('://' in val and '@' in val) or '-----BEGIN' in val):
+        if val is not None and _env_val_is_secret(val):
             return ('err', 'env_get refused: %r' % key)
         return val
     if name == 're_match':
@@ -2618,6 +3841,24 @@ def call(name, args, env, funcs):
         if not isinstance(vals[0], str) or not isinstance(vals[1], str):
             raise RuntimeError('re_match wants str')
         return re_match(vals[0], vals[1])
+    if name == 're_find':
+        if len(vals) != 2:
+            raise TypeError('re_find wants 2 args')
+        if not isinstance(vals[0], str) or not isinstance(vals[1], str):
+            raise RuntimeError('re_find wants str')
+        return re_find(vals[0], vals[1])
+    if name == 're_captures':
+        if len(vals) != 2:
+            raise TypeError('re_captures wants 2 args')
+        if not isinstance(vals[0], str) or not isinstance(vals[1], str):
+            raise RuntimeError('re_captures wants str')
+        return re_captures(vals[0], vals[1])
+    if name == 're_replace':
+        if len(vals) != 3:
+            raise TypeError('re_replace wants 3 args')
+        if not isinstance(vals[0], str) or not isinstance(vals[1], str) or not isinstance(vals[2], str):
+            raise RuntimeError('re_replace wants str')
+        return re_replace(vals[0], vals[1], vals[2])
     raise NameError('no fn ' + name)
 
 def run_block(body, env, funcs, frame=False):
@@ -2630,17 +3871,321 @@ def run_block(body, env, funcs, frame=False):
         run_defers(env, funcs)
 
 _MOD_BASE = ['.']
+_MOD_BASE_SET = [False]
 
 # `BRAT_FILES=1` is the runner's own opt-out, never the program's: `0`, `no` or
 # a typo must leave the sandbox on. Mirrors `_vfiles_free` in crt.h.
-_FILES_FREE = os.environ.get('BRAT_FILES', '').strip().lower() in ('1', 'yes', 'true', 'on')
+def _is_files_free():
+    return os.environ.get('BRAT_FILES', '').strip().lower() in ('1', 'yes', 'true', 'on')
+
+_FILES_FREE = _is_files_free()
+
+
+_SECRET_VAL_RE = re.compile(
+    r'(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,}'
+    r'|sk-(?:proj-)?[A-Za-z0-9_-]{12,}|[sr]k_(?:live|test)_[A-Za-z0-9]{12,}'
+    r'|xox[bpars]-[A-Za-z0-9-]{12,}|AIza[A-Za-z0-9_-]{12,}'
+    r'|(?<![A-Za-z0-9])A(?:KIA|SIA)[A-Z0-9]{16}(?![A-Za-z0-9])'
+    r'|(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+)'
+)
+
+
+def _env_val_is_secret(val):
+    if not val:
+        return False
+    if ('://' in val and '@' in val) or '-----BEGIN' in val:
+        return True
+    return _SECRET_VAL_RE.search(val) is not None
+
+
+def _open_parent_dir_fd(path):
+    base = os.path.realpath(_MOD_BASE[0])
+    if not base or base == os.sep:
+        return (-1, '', 'path outside the program directory')
+    if path == base or not path.startswith(base + os.sep):
+        return (-1, '', 'path outside the program directory' if path != base else 'Is a directory')
+    rel = path[len(base) + 1:]
+    parts = [seg for seg in rel.split(os.sep) if seg]
+    if not parts or any(seg in ('.', '..') for seg in parts):
+        return (-1, '', 'Is a directory')
+    dir_flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0)
+    dir_flags |= getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        dfd = os.open(base, dir_flags)
+    except OSError as e:
+        if e.errno == _errno.ELOOP:
+            return (-1, '', 'path escaped during open')
+        return (-1, '', str(e))
+    for seg in parts[:-1]:
+        try:
+            nfd = os.open(seg, dir_flags, dir_fd=dfd)
+        except OSError as e:
+            os.close(dfd)
+            if e.errno == _errno.ELOOP:
+                return (-1, '', 'path escaped during open')
+            return (-1, '', str(e))
+        os.close(dfd)
+        dfd = nfd
+    return (dfd, parts[-1], '')
+
+
+def _open_confined_fd(path, write_mode, max_bytes, limit_msg):
+    free_fs = _FILES_FREE or _is_files_free()
+    flags = (os.O_WRONLY | os.O_CREAT if write_mode else os.O_RDONLY) | getattr(os, 'O_CLOEXEC', 0)
+    flags |= getattr(os, 'O_BINARY', 0)
+    if free_fs or os.name == 'nt':
+        if not free_fs:
+            try:
+                lst = os.lstat(path)
+                if stat.S_ISLNK(lst.st_mode):
+                    return (-1, 'path escaped during open')
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return (-1, str(e))
+        try:
+            fd = os.open(path, flags, 0o666)
+        except OSError as e:
+            return (-1, str(e))
+    else:
+        dfd, leaf, perr = _open_parent_dir_fd(path)
+        if dfd < 0:
+            return (-1, perr)
+        flags |= getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            fd = os.open(leaf, flags, 0o666, dir_fd=dfd)
+        except OSError as e:
+            os.close(dfd)
+            if e.errno == _errno.ELOOP:
+                return (-1, 'path escaped during open')
+            return (-1, str(e))
+        os.close(dfd)
+    try:
+        os.set_inheritable(fd, False)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            os.close(fd)
+            return (-1, 'Is a directory' if stat.S_ISDIR(st.st_mode) else 'not a regular file')
+        if not free_fs and sys.platform.startswith('linux'):
+            real_fd_path = os.readlink('/proc/self/fd/%d' % fd)
+            base = os.path.realpath(_MOD_BASE[0])
+            if not (real_fd_path == base or real_fd_path.startswith(base + os.sep)):
+                os.close(fd)
+                return (-1, 'path escaped during open')
+        if not write_mode and max_bytes > 0 and st.st_size > max_bytes:
+            os.close(fd)
+            return (-1, limit_msg)
+        if write_mode:
+            os.ftruncate(fd, 0)
+        return (fd, '')
+    except OSError as e:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return (-1, str(e))
+
+
+def _confined_remove(path):
+    if _FILES_FREE or _is_files_free() or os.name == 'nt':
+        if not (_FILES_FREE or _is_files_free()):
+            try:
+                if stat.S_ISLNK(os.lstat(path).st_mode):
+                    return 'path escaped during open'
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return str(e)
+        try:
+            os.remove(path)
+            return None
+        except OSError as e:
+            return str(e)
+    dfd, leaf, perr = _open_parent_dir_fd(path)
+    if dfd < 0:
+        return perr
+    try:
+        os.unlink(leaf, dir_fd=dfd)
+        return None
+    except OSError as e:
+        return str(e)
+    finally:
+        os.close(dfd)
+
+
+def _confined_rename(src, dst):
+    if _FILES_FREE or _is_files_free() or os.name == 'nt':
+        try:
+            os.replace(src, dst)
+            return None
+        except OSError as e:
+            return str(e)
+    sfd, sleaf, serr = _open_parent_dir_fd(src)
+    if sfd < 0:
+        return serr
+    dfd, dleaf, derr = _open_parent_dir_fd(dst)
+    if dfd < 0:
+        os.close(sfd)
+        return derr
+    try:
+        os.replace(sleaf, dleaf, src_dir_fd=sfd, dst_dir_fd=dfd)
+        return None
+    except OSError as e:
+        return str(e)
+    finally:
+        os.close(sfd)
+        os.close(dfd)
+
+
+def _verify_sqlite_confined(path):
+    if _FILES_FREE or _is_files_free():
+        return None
+    if os.name == 'nt':
+        for sfx in ('', '-wal', '-journal', '-shm'):
+            try:
+                st = os.lstat(path + sfx)
+                if not stat.S_ISREG(st.st_mode):
+                    return 'path escaped during open'
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return str(e)
+        return None
+    dfd, leaf, perr = _open_parent_dir_fd(path)
+    if dfd < 0:
+        return perr
+    try:
+        for sfx in ('', '-wal', '-journal', '-shm'):
+            try:
+                st = os.stat(leaf + sfx, dir_fd=dfd, follow_symlinks=False)
+                if not stat.S_ISREG(st.st_mode):
+                    return 'path escaped during open'
+            except FileNotFoundError:
+                pass
+        fl = os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+        tfd = os.open(leaf, fl, 0o666, dir_fd=dfd)
+        try:
+            tst = os.fstat(tfd)
+            if not stat.S_ISREG(tst.st_mode):
+                return 'path escaped during open'
+        finally:
+            os.close(tfd)
+        return None
+    except OSError as e:
+        if e.errno == _errno.ELOOP:
+            return 'path escaped during open'
+        return str(e)
+    finally:
+        os.close(dfd)
+
+
+def _run_proc_bounded(argv_full, exe_path, timeout_ms):
+    import subprocess as _subp
+    max_total = 16 << 20
+    if os.name == 'nt':
+        try:
+            proc = _subp.Popen(
+                argv_full, executable=exe_path, shell=False,
+                stdin=_subp.DEVNULL, stdout=_subp.PIPE, stderr=_subp.PIPE,
+                creationflags=getattr(_subp, 'CREATE_NEW_PROCESS_GROUP', 0),
+            )
+            out_b, err_b = proc.communicate(timeout=timeout_ms / 1000.0)
+        except _subp.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return ('err', 'proc_run timed out')
+        except OSError as e:
+            return ('err', str(e))
+        if len(out_b) + len(err_b) > max_total:
+            return ('err', 'proc_run output exceeded 16 MiB limit')
+        if b'\x00' in out_b or b'\x00' in err_b:
+            return ('err', 'invalid utf-8')
+        try:
+            return ('ok', {'code': int(proc.returncode), 'out': out_b.decode('utf-8'), 'err': err_b.decode('utf-8')})
+        except UnicodeDecodeError:
+            return ('err', 'invalid utf-8')
+    try:
+        proc = _subp.Popen(
+            argv_full, executable=exe_path, shell=False,
+            stdin=_subp.DEVNULL, stdout=_subp.PIPE, stderr=_subp.PIPE,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return ('err', str(e))
+    out_fd = proc.stdout.fileno()
+    err_fd = proc.stderr.fileno()
+    os.set_blocking(out_fd, False)
+    os.set_blocking(err_fd, False)
+    obuf = bytearray()
+    ebuf = bytearray()
+    open_fds = {out_fd: obuf, err_fd: ebuf}
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    post_exit_dl = None
+    timed_out = False
+    over = False
+    while open_fds:
+        now = time.monotonic()
+        if now >= deadline:
+            timed_out = True
+            break
+        if post_exit_dl is None and proc.poll() is not None:
+            post_exit_dl = now + 0.05
+        if post_exit_dl is not None and now >= post_exit_dl:
+            break
+        eff = min(deadline, post_exit_dl) if post_exit_dl is not None else deadline
+        wait_s = min(0.05, max(0.0, eff - now))
+        try:
+            rlist, _, _ = select.select(list(open_fds.keys()), [], [], wait_s)
+        except OSError as e:
+            if e.errno == _errno.EINTR:
+                continue
+            break
+        for rfd in rlist:
+            try:
+                chunk = os.read(rfd, 65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                open_fds.pop(rfd, None)
+                continue
+            if not chunk:
+                open_fds.pop(rfd, None)
+                continue
+            if len(obuf) + len(ebuf) + len(chunk) > max_total:
+                over = True
+                break
+            open_fds[rfd].extend(chunk)
+        if over:
+            break
+    proc.stdout.close()
+    proc.stderr.close()
+    if over or timed_out:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    rc = proc.wait()
+    if timed_out:
+        return ('err', 'proc_run timed out')
+    if over:
+        return ('err', 'proc_run output exceeded 16 MiB limit')
+    if b'\x00' in obuf or b'\x00' in ebuf:
+        return ('err', 'invalid utf-8')
+    try:
+        return ('ok', {'code': int(rc), 'out': bytes(obuf).decode('utf-8'), 'err': bytes(ebuf).decode('utf-8')})
+    except UnicodeDecodeError:
+        return ('err', 'invalid utf-8')
 
 
 def confined_path(p):
-    # Non-str resolves to None: a raw int would otherwise reach open() as an fd.
-    if not isinstance(p, str):
+    # Non-str or embedded NUL resolves to None: a raw int would otherwise reach
+    # open() as an fd, and a NUL byte raises ValueError in os/open calls.
+    if not isinstance(p, str) or '\x00' in p:
         return None
-    if _FILES_FREE:
+    if _FILES_FREE or _is_files_free():
         return p
     base = os.path.realpath(_MOD_BASE[0])
     if not base or base == os.sep:
@@ -2653,9 +4198,10 @@ def confined_path(p):
 _ARGS = [[]]
 
 _SOCKETS = {}
+_SOCKET_DEADLINES = {}
 _NEXT_FD = [1]
 _SOCK_LOCK = threading.Lock()
-_SOCK_TIMEOUT = 30.0      # connected sockets: a silent peer frees its thread
+_SOCK_TIMEOUT = 30.0      # maximum lifetime of a connected socket
 _RECV_MAX = 1 << 20       # one tcp_recv returns at most 1 MiB; mirrors crt.h
 
 
@@ -2682,6 +4228,7 @@ def _fd_for(sock):
         fd = _NEXT_FD[0]
         _NEXT_FD[0] += 1
         _SOCKETS[fd] = sock
+        _SOCKET_DEADLINES[fd] = time.monotonic() + _SOCK_TIMEOUT
     return fd
 
 
@@ -2696,7 +4243,26 @@ def _sock_take(fd):
     if not isinstance(fd, int):
         return None
     with _SOCK_LOCK:
+        _SOCKET_DEADLINES.pop(fd, None)
         return _SOCKETS.pop(fd, None)
+
+
+def _sock_apply_deadline(fd, sock):
+    with _SOCK_LOCK:
+        if _SOCKETS.get(fd) is not sock:
+            return False
+        deadline = _SOCKET_DEADLINES.get(fd)
+    if deadline is None:
+        return False
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return False
+    try:
+        sock.settimeout(left)
+    except (OSError, ValueError):
+        return False
+    return True
+
 
 _POOL = {'cond': threading.Condition(), 'q': [], 'active': 0, 'parked': 0, 'done': []}
 _SPAWN_WORKERS = None
@@ -2718,13 +4284,26 @@ class _Chan:
     `send` takes the value over and `recv` hands it back, so a channel is the
     runtime half of the checker's rule that sending a value moves it.
     """
-    __slots__ = ('cap', 'buf', 'closed', 'cond')
+    __slots__ = ('cap', 'buf', 'closed', 'cond', 'released')
 
     def __init__(self, cap):
         self.cap = cap
         self.buf = []
         self.closed = False
         self.cond = threading.Condition()
+        self.released = False
+
+    def _release_budget_locked(self):
+        if not self.released and self.closed and not self.buf:
+            self.released = True
+            with _CHAN_BUDGET_LOCK:
+                _CHAN_TOTAL_SLOTS[0] = max(0, _CHAN_TOTAL_SLOTS[0] - self.cap)
+
+    def __del__(self):
+        if not getattr(self, 'released', True):
+            self.released = True
+            with _CHAN_BUDGET_LOCK:
+                _CHAN_TOTAL_SLOTS[0] = max(0, _CHAN_TOTAL_SLOTS[0] - self.cap)
 
     def send(self, v):
         with self.cond:
@@ -2741,14 +4320,18 @@ class _Chan:
             while not self.buf and not self.closed:
                 self.cond.wait()
             if not self.buf:
+                self._release_budget_locked()
                 return None
             v = self.buf.pop(0)
+            if self.closed and not self.buf:
+                self._release_budget_locked()
             self.cond.notify_all()
             return v
 
     def close(self):
         with self.cond:
             self.closed = True
+            self._release_budget_locked()
             self.cond.notify_all()
         return None
 
@@ -2888,7 +4471,21 @@ _STRUCT_CTYPES = {
 }
 
 
+def _array_field_spec(ty):
+    if not isinstance(ty, str) or '[' not in ty or not ty.endswith(']') or ty.startswith('ptr['):
+        return None
+    lb = ty.find('[')
+    elem, cnt = ty[:lb].strip(), ty[lb + 1:-1].strip()
+    if elem and cnt.isdigit() and int(cnt) >= 1:
+        return (elem, int(cnt))
+    return None
+
+
 def _struct_ctype(ty):
+    import ctypes
+    arr = _array_field_spec(ty)
+    if arr is not None:
+        return _struct_ctype(arr[0]) * arr[1]
     if isinstance(ty, str) and ty in _STRUCT_CTYPES:
         return getattr(ctypes, _STRUCT_CTYPES[ty])
     if isinstance(ty, str) and ty.startswith('ptr['):
@@ -2898,12 +4495,25 @@ def _struct_ctype(ty):
     return ctypes.c_longlong
 
 
+def _read_struct_elem(v, elem):
+    if elem in _STRUCTS:
+        return _read_struct(v, elem)
+    if isinstance(v, bytes):
+        return v.decode('utf-8')
+    if hasattr(v, 'value'):
+        return v.value
+    return v
+
+
 def _read_struct(inst, tname_):
     """One level of a C struct as a BRAT struct value, nested included."""
     got = {'$type': tname_}
     for f, ft in _STRUCTS[tname_]:
         v = getattr(inst, f)
-        if ft in _STRUCTS:
+        arr = _array_field_spec(ft)
+        if arr is not None:
+            got[f] = [_read_struct_elem(v[k], arr[0]) for k in range(arr[1])]
+        elif ft in _STRUCTS:
             got[f] = _read_struct(v, ft)
         elif isinstance(v, bytes):
             got[f] = v.decode('utf-8')
@@ -2920,11 +4530,12 @@ def _struct_class(name):
     import ctypes
     fields = _STRUCTS[name]
     attrs = {'_fields_': [(f, _struct_ctype(t)) for f, t in fields]}
-    if name in _PACKED:
+    if name in _PACKED and name not in _UNIONS:
         # `extern packed struct`: ctypes pads by default, which would put the
         # second field at the wrong byte and read the neighbouring one.
         attrs['_pack_'] = 1
-    cls = type(name, (ctypes.Structure,), attrs)
+    base = ctypes.Union if name in _UNIONS else ctypes.Structure
+    cls = type(name, (base,), attrs)
     _STRUCT_CACHE[name] = cls
     return cls
 
@@ -2985,7 +4596,13 @@ def _filled_struct(name, v):
             fv = v.get(f)
         if fv is None:
             continue
-        if ft in _STRUCTS:
+        arr = _array_field_spec(ft)
+        if arr is not None:
+            elem_t, cnt = arr
+            if isinstance(fv, list) and len(fv) == cnt:
+                act = _struct_ctype(ft)
+                fv = act(*[(_filled_struct(elem_t, x) if elem_t in _STRUCTS else x) for x in fv])
+        elif ft in _STRUCTS:
             fv = _filled_struct(ft, fv)
         elif ft == 'str' and isinstance(fv, str):
             fv = fv.encode('utf-8')
@@ -3071,7 +4688,7 @@ def _cb_shim_src(ptypes, slots, ret, nbytes):
                 emit(_ft)       # a record holding a record must come second
         seen.append(name)
         pack = ' __attribute__((packed))' if name in _PACKED else ''
-        out.append('typedef struct%s {' % pack)
+        out.append('typedef union {' if name in _UNIONS else ('typedef struct%s {' % pack))
         for f, ft in _STRUCTS[name]:
             out.append('    %s %s;' % (_cb_c_field(ft), f))
         out.append('} __brat_s_%s;' % name)
@@ -3093,7 +4710,7 @@ def _cb_shim_src(ptypes, slots, ret, nbytes):
     out.append('    unsigned char in[%d];' % max(nbytes, 1))
     out.append('    unsigned char out[%d];' % ctypes.sizeof(_struct_class(ret)))
     out.append('    memset(in, 0, sizeof in);')
-    for i, (t, (_off, size, _big)) in enumerate(zip(ptypes, slots)):
+    for i, (t, (_off, _size, _big)) in enumerate(zip(ptypes, slots)):
         out.append('    { %s t = a%d; memcpy(in + %d, &t, sizeof t); }'
                    % (_cb_c_slot(t), i, _off))
     out.append('    __brat_fill(out, in);')
@@ -3102,35 +4719,66 @@ def _cb_shim_src(ptypes, slots, ret, nbytes):
     return '\n'.join(out) + '\n'
 
 
+def _cb_shim_dir():
+    import stat
+    import tempfile
+    uid_tag = str(os.getuid()) if hasattr(os, 'getuid') else 'win'
+    cand = os.path.join(tempfile.gettempdir(), 'brat-cb-shim-%s' % uid_tag)
+    try:
+        os.makedirs(cand, mode=0o700, exist_ok=True)
+        st = os.lstat(cand)
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            raise OSError('not a private directory')
+        if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+            raise OSError('foreign directory owner')
+        if os.name != 'nt' and (st.st_mode & 0o077) != 0:
+            os.chmod(cand, 0o700)
+        return cand
+    except OSError:
+        return tempfile.mkdtemp(prefix='brat-cb-shim-')
+
+
 def _cb_shim_lib(src):
     import hashlib
     import subprocess
-    import tempfile
     key = hashlib.sha1(src.encode('utf-8')).hexdigest()[:20]
     if key in _CB_SHIMS:
         return _CB_SHIMS[key]
-    d = os.path.join(tempfile.gettempdir(), 'brat-cb-shim')
-    os.makedirs(d, exist_ok=True)
+    d = _cb_shim_dir()
     so = os.path.join(d, 'shim-%s.so' % key)
     if not os.path.exists(so):
-        cpath = os.path.join(d, 'shim-%s.c' % key)
+        pid = os.getpid()
+        cpath = os.path.join(d, 'shim-%s.%d.c' % (key, pid))
+        tmp_so = '%s.tmp.%d' % (so, pid)
         with open(cpath, 'w', encoding='utf-8') as f:
             f.write(src)
         cc = os.environ.get('CC') or 'cc'
         try:
-            r = subprocess.run([cc, '-shared', '-fPIC', '-O1', '-w', cpath, '-o', so + '.tmp'],
+            r = subprocess.run([cc, '-shared', '-fPIC', '-O1', '-w', cpath, '-o', tmp_so],
                                capture_output=True, text=True, timeout=120)
         except OSError as e:
+            try:
+                os.unlink(cpath)
+            except OSError:
+                pass
             raise RuntimeError("ffi: a callback returning a struct by value needs a C "
                                "compiler to reach C; `%s` could not run (%s): run "
                                "`brat build`" % (cc, e))
+        try:
+            os.unlink(cpath)
+        except OSError:
+            pass
         if r.returncode != 0:
+            try:
+                os.unlink(tmp_so)
+            except OSError:
+                pass
             raise RuntimeError(
                 "ffi: a callback returning a struct by value needs a C trampoline and it "
                 "did not compile -- the record `%s` is not laid out the same way twice, so "
                 "returning it would be a guess: run `brat build`\n%s"
                 % (src.split('__brat_s_')[1].split(';')[0], (r.stderr or '').strip().splitlines()[:3]))
-        os.replace(so + '.tmp', so)
+        os.replace(tmp_so, so)
     lib = ctypes.CDLL(so)
     _CB_SHIMS[key] = lib
     return lib
@@ -3275,9 +4923,14 @@ def hoist(s, funcs):
             funcs[s[2]] = ('extern', s[3], s[4], s[1], s[5] if len(s) > 5 else None,
                            bool(len(s) > 7 and s[7]))
     elif s[0] == 'externstruct':
+        _STRUCT_CACHE.pop(s[1], None)
+        _PACKED.discard(s[1])
+        _UNIONS.discard(s[1])
         _STRUCTS[s[1]] = s[2]
         if len(s) > 3 and s[3]:
             _PACKED.add(s[1])
+        if len(s) > 4 and s[4]:
+            _UNIONS.add(s[1])
     elif s[0] == 'enum':
         for vname, fields in s[2]:
             tag = 'none' if vname == 'None' and not fields else vname.lower()
@@ -3329,22 +4982,7 @@ def call_method_fn(fname, this, vals, env, funcs):
         if _MANAGED:
             vrc_inc(val)
         frame[nm] = val
-    _note_ptr_params(frame, params)
-    with _frame():
-        env.append(frame)
-        try:
-            run_block(body, env, funcs, frame=True)
-        except Propagate:
-            _drop_all(frame)
-            env.pop()
-            raise
-        except (Done, Ret) as r:
-            _drop_all(frame)
-            env.pop()
-            return r.v
-        _drop_all(frame)
-        env.pop()
-        return 0
+    return _run_frame(frame, body, env, funcs, params)
 
 
 def run_stmt(s, env, funcs):
@@ -3407,9 +5045,7 @@ def _run_stmt(s, env, funcs):
                 return ('err', bad)
             base[_mkey(ix)] = v
         elif isinstance(base, list):
-            if not isinstance(ix, (int, float)) or int(ix) != ix:
-                raise RuntimeError('index must be int')
-            ix = int(ix)
+            ix = _as_index(ix)
             if ix < 0 or ix >= len(base):
                 raise RuntimeError('index out of range')
             base[ix] = v
@@ -3537,6 +5173,7 @@ def _run_stmt(s, env, funcs):
 
 def run(src, base='.', argv=None):
     _MOD_BASE[0] = base
+    _MOD_BASE_SET[0] = True
     _ARGS[0] = list(argv) if argv else []
     _TRAITS.clear()
     _VARIANTS.clear()
@@ -3546,8 +5183,9 @@ def run(src, base='.', argv=None):
     for s in prog[1]:
         hoist(s, funcs)
     for s in prog[1]:
-        if s[0] not in ('fn', 'impl', 'trait', 'enum', 'pub', 'extern', 'externstruct'):
-            run_stmt(s, env, funcs)
+        u = s[1] if s[0] == 'pub' else s
+        if u[0] not in ('fn', 'impl', 'trait', 'enum', 'extern', 'externstruct', 'exportfn'):
+            run_stmt(u, env, funcs)
     out = call('main', [], env, funcs) if 'main' in funcs else 0
     join_all()
     return out

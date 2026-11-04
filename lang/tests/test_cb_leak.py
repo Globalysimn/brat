@@ -76,7 +76,7 @@ with open(path, "w", encoding="utf-8") as f:
 
 want = "5250\n990\n"
 
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
+interp = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True, text=True,
                         timeout=300)
 assert interp.returncode == 0, "interp rc=%d %r" % (interp.returncode,
                                                    (interp.stdout + interp.stderr)[-800:])

@@ -1,0 +1,7 @@
+fn exists(path: str) -> bool
+fn read_or(path: str, fallback: str) -> str
+fn read_lines(path: str)
+fn write_lines(path: str, lines: vec[str])
+fn append_text(path: str, extra: str)
+fn write_atomic(path: str, content: str)
+fn remove(path: str)

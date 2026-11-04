@@ -54,7 +54,8 @@ std::vector<Mode> modes_of(const FnDecl &f) {
 // talk a place out of a write that happens on the other branch.
 enum Cap { kNone = 0, kRead = 1, kMoved = 2, kWrite = 3, kTop = 4 };
 
-const std::set<std::string> kCopyAnns{"i32", "i64", "u64", "f32", "f64", "bool"};
+const std::set<std::string> kCopyAnns{"i8", "u8", "i16", "u16", "i32", "u32",
+                                      "i64", "u64", "usize", "isize", "f32", "f64", "bool"};
 const std::set<std::string> kMutators{"push", "pop", "sort", "sort_by", "ins",
                                       "del", "set", "clear"};
 const std::set<SK> kDecls{SK::Fn,        SK::Impl,   SK::Trait, SK::Enum,
@@ -352,6 +353,8 @@ static std::set<std::string> bound_in(const View &body) {
 
 // names used inside a subtree, for the last-use table and for `spawn`
 
+void used_stmt(const Stmt &s, std::vector<std::string> &acc);
+
 void used_expr(const Expr *e, std::vector<std::string> &acc) {
     if (e == nullptr) return;
     if (e->k == EK::Var) {
@@ -360,14 +363,8 @@ void used_expr(const Expr *e, std::vector<std::string> &acc) {
     }
     for (const auto &k : e->kids) used_expr(k.get(), acc);
     if (e->fn) {
-        for (const auto &sp : e->fn->body) {
-            if (sp->k == SK::Let || sp->k == SK::Expr || sp->k == SK::Set ||
-                sp->k == SK::SetIdx || sp->k == SK::SetField || sp->k == SK::Return) {
-                used_expr(sp->e1.get(), acc);
-                used_expr(sp->e2.get(), acc);
-                used_expr(sp->e3.get(), acc);
-            }
-        }
+        for (const auto &sp : e->fn->body)
+            if (sp) used_stmt(*sp, acc);
     }
 }
 
@@ -722,6 +719,16 @@ struct Walk {
         case EK::Closure: {
             if (e->fn) {
                 State inner = st;
+                for (const Param &p : e->fn->params) inner.forget(p.name);
+                block(view(e->fn->body), inner);
+            }
+            return;
+        }
+        case EK::ParFor: {
+            for (const auto &k : e->kids) expr(k.get(), st, mutating, line);
+            if (e->fn) {
+                State inner = st;
+                if (!e->a.empty()) inner.forget(e->a);
                 block(view(e->fn->body), inner);
             }
             return;
@@ -824,21 +831,34 @@ std::vector<BorrowDiag> cap_verdicts(
         for (const ParamMode &p : kv.second) m.push_back(p.mode);
         modes[kv.first] = std::move(m);
     }
+    for (const auto &sp : body) {
+        const Stmt *node = sp.get();
+        while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
+        if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
+            const FnDecl &f = node->fns[0];
+            if (f.name) modes[*f.name] = modes_of(f);
+        } else if (node->k == SK::Extern && !node->ext.name.empty()) {
+            std::vector<Mode> m;
+            for (const Param &p : node->ext.params) m.push_back(p.mode);
+            modes[node->ext.name] = std::move(m);
+        } else if (node->k == SK::Impl) {
+            for (const FnDecl &f : node->fns)
+                if (f.name) modes.insert({*f.name, modes_of(f)});
+        }
+    }
     std::vector<BorrowDiag> out;
     View top;
     for (const auto &sp : body) {
         const Stmt *node = sp.get();
         while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
-        if (node->k == SK::Fn && !node->fns.empty()) {
+        if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
             const FnDecl &f = node->fns[0];
-            if (f.name) modes[*f.name] = modes_of(f);
             one_body(view(f.body), f.params, modes, out);
             continue;
         }
         if (kDecls.count(node->k)) {
             if (node->k == SK::Impl) {
                 for (const FnDecl &f : node->fns) {
-                    if (f.name) modes.insert({*f.name, modes_of(f)});
                     one_body(view(f.body), f.params, modes, out);
                 }
             }

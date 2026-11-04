@@ -4,7 +4,6 @@ import _scratch
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -76,7 +75,7 @@ want = "42\n2.5\n0.5\nhi from plugin\n10\n99\n2\n"
 env = dict(os.environ, LD_LIBRARY_PATH=TMP)
 path = write("ok.brat", OK)
 
-interp = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
+interp = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True, text=True,
                         timeout=120, env=env)
 check(interp.returncode == 0 and interp.stdout == want,
       "run rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
@@ -91,7 +90,7 @@ check(native.returncode == 0 and native.stdout == want,
 
 def runtime_fail(name, src, text):
     path = write(name + ".brat", src)
-    r = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True, text=True,
+    r = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True, text=True,
                        timeout=120, env=env)
     out = r.stdout + r.stderr
     check(r.returncode != 0 and text in out, "%s run: rc=%d %r" % (name, r.returncode, out))
@@ -133,7 +132,7 @@ def static_fail(name, src, text):
         out = r.stdout + r.stderr
         check(r.returncode != 0 and text in out,
               "%s %s: rc=%d %r" % (name, cmd, r.returncode, out))
-    r = subprocess.run([sys.executable, CLI, "run", "--interp", path], capture_output=True,
+    r = subprocess.run([sys.executable, CLI, "run", "--interp", "--unsafe-ffi", path], capture_output=True,
                        text=True, timeout=120, env=env)
     out = r.stdout + r.stderr
     check(r.returncode != 0 and "refusing to run" in out,

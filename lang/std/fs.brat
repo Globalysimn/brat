@@ -1,0 +1,51 @@
+pub fn exists(path: str) -> bool {
+  let r = read_file(path)
+  return !is_err(r)
+}
+
+pub fn read_or(path: str, fallback: str) -> str {
+  let r = read_file(path)
+  if is_err(r) {
+    return fallback
+  }
+  return unwrap(r)
+}
+
+pub fn read_lines(path: str) {
+  let r = read_file(path)
+  if is_err(r) {
+    return r
+  }
+  let text = unwrap(r)
+  return Ok(text.lines())
+}
+
+pub fn write_lines(path: str, lines: vec[str]) {
+  if len(lines) == 0 {
+    return write_file(path, "")
+  }
+  return write_file(path, lines.join("\n") + "\n")
+}
+
+pub fn append_text(path: str, extra: str) {
+  let prev = read_or(path, "")
+  return write_file(path, prev + extra)
+}
+
+pub fn write_atomic(path: str, content: str) {
+  let tmp = path + ".brat.tmp"
+  let wr = write_file(tmp, content)
+  if is_err(wr) {
+    return wr
+  }
+  let rr = fs_rename(tmp, path)
+  if is_err(rr) {
+    let _rm = fs_remove(tmp)
+    return rr
+  }
+  return wr
+}
+
+pub fn remove(path: str) {
+  return fs_remove(path)
+}

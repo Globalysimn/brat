@@ -159,7 +159,7 @@ BUFFER_WANT = "16\n136\n"
 
 def run(args, **kw):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+            and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
     return subprocess.run([sys.executable, CLI] + args, capture_output=True,
                           text=True, timeout=600, **kw)
@@ -220,14 +220,6 @@ def main():
     assert target_c.returncode == 0, target_c.stdout + target_c.stderr
     assert "size_t _out" in target_c.stdout, \
       "usize out-parameter scratch must follow the target's size_t"
-    sys.path.insert(0, os.path.dirname(CLI))
-    import codegen_c
-    codegen_c.set_ffi_target("i686-linux-gnu")
-    python_c = codegen_c.emit_file(prog)
-    native_c, sep, _contract = target_c.stdout.rpartition("\n/* BRAT FFI contract")
-    assert sep and native_c + "\n" == python_c, \
-      "the target-aware Python and C++ emitters must agree"
-
     p = run(["run", "--interp", buf])
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == BUFFER_WANT, "interp buffer:\n%r" % p.stdout
@@ -263,7 +255,7 @@ fn main() -> i64 {
     assert p.returncode != 0 and "takes a binding" in (p.stdout + p.stderr), p.stdout + p.stderr
 
     print("OUT PARAMS ALL GREEN (integer, float, bool and size_t outputs; "
-          "both backends and target-aware emitter parity)")
+          "both backends and target-aware native emission)")
 
 
 main()

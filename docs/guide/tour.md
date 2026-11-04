@@ -1,6 +1,7 @@
 # The language
 
-Every snippet here runs. Commands are from the repository root:
+Commands are from the repository root. Runnable programs live in
+`lang/examples/`; the snippets below are fragments of those programs.
 
 ```
 python3 lang/engine/cli.py check file.brat    # ownership + types
@@ -249,12 +250,13 @@ Details, interfaces and re-exports: `modules.md`.
 `extern fn`, `extern struct`, `ptr`, `slice`, callbacks, `brat bindgen`,
 `export fn`, run-time plugins: `ffi.md`.
 
-## 13. Not in v0.1
+## 13. Not implemented
 
 Generics are erased rather than monomorphized; no trait objects; no macros; no
-async; no first-class function values; no borrow across a thread. Packages
+async; no first-class function values; no borrow across a thread; no bitwise
+operators, shifts or `**` (the lexer refuses `|`, `^` and `~`). Packages
 support a local index and exact transitive dependencies, but have no hosted
-registry or version-range solving; see `modules.md`.
+registry or version-range solving; see `modules.md`. [limits.md](limits.md) has
+the rest, with programs that show each limit.
 
-More working programs: `lang/examples/` (71 files); the tests run most of them
-on both backends.
+More programs: `lang/examples/` (64 files), each referenced by the test suite.

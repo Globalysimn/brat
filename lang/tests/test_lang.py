@@ -11,7 +11,7 @@ SPEC = os.path.join(HERE, '..', 'spec')
 
 BRAT = os.path.join(ENGINE, 'brat.py')
 OWN = os.path.join(ENGINE, 'borrow.py')
-CBACK2 = os.path.join(HERE, 'test_codegen_c.py')
+NATIVE_EMITTER = os.path.join(HERE, 'test_native_emitter.py')
 
 LANG_EX = os.path.join(HERE, '..', 'examples')
 GOOD = [os.path.join(LANG_EX, f) for f in ['hello.brat', 'control.brat', 'own_good.brat', 'result.brat', 'defer.brat', 'kpipe.brat', 'krouter.brat', 'kapp.brat', 'krange.brat', 'impl.brat', 'trait.brat', 'struct.brat', 'enum.brat', 'generic.brat', 'closure.brat', 'letflow.brat', 'enummeth.brat', 'nested.brat', 'modapi.brat', 'modapp.brat', 'json.brat', 'jsontest.brat', 'map.brat', 'fast.brat', 'spawn.brat', 'inop.brat', 'meth2.brat', 'f64fast.brat', 'meth3.brat', 'fastprint.brat', 'compound.brat', 'destruct.brat', 'meth4.brat', 'defaults.brat', 'trycatch.brat', 'guards.brat', 'utf8.brat', 'syslib.brat', 'funclib.brat', 'rematch.brat', 'jsonlibtest.brat', 'fastvec.brat', 'own_paths.brat', 'boolmatch.brat', 'nested2.brat', 'span.brat', 'precedence.brat', 'interp.brat',
@@ -46,7 +46,6 @@ for bad, cnt in [('own_bad.brat', 4), ('own_move.brat', 2), ('own_sig.brat', 1),
     check(p.returncode == 1 and ('%d error(s)' % cnt) in p.stdout, bad + ': ' + p.stdout[-500:])
     check(': error: ' in p.stdout, bad + ' diag format: ' + p.stdout[-500:])
 
-import tempfile
 NEG = _scratch.mkdtemp(prefix='brat-neg-')
 with open(os.path.join(NEG, 'nonex.brat'), 'w', encoding='utf-8') as f:
     f.write('enum E {\n  A,\n  B\n}\nlet x = A\nmatch x {\n  A => print(1)\n}\n')
@@ -115,8 +114,9 @@ with open(os.path.join(NEG, 'recv.brat'), 'w', encoding='utf-8') as f:
 p = run(BRAT, os.path.join(NEG, 'recv.brat'))
 check(p.returncode == 0 and p.stdout == '1\nTrue\n9\n', 'upper receivers: ' + (p.stdout + p.stderr)[-300:])
 
-p = run(CBACK2)
-check(p.returncode == 0 and 'codegen_c tests ok' in p.stdout, 'codegen_c: ' + p.stdout[-500:])
+p = run(NATIVE_EMITTER)
+check(p.returncode == 0 and 'native emitter tests ok' in p.stdout,
+      'native emitter: ' + (p.stdout + p.stderr)[-500:])
 
 # run_all.py runs every test file once and sets BRAT_NESTED=0 so edge tests are
 # not executed twice; run test_lang.py alone to keep them in this file's run.

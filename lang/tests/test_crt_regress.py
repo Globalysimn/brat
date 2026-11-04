@@ -14,14 +14,14 @@ Val vcall_any(Val f, Vec *args) { (void)f; (void)args; return vnil(); }
 int main(void) {
     vraise("first failure");
     Val saved = vunwind;
-    Val msg = saved.as.tv.args->items[0];
+    Val msg = saved.as.tv->items[0];
     verr_take();
     vraise("second failure");
-    if (strcmp(msg.as.str, "first failure") != 0) { printf("FAIL stale\n"); return 1; }
+    if (strcmp(vstr_c(&msg), "first failure") != 0) { printf("FAIL stale\n"); return 1; }
     verr_take();
     vraise("first");
     vraise("poisoned");
-    if (strcmp(vunwind.as.tv.args->items[0].as.str, "first") != 0) { printf("FAIL first-wins\n"); return 1; }
+    if (strcmp(vstr_c(&vunwind.as.tv->items[0]), "first") != 0) { printf("FAIL first-wins\n"); return 1; }
     verr_take();
     vdrop(saved);
     printf("REGRESS OK\n");

@@ -8,7 +8,8 @@ _STRAY_BRACES = []
 _CURLINE = [1]
 _ENUMS_REV = {}
 
-_ESC = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"', "'": "'", '0': '\0'}
+_ESC = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"', "'": "'", '0': '\0',
+        '{': '{', '}': '}'}
 
 # Names the C emitter spells into the generated source exactly as written
 # (an `extern` symbol is the library's symbol; nothing may rename it), so they
@@ -33,7 +34,7 @@ def c_ident(c, what, c_kw=False):
     """
     t = c.peek()
     if t.k != 'ID' or not _C_IDENT_RE.match(t.v) or (c_kw and t.v in _C_RESERVED):
-        raise SyntaxError('%s wants a plain name, got %r at line %d'
+        raise SyntaxError("%s wants a plain name, got '%s' at line %d"
                           % (what, t.v, eline(c)))
     return c.step().v
 
@@ -64,11 +65,10 @@ def reset_fresh():
     """Start temporary naming over for a new program.
 
     `fresh` numbers compiler-made temporaries with one counter for the process.
-    Without a reset, a tool that emits two programs in one process -- a batch
-    build, the LSP, anything embedding `codegen_c` -- writes different C for the
-    second program than a separate run would, because the counter kept going.
-    That is a determinism defect, not a cosmetic one: the same source must give
-    the same bytes.
+    Without a reset, a tool that processes two programs in one process gives
+    the second program different temporary names than a separate run would,
+    because the counter kept going. That is a determinism defect, not a
+    cosmetic one: the same source must produce the same parsed program.
     """
     global _seq
     _seq = 0
@@ -130,12 +130,19 @@ def tree_depth(node):
     stack = [(node, 1)]
     while stack:
         cur, d = stack.pop()
+        if isinstance(cur, list):
+            # A list is only the container for a node's children (call
+            # arguments, a block body), not another tree level. Counting it
+            # made this bound one level stricter than the C++ node depth
+            # on every call, so the front ends disagreed at the boundary.
+            for sub in cur:
+                if isinstance(sub, (tuple, list)):
+                    stack.append((sub, d))
+            continue
         if d > deepest:
             deepest = d
         if isinstance(cur, tuple) and cur:
             kids = cur[1:]
-        elif isinstance(cur, list):
-            kids = cur
         else:
             continue
         for sub in kids:
@@ -225,26 +232,31 @@ def _parse_stmt(c):
         if c.peek().k == 'STR':
             block_lib = c.step().v.strip('"')
         packed = False
-        if c.peek().k == 'ID' and c.peek().v == 'packed' and c.peek(1).v == 'struct':
-            c.step()          # `extern packed struct`: no padding, 1-byte alignment
-            packed = True
-        if c.peek().k == 'ID' and c.peek().v == 'struct':
-            c.step()  # struct
-            name = c_ident(c, 'extern struct name')
+        is_union = False
+        if c.peek().k == 'ID' and c.peek().v == 'packed':
+            if c.peek(1).v == 'union':
+                raise SyntaxError('`packed` wants `struct`, not `union` at line %d' % eline(c))
+            if c.peek(1).v == 'struct':
+                c.step()          # `extern packed struct`: no padding, 1-byte alignment
+                packed = True
+        if c.peek().k == 'ID' and c.peek().v in ('struct', 'union'):
+            is_union = (c.step().v == 'union')
+            kind_lbl = 'extern union' if is_union else 'extern struct'
+            name = c_ident(c, '%s name' % kind_lbl)
             c.want('{')
             fields = []
             while c.peek().v != '}':
-                fname = c_ident(c, 'extern struct field')
+                fname = c_ident(c, '%s field' % kind_lbl)
                 c.want(':')
                 toks = []
                 depth = 0
                 while True:
                     x = c.peek()
-                    if x.v in (',', '}') and depth == 0:
+                    if x.k == 'EOF' or (x.v in (',', '}') and depth == 0):
                         break
-                    if x.v == '[':
+                    if x.v in ('[', '('):
                         depth += 1
-                    if x.v == ']':
+                    if x.v in (']', ')'):
                         depth -= 1
                     toks.append(x.v)
                     c.step()
@@ -253,6 +265,8 @@ def _parse_stmt(c):
                 if c.peek().v == ',':
                     c.step()
             c.want('}')
+            if is_union:
+                return ('externstruct', name, fields, False, True)
             return ('externstruct', name, fields, packed)
         if c.peek().v == '{':
             c.step()
@@ -287,7 +301,7 @@ def _parse_stmt(c):
             raise SyntaxError('export wants fn at line %d' % eline(c))
         node = parse_fn(c)
         if not (_C_IDENT_RE.match(node[1] or '') and node[1] not in _C_RESERVED):
-            raise SyntaxError('export fn wants a plain name, got %r at line %d'
+            raise SyntaxError("export fn wants a plain name, got '%s' at line %d"
                               % (node[1], eline(c)))
         return ('exportfn',) + node[1:]
     if t.k == 'KW' and t.v == 'fn':
@@ -321,6 +335,9 @@ def _parse_stmt(c):
             return ('pub', parse_trait(c))
         if u.k == 'KW' and u.v == 'impl':
             return ('pub', parse_impl(c))
+        if u.k == 'KW' and u.v == 'const':
+            c.step()
+            return ('pub', parse_let(c, True))
         if u.k == 'KW' and u.v == 'use':
             c.step()
             parts = [c.step().v]
@@ -443,7 +460,7 @@ def parse_let(c, const=False):
             raise SyntaxError('const destructure unsupported at line %d' % eline(c))
         c.step()
         names = []
-        while c.peek().v != ']':
+        while c.peek().v != ']' and c.peek().k != 'EOF':
             names.append(c.step().v)
             if c.peek().v == ',':
                 c.step()
@@ -467,7 +484,7 @@ def parse_let(c, const=False):
         depth = 0
         while True:
             x = c.peek()
-            if x.v == '=' and depth == 0:
+            if x.k == 'EOF' or (x.v == '=' and depth == 0):
                 break
             if x.v == '[':
                 depth += 1
@@ -510,12 +527,12 @@ def canon_ann(ann):
 def parse_params(c, allow_varargs=False):
     params = []
     varargs = None
-    while c.peek().v != ')':
+    while c.peek().v != ')' and c.peek().k != 'EOF':
         if allow_varargs and c.peek().v == '..':
             c.step()
             toks = []
             depth = 0
-            while not (c.peek().v in (',', ')') and depth == 0):
+            while c.peek().k != 'EOF' and not (c.peek().v in (',', ')') and depth == 0):
                 x = c.peek()
                 if x.v in ('[', '('):
                     depth += 1
@@ -540,12 +557,15 @@ def parse_params(c, allow_varargs=False):
             toks = []
             while True:
                 x = c.peek()
-                if x.v in (',', ')', '=') and depth == 0:
+                if x.k == 'EOF' or (x.v in (',', ')', '=') and depth == 0):
                     break
                 if x.v in ('[', '('):
                     depth += 1
                 if x.v in (']', ')'):
                     depth -= 1
+                if allow_varargs and depth == 0 and x.v in EFFECTS:
+                    raise SyntaxError('`%s` is an effect of %s, not a parameter type at line %d'
+                                      % (x.v, pn, eline(c)))
                 if first is None and depth == 0 and x.k in ('ID', 'KW'):
                     first = x.v
                 toks.append(x.v)
@@ -580,7 +600,7 @@ def parse_fn(c):
         while c.peek().v != '>':
             t = c.step()
             if t.k not in ('ID', 'KW'):
-                raise SyntaxError('want type param have %r at line %d' % (t.v, eline(c)))
+                raise SyntaxError("want type param have '%s' at line %d" % (t.v, t.line))
             tparams.append(t.v)
             if c.peek().v == ',':
                 c.step()
@@ -597,7 +617,7 @@ def parse_fn(c):
             if c.step().v == 'ref':
                 raise SyntaxError('ref returns dangle; return owned at line %d' % eline(c))
         toks = []
-        while c.peek().v != '{':
+        while c.peek().v != '{' and c.peek().k != 'EOF':
             toks.append(c.step().v)
         ret = ann_text(toks)
     c.want('{')
@@ -614,8 +634,8 @@ def parse_fn(c):
 # parameter whose memory the callee touches. Without them the checker treats every
 # foreign call as "touches nothing it can see", which is how FFI races used to be
 # nobody's problem (docs/project/LEDGER.md, 2026-10-30).
-EFFECTS = ("pure", "nothrow", "reads", "writes")
-EFFECT_ADDRESSED = ("reads", "writes")
+EFFECTS = ("pure", "nothrow", "reads", "writes", "borrows")
+EFFECT_ADDRESSED = ("reads", "writes", "borrows")
 
 
 # What a C function may do with the callback it is handed. Both are properties of
@@ -634,6 +654,104 @@ def effect_text(eff):
     return eff.replace(":", "(", 1) + ")" if ":" in eff else eff
 
 
+_C_TYPE_WORDS = {
+    'const', 'volatile', 'restrict', 'signed', 'unsigned', 'short', 'long',
+    'int', 'char', 'float', 'double', 'void', 'bool', '_Bool', 'struct',
+    'union', 'enum',
+}
+
+
+def _take_balanced_type(c, toks):
+    stack = []
+    while c.peek().k != 'EOF':
+        x = c.step().v
+        toks.append(x)
+        if x == '[':
+            stack.append(']')
+        elif x == '(':
+            stack.append(')')
+        elif x == '{':
+            stack.append('}')
+        elif x in (']', ')', '}'):
+            if stack and stack[-1] == x:
+                stack.pop()
+            else:
+                break
+        if not stack:
+            break
+
+
+def _take_type_postfix(c, toks, head):
+    map_value = False
+    while True:
+        if c.peek().v == '[':
+            _take_balanced_type(c, toks)
+            if head == 'map' and not map_value:
+                _take_type_toks(c, toks)
+                map_value = True
+            continue
+        if c.peek().v == '*':
+            toks.append(c.step().v)
+            continue
+        break
+
+
+def _take_type_toks(c, toks=None):
+    """Take exactly one type spelling after an `extern` result arrow.
+
+    The old collector read until a keyword it happened to know, so a
+    following top-level statement became part of the annotation:
+    `-> bool` followed by `print(x)` was the type `boolprint(x)`.
+    Types are still carried as glued token text; this only decides
+    where one type ends.
+    """
+    if toks is None:
+        toks = []
+    if c.peek().k == 'ID' and (c.peek().v in EFFECTS or c.peek().v in CONTRACTS):
+        return toks
+    while c.peek().v in ('move', 'ref', 'mut'):
+        toks.append(c.step().v)
+    x = c.peek()
+    if x.k == 'EOF' or x.v in ('{', '}', ';', ',', ')', ']'):
+        return toks
+    if c.peek().k == 'ID' and (x.v in EFFECTS or x.v in CONTRACTS):
+        return toks
+    if x.v == 'fn':
+        toks.append(c.step().v)
+        if c.peek().v == '(':
+            _take_balanced_type(c, toks)
+        if c.peek().v == '->':
+            toks.append(c.step().v)
+            _take_type_toks(c, toks)
+        _take_type_postfix(c, toks, '')
+        return toks
+    if x.v == '(':
+        _take_balanced_type(c, toks)
+        _take_type_postfix(c, toks, '')
+        return toks
+    if x.v in _C_TYPE_WORDS:
+        if x.v in ('struct', 'union', 'enum'):
+            toks.append(c.step().v)
+            if c.peek().k in ('ID', 'KW'):
+                toks.append(c.step().v)
+        else:
+            while c.peek().v in _C_TYPE_WORDS and c.peek().v not in ('struct', 'union', 'enum'):
+                toks.append(c.step().v)
+        _take_type_postfix(c, toks, '')
+        return toks
+    if x.k in ('ID', 'KW'):
+        head = c.step().v
+        toks.append(head)
+        while c.peek().v == '.' and c.peek(1).k in ('ID', 'KW'):
+            toks.append(c.step().v)
+            toks.append(c.step().v)
+            head = ''
+        _take_type_postfix(c, toks, head)
+        return toks
+    toks.append(c.step().v)
+    return toks
+
+
 def parse_extern(c):
 
     lib = None
@@ -643,7 +761,6 @@ def parse_extern(c):
         raise SyntaxError('extern wants fn at line %d' % eline(c))
     c.step()  # fn
     name = c_ident(c, 'extern fn name', c_kw=True)
-    tparams = []
     c.want('(')
     params, varargs = parse_params(c, allow_varargs=True)
     c.want(')')
@@ -652,18 +769,14 @@ def parse_extern(c):
     checked = False
     if c.peek().v == '->':
         c.step()
-        toks = []
-        while (c.peek().k != 'EOF' and not (c.peek().k == 'KW' and c.peek().v in ('fn', 'extern', 'let', 'if'))
-               and c.peek().v not in ('{', '}', ';')
-               and not (c.peek().k == 'ID'
-                        and (c.peek().v in EFFECTS or c.peek().v in CONTRACTS))):
-            toks.append(c.step().v)
+        toks = _take_type_toks(c)
         owned = bool(toks) and toks[0] == 'move'
         if owned:
             toks = toks[1:]
-        checked = bool(toks) and toks[-1] == 'errno'
+        checked = (c.peek().k == 'ID' and c.peek().v == 'errno'
+                   and c.peek(1).v != '(')
         if checked:
-            toks = toks[:-1]
+            c.step()
             if ann_text(toks) not in ('i32', 'i64', 'ptr'):
                 raise SyntaxError('errno wants an i32, i64 or ptr result at line %d' % eline(c))
         if toks:
@@ -673,7 +786,9 @@ def parse_extern(c):
     params = [(n, m, canon_ann(a), d) for (n, m, a, d) in params]
     varargs = canon_ann(varargs)
     contracts = take_contracts(name, params, eline(c))
-    effects = parse_effects(c, name, params, owned, checked)
+    effects = parse_effects(c, name, params, owned, checked, ret)
+    if c.peek().v == ';':
+        c.step()
     return ('extern', lib, name, params, ret, varargs, owned, checked, effects, contracts)
 
 
@@ -738,8 +853,8 @@ def take_contracts(name, params, lineno):
     return tuple(out)
 
 
-def parse_effects(c, name, params, owned, checked):
-    """`pure nothrow writes(buf)` -- the promise an `extern fn` makes about C.
+def parse_effects(c, name, params, owned, checked, ret=None):
+    """`pure nothrow writes(buf) borrows(p)` -- the promise an `extern fn` makes about C.
 
     Parsed and validated here rather than in a checker, so both front ends refuse
     a contradictory declaration with one message: the parser is the only stage
@@ -747,13 +862,6 @@ def parse_effects(c, name, params, owned, checked):
     """
     out = []
     pnames = [p[0] for p in params]
-    for prm in params:
-        for word in EFFECTS:
-            # `p: ptr pure` used to canonicalise to the type `ptrpure` and the
-            # promise was dropped on the floor -- a decoration, not an effect.
-            if isinstance(prm[2], str) and word in prm[2]:
-                raise SyntaxError('`%s` is an effect of %s, not a parameter type at line %d'
-                                  % (word, prm[0], eline(c)))
     while c.peek().k == 'ID' and c.peek().v in EFFECTS:
         word = c.step().v
         if word in EFFECT_ADDRESSED:
@@ -783,12 +891,25 @@ def parse_effects(c, name, params, owned, checked):
             if eff.startswith('writes:'):
                 raise SyntaxError('`pure` contradicts `%s` on %s at line %d'
                                   % (effect_text(eff), name, eline(c)))
-        if owned:
+        if owned or any(p[1] == 'move' for p in params):
             raise SyntaxError('`pure` contradicts a `move` parameter of %s at line %d'
                               % (name, eline(c)))
         if checked:
             raise SyntaxError('`pure` contradicts `errno` on %s at line %d'
                               % (name, eline(c)))
+    for eff in out:
+        if eff.startswith('borrows:'):
+            bp = eff.split(':', 1)[1]
+            if owned:
+                raise SyntaxError('`%s` contradicts `-> move` on %s at line %d'
+                                  % (effect_text(eff), name, eline(c)))
+            if not _points_at_memory(ret):
+                raise SyntaxError('`%s` wants a pointer result on %s, got %s at line %d'
+                                  % (effect_text(eff), name, ret or 'none', eline(c)))
+            pmod = params[pnames.index(bp)][1]
+            if pmod == 'move':
+                raise SyntaxError('`%s` contradicts `move` on parameter `%s` of %s at line %d'
+                                  % (effect_text(eff), bp, name, eline(c)))
     for eff in out:
         if eff.startswith('reads:'):
             other = 'writes:' + eff.split(':', 1)[1]
@@ -818,8 +939,8 @@ def parse_arena(c):
     c.want('{')
     body = parse_block(c)
     c.want('}')
-    enter = ('expr', ('call', '__arena_enter', []))
-    leave = ('defer', ('call', '__arena_leave', []))
+    enter = ('expr', ('call', '$arena_enter', []))
+    leave = ('defer', ('call', '$arena_leave', []))
     return ('if', ('bool', True), [enter, leave] + body, [])
 
 
@@ -932,7 +1053,7 @@ def parse_pat_arg(c):
     if t.k == 'ID':
         c.step()
         return ('bind', t.v)
-    raise SyntaxError('bad pattern arg %r at line %d' % (t.v, eline(c)))
+    raise SyntaxError("bad pattern arg '%s' at line %d" % (t.v, eline(c)))
 
 
 def build_if(tm, pat, body, rest, guard=None):
@@ -994,7 +1115,7 @@ def parse_match(c):
         if pat is not None:
             key = repr(pat) + repr(guard)
             if key in seen:
-                raise SyntaxError('duplicate match pattern %r at line %d' % (pat, eline(c)))
+                raise SyntaxError('duplicate match pattern at line %d' % eline(c))
             seen.append(key)
         if c.peek().v == '{':
             c.step()
@@ -1012,7 +1133,8 @@ def parse_match(c):
     has_wild = False
     for pat, guard, _ in arms:
         if pat is None or pat[0] in ('wild', 'bind'):
-            has_wild = True
+            if guard is None:
+                has_wild = True
             continue
         if pat[0] == 'variant':
             o = _ENUMS_REV.get(pat[1])
@@ -1020,8 +1142,8 @@ def parse_match(c):
                 owners[o][pat[1]] = (pat[2], guard)
         elif pat[0] == 'none':
             o = _ENUMS_REV.get('none')
-            if o:
-                owners.setdefault(o, {})['none'] = ([], guard)
+            if o and ('none' not in owners.setdefault(o, {}) or guard is None):
+                owners[o]['none'] = ([], guard)
     if len(owners) == 1 and not has_wild:
         owner = next(iter(owners))
         total = set()
@@ -1091,14 +1213,14 @@ def parse_enum(c):
     while c.peek().v != '}':
         v = c.step()
         if v.k not in ('ID', 'KW'):
-                raise SyntaxError('want variant have %r at line %d' % (v.v, eline(c)))
+                raise SyntaxError("want variant have '%s' at line %d" % (v.v, v.line))
         fields = []
         if c.peek().v == '(':
             c.step()
             while c.peek().v != ')':
                 f = c.step()
                 if f.k not in ('ID', 'KW'):
-                    raise SyntaxError('want field have %r at line %d' % (f.v, eline(c)))
+                    raise SyntaxError("want field have '%s' at line %d" % (f.v, f.line))
                 fields.append(f.v)
                 if c.peek().v == ',':
                     c.step()
@@ -1122,7 +1244,7 @@ def parse_for(c):
     c.want('for')
     v = c.step()
     if v.k != 'ID':
-        raise SyntaxError('want loop var have %r at line %d' % (v.v, eline(c)))
+        raise SyntaxError("want loop var have '%s' at line %d" % (v.v, v.line))
     c.want('in')
     start = parse_expr(c)
     if c.peek().v == '..':
@@ -1142,7 +1264,7 @@ def parse_sig(c):
     name = c.step().v
     c.want('(')
     params = []
-    while c.peek().v != ')':
+    while c.peek().v != ')' and c.peek().k != 'EOF':
         pn = c.step().v
         mode = 'ref'
         ann = None
@@ -1153,7 +1275,7 @@ def parse_sig(c):
             toks = []
             while True:
                 x = c.peek()
-                if x.v in (',', ')') and depth == 0:
+                if x.k == 'EOF' or (x.v in (',', ')') and depth == 0):
                     break
                 if x.v in ('[', '('):
                     depth += 1
@@ -1177,7 +1299,7 @@ def parse_sig(c):
             if c.step().v == 'ref':
                 raise SyntaxError('ref returns dangle; return owned at line %d' % eline(c))
         toks = []
-        while c.peek().v != '}' and not (c.peek().k == 'KW' and c.peek().v == 'fn'):
+        while c.peek().k != 'EOF' and c.peek().v != '}' and not (c.peek().k == 'KW' and c.peek().v == 'fn'):
             toks.append(c.step().v)
         ret = ann_text(toks)
     return ('sig', name, params, ret)
@@ -1339,24 +1461,40 @@ def _expand_str(raw, src_expr):
     """
     if '{' not in raw:
         return ('str', unesc(raw))
+    # Match braces once. Re-scanning from every unmatched `{` to the end
+    # made a 15 KiB string of openings take seconds: O(n^2) on text whose
+    # contents the program, not the author, may choose.
+    matches = {}
+    stack = []          # [opening index, deepest nested opening below it]
+    k = 0
+    while k < len(raw):
+        if raw[k] == '\\' and k + 1 < len(raw):
+            k += 2
+            continue
+        if raw[k] == '{':
+            stack.append([k, 0])
+        elif raw[k] == '}' and stack:
+            opening, inner_depth = stack.pop()
+            matches[opening] = (k + 1, inner_depth)
+            if stack:
+                stack[-1][1] = max(stack[-1][1], inner_depth + 1)
+        k += 1
     parts = []
     buf = ''
     i = 0
     while i < len(raw):
         c = raw[i]
+        if c == '\\' and i + 1 < len(raw):
+            buf += raw[i:i + 2]
+            i += 2
+            continue
         if c == '{':
-            j = i + 1
-            depth = 1
-            while j < len(raw) and depth:
-                if raw[j] == '\\' and j + 1 < len(raw):
-                    j += 2
-                    continue
-                if raw[j] == '{':
-                    depth += 1
-                elif raw[j] == '}':
-                    depth -= 1
-                j += 1
-            if depth == 0:
+            found = matches.get(i)
+            # A candidate nested past the parser's own bound cannot become
+            # an expression. Trying each enclosing level re-lexed almost
+            # the whole string every time and repeated its warning.
+            if found is not None and found[1] <= MAX_NEST:
+                j = found[0]
                 sub = src_expr(unesc(raw[i + 1:j - 1]))
                 if sub is not None:
                     if buf:
@@ -1396,6 +1534,8 @@ def _note_stray(text):
             depth -= 1
         elif ch == ':' and depth == 0:
             return
+    if _re.fullmatch(r"\d+,\d*", body):
+        return
     if not any(ch.isalnum() or ch == '_' for ch in body):
         return
     _STRAY_BRACES.append((_CURLINE[0], body))
@@ -1441,14 +1581,14 @@ def parse_parfor(c):
     c.want('for')
     v = c.step()
     if v.k != 'ID':
-        raise SyntaxError('want loop var have %r at line %d' % (v.v, eline(c)))
+        raise SyntaxError("want loop var have '%s' at line %d" % (v.v, v.line))
     c.want('in')
     it = parse_expr(c)
     c.want('reduce')
     c.want('(')
     op = c.step()
     if op.k not in ('ID', 'KW'):
-        raise SyntaxError('want the folding function have %r at line %d' % (op.v, eline(c)))
+        raise SyntaxError("want the folding function have '%s' at line %d" % (op.v, op.line))
     c.want(',')
     unit = parse_expr(c)
     c.want(')')
@@ -1540,4 +1680,4 @@ def parse_prim(c):
     # `t.line`, not `eline(c)`: by now a `Name {` lookahead may have
     # consumed tokens, and the reader needs the line of the token that
     # actually stopped the parser, which is the one `t` holds.
-    raise SyntaxError('stuck at %r at line %d' % (t.v, t.line))
+    raise SyntaxError("stuck at '%s' at line %d" % (t.v, t.line))

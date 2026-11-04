@@ -3,8 +3,8 @@
 `brat-cxx flat FILE` prints the tree the C emitter will work on: imports spliced
 in where they are written, every name qualified by its module, `pub use`
 resolved and then dropped. The reference value is `brat.load_file(path).prog`,
-which is exactly what `codegen_c.py` hands to its emitter, so this test is the
-contract the emitter is written against.
+which is the flattened form the native emitter consumes, so this test is the
+contract that emitter is written against.
 
 A program the reference refuses to link — a private function called from another
 module, an ambiguous unqualified name — has to be refused with the same words.

@@ -137,7 +137,7 @@ bad_run = write(os.path.join(TMP, "run-bad.brat"),
                 'fn main() -> i64 {\n  let a = ["x"]\n  let b = move a\n'
                 '  print(len(a))\n  return 0\n}\n')
 refused_run = run_native(bad_run)
-assert refused_run.returncode == 1 and "use of moved" in refused_run.stdout, (
+assert refused_run.returncode == 1 and "use of moved" in refused_run.stderr and refused_run.stdout == "", (
     refused_run.returncode, refused_run.stdout, refused_run.stderr)
 
 print("CXX BUILD ALL GREEN (5 cases + native run)")

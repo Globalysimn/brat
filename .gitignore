@@ -1,11 +1,9 @@
-# BRAT — игнорируемое
-#
-# Правило простое: в репозитории лежит только исходник языка.
-# Всё, что можно воспроизвести, генерируется.
+# Generated binaries, caches, and scratch outputs are never tracked.
 
-# --- Python ---
+# Python bytecode and virtual environments.
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .venv/
 venv/
@@ -13,32 +11,38 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# --- Нативный бэкенд: эмитится и собирается, в репозитории лежать не должен ---
-# Сам бинарь: у него нет расширения, поэтому маски ниже его не ловят.
-lang/cxx/bin/brat-cxx
-*.c
-!lang/engine/**/*.h
+# Native build products.
+lang/cxx/bin/
+*.exe
+*.out
 *.o
 *.obj
-*.exe
 *.so
 *.dylib
 *.dll
 *.a
 *.lib
+*.pdb
+*.ilk
+*.exp
+*.dSYM/
 zig-out/
 zig-cache/
 .zig-cache/
 
-# --- Артефакты прогонов ---
+# Generated code and local run output.
+*.tmp
+*.bak
+*.orig
 *.log
 *.jsonl
 *.trace
 /tmp/
 /out/
 /build/
+/dist/
 
-# --- Сертификаты и секреты (НИКОГДА в репозитории) ---
+# Local credentials and environment files.
 *.pem
 *.key
 *.crt
@@ -48,14 +52,17 @@ zig-cache/
 *.keystore
 .env
 .env.*
-!.env.example
 secrets/
 certs/
+# Public trust bundle and documentation examples are source inputs.
+!lang/engine/cacert.pem
 !docs/**/*.example.pem
+!.env.example
 
-# --- Кэши инструментов ---
-zig-cache/
-__pycache__/
+# Tool and editor state.
+.cache/
+.coverage
+htmlcov/
 .DS_Store
 Thumbs.db
 *.swp
@@ -63,17 +70,13 @@ Thumbs.db
 .idea/
 .vscode/
 
-# --- Мусор от вин-путей (тесты раньше писали сюда) ---
-# экранированы: двоеточие и обратные слэши в имени каталога
+# Stray directories created by legacy Windows path handling.
 C\:*/
 *C\:*
 
-# --- Архивы и редакторы ---
+# Downloaded archives are reproducible from their URLs and hashes.
 *.zip
 *.tar
 *.tar.gz
 *.7z
 *.rar
-*.swp
-# --- C++ front end: собранный бинарник ---
-lang/cxx/bin/

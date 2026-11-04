@@ -235,7 +235,7 @@ def check_cases(lib):
                     fail(name, "%s stdout %r, want %r" % (tag, run.stdout, stdout))
         elif want not in text:
             fail(name, "want %r in the diagnostic, got:\n%s" % (want, text))
-    print("CONTRACTS cases ok (%d cases, both emitters, binaries run)" % len(CASES))
+    print("CONTRACTS cases ok (%d cases, both CLI build paths, binaries run)" % len(CASES))
 
 
 def check_dump_agrees():

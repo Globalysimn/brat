@@ -9,14 +9,11 @@ receive, `end` after `close` — and checks the one thing that is cheap and exac
     Two values sent and one received leaves `send` blocked once the queue is
     full; two received and one sent leaves `recv` blocked forever.
 
-Anything reached through a loop or a branch is printed but not counted: the
-iteration count is not known statically, and a rule that guesses would refuse
+Anything reached through a loop or a branch is marked `dynamic` and not counted:
+the iteration count is not known statically, and a rule that guesses would refuse
 programs that run fine. `send` on a closed channel is not an error (it returns
 an `err` value) and `close` twice is not an error (it is idempotent), so neither
 is reported.
-
-    $ brat check --proto examples/spawn.brat
-    ch   !i64 x3  ?i64 x3   balanced
 """
 
 try:
@@ -94,10 +91,12 @@ class Chan:
         then hang, in both backends, forever. Two sides means a `spawn`, and a
         spawn orders nothing: there is no prefix to prove, so nothing is said.
         """
+        if self.cap is None or not self.events or not self.known():
+            return None
         if len(set(side for side, _o, _k, _q in self.events)) > 1:
             return None
         waiting = 0
-        for (side, op, _kind, _quant), line in zip(self.events, self.event_lines):
+        for (_side, op, _kind, _quant), line in zip(self.events, self.event_lines):
             if op == "send":
                 if waiting >= self.cap:
                     return line if line is not None else (self.lines[-1] if self.lines else None)
@@ -170,6 +169,8 @@ class Chan:
 def _collect(stmts, chans, side, quant, closed):
     """Walk one statement list in program order, recording channel events."""
     for stmt in stmts:
+        while isinstance(stmt, tuple) and len(stmt) > 1 and stmt[0] == "pub":
+            stmt = stmt[1]
         if not isinstance(stmt, tuple) or not stmt:
             continue
         kind = stmt[0]
@@ -184,7 +185,7 @@ def _collect(stmts, chans, side, quant, closed):
             for sub in stmt[1:]:
                 _collect_expr(sub, chans, side, quant)
             continue
-        if kind in ("fn", "impl", "trait", "enum", "extern", "externstruct", "pub"):
+        if kind in ("fn", "exportfn", "impl", "trait", "enum", "extern", "externstruct"):
             continue          # every body is analysed on its own by _bodies()
         if kind == "spawn":
             _collect(stmt[1], chans, "child", quant, set(closed))
@@ -192,7 +193,8 @@ def _collect(stmts, chans, side, quant, closed):
         if kind == "if":
             _collect(stmt[2], chans, side, "|", set(closed))
             if len(stmt) > 3 and stmt[3]:
-                _collect(stmt[3], chans, side, "|", set(closed))
+                els = stmt[3] if isinstance(stmt[3], list) else [stmt[3]]
+                _collect(els, chans, side, "|", set(closed))
             _collect_expr(stmt[1], chans, side, quant)
             continue
         if kind in ("while", "forrange", "foriter"):
@@ -208,7 +210,7 @@ def _collect(stmts, chans, side, quant, closed):
             if len(stmt) > 2 and stmt[2]:
                 _collect(stmt[2], chans, side, "|", set(closed))
             continue
-        if kind in ("block", "scope", "unsafe"):
+        if kind in ("block", "scope", "unsafe", "arena"):
             _collect(stmt[1], chans, side, quant, set(closed))
             continue
         for sub in stmt[1:]:
@@ -216,6 +218,59 @@ def _collect(stmts, chans, side, quant, closed):
                 _collect(sub, chans, side, "|", set(closed))
             else:
                 _collect_expr(sub, chans, side, quant)
+
+
+def _mark_escaped_stmts(stmts, shadow, chans):
+    local_shadow = set(shadow)
+    for s in stmts:
+        if not isinstance(s, tuple) or not s:
+            continue
+        for part in s[1:]:
+            if isinstance(part, tuple):
+                _mark_escaped_expr(part, local_shadow, chans)
+            elif isinstance(part, list):
+                _mark_escaped_stmts(part, local_shadow, chans)
+        if s[0] in ("let", "lettmp", "forrange", "foriter") and len(s) > 1 and isinstance(s[1], str):
+            local_shadow.add(s[1])
+        elif s[0] == "try" and len(s) > 3 and isinstance(s[3], str):
+            local_shadow.add(s[3])
+
+
+def _mark_escaped_expr(e, shadow, chans):
+    if not isinstance(e, tuple) or not e:
+        return
+    if e[0] == "var":
+        if e[1] not in shadow:
+            ch = chans.get(e[1])
+            if ch is not None:
+                ch.escaped = True
+        return
+    if e[0] == "closure":
+        sub = set(shadow)
+        if len(e) > 1 and isinstance(e[1], str):
+            sub.add(e[1])
+        for p in (e[2] if len(e) > 2 and isinstance(e[2], list) else []):
+            sub.add(p[0] if isinstance(p, tuple) else p)
+        if len(e) > 3 and isinstance(e[3], list):
+            _mark_escaped_stmts(e[3], sub, chans)
+        return
+    if e[0] == "parfor":
+        if len(e) > 2:
+            _mark_escaped_expr(e[2], shadow, chans)
+        if len(e) > 4:
+            _mark_escaped_expr(e[4], shadow, chans)
+        sub = set(shadow)
+        if len(e) > 1 and isinstance(e[1], str):
+            sub.add(e[1])
+        if len(e) > 5 and isinstance(e[5], list):
+            _mark_escaped_stmts(e[5], sub, chans)
+        return
+    for sub_e in e[1:]:
+        if isinstance(sub_e, tuple):
+            _mark_escaped_expr(sub_e, shadow, chans)
+        elif isinstance(sub_e, list):
+            for x in sub_e:
+                _mark_escaped_expr(x, shadow, chans)
 
 
 def _collect_expr(e, chans, side, quant):
@@ -235,6 +290,9 @@ def _collect_expr(e, chans, side, quant):
         if ch is not None:
             ch.escaped = True     # `fill(ch)`, `v.push(ch)`, `return ch`
         return
+    if e[0] in ("closure", "parfor"):
+        _mark_escaped_expr(e, set(), chans)
+        return
     for sub in e[1:]:
         if isinstance(sub, tuple):
             _collect_expr(sub, chans, side, quant)
@@ -245,21 +303,37 @@ def _collect_expr(e, chans, side, quant):
 
 def capacity(arg):
     """The capacity of `chan(n)` when it is a literal, else None."""
-    if isinstance(arg, tuple) and arg and arg[0] == "num" and isinstance(arg[1], int):
+    if (isinstance(arg, tuple) and arg and arg[0] == "num"
+            and isinstance(arg[1], int) and not isinstance(arg[1], bool)
+            and 1 <= arg[1] <= 1048576):
         return arg[1]
     return None
 
 
+def _iter_top(stmts):
+    for stmt in stmts:
+        node = stmt
+        while isinstance(node, tuple) and len(node) > 1 and node[0] == "pub":
+            node = node[1]
+        if isinstance(node, tuple) and len(node) > 1 and node[0] == "block" and isinstance(node[1], list):
+            for sub in _iter_top(node[1]):
+                yield sub
+            continue
+        yield node
+
+
 def _bodies(prog):
     """The script body and every function body, each analysed on its own."""
-    yield prog[1]
-    for stmt in prog[1]:
-        node = stmt[1] if stmt[0] == "pub" else stmt
-        if isinstance(node, tuple) and node and node[0] == "fn":
+    top = []
+    for node in _iter_top(prog[1]):
+        if isinstance(node, tuple) and node and node[0] in ("fn", "exportfn"):
             yield node[3]
         elif isinstance(node, tuple) and node and node[0] == "impl":
             for fn in node[3]:
                 yield fn[3]
+        else:
+            top.append(node)
+    yield top
 
 
 def analyse(prog):
@@ -296,19 +370,3 @@ def check(prog):
         out.extend(errors)
     return out
 
-
-def format_protocols(results):
-    """One line per channel: name, shape, balance."""
-    lines = []
-    for ch, errors in results:
-        ok, sent, recv = ch.balanced()
-        if errors:
-            state = "DEADLOCK"
-        elif not ch.known():
-            state = "dynamic"
-        elif ok:
-            state = "balanced"
-        else:
-            state = "unbalanced"
-        lines.append("%-14s %-40s %s" % (ch.name, ch.protocol() or "(unused)", state))
-    return "\n".join(lines)

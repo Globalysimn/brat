@@ -16,9 +16,8 @@ What is proved here, and how:
   skipped with the same reason in every language, and if `rustc`/`go` happen to
   exist the file is compiled; otherwise nothing pretends it was.
 * `-Wall -Wextra -Werror` -- the C a program emits (with an `export fn`, which is
-  the other half of the boundary) must be warning-clean. `crt.h` is a frozen
-  file and is included with `-isystem`: its own `-Wswitch` is reported in
-  FFI_IDEAL, not hidden here.
+  the other half of the boundary) must be warning-clean. `crt.h` is included with
+  `-isystem`, so its own `-Wswitch` warning is not part of this check.
 """
 import _scratch
 
@@ -52,6 +51,9 @@ def cli(*args, timeout=600):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
             and "--interp" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
+    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
+        i = args.index("--interp") + 1
+        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     return subprocess.run([sys.executable, CLI] + list(args), capture_output=True,
                           text=True, timeout=timeout)
 
