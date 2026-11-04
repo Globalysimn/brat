@@ -1,0 +1,41 @@
+import json
+fn main() -> i64 {
+  let mut fails = 0
+  if jstr("hi") == "\"hi\"" {
+    print("ok jstr")
+  } else {
+    fails = fails + 1
+  }
+  if jstr("a\"b\\c") == "\"a\\\"b\\\\c\"" {
+    print("ok esc")
+  } else {
+    fails = fails + 1
+  }
+  if jarr_str(["x", "y"]) == "[\"x\", \"y\"]" {
+    print("ok jarr")
+  } else {
+    fails = fails + 1
+  }
+  if jarr_num([1, 2]) == "[1, 2]" {
+    print("ok jarr_num")
+  } else {
+    fails = fails + 1
+  }
+  if jobj(jpair("a", "1")) == "{\"a\": 1}" {
+    print("ok jobj")
+  } else {
+    fails = fails + 1
+  }
+  if jbool(1) == "true" {
+    print("ok jbool")
+  } else {
+    fails = fails + 1
+  }
+  if jnull() == "null" {
+    print("ok jnull")
+  } else {
+    fails = fails + 1
+  }
+  print(fails)
+  return fails
+}

@@ -1,0 +1,33 @@
+fn heavy(n: i64) -> i64 {
+  let mut t = 0
+  for i in 0..n {
+    t = t + i
+  }
+  return t
+}
+let ch = chan(8)
+spawn {
+  ch.send(heavy(100))
+}
+spawn {
+  ch.send(heavy(200))
+}
+spawn {
+  ch.send(heavy(300))
+}
+join_all()
+print(ch.recv())
+print(ch.recv())
+print(ch.recv())
+for i in 1..4 {
+  spawn {
+    ch.send(i)
+  }
+}
+join_all()
+let mut total = 0
+for i in 1..4 {
+  total = total + ch.recv()
+}
+assert(total == 6)
+print("spawn ok")

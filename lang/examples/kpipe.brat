@@ -1,0 +1,16 @@
+fn main() -> i64 {
+  let ports = ["80", "abc", "443", "", "8080"]
+  let mut total = 0
+  let mut bad = 0
+  for p in ports {
+    let v = p.parse_int()
+    if is_err(v) {
+      bad = bad + 1
+    } else {
+      total = total + unwrap(v)
+    }
+  }
+  print(total)
+  print(bad)
+  return 0
+}

@@ -1,0 +1,49 @@
+pub fn esc(s: str) -> str {
+  let mut o = ""
+  let mut i = 0
+  while i < len(s) {
+    let ch = s[i]
+    if ch == "\"" {
+      o = o + "\\\""
+    } else {
+      if ch == "\\" {
+        o = o + "\\\\"
+      } else {
+        if ch == "\n" {
+          o = o + "\\n"
+        } else {
+          o = o + ch
+        }
+      }
+    }
+    i = i + 1
+  }
+  return o
+}
+pub fn jstr(s: str) -> str {
+  return "\"" + esc(s) + "\""
+}
+pub fn jnum(n: i64) -> str {
+  return str(n)
+}
+pub fn jbool(b: i64) -> str {
+  if b {
+    return "true"
+  }
+  return "false"
+}
+pub fn jnull() -> str {
+  return "null"
+}
+pub fn jarr_str(v) -> str {
+  return "[" + v.map(fn(x) { return jstr(x) }).join(", ") + "]"
+}
+pub fn jarr_num(v) -> str {
+  return "[" + v.map(fn(x) { return str(x) }).join(", ") + "]"
+}
+pub fn jpair(k: str, v: str) -> str {
+  return jstr(k) + ": " + v
+}
+pub fn jobj(pairs: str) -> str {
+  return "{" + pairs + "}"
+}

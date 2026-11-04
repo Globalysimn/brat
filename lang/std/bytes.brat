@@ -1,0 +1,280 @@
+pub fn read(path: str) {
+  return read_bytes(path)
+}
+
+pub fn write(path: str, data: vec[i64]) {
+  return write_bytes(path, data)
+}
+
+pub fn from_str(s: str) -> vec[i64] {
+  return utf8_bytes(s)
+}
+
+pub fn to_str(data: vec[i64]) {
+  return utf8_str(data)
+}
+
+pub fn eq(a: vec[i64], b: vec[i64]) -> bool {
+  if len(a) != len(b) {
+    return false
+  }
+  let mut i = 0
+  let n = len(a)
+  while i < n {
+    if a[i] != b[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+pub fn starts_with(data: vec[i64], prefix: vec[i64]) -> bool {
+  if len(prefix) > len(data) {
+    return false
+  }
+  let mut i = 0
+  let n = len(prefix)
+  while i < n {
+    if data[i] != prefix[i] {
+      return false
+    }
+    i = i + 1
+  }
+  return true
+}
+
+pub fn concat(a: vec[i64], b: vec[i64]) -> vec[i64] {
+  let mut out = []
+  let mut i = 0
+  while i < len(a) {
+    out.push(a[i])
+    i = i + 1
+  }
+  let mut j = 0
+  while j < len(b) {
+    out.push(b[j])
+    j = j + 1
+  }
+  return out
+}
+
+pub fn slice(data: vec[i64], start: i64, stop: i64) -> vec[i64] {
+  let n = len(data)
+  let mut a = start
+  let mut b = stop
+  if a < 0 {
+    a = 0
+  }
+  if b > n {
+    b = n
+  }
+  let mut out = []
+  while a < b {
+    out.push(data[a])
+    a = a + 1
+  }
+  return out
+}
+
+pub fn index_of(data: vec[i64], sub: vec[i64]) -> i64 {
+  let n = len(data)
+  let m = len(sub)
+  if m == 0 {
+    return 0
+  }
+  if m > n {
+    return -1
+  }
+  let limit = n - m
+  let mut i = 0
+  while i <= limit {
+    let mut j = 0
+    let mut ok = true
+    while j < m {
+      if data[i + j] != sub[j] {
+        ok = false
+        j = m
+      } else {
+        j = j + 1
+      }
+    }
+    if ok {
+      return i
+    }
+    i = i + 1
+  }
+  return -1
+}
+
+pub fn to_hex(data: vec[i64]) {
+  let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+  let mut parts = []
+  let mut i = 0
+  let n = len(data)
+  while i < n {
+    let b = data[i]
+    if b < 0 || b > 255 {
+      return Err("byte out of range 0..255: " + str(b))
+    }
+    parts.push(digits[b / 16])
+    parts.push(digits[b % 16])
+    i = i + 1
+  }
+  return Ok(parts.join(""))
+}
+
+fn hex_nibble(ch: str) -> i64 {
+  let lo = ch.lower()
+  let idx = "0123456789abcdef".index_of(lo)
+  if is_none(idx) {
+    return -1
+  }
+  return idx
+}
+
+pub fn from_hex(hex: str) {
+  let chars = hex.chars()
+  let n = len(chars)
+  if n % 2 != 0 {
+    return Err("hex string must have even length")
+  }
+  let mut out = []
+  let mut i = 0
+  while i < n {
+    let hi = hex_nibble(chars[i])
+    let lo = hex_nibble(chars[i + 1])
+    if hi < 0 || lo < 0 {
+      return Err("invalid hex digit in: " + hex)
+    }
+    out.push(hi * 16 + lo)
+    i = i + 2
+  }
+  return Ok(out)
+}
+
+pub fn to_base64(data: vec[i64]) {
+  let alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  let n = len(data)
+  let mut parts = []
+  let mut i = 0
+  while i < n {
+    let b0 = data[i]
+    if b0 < 0 || b0 > 255 {
+      return Err("byte out of range 0..255: " + str(b0))
+    }
+    let rem = n - i
+    if rem >= 3 {
+      let b1 = data[i + 1]
+      let b2 = data[i + 2]
+      if b1 < 0 || b1 > 255 || b2 < 0 || b2 > 255 {
+        return Err("byte out of range 0..255")
+      }
+      let triple = b0 * 65536 + b1 * 256 + b2
+      parts.push(alpha[(triple / 262144) % 64])
+      parts.push(alpha[(triple / 4096) % 64])
+      parts.push(alpha[(triple / 64) % 64])
+      parts.push(alpha[triple % 64])
+      i = i + 3
+    } else {
+      if rem == 2 {
+        let b1 = data[i + 1]
+        if b1 < 0 || b1 > 255 {
+          return Err("byte out of range 0..255")
+        }
+        let triple = b0 * 65536 + b1 * 256
+        parts.push(alpha[(triple / 262144) % 64])
+        parts.push(alpha[(triple / 4096) % 64])
+        parts.push(alpha[(triple / 64) % 64])
+        parts.push("=")
+        i = i + 2
+      } else {
+        let triple = b0 * 65536
+        parts.push(alpha[(triple / 262144) % 64])
+        parts.push(alpha[(triple / 4096) % 64])
+        parts.push("=")
+        parts.push("=")
+        i = i + 1
+      }
+    }
+  }
+  return Ok(parts.join(""))
+}
+
+fn b64_val(ch: str) -> i64 {
+  let idx = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".index_of(ch)
+  if is_none(idx) {
+    return -1
+  }
+  return idx
+}
+
+pub fn from_base64(text: str) {
+  let mut clean = []
+  let mut i = 0
+  let raw_n = len(text)
+  while i < raw_n {
+    let ch = text[i]
+    if ch != " " && ch != "\n" && ch != "\r" && ch != "\t" {
+      clean.push(ch)
+    }
+    i = i + 1
+  }
+  let n = len(clean)
+  if n == 0 {
+    return Ok([])
+  }
+  if n % 4 != 0 {
+    return Err("invalid base64 length")
+  }
+  let mut out = []
+  let mut k = 0
+  while k < n {
+    let c0 = clean[k]
+    let c1 = clean[k + 1]
+    let c2 = clean[k + 2]
+    let c3 = clean[k + 3]
+    let v0 = b64_val(c0)
+    let v1 = b64_val(c1)
+    if v0 < 0 || v1 < 0 {
+      return Err("invalid base64 character")
+    }
+    if c2 == "=" {
+      if c3 != "=" || k + 4 != n {
+        return Err("invalid base64 padding")
+      }
+      if v1 % 16 != 0 {
+        return Err("non-canonical base64 padding bits")
+      }
+      let triple = v0 * 262144 + v1 * 4096
+      out.push((triple / 65536) % 256)
+    } else {
+      let v2 = b64_val(c2)
+      if v2 < 0 {
+        return Err("invalid base64 character")
+      }
+      if c3 == "=" {
+        if k + 4 != n {
+          return Err("invalid base64 padding")
+        }
+        if v2 % 4 != 0 {
+          return Err("non-canonical base64 padding bits")
+        }
+        let triple = v0 * 262144 + v1 * 4096 + v2 * 64
+        out.push((triple / 65536) % 256)
+        out.push((triple / 256) % 256)
+      } else {
+        let v3 = b64_val(c3)
+        if v3 < 0 {
+          return Err("invalid base64 character")
+        }
+        let triple = v0 * 262144 + v1 * 4096 + v2 * 64 + v3
+        out.push((triple / 65536) % 256)
+        out.push((triple / 256) % 256)
+        out.push(triple % 256)
+      }
+    }
+    k = k + 4
+  }
+  return Ok(out)
+}

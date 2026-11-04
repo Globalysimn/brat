@@ -1,0 +1,19 @@
+trait Shout {
+  fn loud(self) -> i64
+}
+impl Shout for Point {
+  fn loud(self) -> i64 {
+    return self.x * 2
+  }
+}
+impl Point {
+  fn sum(self) -> i64 {
+    return self.x + self.y
+  }
+}
+fn main() -> i64 {
+  let p = Point { x: 5, y: 6 }
+  print(p.loud())
+  print(p.sum())
+  return 0
+}

@@ -1,0 +1,19 @@
+fn gate(ok: bool) -> i64 {
+  match ok {
+    true => {
+      return 1
+    },
+    false => {
+      return 0
+    }
+  }
+  return 0
+}
+assert(gate(true) == 1)
+assert(gate(false) == 0)
+let b = true
+match b {
+  true => print("yes"),
+  false => print("no")
+}
+print("boolmatch ok")

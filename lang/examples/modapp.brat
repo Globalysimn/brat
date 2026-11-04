@@ -1,0 +1,5 @@
+import modapi
+fn main() -> i64 {
+  print(ping())
+  return 0
+}

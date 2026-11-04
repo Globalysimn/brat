@@ -1,0 +1,13 @@
+fn read(path: str)
+fn write(path: str, data: vec[i64])
+fn from_str(s: str) -> vec[i64]
+fn to_str(data: vec[i64])
+fn eq(a: vec[i64], b: vec[i64]) -> bool
+fn starts_with(data: vec[i64], prefix: vec[i64]) -> bool
+fn concat(a: vec[i64], b: vec[i64]) -> vec[i64]
+fn slice(data: vec[i64], start: i64, stop: i64) -> vec[i64]
+fn index_of(data: vec[i64], sub: vec[i64]) -> i64
+fn to_hex(data: vec[i64])
+fn from_hex(hex: str)
+fn to_base64(data: vec[i64])
+fn from_base64(text: str)

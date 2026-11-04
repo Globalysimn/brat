@@ -1,0 +1,150 @@
+fn quote_field(f: str) -> str {
+  let has_q = f.contains("\"")
+  if has_q || f.contains(",") || f.contains("\n") || f.contains("\r") {
+    if has_q {
+      return "\"" + f.replace("\"", "\"\"") + "\""
+    }
+    return "\"" + f + "\""
+  }
+  return f
+}
+
+pub fn dump(rows: vec[vec[str]]) -> str {
+  let mut out = ""
+  for row in rows {
+    let mut first = true
+    for f in row {
+      if !first {
+        out += ","
+      }
+      out += quote_field(f)
+      first = false
+    }
+    out += "\n"
+  }
+  return out
+}
+
+fn decode_field(bytes) {
+  let decoded = utf8_str(bytes)
+  if is_err(decoded) {
+    return Err("invalid UTF-8 in CSV input")
+  }
+  return decoded
+}
+
+pub fn parse(text: str) {
+  let bytes = utf8_bytes(text)
+  let mut out_rows = []
+  let mut row = []
+  let mut qfield = []
+  let mut quoted = false
+  let mut after_quote = false
+  let mut used_quotes = false
+  let mut started = false
+  let mut field_start = 0
+  let mut i = 0
+  let n = len(bytes)
+  while i < n {
+    let b = bytes[i]
+    if quoted {
+      if b == 34 {
+        if i + 1 < n && bytes[i + 1] == 34 {
+          qfield.push(34)
+          i += 2
+        } else {
+          quoted = false
+          after_quote = true
+          i += 1
+        }
+      } else {
+        qfield.push(b)
+        i += 1
+      }
+    } else {
+      if b == 34 {
+        if !started {
+          quoted = true
+          used_quotes = true
+          started = true
+          qfield = []
+          i += 1
+        } else {
+          return Err("unescaped quote in CSV field")
+        }
+      } else {
+        if b == 44 {
+          let mut decoded = Ok("")
+          if used_quotes {
+            decoded = decode_field(qfield)
+          } else {
+            if started {
+              decoded = decode_field(bytes.slice(field_start, i))
+            }
+          }
+          if is_err(decoded) {
+            return decoded
+          }
+          row.push(unwrap(decoded))
+          after_quote = false
+          used_quotes = false
+          started = false
+          i += 1
+        } else {
+          if b == 10 || b == 13 {
+            let mut step = 1
+            if b == 13 && i + 1 < n && bytes[i + 1] == 10 {
+              step = 2
+            }
+            let mut decoded = Ok("")
+            if used_quotes {
+              decoded = decode_field(qfield)
+            } else {
+              if started {
+                decoded = decode_field(bytes.slice(field_start, i))
+              }
+            }
+            if is_err(decoded) {
+              return decoded
+            }
+            row.push(unwrap(decoded))
+            out_rows.push(row)
+            row = []
+            after_quote = false
+            used_quotes = false
+            started = false
+            i += step
+          } else {
+            if after_quote {
+              return Err("unexpected character after closing quote in CSV field")
+            }
+            if !started {
+              field_start = i
+              started = true
+            }
+            i += 1
+          }
+        }
+      }
+    }
+  }
+  if quoted {
+    return Err("unterminated quoted CSV field")
+  }
+  if len(row) > 0 || started {
+    let mut decoded = Ok("")
+    if used_quotes {
+      decoded = decode_field(qfield)
+    } else {
+      if started {
+        decoded = decode_field(bytes.slice(field_start, n))
+      }
+    }
+    if is_err(decoded) {
+      return decoded
+    }
+    row.push(unwrap(decoded))
+    out_rows.push(row)
+  }
+  return Ok(out_rows)
+}

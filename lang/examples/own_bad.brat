@@ -1,0 +1,12 @@
+fn leak() {
+  let a = "s"
+  let r = a
+  return r
+}
+let mut m = "s"
+let a1 = m
+let mut a2 = m
+print(nope + 1)
+spawn {
+  print(a1)
+}

@@ -1,0 +1,7 @@
+fn sha256(data)
+fn sha256_hex(data)
+fn hmac_sha256(key, msg)
+fn hmac_sha256_hex(key, msg)
+fn constant_time_eq(a: str, b: str) -> bool
+fn rand_bytes(n: i64)
+fn rand_hex(n_bytes: i64)

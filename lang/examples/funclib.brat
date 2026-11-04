@@ -1,0 +1,30 @@
+fn add2(a, b) {
+  return a + b
+}
+let v = [1, 2, 3, 4]
+assert(v.fold(0, add2) == 10)
+assert(v.fold(10, add2) == 20)
+assert(v.fold("", fn(a, x) { return a + str(x) }) == "1234")
+assert(v.any(fn(x) { return x > 3 }))
+assert(!v.any(fn(x) { return x > 9 }))
+assert(v.all(fn(x) { return x > 0 }))
+assert(!v.all(fn(x) { return x > 1 }))
+assert([].all(fn(x) { return false }))
+assert(![].any(fn(x) { return true }))
+let f = v.find(fn(x) { return x > 2 })
+assert(f == 3)
+assert(is_none(v.find(fn(x) { return x > 9 })))
+assert(v.pos(3) == 2)
+assert(is_none(v.pos(99)))
+let mut w = [3, 1, 2]
+w.sort_by(fn(x) { return 0 - x })
+assert(w == [3, 2, 1])
+w.sort_by(fn(x) { return x })
+assert(w == [1, 2, 3])
+let mut words = ["bb", "a", "ccc"]
+words.sort_by(fn(s) { return len(s) })
+assert(words == ["a", "bb", "ccc"])
+let m = {"a": 1}
+assert(m.get_or("a", 9) == 1)
+assert(m.get_or("zz", 9) == 9)
+print("func ok")

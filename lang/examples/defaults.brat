@@ -1,0 +1,29 @@
+fn greet(name: str = "world", punct: str = "!") -> str {
+  return "hello " + name + punct
+}
+assert(greet() == "hello world!")
+assert(greet("brat") == "hello brat!")
+assert(greet("brat", "!!") == "hello brat!!")
+fn pow_(x: i64, e: i64 = 2) -> i64 {
+  let mut r = 1
+  for i in 0..e {
+    r = r * x
+  }
+  return r
+}
+assert(pow_(3) == 9)
+assert(pow_(2, 10) == 1024)
+fn clamp(x: i64, lo: i64 = 0, hi: i64 = 100) -> i64 {
+  if x < lo {
+    return lo
+  }
+  if x > hi {
+    return hi
+  }
+  return x
+}
+assert(clamp(150) == 100)
+assert(clamp(-5) == 0)
+assert(clamp(50) == 50)
+assert(clamp(50, 0, 10) == 10)
+print("defaults ok")

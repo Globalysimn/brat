@@ -1,0 +1,6 @@
+import modapi
+
+fn main() -> i64 {
+  print(modapi.helper())
+  return 0
+}

@@ -1,0 +1,13 @@
+fn origin() -> i64 {
+  return Ok(Point { x: 0, y: 0 })
+}
+fn main() -> i64 {
+  let p = Point { x: 3, y: 4 }
+  print(p.x)
+  print(p.y)
+  let o = origin()?
+  print(o.x)
+  let name = "brat"
+  print(name)
+  return 0
+}

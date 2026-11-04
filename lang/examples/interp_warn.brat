@@ -1,0 +1,11 @@
+fn main() -> i64 {
+  let v = [10, 20, 30]
+  let cfg = Net { host: "a1", port: 8080 }
+  print("up {cfg.host}:{cfg.port} n={len(v)} avg={v.sum() / len(v)}")
+  print("first={v[0]} last={v[len(v) - 1]} upper={cfg.host.upper()}")
+  print("doc={\"a\": 1, \"b\": [1, 2]}")
+  print("lone { }{ }{ } braces")
+  let n = 7
+  print("n={n} doubled={n * 2} neg={-n}")
+  return 0
+}

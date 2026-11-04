@@ -1,0 +1,8 @@
+import klib
+fn main() -> i64 {
+  defer log.info("kapp done")
+  let d = safe_double(21)?
+  print(d)
+  print(shout("  hey "))
+  return 0
+}

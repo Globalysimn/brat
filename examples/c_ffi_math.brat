@@ -1,0 +1,10 @@
+extern fn hypot(x: f64, y: f64) -> f64
+extern fn fma(a: f64, b: f64, c: f64) -> f64
+
+fn main() {
+  let h = hypot(3.0, 4.0)
+  let m = fma(6.0, 7.0, -2.0)
+  assert(h == 5.0)
+  assert(m == 40.0)
+  print(h, m)
+}

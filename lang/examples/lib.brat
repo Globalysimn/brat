@@ -1,0 +1,12 @@
+pub fn safe_div(a: i64, b: i64) -> i64 {
+  if b == 0 {
+    return Err("div by zero")
+  }
+  return Ok(a / b)
+}
+pub fn pick_first(v: vec[i64]) -> i64 {
+  if len(v) == 0 {
+    return None
+  }
+  return Some(v[0])
+}

@@ -1,0 +1,4 @@
+fn run(cmd: str, argv: vec[str])
+fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64)
+fn status(cmd: str, argv: vec[str])
+fn output(cmd: str, argv: vec[str])

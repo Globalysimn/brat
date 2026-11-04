@@ -1,0 +1,61 @@
+fn fib(n: mut i64) -> i64 {
+  if n < 2 {
+    return n
+  }
+  return fib(n - 1) + fib(n - 2)
+}
+assert(fib(20) == 6765)
+fn fdiv(a: i64, b: i64) -> i64 {
+  return a / b
+}
+assert(fdiv(7, 2) == 3)
+assert(fdiv(-7, 2) == -4)
+assert(fdiv(7, -2) == -4)
+assert(fdiv(-7, -2) == 3)
+fn fmod(a: i64, b: i64) -> i64 {
+  return a % b
+}
+assert(fmod(-7, 2) == 1)
+assert(fmod(7, -2) == -1)
+assert(fmod(7, 2) == 1)
+fn sum_to(n: mut i64) -> i64 {
+  let mut t = 0
+  for i in 0..n {
+    t = t + i
+  }
+  return t
+}
+assert(sum_to(100) == 4950)
+fn collatz(n: mut i64) -> i64 {
+  let mut steps = 0
+  while n != 1 {
+    if n % 2 == 0 {
+      n = n / 2
+    } else {
+      n = 3 * n + 1
+    }
+    steps = steps + 1
+  }
+  return steps
+}
+assert(collatz(27) == 111)
+fn lgc(a: i64, b: i64) -> i64 {
+  if a > 0 && b > 0 {
+    return a && b
+  }
+  return a || b
+}
+assert(lgc(2, 3) == 3)
+assert(lgc(0, 5) == 5)
+assert(lgc(0, 0) == 0)
+fn neg(x: i64) -> i64 {
+  return -x
+}
+assert(neg(5) == -5)
+assert(neg(-3) == 3)
+fn mix(a: i64) -> i64 {
+  let r = fib(10) + sum_to(10)
+  return r + a
+}
+assert(mix(0) == 100)
+print("fast ok")

@@ -1,0 +1,17 @@
+let u = "привет"
+assert(len(u) == 6)
+assert(u[0] == "п")
+assert(u[1] == "р")
+assert(u.slice(1, 3) == "ри")
+assert(u.slice(0, 99) == "привет")
+assert(u.slice(-2, 6) == "ет")
+assert(u.chars() == ["п", "р", "и", "в", "е", "т"])
+let e = "héllo"
+assert(len(e) == 5)
+assert(e[1] == "é")
+assert(e.slice(1, 3) == "él")
+assert("hello".slice(1, 4) == "ell")
+assert("hello".slice(-3, 5) == "llo")
+let v = [1, 2, 3, 4]
+assert(v.slice(1, 3) == [2, 3])
+print("utf8 ok")

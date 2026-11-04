@@ -1,0 +1,41 @@
+enum Wrap {
+  One(v)
+}
+fn unwrap2(w) -> i64 {
+  match w {
+    One(x) => {
+      return x
+    }
+  }
+  return 0
+}
+assert(unwrap2(One(7)) == 7)
+enum Res2 {
+  Ok(v),
+  Err(e)
+}
+enum Box2 {
+  Has(v),
+  Empty
+}
+fn deep(b) -> i64 {
+  match b {
+    Has(Ok(v)) => {
+      return v
+    },
+    Has(Err(e)) => {
+      return -1
+    },
+    Has(_) => {
+      return -2
+    },
+    Empty => {
+      return 0
+    }
+  }
+  return 0
+}
+assert(deep(Has(Ok(5))) == 5)
+assert(deep(Has(Err("x"))) == -1)
+assert(deep(Empty) == 0)
+print("nested2 ok")

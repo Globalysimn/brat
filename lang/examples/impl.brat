@@ -1,0 +1,14 @@
+impl Point {
+  fn sum(self) -> i64 {
+    return self.x + self.y
+  }
+  fn shift(self, dx: i64) -> i64 {
+    return self.x + dx
+  }
+}
+fn main() -> i64 {
+  let p = Point { x: 3, y: 4 }
+  print(p.sum())
+  print(p.shift(10))
+  return 0
+}

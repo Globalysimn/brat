@@ -1,0 +1,43 @@
+pub fn is_empty(s: str) -> bool {
+  return len(s) == 0
+}
+pub fn repeat(s: str, n: i64) -> str {
+  let mut out = ""
+  for i in 0..n {
+    out = out + s
+  }
+  return out
+}
+pub fn pad_left(s: str, w: i64) -> str {
+  let need = w - len(s)
+  if need <= 0 {
+    return s
+  }
+  return repeat(" ", need) + s
+}
+pub fn after_colon(line: str) -> str {
+  let mut out = ""
+  let mut hit = 0
+  for i in 0..len(line) {
+    let ch = line[i]
+    if hit == 1 {
+      out = out + ch
+    } else {
+      if ch == ":" {
+        hit = 1
+      }
+    }
+  }
+  return out.trim()
+}
+pub fn csv_first(line: str) -> str {
+  let mut out = ""
+  for i in 0..len(line) {
+    let ch = line[i]
+    if ch == "," {
+      break
+    }
+    out = out + ch
+  }
+  return out.trim()
+}

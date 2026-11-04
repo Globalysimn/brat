@@ -1,0 +1,78 @@
+// std.json -- RFC 8259 JSON parser, serializer, and typed accessors.
+
+pub fn parse(s: str) {
+  return json_parse(s)
+}
+
+pub fn stringify(v) -> str {
+  return json_stringify(v, 0)
+}
+
+pub fn stringify_indent(v, indent: i64) -> str {
+  return json_stringify(v, indent)
+}
+
+fn get_path_segs(cur, segs: vec[str], pos: i64) {
+  if pos >= len(segs) {
+    return Some(cur)
+  }
+  let seg = segs[pos]
+  if is_map(cur) {
+    if !cur.has(seg) {
+      return None
+    }
+    return get_path_segs(cur.get(seg), segs, pos + 1)
+  }
+  if is_vec(cur) {
+    let idx_r = seg.parse_int()
+    if is_err(idx_r) {
+      return None
+    }
+    let idx = unwrap(idx_r)
+    if idx < 0 || idx >= len(cur) {
+      return None
+    }
+    return get_path_segs(cur[idx], segs, pos + 1)
+  }
+  return None
+}
+
+pub fn get_path(v, dotted: str) {
+  if len(dotted) == 0 {
+    return Some(v)
+  }
+  return get_path_segs(v, dotted.split("."), 0)
+}
+
+pub fn get_str(m, key: str, fallback: str) -> str {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if !is_str(val) {
+    return fallback
+  }
+  return val
+}
+
+pub fn get_int(m, key: str, fallback: i64) -> i64 {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if !is_int(val) {
+    return fallback
+  }
+  return val
+}
+
+pub fn get_bool(m, key: str, fallback: bool) -> bool {
+  if !is_map(m) || !m.has(key) {
+    return fallback
+  }
+  let val = m.get(key)
+  if !is_bool(val) {
+    return fallback
+  }
+  return val
+}

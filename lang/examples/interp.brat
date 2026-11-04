@@ -1,0 +1,14 @@
+fn main() -> i64 {
+  let v = [10, 20, 30]
+  let cfg = Net { host: "10.0.0.1", port: 8080 }
+  let mut stats = {}
+  stats.set("hits", 3)
+  print("up {cfg.host}:{cfg.port} hits={stats.get("hits")} avg={v.sum() / len(v)}")
+  print("first={v[0]} last={v[len(v) - 1]} sum={v.sum()}")
+  let doc = "{\"host\": \"a1\", \"port\": 8080}"
+  print("doc={doc}")
+  print("braces { }{ }{ } done")
+  let n = 7
+  print("n={n} doubled={n * 2} neg={-n}")
+  return 0
+}

@@ -1,0 +1,5 @@
+let p = Point { x: 1, y: 2 }
+let a = move p.x
+print(p.x)
+let q = move p
+print(p.y)

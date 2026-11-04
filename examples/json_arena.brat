@@ -1,0 +1,22 @@
+import std.json
+
+fn summarize_batch(raw: str) {
+  let doc = std.json.parse(raw)?
+  let service = std.json.get_str(doc, "service", "unknown")
+  let items = doc["latencies_ms"]
+  let mut total = 0
+  arena {
+    let mut trace = "batch"
+    for x in items {
+      total = total + x
+      trace = trace + ":" + str(x)
+    }
+    assert(len(trace) > 5)
+  }
+  return Ok(service + ":" + str(total) + "ms")
+}
+
+fn main() {
+  let payload = "{\"service\":\"auth\",\"latencies_ms\":[12,18,15]}"
+  print(unwrap(summarize_batch(payload)))
+}

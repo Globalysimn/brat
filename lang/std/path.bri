@@ -1,0 +1,9 @@
+fn is_abs(p: str) -> bool
+fn join(a: str, b: str) -> str
+fn dir(p: str) -> str
+fn base(p: str) -> str
+fn ext(p: str) -> str
+fn stem(p: str) -> str
+fn with_ext(p: str, new_ext: str) -> str
+fn norm(p: str) -> str
+fn rel(from_dir: str, to_path: str) -> str

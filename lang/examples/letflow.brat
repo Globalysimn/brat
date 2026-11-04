@@ -1,0 +1,25 @@
+fn head(v) -> i64 {
+  if let Ok(x) = v[0] {
+    return x
+  } else {
+    return 0
+  }
+}
+fn drain(v) -> i64 {
+  let mut total = 0
+  let mut i = 0
+  while let Some(x) = v[i] {
+    total = total + x
+    i = i + 1
+    if i >= len(v) {
+      break
+    }
+  }
+  return total
+}
+fn main() -> i64 {
+  print(head([Ok(5)]))
+  print(head([Err("e")]))
+  print(drain([Some(1), Some(2), None]))
+  return 0
+}

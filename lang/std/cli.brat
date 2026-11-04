@@ -1,0 +1,160 @@
+fn has_str(xs: vec[str], target: str) -> bool {
+  for x in xs {
+    if x == target {
+      return true
+    }
+  }
+  return false
+}
+
+pub fn has_flag(argv: vec[str], flag: str) -> bool {
+  let prefix = flag + "="
+  let mut i = 0
+  let n = len(argv)
+  while i < n {
+    let a = argv[i]
+    if a == "--" {
+      return false
+    }
+    if a == flag {
+      return true
+    }
+    if a.starts_with(prefix) {
+      let val = a.slice(len(prefix), len(a)).lower()
+      return val != "0" && val != "false" && val != "no" && val != "off"
+    }
+    i += 1
+  }
+  return false
+}
+
+pub fn opt(argv: vec[str], flag: str, fallback: str) -> str {
+  let prefix = flag + "="
+  let mut i = 0
+  let n = len(argv)
+  while i < n {
+    let a = argv[i]
+    if a == "--" {
+      return fallback
+    }
+    if a == flag {
+      if i + 1 < n {
+        return argv[i + 1]
+      }
+      return fallback
+    }
+    if a.starts_with(prefix) {
+      return a.slice(len(prefix), len(a))
+    }
+    i += 1
+  }
+  return fallback
+}
+
+pub fn opt_int(argv: vec[str], flag: str, fallback: i64) {
+  let prefix = flag + "="
+  let mut i = 0
+  let n = len(argv)
+  let mut found = false
+  let mut raw = ""
+  while i < n {
+    let a = argv[i]
+    if a == "--" {
+      break
+    }
+    if a == flag {
+      if i + 1 < n {
+        found = true
+        raw = argv[i + 1]
+      }
+      break
+    }
+    if a.starts_with(prefix) {
+      found = true
+      raw = a.slice(len(prefix), len(a))
+      break
+    }
+    i += 1
+  }
+  if !found {
+    return Ok(fallback)
+  }
+  if len(raw) == 0 {
+    return Err("invalid integer for " + flag + ": ")
+  }
+  let parsed = raw.parse_int()
+  if is_err(parsed) {
+    return Err("invalid integer for " + flag + ": " + raw)
+  }
+  return parsed
+}
+
+pub fn positional(argv: vec[str], value_flags: vec[str]) -> vec[str] {
+  let mut out = []
+  let mut i = 0
+  let n = len(argv)
+  let mut literal = false
+  while i < n {
+    let a = argv[i]
+    if literal {
+      out.push(a)
+      i += 1
+      continue
+    }
+    if a == "--" {
+      literal = true
+      i += 1
+      continue
+    }
+    if a.starts_with("-") && len(a) > 1 {
+      let eq = a.index_of("=")
+      if !is_none(eq) {
+        i += 1
+        continue
+      }
+      if has_str(value_flags, a) {
+        i += 2
+        continue
+      }
+      i += 1
+      continue
+    }
+    out.push(a)
+    i += 1
+  }
+  return out
+}
+
+pub fn subcommand(argv: vec[str], value_flags: vec[str]) -> str {
+  let pos = positional(argv, value_flags)
+  if len(pos) == 0 {
+    return ""
+  }
+  return pos[0]
+}
+
+pub fn subcommand_args(argv: vec[str], value_flags: vec[str]) -> vec[str] {
+  let mut i = 0
+  let n = len(argv)
+  while i < n {
+    let a = argv[i]
+    if a == "--" {
+      return []
+    }
+    if a.starts_with("-") && len(a) > 1 {
+      let eq = a.index_of("=")
+      if !is_none(eq) {
+        i += 1
+        continue
+      }
+      if has_str(value_flags, a) {
+        i += 2
+        continue
+      }
+      i += 1
+      continue
+    }
+    return argv.slice(i + 1, n)
+  }
+  return []
+}

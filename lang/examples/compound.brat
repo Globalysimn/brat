@@ -1,0 +1,21 @@
+let mut x = 10
+x += 5
+assert(x == 15)
+x -= 3
+assert(x == 12)
+x *= 2
+assert(x == 24)
+x /= 5
+assert(x == 4)
+x %= 3
+assert(x == 1)
+let mut v = [1, 2, 3]
+v[0] += 40
+assert(v[0] == 41)
+let mut m = {"n": 5}
+m["n"] *= 4
+assert(m["n"] == 20)
+let mut s = "a"
+s += "b"
+assert(s == "ab")
+print("compound ok")

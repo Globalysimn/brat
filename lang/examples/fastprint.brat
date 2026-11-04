@@ -1,0 +1,23 @@
+fn table(n: mut i64) -> i64 {
+  for i in 1..4 {
+    print("{n} x {i} = ", n * i)
+  }
+  return 0
+}
+table(5)
+fn countdown(n: mut i64) -> i64 {
+  while n > 0 {
+    print(n)
+    n = n - 1
+  }
+  print("go")
+  return n
+}
+assert(countdown(3) == 0)
+fn banner() -> f64 {
+  print("banner start")
+  print("banner end")
+  return 1.0
+}
+assert(banner() == 1.0)
+print("fastprint ok")

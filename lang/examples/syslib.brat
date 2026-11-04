@@ -1,0 +1,25 @@
+let a = args()
+assert(len(a) >= 0)
+let t0 = time_ms()
+assert(t0 > 0)
+sleep_ms(1)
+let t1 = time_ms()
+assert(t1 >= t0)
+let eg = env_get("BRAT_TEST_X")
+assert(is_none(eg))
+eprint("to stderr")
+try {
+  raise("boom")
+  assert(false, "unreachable")
+} catch e {
+  assert(e == "boom")
+}
+try {
+  raise(42)
+  assert(false, "unreachable")
+} catch e {
+  assert(e == 42)
+}
+print("sys ok")
+exit(0)
+print("unreachable")

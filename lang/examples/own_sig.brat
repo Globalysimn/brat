@@ -1,0 +1,19 @@
+fn eat(s: move str) -> i64 {
+  print(s)
+  return 1
+}
+fn peek(s: ref str) -> i64 {
+  print(s)
+  return 0
+}
+fn main() -> i64 {
+  let h = "hi"
+  let r = eat(h)
+  print(h)
+  let k = "yo"
+  let q = k
+  peek(k)
+  let z = eat(k)
+  print("done")
+  return 0
+}

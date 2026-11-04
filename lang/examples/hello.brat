@@ -1,0 +1,9 @@
+let host: str = "127.0.0.1:9001"
+let r: ref str = host
+log.info("hello {host}")
+print(r)
+fn add(a: i64, b: i64) -> i64 {
+  return a + b
+}
+let x = add(40, 2)?
+print(x)

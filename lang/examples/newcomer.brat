@@ -1,0 +1,72 @@
+let mut log_lines = [
+  "10.0.0.7 - - [10/Oct/2026:11:00:01 +0000] \"GET /index.html HTTP/1.1\" 200 512",
+  "10.0.0.3 - - [10/Oct/2026:11:00:02 +0000] \"POST /api/login HTTP/1.1\" 401 87",
+  "10.0.0.7 - - [10/Oct/2026:11:00:05 +0000] \"GET /a.css HTTP/1.1\" 200 1200",
+  "10.0.0.9 - - [10/Oct/2026:11:00:07 +0000] \"GET /missing HTTP/1.1\" 404 0",
+  "10.0.0.3 - - [10/Oct/2026:11:00:09 +0000] \"GET /x.js HTTP/1.1\" 500 42",
+  "10.0.0.9 - - [10/Oct/2026:11:00:13 +0000] \"GET /health HTTP/1.1\" 200 2",
+  "garbage line with no fields at all",
+]
+fn class_of(code: i64) -> str {
+  match code {
+    200 => { return "2xx" },
+    301 => { return "3xx" },
+    401 => { return "4xx" },
+    404 => { return "4xx" },
+    500 => { return "5xx" },
+    _ => { return "?" }
+  }
+  return "?"
+}
+fn parse_line(line: str) {
+  let f = line.split(" ")
+  let ip = f[0]
+  let code = unwrap(f[8].parse_int())
+  let size = unwrap(f[9].parse_int())
+  return Hit { ip: ip, code: code, size: size }
+}
+fn bar(n: i64) -> str {
+  return "=".repeat(n)
+}
+fn main() -> i64 {
+  let mut per_ip = {}
+  let mut classes = {}
+  let mut skipped = 0
+  let mut total_bytes = 0
+  for raw in log_lines {
+    try {
+      let rec = parse_line(raw)?
+      let ip = rec.ip
+      let code = rec.code
+      let size = rec.size
+      let kind = class_of(code)
+      total_bytes = total_bytes + size
+      if !per_ip.has(ip) {
+        per_ip[ip] = {"hits": 0, "bytes": 0, "bad": 0}
+      }
+      per_ip[ip]["hits"] = per_ip[ip]["hits"] + 1
+      per_ip[ip]["bytes"] = per_ip[ip]["bytes"] + size
+      if code >= 400 {
+        per_ip[ip]["bad"] = per_ip[ip]["bad"] + 1
+      }
+      if classes.has(kind) {
+        classes[kind] = classes[kind] + 1
+      } else {
+        classes[kind] = 1
+      }
+    } catch e {
+      skipped = skipped + 1
+      log.warn("skipped a line: {e}")
+    }
+  }
+  print("requests: {len(log_lines)} skipped: {skipped} bytes: {total_bytes}")
+  for ip in per_ip.keys().sort() {
+    let e = per_ip[ip]
+    print("{ip}: {e.hits} hits, {e.bytes} bytes, {e.bad} errors {bar(e.hits)}")
+  }
+  for kind in classes.keys().sort() {
+    let n = classes[kind]
+    print("{kind}: {n} {bar(n)}")
+  }
+  return 0
+}

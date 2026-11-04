@@ -1,0 +1,23 @@
+import jsonlib
+let doc = "{\"host\": \"a1\", \"port\": 8080, \"tls\": true, \"tags\": [\"lb\", \"edge\"], \"limits\": {\"rps\": 1.5, \"n\": null}}"
+let cfg = json_parse(doc)?
+assert(cfg["host"] == "a1")
+assert(cfg["port"] == 8080)
+assert(cfg["tls"] == true)
+assert(cfg["tags"] == ["lb", "edge"])
+assert(cfg["tags"][1] == "edge")
+assert(cfg["limits"]["rps"] == 1.5)
+assert(is_none(cfg["limits"]["n"]))
+let av = json_parse("[1, 2.5, \"x\", true, null, [7]]")?
+assert(av[0] == 1)
+assert(av[1] == 2.5)
+assert(av[2] == "x")
+assert(av[3] == true)
+assert(is_none(av[4]))
+assert(av[5] == [7])
+assert(is_err(json_parse("{bad")))
+assert(is_err(json_parse("{\"a\":1} extra")))
+assert(json_parse("  {\"k\":  \"v\" }  ")?["k"] == "v")
+let esc = json_parse("\"a\\nb\\t\\\"q\\\"\"")?
+assert(len(esc) == 7)
+print("jsonlib ok")

@@ -1,0 +1,26 @@
+enum Color {
+  Red,
+  Green(v)
+}
+impl Color {
+  fn code(self) -> i64 {
+    match self {
+      Red => {
+        return 1
+      },
+      Green(v) => {
+        return v
+      },
+      _ => {
+        return 0
+      }
+    }
+    return 0
+  }
+}
+fn main() -> i64 {
+  let g = Green(7)
+  print(g.code())
+  print(Red.code())
+  return 0
+}

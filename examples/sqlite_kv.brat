@@ -1,0 +1,17 @@
+import std.sqlite
+
+fn seed_and_count() -> Result[i64, str] {
+  let db = std.sqlite.open_memory()?
+  defer std.sqlite.close(db)
+
+  std.sqlite.exec(db, "CREATE TABLE kv (k TEXT PRIMARY KEY, v INT NOT NULL);")?
+  let _r1 = std.sqlite.query(db, "INSERT INTO kv (k, v) VALUES (?1, ?2);", ["alpha", 10])?
+  let _r2 = std.sqlite.query(db, "INSERT INTO kv (k, v) VALUES (?1, ?2);", ["beta", 32])?
+  return std.sqlite.scalar_int(db, "SELECT SUM(v) FROM kv;", [])
+}
+
+fn main() {
+  let total = unwrap(seed_and_count())
+  assert(total == 42)
+  print(total)
+}

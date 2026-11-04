@@ -1,0 +1,17 @@
+assert("hello world".replace("o", "0") == "hell0 w0rld")
+assert("aaa".replace("a", "bb") == "bbbbbb")
+assert("x".replace("", "-") == "-x-")
+assert("abc".replace("z", "q") == "abc")
+let v = [3, 1, 2]
+assert(v.first() == 3)
+assert(v.last() == 2)
+assert(is_none([].first()))
+assert(is_none([].last()))
+let mut s = [5, 2, 8, 1]
+assert(s.sort() == [1, 2, 5, 8])
+assert(s == [1, 2, 5, 8])
+assert(s.rev() == [8, 5, 2, 1])
+let mut words = ["b", "a", "c"]
+assert(words.sort() == ["a", "b", "c"])
+assert(words.rev() == ["c", "b", "a"])
+print("meth ok")
