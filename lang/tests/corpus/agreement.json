@@ -1,0 +1,1010 @@
+{
+  "version": 1,
+  "note": "One entry per program. `wrap` means the text is a body for `fn main() -> i64 { ... return 0 }`. Explicit rc/out specify the expected exit code and stdout; null values require backend agreement only.",
+  "cases": [
+    {
+      "name": "case_map",
+      "src": "fn main() -> i64 {\n  print(\"ß\".upper())\n  print(\"İ\".lower())\n  print(\"ΣΑΣ\".lower())\n  print(\"ﬀ\".upper())\n  print(\"ŉ\".upper())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "SS\ni̇\nσας\nﬀ\nŉ\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "closure_ret",
+      "src": "fn main() -> i64 {\n  let v = [1, 2, 3]\n  print(v.filter(fn(x) { return x > 1 }))\n  let greet = fn() { return \"hi\" }\n  print(greet())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "[2, 3]\nhi\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "div_zero_in_fn",
+      "src": "fn show(n: i64) -> i64 {\n  print(100 / n)\n  return 0\n}\nfn main() -> i64 {\n  show(4)\n  show(0)\n  print(\"after\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 1,
+      "out": "25\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "div_zero_in_loop",
+      "src": "fn main() -> i64 {\n  let mut i = 0\n  while i < 3 {\n    print(10 % 0)\n    i = i + 1\n  }\n  print(\"after\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 1,
+      "out": "",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "div_zero_stmt",
+      "src": "fn main() -> i64 {\n  print(1 / 0)\n  print(\"still here\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 1,
+      "out": "",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "err_text_cmp",
+      "src": "fn d(x) {\n  return x\n}\nfn main() -> i64 {\n  try {\n    print(d(1) < \"a\")\n  } catch e {\n    print(\"E {e}\")\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E type error in <\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "err_text_div",
+      "src": "fn d(x) {\n  return x\n}\nfn main() -> i64 {\n  try {\n    print(d(1) / \"0\")\n  } catch e {\n    print(\"E {e}\")\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E type error in /\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "err_text_mul",
+      "src": "fn d(x) {\n  return x\n}\nfn main() -> i64 {\n  try {\n    print(d(\"a\") * 2.5)\n  } catch e {\n    print(\"E {e}\")\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E type error in *\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "join_and_in",
+      "src": "fn main() -> i64 {\n  let v = [1, 2, 3]\n  print(v.join(\"-\"))\n  print(2 in v)\n  print(9 in v)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "1-2-3\ntrue\nfalse\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "lit_edges",
+      "src": "fn main() -> i64 {\n  print(-9223372036854775808)\n  print(1e-320)\n  print(1e400)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "-9223372036854775808\n1e-320\ninf\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "map_typed_keys",
+      "src": "fn main() -> i64 {\n  let mut m = {}\n  m.set(1, \"int\")\n  m.set(1.0, \"float\")\n  m.set(true, \"bool\")\n  print(len(m))\n  print(m.get(1))\n  print(m.get(1.0))\n  print(m.get(true))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "3\nint\nfloat\nbool\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "method_not_vec",
+      "src": "fn d(x) {\n  return x\n}\nfn main() -> i64 {\n  try {\n    d(1).push(1)\n  } catch e {\n    print(\"E1 {e}\")\n  }\n  try {\n    d(\"ab\").sort()\n  } catch e {\n    print(\"E2 {e}\")\n  }\n  try {\n    d(1.5).sum()\n  } catch e {\n    print(\"E3 {e}\")\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E1 no method push\nE2 no method sort\nE3 no method sum\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "mod_zero_in_range",
+      "src": "fn main() -> i64 {\n  for i in 0..3 {\n    print(10 % 0)\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 1,
+      "out": "",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "nested_fn",
+      "src": "fn main() -> i64 {\n  fn inner(x: i64) -> i64 {\n    return x + 1\n  }\n  print(inner(41))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "42\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "quest_cross_fn",
+      "src": "fn f() -> i64 {\n  let x = Err(\"e\")?\n  return 0\n}\nfn main() -> i64 {\n  try {\n    f()\n    print(\"no catch\")\n  } catch e {\n    print(\"caught {e}\")\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "caught e\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "quest_top",
+      "src": "fn f() -> i64 {\n  return Err(\"e\")?\n}\nfn main() -> i64 {\n  let r = f()\n  print(\"got\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 1,
+      "out": "",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "raise_in_fn",
+      "src": "fn check(x: i64) -> i64 {\n  if x < 0 {\n    raise(\"negative\")\n  }\n  return x\n}\nfn main() -> i64 {\n  print(check(5))\n  match check(0 - 1) {\n    Ok(v) => { print(\"ok {v}\") },\n    Err(e) => { print(\"err {e}\") }\n  }\n  print(\"done\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "5\nerr negative\ndone\n",
+      "asan": false,
+      "from": "parity"
+    },
+    {
+      "name": "ret_param",
+      "src": "fn id(x: vec) -> vec {\n  return x\n}\nfn main() -> i64 {\n  let mut a = id([1, 2])\n  a.push(3)\n  print(a)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "[1, 2, 3]\n",
+      "asan": true,
+      "from": "parity"
+    },
+    {
+      "name": "ret_proj",
+      "src": "fn first(v: vec) -> i64 {\n  return v[0]\n}\nfn row(v: vec) -> vec {\n  return v[0]\n}\nfn main() -> i64 {\n  print(first([7, 8]))\n  let mut r = row([[1, 2], [3]])\n  r.push(4)\n  print(r)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "7\n[1, 2, 4]\n",
+      "asan": true,
+      "from": "parity"
+    },
+    {
+      "name": "arith_bool",
+      "src": "print(true + 1)\nprint(-true)\nprint(true * 2)\nprint(true + true)\nprint(7 / true)\nprint(7 % true)\nprint(2.5 + true)\nprint(\"b{true}n\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "2\n-1\n2\n2\n7\n0\n3.5\nbtruen\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "arith_concat",
+      "src": "print(\"x\" + 2.5 + \"y\")\nprint(\"a\" + 0.1)\nprint(\"z\" + None)\nprint(\"v\" + [1, 2])\nprint(\"t\" + Ok(1))\nprint(\"s\" + true)\nprint(str(true))\nprint(str(1.5))\nprint(str(None))",
+      "wrap": true,
+      "rc": 0,
+      "out": "x2.5y\na0.1\nzNone\nv[1, 2]\ntOk(1)\nstrue\ntrue\n1.5\nNone\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "arith_vec",
+      "src": "print([1] + [2])\nprint([1, 2] + [3, 4] + [5])\nprint([] + [])\nprint(7.5 % 2.0)\nprint(-7.5 % 2.0)\nprint(7.5 / 2.5)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[1, 2]\n[1, 2, 3, 4, 5]\n[]\n1.5\n0.5\n3.0\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "arith_wrap",
+      "src": "print(9223372036854775807 + 1)\nprint(-9223372036854775808 - 1)\nprint(9223372036854775807 * 2)\nlet mn = -9223372036854775808\nprint(mn / -1)\nprint(mn % -1)\nprint(-mn)",
+      "wrap": true,
+      "rc": 0,
+      "out": "-9223372036854775808\n9223372036854775807\n-2\n-9223372036854775808\n0\n-9223372036854775808\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "case_full",
+      "src": "print(\"Привет Мир\".upper())\nprint(\"ΌΛΟΣ\".lower())\nprint(\"ǅ\".upper())",
+      "wrap": true,
+      "rc": 0,
+      "out": "ПРИВЕТ МИР\nόλος\nǄ\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "catch_capture",
+      "src": "try {\n  raise(\"boom\")\n} catch e {\n  let f = fn() { return e }\n  print(f())\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "boom\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "chunks_oob",
+      "src": "print([1, 2, 3].chunks(99))",
+      "wrap": true,
+      "rc": 0,
+      "out": "[[1, 2, 3]]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "closure_loopcap",
+      "src": "let mut fns = []\nfor i in 0..3 {\n  fns.push(fn() { return i })\n}\nlet mut out = []\nfor f in fns {\n  out.push(f())\n}\nprint(out)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[0, 1, 2]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "closure_nested",
+      "src": "let g = 5\nlet f = fn() {\n  let h = fn() { return g + 1 }\n  return h()\n}\nprint(f())",
+      "wrap": true,
+      "rc": 0,
+      "out": "6\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "deep_rec",
+      "src": "fn down(n: i64) -> i64 {\n  if n <= 0 { return 0 }\n  return down(n - 1)\n}\nprint(down(200))",
+      "wrap": true,
+      "rc": 0,
+      "out": "0\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "defer_block",
+      "src": "fn collect() {\n    let mut loop_log = []\n    let mut guard_log = []\n    let mut branch_log = []\n    for i in 1..4 {\n      defer loop_log.push(\"pass\")\n    }\n    if true {\n      defer branch_log.push(\"outer\")\n      if true {\n        defer branch_log.push(\"inner-1\")\n        defer branch_log.push(\"inner-2\")\n      }\n    }\n    for i in 1..3 {\n      if true {\n        defer guard_log.push(\"guard\")\n      }\n    }\n    return [loop_log, branch_log, guard_log]\n  }\n  let r = collect()\n  print(r[0])\n  print(r[1])\n  print(r[2])",
+      "wrap": true,
+      "rc": 0,
+      "out": "['pass', 'pass', 'pass']\n['inner-2', 'inner-1', 'outer']\n['guard', 'guard']\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "defer_nested_unwind",
+      "src": "fn deep() -> i64 {\n  defer log.warn(\"deep defer\")\n  raise(\"deep boom\")\n  return 0\n}\nfn mid() -> i64 {\n  defer log.info(\"mid defer\")\n  return deep()\n}\nlet r = 0\ntry {\n  r = mid()\n} catch e {\n  r = -2\n  print(\"nested caught {e}\")\n}\nprint(\"nested after {r}\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "{\"ts\": T, \"lvl\": \"WARN\", \"msg\": \"deep defer\"}\n{\"ts\": T, \"lvl\": \"INFO\", \"msg\": \"mid defer\"}\nnested after Err('deep boom')\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "defer_on_unwind",
+      "src": "fn boom() -> i64 {\n  defer log.info(\"defer ran\")\n  raise(\"boom\")\n  return 0\n}\nlet r = 0\ntry {\n  r = boom()\n} catch e {\n  r = -1\n  print(\"caught {e}\")\n}\nprint(\"after {r}\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "{\"ts\": T, \"lvl\": \"INFO\", \"msg\": \"defer ran\"}\nafter Err('boom')\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_abs",
+      "src": "match read_file(\"/etc/hostname\") {\n  Ok(t) => { print(\"ok {len(t)}\") },\n  Err(reason) => { print(\"refused {reason}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "refused path outside the program directory\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_dir",
+      "src": "match read_file(\".\") {\n  Ok(t) => { print(\"dir ok {len(t)}\") },\n  Err(reason) => { print(\"dir err {reason.contains(\"Is a directory\")}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "dir err true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_dotdot",
+      "src": "match read_file(\"../outside.txt\") {\n  Ok(t) => { print(\"ok {len(t)}\") },\n  Err(reason) => { print(\"refused {reason}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "refused path outside the program directory\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_empty",
+      "src": "let w = write_file(\"empty.txt\", \"\")\nmatch w {\n  Ok(n) => { print(\"wrote {n}\") },\n  Err(reason) => { print(\"werr {reason}\") }\n}\nmatch read_file(\"empty.txt\") {\n  Ok(t) => { print(\"empty ok {len(t)} [{t}]\") },\n  Err(reason) => { print(\"empty err {reason}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "wrote 0\nempty ok 0 []\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_missing",
+      "src": "match read_file(\"nope.txt\") {\n  Ok(t) => { print(\"ok {len(t)}\") },\n  Err(reason) => { print(\"errno {reason.contains(\"[Errno 2]\")}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "errno true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_ok",
+      "src": "let w = write_file(\"out.txt\", \"hello\")\nmatch w {\n  Ok(n) => { print(\"wrote {n}\") },\n  Err(reason) => { print(\"werr {reason}\") }\n}\nmatch read_file(\"out.txt\") {\n  Ok(t) => { print(\"read [{t}]\") },\n  Err(reason) => { print(\"rerr {reason}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "wrote 5\nread [hello]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "fs_write_dotdot",
+      "src": "let w = write_file(\"../escaped.txt\", \"x\")\nmatch w {\n  Ok(n) => { print(\"WROTE {n} BYTES\") },\n  Err(reason) => { print(\"wrefused {reason}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "wrefused path outside the program directory\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "index_utf8",
+      "src": "print(\"héllo\".index_of(\"l\"))\nprint(\"привет\".index_of(\"в\"))\nprint(\"abc\".index_of(\"z\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "2\n3\nNone\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "interp_call",
+      "src": "let mut by_ip = {}\nby_ip.set(\"a\", 1)\nprint(\"a={by_ip.get(\"a\")}\")\nprint(\"keys={by_ip.keys().join(\",\")}\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "a=1\nkeys=a\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "interp_expr",
+      "src": "let v = [1, 2, 3]\nlet p = Point { x: 7 }\nlet n = 5\nlet s = \"hi\"\nprint(\"len={len(v)} f={p.x} a={n + 1} u={s.upper()} i={v[0]}\")\nprint(\"plain {n} text\")\nprint(\"neg={-n}\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "len=3 f=7 a=6 u=HI i=1\nplain 5 text\nneg=-5\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "interp_json",
+      "src": "print(\"{\\\"a\\\": 1}\")\nprint(\"[1, 2]\")\nlet j = \"{\\\"k\\\": {\\\"n\\\": 2}}\"\nprint(j)\nprint(\"brace { alone\")\nprint(\"}{\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "{\"a\": 1}\n[1, 2]\n{\"k\": {\"n\": 2}}\nbrace { alone\n}{\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "interp_json_lit",
+      "src": "print(\"{\\\"a\\\": 1}\")\nprint(\"json {\\\"k\\\": {\\\"n\\\": 2}}\")\nprint(\"brace { alone\")\nprint(\"}{\")\nlet v = 9\nprint(\"real {v} text\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "{\"a\": 1}\njson {\"k\": {\"n\": 2}}\nbrace { alone\n}{\nreal 9 text\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "interp_str_in",
+      "src": "let mut m = {}\nm.set(\"k\", 7)\nprint(\"get={m.get_or(\\\"k\\\", 0)}\")\nprint(\"mid {m.get_or(\\\"k\\\", 0)} done\")\nlet v = 5\nprint(\"mixed {v}-{len([1,2])}-{m.get_or(\\\"k\\\", 0)}\")\nprint(\"quote \\\"{v}\\\" and \\\"end\\\"\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "get=7\nmid 7 done\nmixed 5-2-7\nquote \"5\" and \"end\"\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "join_mixed",
+      "src": "print([1, true, None, 2.5].join(\"-\"))\nprint([].join(\",\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "1-true-None-2.5\n\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "join_nested",
+      "src": "print([[1, 2], [\"a\"]].join(\",\"))\nprint([Ok(1), Err(\"x\")].join(\",\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "[1, 2],['a']\nOk(1),Err('x')\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "lines",
+      "src": "print(\"a\\nb\".lines())\nprint(\"a\\r\\nb\\rc\".lines())\nprint(\"x\\n\".lines())",
+      "wrap": true,
+      "rc": 0,
+      "out": "['a', 'b']\n['a', 'b', 'c']\n['x']\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "log_json",
+      "src": "log.info(\"say \\\"hi\\\" and \\\\ end\")\nlog.info(\"a\\tb\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "{\"ts\": T, \"lvl\": \"INFO\", \"msg\": \"say \\\"hi\\\" and \\\\ end\"}\n{\"ts\": T, \"lvl\": \"INFO\", \"msg\": \"a\\tb\"}\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "map_del_none",
+      "src": "let mut m = {\"a\": None}\nprint(m.del(\"a\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "minmax_nested",
+      "src": "print([[3], [1]].min())\nprint([[3], [1]].max())",
+      "wrap": true,
+      "rc": 0,
+      "out": "[1]\n[3]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "neg_index",
+      "src": "let v = [1, 2, 3]\nprint(v.del(-1))\nprint(v)",
+      "wrap": true,
+      "rc": 0,
+      "out": "3\n[1, 2]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "diff_nested_fn",
+      "src": "fn outer() -> i64 {\n  fn inner(x: i64) -> i64 { return x + 1 }\n  return inner(41)\n}\nprint(outer())",
+      "wrap": true,
+      "rc": 0,
+      "out": "42\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "parse_big",
+      "src": "print(\"99999999999999999999\".parse_int())\nprint(\"-99999999999999999999\".parse_int())",
+      "wrap": true,
+      "rc": 0,
+      "out": "Err('number out of range')\nErr('number out of range')\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "re_class_long",
+      "src": "print(re_match(\"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\", \"[qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq]\"))\nprint(re_match(\"zz\", \"[qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq]\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "re_stack",
+      "src": "print(re_match(\"a\", \"a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "re_stack2",
+      "src": "print(re_match(\"aa\", \"a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "recv_upper",
+      "src": "let mut V = [3, 1]\nV.push(2)\nV.sort()\nprint(V)\nprint(V[0])\nlet mut M = {}\nM.set(\"a\", 1)\nprint(M.get(\"a\"))\nprint(M.has(\"a\"))\nlet mut P = Point { x: 1 }\nP.x = 9\nprint(P.x)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[1, 2, 3]\n1\n1\ntrue\n9\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_alt",
+      "src": "print(re_match(\"curl/8.0\", \"(curl|wget|sqlmap)\"))\nprint(re_match(\"Mozilla/5.0\", \"(curl|wget|sqlmap)\"))\nprint(re_match(\"aabc\", \"(a|ab)c\"))\nprint(re_match(\"ac\", \"(a|ab)c\"))\nprint(re_match(\"ab\", \"(a|b)+\"))\nprint(re_match(\"zzz\", \"(a|b)+\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\ntrue\ntrue\ntrue\nfalse\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_anchor",
+      "src": "print(re_match(\"GET\", \"^(GET|POST|PUT|DELETE|HEAD)$\"))\nprint(re_match(\"Get\", \"^(GET|POST|PUT|DELETE|HEAD)$\"))\nprint(re_match(\"abc123\", \"^[a-z]+[0-9]+$\"))\nprint(re_match(\"nospaces\", \"^\\S+$\"))\nprint(re_match(\"has space\", \"^\\S+$\"))\nprint(re_match(\"10.0.0.1\", \"^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\ntrue\ntrue\nfalse\ntrue\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_backtrack",
+      "src": "print(re_match(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\", \"(a+)+b\"))\nprint(re_match(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\", \"(a+)+b\"))\nprint(re_match(\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxy\", \"(x+x+)+y\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\ntrue\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_bad",
+      "src": "try {\n  re_match(\"x\", \"(unbalanced\")\n} catch e {\n  print(\"bad pat\")\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "bad pat\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_cls",
+      "src": "print(re_match(\"abc123\", \"\\w+\\d+\"))\nprint(re_match(\"a b\", \"\\w\\s\\w\"))\nprint(re_match(\"abc\", \"^\\D+$\"))\nprint(re_match(\"123\", \"^\\D+$\"))\nprint(re_match(\"nospaces\", \"^\\S+$\"))\nprint(re_match(\"has space\", \"^\\S+$\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\ntrue\ntrue\nfalse\ntrue\nfalse\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_empty",
+      "src": "print(re_match(\"\", \"\"))\nprint(re_match(\"x\", \"\"))\nprint(re_match(\"\", \"^(a|b|c)*$\"))\nprint(re_match(\"abc\", \"^(a|b|c)*$\"))\nprint(re_match(\"nothing\", \"^(a|b|c)*$\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\ntrue\ntrue\ntrue\nfalse\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_grp",
+      "src": "print(re_match(\"abd\", \"a(b|c)d\"))\nprint(re_match(\"adc\", \"a(b|c)d\"))\nprint(re_match(\"hello\", \"(hel|he)lo\"))\nprint(re_match(\"\", \"\"))\nprint(re_match(\"x\", \"\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\ntrue\ntrue\ntrue\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "regex_http",
+      "src": "print(re_match(\"GET /i.html HTTP/1.1\", \"^(GET|POST) \\S+ HTTP/[0-9]\\.[0-9]$\"))\nprint(re_match(\"BAD /i.html HTTP/1.1\", \"^(GET|POST) \\S+ HTTP/[0-9]\\.[0-9]$\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "true\nfalse\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "repeat_ok",
+      "src": "print(\"ab\".repeat(3))\nprint(\"z\" * 4)",
+      "wrap": true,
+      "rc": 0,
+      "out": "ababab\nzzzz\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "repeat_oom",
+      "src": "try {\n  let s = \"x\".repeat(2000000000)\n  print(len(s))\n} catch e {\n  print(e)\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "out of memory\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "repeat_star_oom",
+      "src": "try {\n  let s = \"xy\" * 1000000000\n  print(len(s))\n} catch e {\n  print(e)\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "out of memory\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "sbuf",
+      "src": "let b = sbuf()\nlet n = sbuf_add(b, \"hello \")\nsbuf_add(b, \"world\")\nmatch sbuf_str(b) {\n  Ok(t) => { print(\"add={n} len={sbuf_len(b)} str=[{t}]\") },\n  Err(r) => { print(\"err {r}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "add=6 len=11 str=[hello world]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "sbuf_unicode",
+      "src": "let b = sbuf()\nsbuf_add(b, \"привет \")\nsbuf_add(b, \"мир\")\nmatch sbuf_str(b) {\n  Ok(t) => { print(\"u={len(t)} [{t}]\") },\n  Err(r) => { print(\"uerr {r}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "u=10 [привет мир]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "sort_nested",
+      "src": "let mut v = [[3], [1], [2]]\nv.sort()\nprint(v)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[[1], [2], [3]]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "sort_str",
+      "src": "let mut v = [\"b\", \"a\", \"c\"]\nv.sort()\nprint(v)",
+      "wrap": true,
+      "rc": 0,
+      "out": "['a', 'b', 'c']\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "spawn_in_closure",
+      "src": "let ch = chan(4)\nlet f = fn(n: i64) {\n  spawn {\n    ch.send(n * 2)\n  }\n  join_all()\n}\nf(3)\nf(4)\nlet mut total = []\ntotal.push(ch.recv())\ntotal.push(ch.recv())\ntotal.sort()\nprint(total)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[6, 8]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "spawn_loopvar",
+      "src": "let ch = chan(4)\nfor i in 1..4 {\n  spawn {\n    ch.send(i)\n  }\n}\njoin_all()\nlet mut seen = []\nfor i in 1..4 {\n  seen.push(ch.recv())\n}\nseen.sort()\nprint(seen)",
+      "wrap": true,
+      "rc": 0,
+      "out": "[1, 2, 3]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "split_empty",
+      "src": "try {\n  \"abc\".split(\"\")\n} catch e {\n  print(\"caught\")\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "caught\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "split_nl",
+      "src": "print(\"a\\nb\".split(\"\\n\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "['a', 'b']\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "sum_big",
+      "src": "print([9223372036854775807, 1].sum())",
+      "wrap": true,
+      "rc": 0,
+      "out": "-9223372036854775808\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "tcp_bad_addr",
+      "src": "let a = tcp_listen(\"127.0.0.1:70000\")\nmatch a {\n  Ok(fd) => { print(\"bad listen\") },\n  Err(r) => { print(\"listen rejected\") }\n}\nlet b = tcp_connect(\"127.0.0.1:0\")\nmatch b {\n  Ok(fd) => { print(\"bad connect\") },\n  Err(r) => { print(\"connect rejected\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "listen rejected\nconnect rejected\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "tcp_echo",
+      "src": "let srv = tcp_listen(\"127.0.0.1:47311\")\nmatch srv {\n  Ok(fd) => {\n    let cli = tcp_connect(\"127.0.0.1:47311\")\n    match cli {\n      Ok(cfd) => {\n        let acc = tcp_accept(fd)\n        match acc {\n          Ok(afd) => {\n            tcp_send(cfd, \"ping\")\n            let got = tcp_recv(afd, 16)\n            match got {\n              Ok(text) => { print(\"echo [{text}]\") },\n              Err(r) => { print(\"recv {r}\") }\n            }\n            tcp_close(afd)\n          },\n          Err(r) => { print(\"accept {r}\") }\n        }\n        tcp_close(cfd)\n      },\n      Err(r) => { print(\"connect {r}\") }\n    }\n    tcp_close(fd)\n  },\n  Err(r) => { print(\"listen {r}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "echo [ping]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "tcp_refused",
+      "src": "let c = tcp_connect(\"127.0.0.1:47399\")\nmatch c {\n  Ok(fd) => { print(\"unexpectedly connected\"); tcp_close(fd) },\n  Err(r) => { print(\"refused ok\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "refused ok\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "tcp_sigpipe",
+      "src": "let srv = tcp_listen(\"127.0.0.1:47312\")\nmatch srv {\n  Ok(fd) => {\n    let cli = tcp_connect(\"127.0.0.1:47312\")\n    match cli {\n      Ok(cfd) => {\n        let acc = tcp_accept(fd)\n        match acc {\n          Ok(afd) => {\n            tcp_close(cfd)\n            let mut tries = 0\n            let mut failed = false\n            while tries < 200 && failed == false {\n              let s = tcp_send(afd, \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\")\n              match s {\n                Ok(n) => { tries = tries + 1 },\n                Err(r) => { failed = true }\n              }\n            }\n            print(\"peer gone, send refused: {failed}\")\n            tcp_close(afd)\n          },\n          Err(r) => { print(\"accept {r}\") }\n        }\n      },\n      Err(r) => { print(\"connect {r}\") }\n    }\n    tcp_close(fd)\n  },\n  Err(r) => { print(\"listen {r}\") }\n}",
+      "wrap": true,
+      "rc": 0,
+      "out": "peer gone, send refused: true\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "trim_ws",
+      "src": "print(\"\\t x \\n\".trim())\nprint(\"[\\tx\\n]\")",
+      "wrap": true,
+      "rc": 0,
+      "out": "x\n[\tx\n]\n",
+      "asan": false,
+      "from": "diff"
+    },
+    {
+      "name": "float_literals",
+      "src": "print(1e-320)\nprint(5e-324)\nprint(1e15)\nprint(1e16)\nprint(0.0001)\nprint(1e-5)\nprint(2.5e20)\nprint(-0.0)\nprint(1.0e308 * 10.0)",
+      "wrap": true,
+      "rc": 0,
+      "out": "1e-320\n5e-324\n1000000000000000.0\n1e+16\n0.0001\n1e-05\n2.5e+20\n-0.0\ninf\n",
+      "asan": false,
+      "from": "agreement"
+    },
+    {
+      "name": "temp_names",
+      "src": "let a = [1, 2]\nlet b = {}\nb.set(\"k\", a)\nlet c = [a, [3]]\nprint(len(c))\nprint(b.get(\"k\"))",
+      "wrap": true,
+      "rc": 0,
+      "out": "2\n[1, 2]\n",
+      "asan": false,
+      "from": "agreement"
+    },
+    {
+      "name": "f64_param_coercion",
+      "src": "fn twice(v: f64) -> f64 {\n  return v * 2\n}\nfn bump(mut v: f64) -> f64 {\n  return v + 0.25\n}\nfn main() -> i64 {\n  print(twice(4))\n  print(bump(1))\n  print(twice(twice(3)))\n  print(twice(-3))\n  print(twice(0))\n  let f = fn(x: f64) { return x * 10 }\n  print(f(2))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "8.0\n1.25\n12.0\n-6.0\n0.0\n20\n",
+      "asan": false,
+      "from": "ledger"
+    },
+    {
+      "name": "int_literal_wraps",
+      "src": "fn main() -> i64 {\n  print(9223372036854775808)\n  print(-9223372036854775808)\n  print(-9223372036854775809)\n  print(18446744073709551616)\n  let x = 9223372036854775808\n  print(x > 0)\n  print(0 - 9223372036854775808)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "-9223372036854775808\n-9223372036854775808\n9223372036854775807\n0\nfalse\n-9223372036854775808\n",
+      "asan": false,
+      "from": "divergence-2026-10-30",
+      "note": "An integer literal is an i64, so it wraps before anything reads it: the interpreter kept the bignum and answered True to `x > 0`."
+    },
+    {
+      "name": "f64_repr_at_1e16",
+      "src": "fn main() -> i64 {\n  print(12345678901234567.0)\n  print(1.0e16)\n  print(1.0e15)\n  print(1.0e-5)\n  print(0.0001)\n  print(1.2345678901234568e16)\n  print(123456789012345678.0)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "1.2345678901234568e+16\n1e+16\n1000000000000000.0\n1e-05\n0.0001\n1.2345678901234568e+16\n1.2345678901234568e+17\n",
+      "asan": false,
+      "from": "divergence-2026-10-30",
+      "note": "repr() decides fixed against exponent by decimal exponent; %g decides by precision, so one 17-digit value at 1e16 printed differently."
+    },
+    {
+      "name": "map_reserved_key_reads",
+      "src": "fn main() -> i64 {\n  let mut m = {\"a\": 1}\n  print(m.get(\"$type\"))\n  print(m.has(\"$type\"))\n  print(m.get_or(\"$type\", 5))\n  print(m.del(\"$type\"))\n  print(m)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "Err('map key \"$type\" is reserved')\nErr('map key \"$type\" is reserved')\nErr('map key \"$type\" is reserved')\nErr('map key \"$type\" is reserved')\n{'a': 1}\n",
+      "asan": false,
+      "from": "divergence-2026-10-30",
+      "note": "Reading the tag is refused with the same err value as writing it; the C methods answered False/None/the default instead."
+    },
+    {
+      "name": "struct_field_by_index",
+      "src": "fn main() -> i64 {\n  let p = Point { x: 1, y: \"two\" }\n  print(p.x)\n  print(p[\"x\"])\n  print(p[\"y\"])\n  print(len(p))\n  for k in p { print(k) }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "1\n1\ntwo\n2\nx\ny\n",
+      "asan": false,
+      "from": "divergence-2026-10-30",
+      "note": "A tagged map is a record: `p[\"x\"]` reads the field. The interpreter refused every index read on a tagged map."
+    },
+    {
+      "name": "struct_missing_field_by_index",
+      "src": "fn main() -> i64 {\n  let p = Point { x: 1 }\n  try { print(p[\"zz\"]) } catch e { print(\"E \" + e) }\n  try { print(p[\"$type\"]) } catch e { print(\"E \" + e) }\n  try { print({\"a\": 1}[\"zz\"]) } catch e { print(\"E \" + e) }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E no field zz\nE no field $type\nE no key zz\n",
+      "asan": false,
+      "from": "divergence-2026-10-30",
+      "note": "The message a catch binds is the same string in both backends: a record says `field`, a plain map says `key`."
+    },
+    {
+      "name": "closure_print_fn",
+      "src": "fn main() -> i64 {\n  let f = fn(x) { return x + 1 }\n  print(f)\n  print(str(f))\n  print([f, [f]])\n  print(\"{f}\")\n  print({\"k\": f})\n  print(f(1))\n  print(tagof(f))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "fn\nfn\n[fn, [fn]]\nfn\n{'k': fn}\n2\nclosure\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "A closure prints as `fn` in both backends: `print`, `str()`, inside a vec, `{}` interpolation and a map value. It used to print the interpreter's own representation of the value."
+    },
+    {
+      "name": "digit_separators",
+      "src": "fn main() -> i64 {\n  print(1_000)\n  print(1_000_000)\n  print(1_0.5)\n  print(1_0e1)\n  print(1_0.2_5)\n  print(9_223_372_036_854_775_807)\n  print(-1_0)\n  print(\"1_000\".parse_int())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "1000\n1000000\n10.5\n100.0\n10.25\n9223372036854775807\n-10\nErr('not a number')\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "Underscores group digits and are erased by both lexers; `_` only ever sits between two digits, so `1_000` is one literal and `1_` is a literal and a name."
+    },
+    {
+      "name": "order_cross_class",
+      "src": "fn main() -> i64 {\n  try { print([1, \"x\"] < [1, 2]) } catch e { print(\"E \" + e) }\n  try { print([1, \"x\"] >= [1, 2]) } catch e { print(\"E \" + e) }\n  try { print(Ok(\"a\") < Ok(1)) } catch e { print(\"E \" + e) }\n  print({\"a\": 1} < {\"a\": 2})\n  print({\"a\": 1} < {\"a\": 1})\n  print([1] < [1, 2])\n  print([[1]] < [[2]])\n  print([None, 1] < [None, 2])\n  print(\"a\" < \"b\")\n  print(1 < 2.5)\n  print(true < 1)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E type error in <\nE type error in >=\nE type error in <\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "Ordering is one rule at every level: a cross-class comparison inside a vec, a tag or a map is `type error in <` (the operator the program wrote). The native side used to answer with the tag enum and the interpreter with a Python `TypeError`."
+    },
+    {
+      "name": "order_sort_min_class",
+      "src": "fn main() -> i64 {\n  try { print([[1], [\"a\"]].sort()) } catch e { print(\"E \" + e) }\n  try { print([1, \"a\"].min()) } catch e { print(\"E \" + e) }\n  try { print([1, \"a\"].sort_by(fn(x) { return x })) } catch e { print(\"E \" + e) }\n  print([3, 1, 2].sort())\n  print([\"b\", \"c\", \"a\"].sort())\n  print([\"bbb\", \"a\", \"cc\"].sort_by(fn(s) { return len(s) }))\n  print([1, 2, 3].min(), [1, 2, 3].max())\n  print([].min())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E type error in <\nE type error in <\nE type error in <\n[1, 2, 3]\n['a', 'b', 'c']\n['a', 'cc', 'bbb']\n1 3\nNone\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "`sort`, `sort_by`, `min` and `max` use the ordering rule above, so a container that is not all of one class is refused instead of being ordered by an arbitrary tie-break."
+    },
+    {
+      "name": "parse_int_range",
+      "src": "fn main() -> i64 {\n  print(\"9223372036854775807\".parse_int())\n  print(\"9223372036854775808\".parse_int())\n  print(\"-9223372036854775808\".parse_int())\n  print(\"-9223372036854775809\".parse_int())\n  print(\"99999999999999999999999\".parse_int())\n  print(\"00000000000000000000000012\".parse_int())\n  print(\" 12\".parse_int())\n  print(\"+5\".parse_int())\n  print(\"1e3\".parse_int())\n  print(\"1 \".parse_int())\n  print(\"99999999999999999999999\".parse_float())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "Ok(9223372036854775807)\nErr('number out of range')\nOk(-9223372036854775808)\nErr('number out of range')\nErr('number out of range')\nOk(12)\nOk(12)\nOk(5)\nErr('not a number')\nErr('not a number')\nOk(1e+23)\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "`parse_int` is an `Err` when the digits do not fit in an `i64`. It used to wrap (`99999999999999999999999` parsed as `Ok(200376420520689663)`), which turns a too-large input into a different valid number."
+    },
+    {
+      "name": "str_ascii_space",
+      "src": "fn main() -> i64 {\n  print(\" x \".trim() == \" x \")\n  print(\" \\t\u000b\f\\r\\nx \\t\u000b\f\\r\\n\".trim())\n  print(\"a b\\tc\\nd\\re\u000bf\fg\".split())\n  print(len(\"a b c　d\".split()))\n  print(len(\"a b\".lines()))\n  print(len(\"a\u000bb\fc\u001cde\".lines()))\n  print(\"a\\r\\nb\\rc\\n\\nd\\n\".lines())\n  print(\"\".lines())\n  print(\"\\n\".lines())\n  print(\"　 1\".parse_int())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "true\nx\n['a', 'b', 'c', 'd', 'e', 'f', 'g']\n1\n1\n1\n['a', 'b', 'c', '', 'd']\n[]\n['']\nErr('not a number')\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "Whitespace for `trim`, `split()` and the `parse_*` methods is the six ASCII characters space, tab, newline, vertical tab, form feed and carriage return; `lines` breaks on `\\n`, `\\r\\n` and `\\r` only. The interpreter used Python's Unicode definitions (NBSP, U+2028, U+0085, ...) while the native runtime used three different ASCII sets."
+    },
+    {
+      "name": "split_empty_sep",
+      "src": "fn main() -> i64 {\n  try { print(\"abc\".split(\"\")) } catch e { print(\"E \" + e) }\n  try { print(\"abc\".split_once(\"\")) } catch e { print(\"E \" + e) }\n  print(\"abc\".split_once(\"b\"))\n  print(\"abc\".split_once(\"x\"))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E empty separator\nE empty separator\n['a', 'c']\nNone\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "`split_once(\"\")` is an error like `split(\"\")`; the native runtime used to return `['', s]`."
+    },
+    {
+      "name": "replace_empty_utf8",
+      "src": "fn main() -> i64 {\n  print(\"é\".replace(\"\", \"-\"))\n  print(len(\"é\".replace(\"\", \"-\")))\n  print(\"日本\".replace(\"\", \"x\"))\n  print(\"a😀\".replace(\"\", \"·\"))\n  print(\"\".replace(\"\", \"x\"))\n  print(\"ab\".replace(\"\", \"\"))\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "-é-\n3\nx日x本x\n·a·😀·\nx\nab\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "Replacing the empty string inserts at code point boundaries. The native runtime inserted between bytes and produced invalid UTF-8 for any non-ASCII input."
+    },
+    {
+      "name": "float_nan_print",
+      "src": "fn main() -> i64 {\n  let inf = 1e300 * 1e300\n  let n = inf - inf\n  print(n)\n  print(-n)\n  print(\"{n} {-n}\")\n  print(str(n))\n  print([n, -n])\n  print(n == n)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "nan\nnan\nnan nan\nnan\n[nan, nan]\nfalse\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "A NaN prints as `nan` whatever its sign bit is. glibc's printf writes `-nan` for a negative NaN, and `inf - inf` produces one on x86."
+    },
+    {
+      "name": "parse_float_grammar",
+      "src": "fn main() -> i64 {\n  print(\"١٢\".parse_float())\n  print(\"-0x1p3\".parse_float())\n  print(\"+0x10\".parse_float())\n  print(\"0x10\".parse_float())\n  print(\"nan(1)\".parse_float())\n  print(\"1_0.5\".parse_float())\n  print(\" 1.5 \".parse_float())\n  print(\"1e\".parse_float())\n  print(\"e1\".parse_float())\n  print(\".\".parse_float())\n  print(\"+\".parse_float())\n  print(\"1e5\".parse_float())\n  print(\"-inf\".parse_float())\n  print(\" INFINITY \".parse_float())\n  print(\"-.5e-3\".parse_float())\n  print(\"5.\".parse_float())\n  print(\".5\".parse_float())\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "Err('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nOk(100000.0)\nOk(-inf)\nOk(inf)\nOk(-0.0005)\nOk(5.0)\nOk(0.5)\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "`parse_float` accepts digits `0-9`, an optional fraction and exponent, and `inf`, `infinity` and `nan` in any case. The interpreter accepted Arabic-Indic digits; the native runtime accepted signed hex floats and `nan(...)`."
+    },
+    {
+      "name": "depth_budget",
+      "src": "fn main() -> i64 {\n  let mut w = [1]\n  let mut i = 0\n  while i < 2200 {\n    w = [w]\n    i += 1\n  }\n  let mut x = [1]\n  let mut j = 0\n  while j < 2200 {\n    x = [x]\n    j += 1\n  }\n  try { print(w == x) } catch e { print(\"E \" + e) }\n  try { print(w < x) } catch e { print(\"E \" + e) }\n  try { print(w == None) } catch e { print(\"E \" + e) }\n  try { print(w == [1]) } catch e { print(\"E \" + e) }\n  try { print(len(str(w))) } catch e { print(\"E \" + e) }\n  try { print([w, x].sort()) } catch e { print(\"E \" + e) }\n  print(\"done\")\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "E recursion too deep\nE recursion too deep\nfalse\nfalse\nE recursion too deep\nE recursion too deep\ndone\n",
+      "asan": false,
+      "from": "conformance-2026-10-30",
+      "note": "Values nest to BRAT_MAX_VALUE_DEPTH (2000) for print, str and comparison, and past it both backends stop with `recursion too deep`. The interpreter used to answer `w == None` with that error (the native side short-circuits on class) and used to print a 2200-deep value that C refuses to walk."
+    },
+    {
+      "name": "caught_error_frame_function",
+      "src": "fn f(op, a) {\n  return a + [1]\n}\n\nfn main() -> i64 {\n  for op in [\"a\", \"b\", \"c\"] {\n    try {\n      print(f(op, 1))\n    } catch e {\n      print(op)\n    }\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "a\nb\nc\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+    },
+    {
+      "name": "caught_error_frame_method",
+      "src": "impl Point {\n  fn bad(self, op) {\n    return self.x + [1]\n  }\n}\n\nfn main() -> i64 {\n  let p = Point { x: 1, y: 2 }\n  for op in [\"a\", \"b\", \"c\"] {\n    try {\n      print(p.bad(op))\n    } catch e {\n      print(op)\n    }\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "a\nb\nc\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+    },
+    {
+      "name": "caught_error_frame_local",
+      "src": "fn g(n) {\n  let total = n * 2\n  return total + [1]\n}\n\nfn main() -> i64 {\n  let total = 100\n  let mut i = 0\n  while i < 3 {\n    try {\n      print(g(i))\n    } catch e {\n      print(total + i)\n    }\n    i += 1\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "100\n101\n102\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+    },
+    {
+      "name": "ownership_of_logical_operands",
+      "src": "fn main() -> i64 {\n  let y = \"abc\".repeat(30)\n  let v = [1, 2, 3]\n  let none = None\n  let mut total = 0\n  for i in 0..3 {\n    let x = y or \"d\"\n    let z = none or y\n    let w = v && y\n    let u = 0 || v\n    total += len(x) + len(z) + len(w) + len(u)\n    if y && v {\n      total += 1\n    }\n    if !(y && v) {\n      total += 1000\n    }\n    while v && false {\n      total += 1000000\n    }\n  }\n  print(total)\n  print(len(y))\n  print(v)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "822\n90\n[1, 2, 3]\n",
+      "asan": true,
+      "from": "audit-2026-11",
+      "note": "`a && b`, `a || b` and `x or y` evaluate to one of their operands. The native code took a variable operand as an alias and the receiver released it, so `let x = y or \"d\"` freed the string `y` still named (heap-use-after-free under ASan). A condition that is such an expression has to release the operand it was handed."
+    },
+    {
+      "name": "ownership_of_logical_operands_dynamic",
+      "src": "fn both(a, b) {\n  return a && b\n}\n\nfn either(a, b) {\n  return a || b\n}\n\nfn first(a, b) {\n  return a or b\n}\n\nfn main() -> i64 {\n  let vals = [1, [1, 2], 0, [3], None, \"text\"]\n  for round in 0..2 {\n    print(both(vals[0], vals[1]))\n    print(either(vals[2], vals[3]))\n    print(first(vals[4], vals[5]))\n    print(first(vals[1], vals[5]))\n  }\n  print(vals)\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "[1, 2]\n[3]\ntext\n[1, 2]\n[1, 2]\n[3]\ntext\n[1, 2]\n[1, [1, 2], 0, [3], None, 'text']\n",
+      "asan": true,
+      "from": "audit-2026-11",
+      "note": "`a && b`, `a || b` and `x or y` evaluate to one of their operands. The native code took a variable operand as an alias and the receiver released it, so `let x = y or \"d\"` freed the string `y` still named (heap-use-after-free under ASan). A condition that is such an expression has to release the operand it was handed."
+    },
+    {
+      "name": "index_must_be_whole",
+      "src": "fn at(a, i) {\n  return a[i]\n}\n\nfn main() -> i64 {\n  let inf = 1e308 * 10.0\n  let nan = inf - inf\n  let idxs = [1, 1.0, 2.0, 1.5, true, nan, inf, 1e30, -1]\n  for a in [[10, 20, 30], \"abc\"] {\n    for i in idxs {\n      try {\n        print(at(a, i))\n      } catch e {\n        print(e)\n      }\n    }\n  }\n  let mut v = [10, 20, 30]\n  for i in idxs {\n    try {\n      v[i] = 7\n      print(v)\n    } catch e {\n      print(e)\n    }\n  }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "20\n20\n30\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\nb\nb\nc\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n[10, 7, 30]\n[10, 7, 30]\n[10, 7, 7]\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "An index is an integer or a float with a whole value. The native read truncated `v[1.5]` to `v[1]`, took NaN and infinity through an undefined float-to-int cast, and the interpreter accepted a bool and leaked CPython's `cannot convert float NaN to integer`."
+    },
+    {
+      "name": "operator_type_errors",
+      "src": "fn div(a, b) {\n  return a / b\n}\n\nfn rem(a, b) {\n  return a % b\n}\n\nfn has(a, b) {\n  return a in b\n}\n\nfn at(a, i) {\n  return a[i]\n}\n\nfn main() -> i64 {\n  let inf = 1e308 * 10.0\n  try { print(div(1.5, \"\")) } catch e { print(e) }\n  try { print(div(\"\", 0)) } catch e { print(e) }\n  try { print(div(1, 0)) } catch e { print(e) }\n  try { print(div([1], 2.5)) } catch e { print(e) }\n  try { print(rem(\"\", 0)) } catch e { print(e) }\n  try { print(rem(5, 0)) } catch e { print(e) }\n  try { print(rem(inf, 1)) } catch e { print(e) }\n  try { print(rem(-7.5, 2)) } catch e { print(e) }\n  try { print(has(0, \"abc\")) } catch e { print(e) }\n  try { print(has(\"b\", \"abc\")) } catch e { print(e) }\n  try { print(has([], {})) } catch e { print(e) }\n  try { print(has(\"a\", {\"a\": 1})) } catch e { print(e) }\n  try { print(has(2, [1, 2])) } catch e { print(e) }\n  try { print(at({}, [])) } catch e { print(e) }\n  try { print(at({\"a\": 1}, [1, 2])) } catch e { print(e) }\n  return 0\n}\n",
+      "wrap": false,
+      "rc": 0,
+      "out": "type error in /\ntype error in /\ndiv by zero\ntype error in /\ntype error in %\ndiv by zero\nnan\n0.5\nin of non-container\ntrue\nfalse\ntrue\ntrue\nno key []\nno key [1, 2]\n",
+      "asan": false,
+      "from": "audit-2026-11",
+      "note": "The interpreter answered `/` and `%` on the wrong types with CPython's `unsupported operand type(s)` or, for a zero divisor, `div by zero` before looking at the types; `inf % 1` was `math domain error`; `in` with a non-string left of a string leaked CPython's text; a vector as a map key was `unhashable map key` for a read where the native answer is `no key`."
+    }
+  ]
+}
