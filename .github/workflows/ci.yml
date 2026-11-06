@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  native-and-sanitizers:
+    name: Native Conformance & ASan/UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ensure C/FFI development headers and Valgrind
+        run: |
+          PKGS=""
+          [ -f /usr/include/sqlite3.h ] || PKGS="$PKGS libsqlite3-dev"
+          command -v clang >/dev/null 2>&1 || PKGS="$PKGS clang"
+          command -v valgrind >/dev/null 2>&1 || PKGS="$PKGS valgrind"
+          if [ -n "$PKGS" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends $PKGS
+          fi
+
+      - name: Build release and ASan/UBSan compiler binaries
+        run: |
+          make -j"$(nproc)"
+          make -j"$(nproc)" asan
+
+      - name: Run 109/109 native conformance and regression suites
+        run: make test-native
+
+      - name: Run native C++20 frontend, checker, borrow, module and docs contracts
+        run: |
+          python3 lang/tests/run_all.py -j "$(nproc)" \
+            test_cxx_frontend.py \
+            test_cxx_checker.py \
+            test_cxx_borrow.py \
+            test_cxx_modules.py \
+            test_cxx_clang_headers.py \
+            test_docs_examples.py
+
+      - name: Exercise compiler under ASan + UBSan + LSan
+        env:
+          BRAT_CXX: ${{ github.workspace }}/lang/cxx/bin/brat-cxx-asan
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: |
+          python3 lang/tests/test_bitwise.py
+          python3 lang/tests/test_runtime_json_enum.py
+          python3 lang/tests/test_defer_try_soundness.py
+          python3 lang/tests/test_perf_codegen.py
+          python3 lang/tests/test_bindgen_preprocess_sys.py
+          python3 lang/tests/test_dwarf_pax_parfor.py
+          python3 lang/tests/test_examples_and_valgrind.py
+          python3 lang/tests/test_shaped_map_ic.py
+          python3 lang/tests/test_import_prune.py
+
+  full-suite:
+    name: Test Suite (${{ matrix.shard }}/8)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Ensure SQLite and Clang headers
+        run: |
+          PKGS=""
+          [ -f /usr/include/sqlite3.h ] || PKGS="$PKGS libsqlite3-dev"
+          command -v clang >/dev/null 2>&1 || PKGS="$PKGS clang"
+          command -v go >/dev/null 2>&1 || PKGS="$PKGS golang-go"
+          if [ -n "$PKGS" ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends $PKGS
+          fi
+
+      - name: Build native compiler
+        run: make -j"$(nproc)"
+
+      - name: Run shard ${{ matrix.shard }}/8 of 169 test files
+        run: python3 lang/tests/run_all.py --shard "${{ matrix.shard }}/8" -j "$(nproc)"
+
+  macos-arm64:
+    name: Native macOS (arm64)
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build native compiler with Apple Clang
+        run: make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Verify symlink launcher, frontend, checker, borrow, FFI and bundle
+        run: |
+          ./bin/brat run examples/hello.brat
+          ./bin/brat run examples/json_arena.brat
+          python3 lang/tests/test_agreement.py --native-only
+          python3 lang/tests/test_cxx_frontend.py
+          python3 lang/tests/test_cxx_checker.py
+          python3 lang/tests/test_cxx_borrow.py
+          python3 lang/tests/test_cxx_modules.py
+          python3 lang/tests/test_bitwise.py
+          python3 lang/tests/test_runtime_json_enum.py
+          python3 lang/tests/test_defer_try_soundness.py
+          python3 lang/tests/test_import_prune.py
+
+  windows-x86_64:
+    name: Native Windows (x86_64 LLP64)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build native compiler with MinGW-w64 and run LLP64 verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          New-Item -ItemType Directory -Force -Path lang/cxx/bin | Out-Null
+          $srcs = Get-ChildItem lang/cxx/src/*.cpp | ForEach-Object { $_.FullName }
+          & g++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -static $srcs -lws2_32 -o lang/cxx/bin/brat-cxx.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./lang/cxx/bin/brat-cxx.exe run examples/hello.brat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./lang/cxx/bin/brat-cxx.exe run examples/json_arena.brat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_cxx_frontend.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_cxx_checker.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_cxx_borrow.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_cxx_modules.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_bitwise.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_runtime_json_enum.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python lang/tests/test_import_prune.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

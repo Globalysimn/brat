@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version label for manual dry-run bundles (e.g. v0.7.0)'
+        required: false
+        default: 'v0.7.0'
+
+permissions:
+  contents: write
+
+jobs:
+  bundle-posix:
+    name: Bundle (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+          - os: macos-15
+            target: macos-arm64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build native toolchain and portable bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.tag }}"
+          fi
+          make -j"$(getconf _NPROCESSORS_ONLN || echo 4)"
+          STAGE="brat-${VERSION}-${{ matrix.target }}"
+          ./lang/cxx/bin/brat-cxx bundle "${STAGE}"
+          "${STAGE}/bin/brat" check examples/hello.brat
+          tar -czf "${STAGE}.tar.gz" "${STAGE}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.target }}
+          path: brat-*.tar.gz
+          if-no-files-found: error
+
+  bundle-windows:
+    name: Bundle (windows-x86_64)
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build native toolchain and portable Windows bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:GITHUB_REF_NAME
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $version = "${{ inputs.tag }}"
+          }
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          New-Item -ItemType Directory -Force -Path lang/cxx/bin | Out-Null
+          $srcs = Get-ChildItem lang/cxx/src/*.cpp | ForEach-Object { $_.FullName }
+          & g++ -std=c++20 -O2 -static $srcs -lws2_32 -o lang/cxx/bin/brat-cxx.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stage = "brat-$version-windows-x86_64"
+          & ./lang/cxx/bin/brat-cxx.exe bundle $stage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$stage/lang/cxx/bin/brat-cxx.exe" check examples/hello.brat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-windows-x86_64
+          path: brat-*.zip
+          if-no-files-found: error
+
+  vscode-extension:
+    name: VS Code Extension (.vsix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Package VS Code extension
+        working-directory: editors/vscode
+        run: |
+          set -euo pipefail
+          node --check extension.js
+          npm install --no-audit --no-fund
+          npx --yes @vscode/vsce package --allow-missing-repository --no-dependencies -o ../../brat-lang.vsix || \
+            npx --yes @vscode/vsce package --allow-missing-repository -o ../../brat-lang.vsix
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-vscode
+          path: brat-lang.vsix
+          if-no-files-found: error
+
+  publish:
+    name: Checksums & GitHub Release
+    needs: [bundle-posix, bundle-windows, vscode-extension]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist-raw
+
+      - name: Assemble release directory and SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p release-out
+          find dist-raw -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.vsix' \) -exec cp {} release-out/ \;
+          (cd release-out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle-all
+          path: release-out/*
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release on tag push
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-out/* --clobber
+          else
+            gh release create "${TAG}" release-out/* --title "BRAT ${TAG}" --generate-notes
+          fi
