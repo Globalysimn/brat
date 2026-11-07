@@ -40,11 +40,16 @@ when present, its return value becomes the process exit status.
   `1.0` and `true` are three distinct keys). Indexing a missing key with `m[k]`
   raises `no key`; `m.get(k)` returns `None` when absent and `m.get_or(k, def)`
   returns `def`.
-- Tagged records and enums: `Point { x: 1, y: 2 }` creates a map tagged with
-  `"Point"` without requiring a prior struct definition. `enum Name { A, B(x) }`
-  defines variant constructors; `Ok(v)`, `Err(e)`, `Some(v)` and `None` are
+- Nominal `struct`s, tagged records, `enum`s, `Option[T]` and `Result[T, E]`:
+  `[pub] struct Name { field: Type, ... }` declares a nominal struct with
+  checked field names/types, shorthand literals (`Point { x, y }`), canonical
+  declaration-order slot layout, and closed or open (`Point { x, .. }`) pattern
+  destructuring; undeclared `Point { x: 1, y: 2 }` still creates an ad-hoc map
+  tagged `"Point"`. `[pub] enum Name { A, B(x), C(i64), D(id: i64, msg: str) }`
+  defines untyped, positional typed, or named typed variant constructors.
+  `Option[T]` (`Some(v)`, `None`) and `Result[T, E]` (`Ok(v)`, `Err(e)`) are
   predeclared in the prelude. Variants cannot be indexed with `[]`; destructure
-  them with `match`, `if let`, `?` or `unwrap`.
+  them with `match`, `if let`, `?` or `unwrap` / `unwrap_or`.
 
 ### 2.2 Equality and ordering
 
@@ -80,6 +85,9 @@ method arity is checked statically during `brat-cxx check`:
   `map(fn)`, `filter(fn)`, `fold(init, fn)`, `any(fn)`, `all(fn)`, `find(fn)`.
 - `map`: `get(k)`, `get_or(k, default)`, `has(k)`, `set(k, v)`, `del(k)`,
   `keys()`, `vals()`, `items()`, `copy()`.
+- `Option[T]` and `Result[T, E]` tags: `unwrap()`, `unwrap_or(default)` (evaluates
+  `default` lazily only on `None` / `Err`), `is_ok()`, `is_err()`, `is_some()`,
+  `is_none()`.
 
 ## 3. Ownership, mutability and borrows
 
@@ -106,16 +114,20 @@ move/borrow rules checked intra-procedurally by `borrow.cpp`:
 ## 4. Static type islands and numeric lowering
 
 Type annotations are optional. Functions with an annotated return type (`-> i64`,
-`-> f64`, `-> bool`, `-> str`, `-> vec[T]`, `-> map`, `-> none`) are statically
-type-checked (`check.cpp`); unannotated functions operate on dynamic `Val`
-values. Generic type parameters (`fn first<T>(v: vec[T]) -> T`) are checked for
+`-> f64`, `-> bool`, `-> str`, `-> vec[T]`, `-> map`, `-> StructName`,
+`-> EnumName`, `-> Option[T]`, `-> Result[T, E]`, `-> none`) are statically
+type-checked (`check.cpp`), including `if x.is_some()` / `if r.is_ok()` flow
+narrowing for `unwrap()`; unannotated functions operate on dynamic `Val` values.
+Generic type parameters (`fn first<T>(v: vec[T]) -> T`) are checked for
 declaration consistency and erased before code generation.
 
 Functions whose parameters are all `i64` (or all `f64`, or a mix of `i64` and
 `vec[i64]`) and whose body uses arithmetic, comparisons, loops and calls to
 compatible numeric functions compile to unboxed C scalar functions (`int64_t`,
 `double`, raw `Vec *` item access) paired with a tag-checking boxed wrapper for
-dynamic callers.
+dynamic callers. At `-O1` and `-O2`, non-escaping, unaliased local `struct`
+bindings (including nested structs) are decomposed by Scalar Replacement of
+Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
 
 ## 5. Functions, closures, traits and errors
 
@@ -130,9 +142,12 @@ dynamic callers.
   Type { ... }` must implement every method in the trait. Associated functions
   without `self` inside `impl Type` are called as `Type.func(...)`. Dynamic
   trait objects are not supported.
-- `?` unwraps `Ok(v)` / `Some(v)`, passes non-tagged values through, and returns
-  `Err(e)` from the current function. `expr or fallback` substitutes `fallback`
-  when `expr` evaluates to `None` (never for `Err`).
+- `?` unwraps `Ok(v)` / `Some(v)` and passes non-tagged values through. Inside
+  functions annotated `-> Result` / `-> Result[T, E]`, `Err(e)?` returns `Err(e)`
+  early from the function; in non-`Result` functions, `?` on `Err(e)` or `None`
+  unwinds to the enclosing `try/catch` (or terminates unhandled). `expr or
+  fallback` substitutes `fallback` when `expr` evaluates to `None` (never for
+  `Err`).
 - `try { ... } catch e { ... }` catches `Err` unwinding from `?` / `raise(msg)`
   and runtime errors, binding `e` to the error payload while letting `return`,
   `break` and `continue` pass through untouched. `defer stmt` runs `stmt` in
@@ -144,11 +159,12 @@ dynamic callers.
   `while let Pat = expr { ... }`, `for x in vec_expr { ... }`, and half-open
   integer range loops `for i in lo..hi { ... }`.
 - `match expr { pat => { ... }, ... }` supports literals, variable bindings
-  (lowercase), nullary enum tags (uppercase), nested destructuring
-  (`Some(Ok(v))`), guards (`x if x > 0 => ...`) and `_` (must appear last).
-  Duplicate literal/variant patterns are parse errors. When all arms match
-  variants of one file-local `enum` (or `bool`), missing variants without `_`
-  are rejected at parse time (`non-exhaustive match`).
+  (lowercase), nullary enum tags (uppercase), struct destructuring
+  (`Point { x, y }`, `Point { x, .. }`), nested destructuring (`Some(Ok(v))`),
+  guards (`x if x > 0 => ...`) and `_` (must appear last). Duplicate
+  literal/variant patterns are parse errors. Exhaustiveness without `_` is
+  checked across local and imported `pub enum` types, `Option[T]`,
+  `Result[T, E]`, closed `struct` patterns and `bool`.
 - `unsafe { ... }` marks raw pointer or FFI sections for human readers without
   disabling any borrow, ownership or type check.
 
@@ -173,9 +189,10 @@ dynamic callers.
 ## 8. Modules, interfaces and packages
 
 - `import a.b` loads `a/b.brat` from the entry directory, `vendor/`, or
-  `lang/std/` (`$BRAT_STDLIB`). Only `pub fn` declarations (or signatures listed
-  in an adjacent `b.bri` interface file) are visible to importers; `pub use
-  a.b.fn_name` re-exports an imported public function without duplicating it.
+  `lang/std/` (`$BRAT_STDLIB`). Only `pub fn`, `pub struct` and `pub enum`
+  declarations (checked against an adjacent `b.bri` interface file when present)
+  are visible to importers; `pub use a.b.fn_name` re-exports an imported public
+  function without duplicating it.
 - `brat-cxx pkg` resolves local archives, GitHub tarballs and `$BRAT_INDEX` /
   `brat-index.json` constraints (`=`, `>`, `>=`, `<`, `<=`), verifies SHA-256
   digests in `brat.lock`, compiles package `c_sources` and emits `.bratbind`
