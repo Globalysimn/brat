@@ -1,0 +1,122 @@
+# CLI, Environment Variables, and Diagnostic Codes
+
+`./bin/brat` is a thin wrapper around `./lang/cxx/bin/brat-cxx`. Both accept the
+exact same subcommands and flags.
+
+---
+
+## 1. Subcommands
+
+### Compile and execute
+
+| Command | Purpose |
+|---|---|
+| `brat check [--json] <file.brat>` | Parse, load modules, check ownership (`borrow.cpp`) and types (`check.cpp`) without invoking a C compiler. `--json` emits machine-readable diagnostics (`code`, `severity`, `line`, `col`, `message`, `hint`, `fix`). |
+| `brat run [-O0\|-O1\|-O2] [--trace-lines] [--mem MB] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
+| `brat build [-O0\|-O1\|-O2] [--shared] [--out-header out.h] [--trace-lines] [--mem MB] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). |
+| `brat emit-c [-O0\|-O1\|-O2] [--trace-lines] <file.brat> [-o out.c]` | Write the generated C11 translation unit to `stdout` or `-o out.c` so you can read it or feed a custom build system. |
+| `brat repl` | Interactive read-eval-print loop with persistent bindings, definitions, and `:help` / `:quit`. |
+
+### C FFI verification and binding generation
+
+| Command | Purpose |
+|---|---|
+| `brat ffi [--json] [--preprocess] [-I dir] [-D K=V] [--target triple] [--abi-matrix] [--header h.h] [--object lib.o\|.a\|.so] <file.brat>` | Verify every `extern fn`, `extern struct`, and `extern union` in `<file.brat>` against C headers and/or compiled ELF/Mach-O/PE DWARF debug info. Without `--preprocess`, raw `#ifdef` directives in headers are rejected explicitly. |
+| `brat bindgen <header.h> [--preprocess] [-I dir] [-D K=V] [--target triple] [--link lib] [-o out.brat]` | Generate checked `.brat` `extern` declarations (plus an adjacent `.bratbind` SHA-256 verification manifest when `-o` is used) directly from a C header. |
+
+Build-time FFI flags accepted by `build` and `run`:
+
+- `--header <h.h>` (repeatable), `-I <dir>` / `-I<dir>`, `-D <macro>` / `-D<macro>`, `--target <triple>`
+- `--object <lib.o|.a|.so|.dylib|.dll>` (repeatable; inspects symbol tables + DWARF v2–v5 without `dlopen`)
+- `--abi-matrix` (probe struct layouts across LP64, LLP64, and ILP32 target widths)
+- `--unsafe-ffi` (explicit opt-out allowing unverified `extern` declarations to compile)
+
+### Formatting, testing, packages, and introspection
+
+| Command | Purpose |
+|---|---|
+| `brat fmt [--check\|--write] <file.brat...>` | Canonical formatter. Prints formatted source by default, checks formatting in CI with `--check` (exit `1` on diff), or rewrites in place with `--write`. |
+| `brat test [--filter substr] [--json] [path...]` | Discover `*_test.brat` files (or explicit paths) and run every zero-arg `test_*` function, reporting pass/fail counts. |
+| `brat pkg <add\|install\|verify\|list\|update\|publish>` | Vendored `.tar.gz` package manager backed by `brat.lock` and `./vendor/`. See [Modules & `pkg`](modules.md). |
+| `brat deps [--dot\|--json] [-o out] <file.brat>` | Inspect the transitive import graph as text, Graphviz DOT, or JSON. |
+| `brat api [--json] <file.brat>` | Extract the public `.bri` interface signature of a module. |
+| `brat api --diff [--json] <old.bri> <new.bri>` | Compare two interfaces and classify the change as `none`, `minor`, or `major` (exits non-zero on `major`). |
+| `brat doc [-o out.md\|out.html] <file.brat>` | Render Markdown or standalone HTML API documentation from module signatures and doc comments. |
+| `brat bundle <file.brat> -o <out.tar.gz>` | Pack `<file.brat>`, all transitive local/vendored `.brat`/`.bri` imports, `crt.h`, and `crt/*.h` into a self-contained tarball buildable anywhere with a C11 compiler. |
+| `brat explain [--json] <code>` | Print a worked explanation and fix example for diagnostic code `<code>` (listed below). |
+| `brat lsp` | Start the JSON-RPC 2.0 Language Server on `stdio` (diagnostics, hover, go-to-definition, completions, formatting, code actions). |
+| `brat mcp [--root dir]` | Start the Model Context Protocol tool server on `stdio`, confined to `--root` (default `.`). |
+
+---
+
+## 2. Environment variables
+
+### Compiler and build cache
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BRAT_CC` | `cc` (or platform `gcc`/`clang`) | C11 compiler invoked by `build`, `run`, `ffi`, and `bindgen --preprocess`. |
+| `BRAT_CC_TIMEOUT_MS` | `120000` | Maximum wall time (`1..3600000` ms) allowed for a child C compiler invocation. |
+| `BRAT_CACHE` | `~/.cache/brat` (or OS cache dir) | Directory for content-addressed `brat run` binaries and precompiled headers. |
+| `BRAT_NATIVE_CACHE_DISABLE` | unset | Set to `1` to bypass the `brat run` binary cache (useful when benchmarking cold builds). |
+| `BRAT_NO_PCH` | unset | Set to `1` to disable precompiled `crt.h` headers during C compilation. |
+| `BRAT_STDLIB` | `<repo>/lang/std` | Override path searched for `import std.*`. |
+| `BRAT_INDEX` | `./brat-index.json` | Path or URL to the JSON package index consulted by `brat pkg`. |
+
+### Runtime confinement and resource budgets
+
+| Variable | Default | Effect |
+|---|---|---|
+| `BRAT_FILES` | current working directory | Colon-separated list (`;` on Windows) of allowed root directories for confined file and SQLite operations (`O_NOFOLLOW`). Set `BRAT_FILES=""` to deny all file I/O. |
+| `BRAT_EXEC` | `0` (disabled) | Must be set to `1` before `proc_run` / `std.proc.*` will spawn child processes. |
+| `BRAT_EXEC_ALLOW` | unset (all programs when `BRAT_EXEC=1`) | Colon-separated allowlist of executable paths/names permitted under `BRAT_EXEC=1`. |
+| `BRAT_PROC_TIMEOUT_MS` | unset | Default timeout in milliseconds applied to `proc_run` children before `SIGKILL`. |
+| `BRAT_ENV_ALLOW` | unset | Comma/colon-separated allowlist of environment variable names visible to `env_get` / `std.env`, overriding the secret-name denylist. |
+| `BRAT_ENV_DENY_ALL` | unset | Set to `1` to make `env_get` / `std.env` return `None` for every variable. |
+| `BRAT_RECURSION_BUDGET` | `2000` | Maximum BRAT call depth (`1..1000000`) before raising catchable `recursion too deep`. |
+| `BRAT_PIN_BUDGET_BYTES` | `67108864` (64 MiB) | Maximum slab memory used to pin short SSO strings passed across C FFI (`ptr_of_str` / `str`). |
+| `BRAT_MEM_BYTES` | unset (unlimited) | Hard process resident/heap cap (also settable via `--mem <MB>` on Linux `RLIMIT_AS`). |
+| `BRAT_THREADS` | hardware concurrency | Worker thread count for `par for` and the runtime task pool. |
+| `BRAT_TRACE` | unset | Set to `1` to enable line-number trace updates when compiled with `--trace-lines`. |
+
+---
+
+## 3. Diagnostic code index (`brat explain <code>`)
+
+Run `./bin/brat explain E0382` (or `--json`) at any time to see a runnable
+before/after example in your terminal.
+
+### Ownership and lifetime (`E03xx` – `E05xx`)
+
+| Code | Summary | Typical cause & fix |
+|---|---|---|
+| `E0382` | Use of moved value | Reading a binding after `move x` transferred ownership. Borrow with `ref`, pass `x.copy()`, or reorder the read before `move`. |
+| `E0499` | Second mutable borrow while first is active | Passing the same binding twice as `mut` in one call (`swap_both(mut v, mut v)`). Use distinct values or index positions inside one `mut` parameter. |
+| `E0502` | Cannot mutate / borrow conflict | Mutating a container inside `for x in items { items.push(...) }`, mutating a binding while an active `ref` borrow is still read later, or direct self-insertion (`v.push(v)`). Collect changes in a second vector or finish reading the borrow first. |
+| `E0505` | Cannot move out of borrowed value | Moving `x` (`eat(move x)`) while a local alias `let r = x` still has a later read. Move `eat(move x)` past the last read of `r`, or `r = x.copy()`. |
+| `E0507` | Cannot move out of borrowed parameter | `move s` inside `fn f(s: ref str)`. Change the parameter to `s: move str` or copy (`let owned = s.copy()`). |
+| `E0515` | Borrowed reference escapes via `return` | Returning a `ref` parameter, local borrow, or `ptr_of_str(local)` whose owner dies at function exit (`arena` escapes without `own(...)` are also rejected). Return an owned copy (`s.copy()` / `own(v)`). |
+| `E0596` | Mutation of immutable binding | Reassigning `x = ...` or calling `.push()` / `.set()` / `.del()` / `.sort()` without `let mut x` or `mut` parameter mode. |
+
+### Concurrency, scope, and plugins (`B0xxx`)
+
+| Code | Summary | Typical cause & fix |
+|---|---|---|
+| `B0101` | Undeclared identifier | Variable or function name is not in scope (`brat check` suggests close spellings). |
+| `B0521` | Borrowed value escapes via `spawn` | Spawning a worker closure that captures a `ref`/`mut` parameter without joining inside the function. Wrap the `spawn` in `scope { ... }` or call `join_all()` before returning. |
+| `B0522` | Data race across concurrent `spawn` tasks | Mutating a captured binding while another `spawn` reads or writes it before `join_all()` / `scope` exit. Pass values over `chan(cap)` or use `par for ... reduce(...)`. |
+| `B0530` | Plugin symbol/value used after `lib_close` | Calling a symbol or reading data from a handle opened with `lib_open` after `lib_close(lib)` ran. Keep `defer lib_close(lib)` in the outer scope. |
+| `B0531` | Plugin signature mismatch | `call(sym, sig, ...)` signature string does not match the symbol exported in the plugin's `brat_plugin_abi_v1` table. |
+| `B0000` | General check diagnostic | Catch-all code for diagnostics without a dedicated numbered rule (for example duplicate top-level definitions). |
+
+### Syntax, types, FFI, and warnings (`P`, `T`, `F`, `W`)
+
+| Code | Summary | Typical cause & fix |
+|---|---|---|
+| `P0001` | Syntax / parse error | Malformed token, unclosed delimiter, or non-exhaustive `match` on an in-file `enum`/`bool`. |
+| `T0001` | Type or arity mismatch | Passing `str` to an `i64` parameter, implicit `i64`/`f64` mixing, wrong argument count, or `arena` escape. |
+| `F0001` | Unverified or incompatible FFI declaration | `extern fn` lacks `--header`/`--object`/`.bratbind`, or C parameter/return width/constness disagrees with the header or DWARF DIE. |
+| `W0001` | Unused variable | Local binding is never read; prefix intentionally ignored bindings with `_` (`let _unused = ...`). |
+| `W0002` | Unnecessary `let mut` | Binding is declared `let mut` but never reassigned or mutated in place. |
+| `W0003` | Unused `import` | Imported module has no symbols referenced in the file. |
+| `W0004` | Literal `{...}` in string did not interpolate | Braces inside `"..."` failed to parse as an expression and stayed literal text (harmless for JSON literals, flagged when suspicious). |

@@ -13,6 +13,8 @@ import _cxx
 import _scratch
 
 import os
+import re
+import socket
 import subprocess
 import sys
 
@@ -21,6 +23,22 @@ CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-sock-")
 
 n = 0
+_next_port = 19400
+
+
+def _alloc_port():
+    global _next_port
+    while _next_port < 30000:
+        cand = _next_port
+        _next_port += 1
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", cand))
+                return cand
+            except OSError:
+                continue
+    raise RuntimeError("no free local port in 19400..29999")
 
 
 def check(cond, msg):
@@ -30,6 +48,13 @@ def check(cond, msg):
 
 
 def write(name, text):
+    port_map = {}
+    def _sub(m):
+        old = m.group(1)
+        if old not in port_map:
+            port_map[old] = str(_alloc_port())
+        return "127.0.0.1:" + port_map[old]
+    text = re.sub(r"127\.0\.0\.1:(473[78]\d)", _sub, text)
     path = os.path.join(TMP, name)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
