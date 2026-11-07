@@ -19,7 +19,8 @@ separate UID and kernel resource limits (`rlimit`, cgroups, seccomp).
    rejects returning `ptr_of_str(local)` from a function. Inline short strings
    (`<= 14` bytes) have no heap buffer of their own, so `ptr_of_str` interns them
    into a non-moving, demand-paged slab pool (`64 KiB` chunks) capped by
-   `BRAT_PIN_BUDGET_BYTES` (default `67108864`, 64 MiB; `0` disables the cap).
+   `BRAT_PIN_BUDGET_BYTES` (default `67108864`, 64 MiB; `0` disables the cap,
+   meaning unlimited pinning — not recommended for untrusted inputs).
    Reaching the budget raises a catchable runtime error (`string pin limit
    exceeded`) without invalidating already-issued pointers. Foreign code still
    must not retain borrowed string pointers after the owner is freed.
@@ -27,7 +28,7 @@ separate UID and kernel resource limits (`rlimit`, cgroups, seccomp).
    `yes`, `on`) is set in the environment, built-in file operations (`read_file`,
    `write_file`, `fs_rename`, `fs_remove`) and `sql_open` confine relative paths
    to the program's module root using `openat`/`O_NOFOLLOW` leaf checks and
-   reject NUL bytes. `sql_open` additionally rejects `file:` URIs, checks
+   reject NUL bytes (see [docs/guide/cli.md](docs/guide/cli.md)). `sql_open` additionally rejects `file:` URIs, checks
    `-wal`, `-shm` and `-journal` sidecars against symlink replacement, verifies
    `(st_dev, st_ino)` identity across `sqlite3_open_v2(SQLITE_OPEN_NOFOLLOW)`,
    enables `SQLITE_DBCONFIG_DEFENSIVE`, disables `TRUSTED_SCHEMA` and extension
@@ -48,7 +49,9 @@ platform limitations.
 
 ## Reporting defects
 
-Include the commit hash, operating system, C/C++ compiler versions, exact
-command line and a minimal non-destructive reproducer. Avoid publishing
-weaponized exploit payloads in public issues before maintainers have had a
-chance to reproduce and patch the defect.
+Report defects via GitHub Issues (`https://github.com/Globalysimn/brat/issues`)
+until a dedicated private advisory channel is set up. Include the commit hash,
+operating system, C/C++ compiler versions, exact command line and a minimal
+non-destructive reproducer. Avoid publishing weaponized exploit payloads in
+public issues before maintainers have had a chance to reproduce and patch the
+defect.

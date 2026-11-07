@@ -1,7 +1,7 @@
-fn sha256(data)
-fn sha256_hex(data)
-fn hmac_sha256(key, msg)
-fn hmac_sha256_hex(key, msg)
+fn sha256(data) -> Result[vec[i64], str]
+fn sha256_hex(data) -> Result[str, str]
+fn hmac_sha256(key, msg) -> Result[vec[i64], str]
+fn hmac_sha256_hex(key, msg) -> Result[str, str]
 fn constant_time_eq(a: str, b: str) -> bool
-fn rand_bytes(n: i64)
-fn rand_hex(n_bytes: i64)
+fn rand_bytes(n: i64) -> Result[vec[i64], str]
+fn rand_hex(n_bytes: i64) -> Result[str, str]

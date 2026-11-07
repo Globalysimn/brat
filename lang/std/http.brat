@@ -42,7 +42,7 @@ fn parse_uint(s: str) {
   return s.parse_int()
 }
 
-pub fn parse_url(url: str) {
+pub fn parse_url(url: str) -> Result[map, str] {
   let mut err = ""
   if has_ctl_or_space(url) {
     err = "URL contains control characters or spaces"
@@ -197,7 +197,7 @@ pub fn encode_query_component(s: str) -> str {
   return out
 }
 
-pub fn decode_query_component(s: str) {
+pub fn decode_query_component(s: str) -> Result[str, str] {
   let bs = utf8_bytes(s)
   let n = len(bs)
   let mut out = []
@@ -247,7 +247,7 @@ pub fn encode_query(params) -> str {
   return out
 }
 
-pub fn parse_query(qs: str) {
+pub fn parse_query(qs: str) -> Result[map, str] {
   let mut raw = qs + ""
   if qs.starts_with("?") {
     raw = qs.slice(1, len(qs))
@@ -899,7 +899,7 @@ fn send_recv_conn(conn: i64, wire: str, method: str, always_close: bool) {
   return pr
 }
 
-pub fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str) {
+pub fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str) -> Result[map, str] {
   let ur = parse_url(url)
   if is_err(ur) {
     return ur
@@ -924,7 +924,7 @@ pub fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str) {
   return send_recv_conn(unwrap(cr), wire, method, true)
 }
 
-pub fn open_keep_alive(url: str) {
+pub fn open_keep_alive(url: str) -> Result[i64, str] {
   let ur = parse_url(url)
   if is_err(ur) {
     return ur
@@ -936,7 +936,7 @@ pub fn open_keep_alive(url: str) {
   return tcp_connect(info["dial"])
 }
 
-pub fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str) {
+pub fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str) -> Result[map, str] {
   let ur = parse_url(url)
   if is_err(ur) {
     return ur
@@ -952,23 +952,23 @@ pub fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str) 
   return send_recv_conn(conn, unwrap(wr), method, false)
 }
 
-pub fn get_keep_alive(conn: i64, url: str) {
+pub fn get_keep_alive(conn: i64, url: str) -> Result[map, str] {
   return request_keep_alive(conn, "GET", url, {}, "")
 }
 
-pub fn close_keep_alive(conn: i64) {
+pub fn close_keep_alive(conn: i64) -> Result[i64, str] {
   return tcp_close(conn)
 }
 
-pub fn request_headers(method: str, url: str, headers, body: str) {
+pub fn request_headers(method: str, url: str, headers, body: str) -> Result[map, str] {
   return request_tls_ca(method, url, headers, body, "")
 }
 
-pub fn request_ex(method: str, url: str, headers, body: str) {
+pub fn request_ex(method: str, url: str, headers, body: str) -> Result[map, str] {
   return request_headers(method, url, headers, body)
 }
 
-pub fn request(method: str, url: str, content_type: str, body: str) {
+pub fn request(method: str, url: str, content_type: str, body: str) -> Result[map, str] {
   let mut hdrs = {}
   if len(content_type) > 0 {
     hdrs.set("Content-Type", content_type)
@@ -976,11 +976,11 @@ pub fn request(method: str, url: str, content_type: str, body: str) {
   return request_headers(method, url, hdrs, body)
 }
 
-pub fn get(url: str) {
+pub fn get(url: str) -> Result[map, str] {
   return request("GET", url, "", "")
 }
 
-pub fn get_ca(url: str, ca_file: str) {
+pub fn get_ca(url: str, ca_file: str) -> Result[map, str] {
   return request_tls_ca("GET", url, {}, "", ca_file)
 }
 
@@ -1024,7 +1024,7 @@ fn is_internal_host(raw_host: str) -> bool {
   return false
 }
 
-pub fn get_follow(url: str, max_redirects: i64) {
+pub fn get_follow(url: str, max_redirects: i64) -> Result[map, str] {
   let init_ur = parse_url(url)
   if is_err(init_ur) {
     return init_ur
@@ -1088,7 +1088,7 @@ pub fn get_follow(url: str, max_redirects: i64) {
   return Err("too many HTTP redirects")
 }
 
-pub fn post_json(url: str, json_body: str) {
+pub fn post_json(url: str, json_body: str) -> Result[map, str] {
   return request("POST", url, "application/json", json_body)
 }
 
@@ -1132,7 +1132,7 @@ fn parse_req_line(rline: str) {
   return Ok([method, target, target.slice(0, qm), target.slice(qm + 1, len(target)), version])
 }
 
-pub fn parse_request(raw: str) {
+pub fn parse_request(raw: str) -> Result[map, str] {
   let hb = split_head_body(raw)
   if len(hb) == 0 {
     return Err("malformed HTTP request: missing header separator")
@@ -1175,11 +1175,11 @@ fn format_response_mode(status: i64, headers, body: str, conn_val: str) {
   return emit_wire_message("HTTP/1.1 " + str(status) + " " + status_text(status), base, headers, false, body)
 }
 
-pub fn format_response(status: i64, headers, body: str) {
+pub fn format_response(status: i64, headers, body: str) -> Result[str, str] {
   return format_response_mode(status, headers, body, "close")
 }
 
-pub fn read_request(conn: i64, max_bytes: i64) {
+pub fn read_request(conn: i64, max_bytes: i64) -> Result[map, str] {
   let mut limit = max_bytes
   if limit <= 0 {
     limit = 1048576
@@ -1192,7 +1192,7 @@ pub fn read_request(conn: i64, max_bytes: i64) {
   return parse_request(msg["raw"])
 }
 
-pub fn respond(conn: i64, status: i64, headers, body: str) {
+pub fn respond(conn: i64, status: i64, headers, body: str) -> Result[i64, str] {
   let fr = format_response(status, headers, body)
   if is_err(fr) {
     let _c = tcp_close(conn)
@@ -1203,19 +1203,19 @@ pub fn respond(conn: i64, status: i64, headers, body: str) {
   return sr
 }
 
-pub fn respond_text(conn: i64, status: i64, body: str) {
+pub fn respond_text(conn: i64, status: i64, body: str) -> Result[i64, str] {
   return respond(conn, status, {"Content-Type": "text/plain; charset=utf-8"}, body)
 }
 
-pub fn respond_json(conn: i64, status: i64, json_body: str) {
+pub fn respond_json(conn: i64, status: i64, json_body: str) -> Result[i64, str] {
   return respond(conn, status, {"Content-Type": "application/json; charset=utf-8"}, json_body)
 }
 
-pub fn listen(addr: str) {
+pub fn listen(addr: str) -> Result[i64, str] {
   return tcp_listen(addr)
 }
 
-pub fn accept_request(srv_fd: i64, max_bytes: i64) {
+pub fn accept_request(srv_fd: i64, max_bytes: i64) -> Result[map, str] {
   let ar = tcp_accept(srv_fd)
   if is_err(ar) {
     return ar
@@ -1258,7 +1258,7 @@ fn unpack_reply(reply) {
   return [status, hdrs, body]
 }
 
-pub fn serve_once(srv_fd: i64, handler) {
+pub fn serve_once(srv_fd: i64, handler) -> Result[i64, str] {
   let got = accept_request(srv_fd, 1048576)
   if is_err(got) {
     return got
@@ -1272,7 +1272,7 @@ pub fn serve_once(srv_fd: i64, handler) {
   return Ok(rep[0])
 }
 
-pub fn serve_keep_alive(srv_fd: i64, max_requests: i64, handler) {
+pub fn serve_keep_alive(srv_fd: i64, max_requests: i64, handler) -> Result[i64, str] {
   let ar = tcp_accept(srv_fd)
   if is_err(ar) {
     return ar

@@ -21,10 +21,10 @@ parse as `i64` (when exact integer) or `f64`. `get_path` returns `Some(val)` or
 `NaN`/`Inf`.
 
 ```brat
-fn parse(s: str)
+fn parse(s: str) -> Result[dyn, str]
 fn stringify(v) -> str
 fn stringify_indent(v, indent: i64) -> str
-fn get_path(v, dotted: str)
+fn get_path(v, dotted: str) -> Option[dyn]
 fn get_str(m, key: str, fallback: str) -> str
 fn get_int(m, key: str, fallback: i64) -> i64
 fn get_bool(m, key: str, fallback: bool) -> bool
@@ -55,19 +55,19 @@ Binary payloads are represented as `vec[i64]` with elements in `0..255`.
 operations (`read`, `write`) obey `BRAT_FILES` path confinement.
 
 ```brat
-fn read(path: str)
-fn write(path: str, data: vec[i64])
+fn read(path: str) -> Result[vec[i64], str]
+fn write(path: str, data: vec[i64]) -> Result[i64, str]
 fn from_str(s: str) -> vec[i64]
-fn to_str(data: vec[i64])
+fn to_str(data: vec[i64]) -> Result[str, str]
 fn eq(a: vec[i64], b: vec[i64]) -> bool
 fn starts_with(data: vec[i64], prefix: vec[i64]) -> bool
 fn concat(a: vec[i64], b: vec[i64]) -> vec[i64]
 fn slice(data: vec[i64], start: i64, stop: i64) -> vec[i64]
 fn index_of(data: vec[i64], sub: vec[i64]) -> i64
-fn to_hex(data: vec[i64])
-fn from_hex(hex: str)
-fn to_base64(data: vec[i64])
-fn from_base64(text: str)
+fn to_hex(data: vec[i64]) -> Result[str, str]
+fn from_hex(hex: str) -> Result[vec[i64], str]
+fn to_base64(data: vec[i64]) -> Result[str, str]
+fn from_base64(text: str) -> Result[vec[i64], str]
 ```
 
 ```brat run
@@ -98,7 +98,7 @@ Stateless helpers over `args()` (or any `vec[str]`). Both `--flag value` and
 ```brat
 fn has_flag(argv: vec[str], flag: str) -> bool
 fn opt(argv: vec[str], flag: str, fallback: str) -> str
-fn opt_int(argv: vec[str], flag: str, fallback: i64)
+fn opt_int(argv: vec[str], flag: str, fallback: i64) -> Result[i64, str]
 fn positional(argv: vec[str], value_flags: vec[str]) -> vec[str]
 fn subcommand(argv: vec[str], value_flags: vec[str]) -> str
 fn subcommand_args(argv: vec[str], value_flags: vec[str]) -> vec[str]
@@ -130,13 +130,13 @@ accept either `str` or `vec[i64]` (`0..255`). `constant_time_eq` compares string
 without early-exit timing leaks.
 
 ```brat
-fn sha256(data)
-fn sha256_hex(data)
-fn hmac_sha256(key, msg)
-fn hmac_sha256_hex(key, msg)
+fn sha256(data) -> Result[vec[i64], str]
+fn sha256_hex(data) -> Result[str, str]
+fn hmac_sha256(key, msg) -> Result[vec[i64], str]
+fn hmac_sha256_hex(key, msg) -> Result[str, str]
 fn constant_time_eq(a: str, b: str) -> bool
-fn rand_bytes(n: i64)
-fn rand_hex(n_bytes: i64)
+fn rand_bytes(n: i64) -> Result[vec[i64], str]
+fn rand_hex(n_bytes: i64) -> Result[str, str]
 ```
 
 ```brat run
@@ -165,7 +165,7 @@ Handles quoted fields, embedded commas/newlines, and doubled `""` escapes.
 line endings.
 
 ```brat
-fn parse(text: str)
+fn parse(text: str) -> Result[vec[vec[str]], str]
 fn dump(rows: vec[vec[str]]) -> str
 ```
 
@@ -195,8 +195,8 @@ Reads process environment variables subject to the runtime credential denylist
 and `"on"` (case-insensitive) as `true`.
 
 ```brat
-fn get(name: str)
-fn get_bytes(name: str)
+fn get(name: str) -> Result[str, str]
+fn get_bytes(name: str) -> Result[vec[i64], str]
 fn get_or(name: str, fallback: str) -> str
 fn has(name: str) -> bool
 fn flag(name: str) -> bool
@@ -206,20 +206,19 @@ fn flag(name: str) -> bool
 
 ## `std.fs` — Confined filesystem helpers
 
-Wraps the runtime's `O_NOFOLLOW` confined file primitives. When `BRAT_FILES` is
-unset, relative paths under the current working directory are allowed; set
-`BRAT_FILES=/dir1:/dir2` to restrict access to explicit roots or `BRAT_FILES=""`
-to deny all file I/O. `write_atomic` writes a sibling temp file and renames it
-into place.
+Wraps the runtime's `O_NOFOLLOW` confined file primitives. By default, paths are
+confined to the program's module root; set `BRAT_FILES=1` (`true`, `yes`, `on`)
+when running a trusted CLI tool that needs unrestricted host filesystem access.
+`write_atomic` writes a sibling temp file and renames it into place.
 
 ```brat
 fn exists(path: str) -> bool
 fn read_or(path: str, fallback: str) -> str
-fn read_lines(path: str)
-fn write_lines(path: str, lines: vec[str])
-fn append_text(path: str, extra: str)
-fn write_atomic(path: str, content: str)
-fn remove(path: str)
+fn read_lines(path: str) -> Result[vec[str], str]
+fn write_lines(path: str, lines: vec[str]) -> Result[i64, str]
+fn append_text(path: str, extra: str) -> Result[i64, str]
+fn write_atomic(path: str, content: str) -> Result[i64, str]
+fn remove(path: str) -> Result[i64, str]
 ```
 
 ---
@@ -270,15 +269,15 @@ global `TZ` mutexes and locale state).
 ```brat
 fn now_ms() -> i64
 fn now_mono_ns() -> i64
-fn unix_sec()
+fn unix_sec() -> i64
 fn sleep(ms: i64) -> i64
-fn is_leap_year(year: i64)
-fn days_in_month(year: i64, month: i64)
-fn days_from_civil(y: i64, m: i64, d: i64)
-fn civil_from_days(z_in: i64)
-fn day_of_week(days: i64)
+fn is_leap_year(year: i64) -> bool
+fn days_in_month(year: i64, month: i64) -> i64
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64
+fn civil_from_days(z_in: i64) -> map
+fn day_of_week(days: i64) -> i64
 fn format_iso8601_utc(epoch_sec: i64) -> str
-fn parse_iso8601_utc(s: str)
+fn parse_iso8601_utc(s: str) -> Result[i64, str]
 fn format_duration_ms(ms: i64) -> str
 ```
 
@@ -307,13 +306,13 @@ mode, disabled `TRUSTED_SCHEMA`, authorizer blocking arbitrary `ATTACH`).
 keyed by column name; `query_one` returns `Ok(Some(row))` or `Ok(None)`.
 
 ```brat
-fn open(path: str)
-fn open_memory()
-fn close(db: i64)
-fn exec(db: i64, sql: str)
-fn query(db: i64, sql: str, params)
-fn query_one(db: i64, sql: str, params)
-fn scalar_int(db: i64, sql: str, params)
+fn open(path: str) -> Result[i64, str]
+fn open_memory() -> Result[i64, str]
+fn close(db: i64) -> Result[i64, str]
+fn exec(db: i64, sql: str) -> Result[i64, str]
+fn query(db: i64, sql: str, params) -> Result[vec[map], str]
+fn query_one(db: i64, sql: str, params) -> Result[Option[map], str]
+fn scalar_int(db: i64, sql: str, params) -> Result[i64, str]
 ```
 
 ---
@@ -325,34 +324,34 @@ keep-alive connection pools, redirect following (`get_follow`), and blocking or
 keep-alive HTTP/1.1 servers (`listen`, `serve_once`, `serve_keep_alive`).
 
 ```brat
-fn parse_url(url: str)
+fn parse_url(url: str) -> Result[map, str]
 fn encode_query_component(s: str) -> str
-fn decode_query_component(s: str)
+fn decode_query_component(s: str) -> Result[str, str]
 fn encode_query(params) -> str
-fn parse_query(qs: str)
-fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str)
-fn open_keep_alive(url: str)
-fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str)
-fn get_keep_alive(conn: i64, url: str)
-fn close_keep_alive(conn: i64)
-fn request_headers(method: str, url: str, headers, body: str)
-fn request_ex(method: str, url: str, headers, body: str)
-fn request(method: str, url: str, content_type: str, body: str)
-fn get(url: str)
-fn get_ca(url: str, ca_file: str)
-fn get_follow(url: str, max_redirects: i64)
-fn post_json(url: str, json_body: str)
+fn parse_query(qs: str) -> Result[map, str]
+fn request_tls_ca(method: str, url: str, headers, body: str, ca_file: str) -> Result[map, str]
+fn open_keep_alive(url: str) -> Result[i64, str]
+fn request_keep_alive(conn: i64, method: str, url: str, headers, body: str) -> Result[map, str]
+fn get_keep_alive(conn: i64, url: str) -> Result[map, str]
+fn close_keep_alive(conn: i64) -> Result[i64, str]
+fn request_headers(method: str, url: str, headers, body: str) -> Result[map, str]
+fn request_ex(method: str, url: str, headers, body: str) -> Result[map, str]
+fn request(method: str, url: str, content_type: str, body: str) -> Result[map, str]
+fn get(url: str) -> Result[map, str]
+fn get_ca(url: str, ca_file: str) -> Result[map, str]
+fn get_follow(url: str, max_redirects: i64) -> Result[map, str]
+fn post_json(url: str, json_body: str) -> Result[map, str]
 fn status_text(code: i64) -> str
-fn parse_request(raw: str)
-fn format_response(status: i64, headers, body: str)
-fn read_request(conn: i64, max_bytes: i64)
-fn respond(conn: i64, status: i64, headers, body: str)
-fn respond_text(conn: i64, status: i64, body: str)
-fn respond_json(conn: i64, status: i64, json_body: str)
-fn listen(addr: str)
-fn accept_request(srv_fd: i64, max_bytes: i64)
-fn serve_once(srv_fd: i64, handler)
-fn serve_keep_alive(srv_fd: i64, max_requests: i64, handler)
+fn parse_request(raw: str) -> Result[map, str]
+fn format_response(status: i64, headers, body: str) -> Result[str, str]
+fn read_request(conn: i64, max_bytes: i64) -> Result[map, str]
+fn respond(conn: i64, status: i64, headers, body: str) -> Result[i64, str]
+fn respond_text(conn: i64, status: i64, body: str) -> Result[i64, str]
+fn respond_json(conn: i64, status: i64, json_body: str) -> Result[i64, str]
+fn listen(addr: str) -> Result[i64, str]
+fn accept_request(srv_fd: i64, max_bytes: i64) -> Result[map, str]
+fn serve_once(srv_fd: i64, handler) -> Result[i64, str]
+fn serve_keep_alive(srv_fd: i64, max_requests: i64, handler) -> Result[i64, str]
 ```
 
 ```brat run
@@ -381,8 +380,8 @@ requires `BRAT_EXEC=1` (and honors `BRAT_EXEC_ALLOW=/usr/bin/git:...` and
 `BRAT_PROC_TIMEOUT_MS`).
 
 ```brat
-fn run(cmd: str, argv: vec[str])
-fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64)
-fn status(cmd: str, argv: vec[str])
-fn output(cmd: str, argv: vec[str])
+fn run(cmd: str, argv: vec[str]) -> Result[map, str]
+fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64) -> Result[map, str]
+fn status(cmd: str, argv: vec[str]) -> Result[i64, str]
+fn output(cmd: str, argv: vec[str]) -> Result[str, str]
 ```

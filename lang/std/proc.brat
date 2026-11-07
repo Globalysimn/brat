@@ -1,12 +1,12 @@
-pub fn run(cmd: str, argv: vec[str]) {
+pub fn run(cmd: str, argv: vec[str]) -> Result[map, str] {
   return proc_run(cmd, argv)
 }
 
-pub fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64) {
+pub fn run_timeout(cmd: str, argv: vec[str], timeout_ms: i64) -> Result[map, str] {
   return proc_run(cmd, argv, timeout_ms)
 }
 
-pub fn status(cmd: str, argv: vec[str]) {
+pub fn status(cmd: str, argv: vec[str]) -> Result[i64, str] {
   match proc_run(cmd, argv) {
     Err(e) => return Err(e),
     Ok(res) => {
@@ -16,7 +16,7 @@ pub fn status(cmd: str, argv: vec[str]) {
   }
 }
 
-pub fn output(cmd: str, argv: vec[str]) {
+pub fn output(cmd: str, argv: vec[str]) -> Result[str, str] {
   match proc_run(cmd, argv) {
     Err(e) => return Err(e),
     Ok(res) => {

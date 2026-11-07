@@ -1,6 +1,6 @@
 // std.json -- RFC 8259 JSON parser, serializer, and typed accessors.
 
-pub fn parse(s: str) {
+pub fn parse(s: str) -> Result[dyn, str] {
   return json_parse(s)
 }
 
@@ -12,7 +12,7 @@ pub fn stringify_indent(v, indent: i64) -> str {
   return json_stringify(v, indent)
 }
 
-fn get_path_segs(cur, segs: vec[str], pos: i64) {
+fn get_path_segs(cur, segs: vec[str], pos: i64) -> Option[dyn] {
   if pos >= len(segs) {
     return Some(cur)
   }
@@ -37,7 +37,7 @@ fn get_path_segs(cur, segs: vec[str], pos: i64) {
   return None
 }
 
-pub fn get_path(v, dotted: str) {
+pub fn get_path(v, dotted: str) -> Option[dyn] {
   if len(dotted) == 0 {
     return Some(v)
   }

@@ -425,10 +425,38 @@ struct Walk {
     int index = 0;
     int cur = 0;                                      // line of the current statement
 
+    static std::string trim_ann(const std::string &raw) {
+        size_t b = raw.find_first_not_of(" \t\r\n");
+        size_t z = raw.find_last_not_of(" \t\r\n");
+        return b == std::string::npos ? std::string() : raw.substr(b, z - b + 1);
+    }
+
+    static std::string unwrap_adt_ann(const std::string &raw) {
+        std::string a = trim_ann(raw);
+        if (a.size() > 8 && a.rfind("Option[", 0) == 0 && a.back() == ']')
+            return trim_ann(a.substr(7, a.size() - 8));
+        if (a.size() > 8 && a.rfind("Result[", 0) == 0 && a.back() == ']') {
+            std::string inner = a.substr(7, a.size() - 8);
+            int depth = 0;
+            for (size_t i = 0; i < inner.size(); i++) {
+                if (inner[i] == '[' || inner[i] == '(') depth++;
+                else if (inner[i] == ']' || inner[i] == ')') depth--;
+                else if (inner[i] == ',' && depth == 0)
+                    return trim_ann(inner.substr(0, i));
+            }
+            return trim_ann(inner);
+        }
+        return a;
+    }
+
     std::string infer_ann(const State &st, const Expr *e) const {
-        while (e && (e->k == EK::Quest || e->k == EK::Move) && !e->kids.empty())
+        while (e && e->k == EK::Move && !e->kids.empty())
             e = e->kids[0].get();
         if (e == nullptr) return "";
+        if (e->k == EK::Quest) {
+            if (e->kids.empty()) return "";
+            return unwrap_adt_ann(infer_ann(st, e->kids[0].get()));
+        }
         if (e->k == EK::Var) {
             auto it = st.anns.find(e->a);
             return it == st.anns.end() ? "" : it->second;
@@ -437,10 +465,37 @@ struct Walk {
         if (e->k == EK::Call) {
             if (e->a == "own" && e->kids.size() == 1)
                 return infer_ann(st, e->kids[0].get());
+            if (e->a == "is_ok" || e->a == "is_err" || e->a == "is_some" || e->a == "is_none")
+                return "bool";
+            if (e->a == "Some" && e->kids.size() == 1) {
+                std::string in = infer_ann(st, e->kids[0].get());
+                return in.empty() ? "" : "Option[" + in + "]";
+            }
+            if (e->a == "Ok" && e->kids.size() == 1) {
+                std::string in = infer_ann(st, e->kids[0].get());
+                return in.empty() ? "" : "Result[" + in + ", dyn]";
+            }
+            if (e->a == "unwrap" && e->kids.size() == 1) {
+                std::string in = infer_ann(st, e->kids[0].get());
+                std::string u = unwrap_adt_ann(in);
+                return u == in ? "" : u;
+            }
+            if (e->a == "unwrap_or" && e->kids.size() == 2) {
+                std::string in = infer_ann(st, e->kids[0].get());
+                std::string u = unwrap_adt_ann(in);
+                if (!u.empty() && u != in && u != "dyn") return u;
+                return infer_ann(st, e->kids[1].get());
+            }
+            if (e->a == "read_file") return "Result[str, str]";
+            if (e->a == "re_find") return "Option[str]";
             auto it = fn_rets.find(e->a);
             return it == fn_rets.end() ? "" : it->second;
         }
         if (e->k == EK::MCall && !e->kids.empty()) {
+            if (e->b == "is_ok" || e->b == "is_err" || e->b == "is_some" || e->b == "is_none")
+                return "bool";
+            if (e->b == "parse_int") return "Result[i64, str]";
+            if (e->b == "parse_float") return "Result[f64, str]";
             if (e->b == "copy" && e->kids.size() == 1)
                 return infer_ann(st, e->kids[0].get());
             if ((e->kids[0]->k == EK::Call && e->kids[0]->kids.empty()) ||
@@ -450,6 +505,15 @@ struct Walk {
             }
             std::string rty = infer_ann(st, e->kids[0].get());
             if (!rty.empty()) {
+                if (e->b == "unwrap") {
+                    std::string u = unwrap_adt_ann(rty);
+                    if (u != rty) return u;
+                }
+                if (e->b == "unwrap_or") {
+                    std::string u = unwrap_adt_ann(rty);
+                    if (!u.empty() && u != rty && u != "dyn") return u;
+                    if (e->kids.size() >= 2) return infer_ann(st, e->kids[1].get());
+                }
                 auto mit = fn_rets.find(rty + "." + e->b);
                 if (mit != fn_rets.end()) return mit->second;
             }
@@ -884,7 +948,7 @@ void one_body(const View &stmts, const std::vector<Param> &params,
         st.params.insert(p.name);
         std::string ann = p.ann.value_or("");
         if (ann.empty() && p.name == "self" && !impl_type.empty() &&
-            struct_fields.count(impl_type)) {
+            (struct_fields.count(impl_type) || struct_fields.count("__enum__:" + impl_type))) {
             ann = impl_type;
         }
         if (!ann.empty()) {

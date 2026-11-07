@@ -1,26 +1,26 @@
 // std.sqlite — confined & parameterized SQLite3 database bindings
 
-pub fn open(path: str) {
+pub fn open(path: str) -> Result[i64, str] {
   return sql_open(path)
 }
 
-pub fn open_memory() {
+pub fn open_memory() -> Result[i64, str] {
   return sql_open(":memory:")
 }
 
-pub fn close(db: i64) {
+pub fn close(db: i64) -> Result[i64, str] {
   return sql_close(db)
 }
 
-pub fn exec(db: i64, sql: str) {
+pub fn exec(db: i64, sql: str) -> Result[i64, str] {
   return sql_exec(db, sql)
 }
 
-pub fn query(db: i64, sql: str, params) {
+pub fn query(db: i64, sql: str, params) -> Result[vec[map], str] {
   return sql_query(db, sql, params)
 }
 
-pub fn query_one(db: i64, sql: str, params) {
+pub fn query_one(db: i64, sql: str, params) -> Result[Option[map], str] {
   let r = sql_query(db, sql, params)
   if is_err(r) {
     return r
@@ -32,7 +32,7 @@ pub fn query_one(db: i64, sql: str, params) {
   return Ok(Some(rows[0]))
 }
 
-pub fn scalar_int(db: i64, sql: str, params) {
+pub fn scalar_int(db: i64, sql: str, params) -> Result[i64, str] {
   let r = sql_query(db, sql, params)
   if is_err(r) {
     return r

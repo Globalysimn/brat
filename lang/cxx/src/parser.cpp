@@ -280,6 +280,9 @@ StmtP clone_stmt(const Stmt &s) {
     c->ann = s.ann;
     c->mut = s.mut;
     c->konst = s.konst;
+    c->from_match = s.from_match;
+    c->pat_uncond = s.pat_uncond;
+    c->pat_arity = s.pat_arity;
     if (s.e1) c->e1 = clone_expr(*s.e1);
     if (s.e2) c->e2 = clone_expr(*s.e2);
     if (s.e3) c->e3 = clone_expr(*s.e3);
@@ -1070,17 +1073,67 @@ private:
         want("enum");
         std::string tname = to_str(want_id("enum name").text);
         want("{");
+        static const std::unordered_set<std::string_view> kPositionalTypeHeads = {
+            "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
+            "isize", "usize", "f32", "f64", "bool", "str", "vec", "map",
+            "ptr", "slice", "dyn", "chan", "fn",
+        };
+        auto collect_variant_ann = [&]() -> std::optional<std::string> {
+            std::vector<std::string> toks;
+            int depth = 0;
+            for (;;) {
+                const Tok &x = peek();
+                if (x.kind == TK::Eof || (depth == 0 && (x.text == "," || x.text == ")"))) break;
+                if (x.text == "[" || x.text == "(") depth++;
+                if (x.text == "]" || x.text == ")") depth--;
+                toks.push_back(to_str(x.text));
+                step();
+            }
+            return ann_text(toks);
+        };
         std::vector<Variant> variants;
         while (!at("}")) {
             Tok v = step();
             if (!is_name(v)) fail("want variant have '" + to_str(v.text) + "'", v.line);
-            Variant var{to_str(v.text), {}};
+            std::string vname = to_str(v.text);
+            for (const auto &prev : variants) {
+                if (prev.name == vname)
+                    fail("duplicate variant '" + vname + "' in enum " + tname, v.line);
+            }
+            Variant var{std::move(vname), {}, {}};
             if (at("(")) {
                 step();
+                std::vector<std::string> explicit_names;
                 while (!at(")")) {
-                    Tok f = step();
-                    if (!is_name(f)) fail("want field have '" + to_str(f.text) + "'", f.line);
-                    var.fields.push_back(to_str(f.text));
+                    const Tok &cur = peek();
+                    if (is_name(cur) && peek(1).text == ":") {
+                        std::string fname = to_str(step().text);
+                        for (const auto &prev : explicit_names) {
+                            if (prev == fname)
+                                fail("duplicate field '" + fname + "' in variant " + var.name, cur.line);
+                        }
+                        explicit_names.push_back(fname);
+                        want(":");
+                        auto fann = collect_variant_ann();
+                        if (!fann || fann->empty())
+                            fail("field '" + fname + "' in variant " + var.name + " needs a type", cur.line);
+                        var.fields.push_back(std::move(fname));
+                        var.field_anns.push_back(std::move(fann));
+                    } else if (kPositionalTypeHeads.count(cur.text) ||
+                               (!cur.text.empty() && cur.text[0] >= 'A' && cur.text[0] <= 'Z') ||
+                               (is_name(cur) && peek(1).text == "[")) {
+                        auto fann = collect_variant_ann();
+                        if (!fann || fann->empty())
+                            fail("variant '" + var.name + "' payload needs a type", cur.line);
+                        var.fields.push_back("_" + std::to_string(var.fields.size()));
+                        var.field_anns.push_back(std::move(fann));
+                    } else if (is_name(cur)) {
+                        Tok f = step();
+                        var.fields.push_back(to_str(f.text));
+                        var.field_anns.push_back(std::nullopt);
+                    } else {
+                        fail("want field have '" + to_str(cur.text) + "'", cur.line);
+                    }
                     eat(",");
                 }
                 want(")");
@@ -1788,6 +1841,7 @@ private:
         // A guard on a real pattern tests first, and falls through to the same
         // `rest` the pattern itself falls through to; the copy is what makes the
         // two owners of that shape independent.
+        const bool had_guard = static_cast<bool>(guard);
         if (guard) {
             std::vector<StmtP> wrapped;
             wrapped.push_back(mk_if(std::move(guard), std::move(body), clone_stmt(*rest)));
@@ -1801,7 +1855,9 @@ private:
         case PK::None: {
             std::vector<ExprP> args;
             args.push_back(mk_var(tm));
-            return mk_if(mk_call("is_none", std::move(args)), std::move(body), std::move(rest));
+            auto out_if = mk_if(mk_call("is_none", std::move(args)), std::move(body), std::move(rest));
+            out_if->pat_uncond = !had_guard;
+            return out_if;
         }
         case PK::Bind: {
             std::vector<StmtP> out;
@@ -1851,6 +1907,16 @@ private:
             return mk_if(std::move(cond), std::move(pre), std::move(rest));
         }
         case PK::Variant: {
+            bool all_subs_total = !had_guard;
+            if (all_subs_total) {
+                for (const auto &sp : pat.subs) {
+                    if (!space_total(*sp)) {
+                        all_subs_total = false;
+                        break;
+                    }
+                }
+            }
+            const int arity = static_cast<int>(pat.subs.size());
             std::vector<ExprP> tagargs;
             tagargs.push_back(mk_var(tm));
             auto cond = mk_bin("==", mk_call("tagof", std::move(tagargs)), mk_str(pat.a));
@@ -1874,7 +1940,10 @@ private:
                 }
             }
             for (auto &s : inner) pre.push_back(std::move(s));
-            return mk_if(std::move(cond), std::move(pre), std::move(rest));
+            auto out_if = mk_if(std::move(cond), std::move(pre), std::move(rest));
+            out_if->pat_arity = arity;
+            out_if->pat_uncond = all_subs_total;
+            return out_if;
         }
         }
         return nullptr;
@@ -1926,7 +1995,13 @@ private:
         for (size_t k = arms.size(); k-- > 0;) {
             Arm &a = arms[k];
             const bool arms_follow = node != nullptr;
-            StmtP rest = node ? std::move(node) : mk_block({});
+            StmtP rest;
+            if (node) {
+                rest = std::move(node);
+            } else {
+                rest = mk_block({});
+                rest->from_match = true;
+            }
             if (!a.pat) {
                 if (!a.guard) {
                     if (arms_follow) fail("_ must be last");
@@ -1976,7 +2051,9 @@ private:
         if (!node) return one(mk_expr(std::move(scrut)));
         if (node->k == SK::Block && node->body.empty()) return one(mk_expr(std::move(scrut)));
         std::vector<StmtP> out;
-        out.push_back(mk_let_tmp(tm, std::move(scrut), false));
+        auto mtmp = mk_let_tmp(tm, std::move(scrut), false);
+        mtmp->from_match = true;
+        out.push_back(std::move(mtmp));
         if (node->k == SK::Block) {
             for (auto &s : node->body) out.push_back(std::move(s));
         } else {

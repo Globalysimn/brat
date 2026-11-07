@@ -123,11 +123,11 @@
       "patterns": [
         {
           "name": "support.type.primitive.brat",
-          "match": "\\b(i8|u8|i16|u16|i32|u32|i64|u64|isize|usize|f32|f64|bool|str|ptr|slice|vec|map|chan|dyn)\\b"
+          "match": "\\b(i8|u8|i16|u16|i32|u32|i64|u64|isize|usize|f32|f64|bool|str|ptr|slice|vec|map|chan|Option|Result|dyn)\\b"
         },
         {
           "name": "support.constant.variant.brat",
-          "match": "\\b(Some|Ok|Err)\\b"
+          "match": "\\b(Some|None|Ok|Err)\\b"
         }
       ]
     },
@@ -163,7 +163,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.brat",
-          "match": "\\b(len|own|assert|print|str|int|float|typeof|tagof|is_err|is_none|unwrap|chan|time_ms|mono_ns)(?=\\s*\\()"
+          "match": "\\b(len|own|assert|print|str|int|float|typeof|tagof|is_ok|is_err|is_some|is_none|unwrap|unwrap_or|chan|time_ms|mono_ns)(?=\\s*\\()"
         },
         {
           "name": "entity.name.function.brat",

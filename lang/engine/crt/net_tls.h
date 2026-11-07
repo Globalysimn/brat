@@ -1,5 +1,5 @@
 
-static void vraise_err_tag(Val v) {
+static void vraise_err_tag_mode(Val v, int is_exc) {
     if (_verr_pending) return;
     int saved = barena_depth;
     barena_depth = 0;
@@ -18,7 +18,12 @@ static void vraise_err_tag(Val v) {
     vunwind = vtagv("err", a);
     barena_depth = saved;
     _verr_line = _btrace_cur_line;
-    vunwind_do();
+    _verr_pending = 1;
+    _verr_exc = is_exc;
+}
+
+static void vraise_err_tag(Val v) {
+    vraise_err_tag_mode(v, 1);
 }
 
 BFN int vassert1(Val cond) {
@@ -69,6 +74,12 @@ BFN Val vtag_payload(Val v);
 BFN Val vquest(Val v) {
     if (v.tag == V_TAG && !strcmp(v.as.tv->tag, "err")) {
         vraise_err_tag(v);
+    }
+    return v;
+}
+BFN Val vquest_ret(Val v) {
+    if (v.tag == V_TAG && !strcmp(v.as.tv->tag, "err")) {
+        vraise_err_tag_mode(v, 0);
     }
     return v;
 }

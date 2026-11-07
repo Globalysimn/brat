@@ -1,7 +1,7 @@
-fn parse(s: str)
+fn parse(s: str) -> Result[dyn, str]
 fn stringify(v) -> str
 fn stringify_indent(v, indent: i64) -> str
-fn get_path(v, dotted: str)
+fn get_path(v, dotted: str) -> Option[dyn]
 fn get_str(m, key: str, fallback: str) -> str
 fn get_int(m, key: str, fallback: i64) -> i64
 fn get_bool(m, key: str, fallback: bool) -> bool

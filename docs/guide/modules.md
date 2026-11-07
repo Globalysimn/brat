@@ -38,17 +38,19 @@ unqualified name` and asks you to spell `mod_a.fn_name(...)`.
 
 ### `.bri` interface files and `pub use`
 
-Drop `circle.bri` next to `circle.brat` to lock down its public surface, one
-signature per line:
+Drop `circle.bri` next to `circle.brat` to lock down its public surface (`fn`,
+`struct`, and `enum` declarations):
 
 ```brat
 // circle.bri
-fn area(r: f64) -> f64
+struct Circle { r: f64 }
+fn area(c: Circle) -> f64
 ```
 
-When a `.bri` file exists, **only** functions listed in `.bri` are visible to
-importers, even if the `.brat` file has other `pub fn` helpers. Missing
-functions or mismatched parameter/return types fail module loading immediately.
+When a `.bri` file exists, **only** functions and types listed in `.bri` are
+visible to importers, even if the `.brat` file has other `pub` items. Missing
+declarations or mismatched field/parameter/return types fail module loading
+immediately.
 
 `pub use other.helper` re-exports `helper` through the current module without
 duplicating the underlying symbol, so diamond imports converging on the same
@@ -113,6 +115,10 @@ Operational rules:
 - **Atomic staging:** archives are capped at 16 MiB, checked against lowercase
   64-hex SHA-256 digests before extraction, and swapped into `vendor/` +
   `brat.lock` atomically with rollback on failure.
+- **Local index publishing:** `pkg publish owner/name@ver file.brat` copies the
+  artifact into `.brat-packages/<owner>/` beside `$BRAT_INDEX` (default
+  `./brat-index.json`) and records its `file://` URI and SHA-256 digest in that
+  index file.
 - **Verified C packages:** a package with `brat.pkg.json` can ship `c_sources`
   and `c_headers`. During `pkg add`/`install`, BRAT compiles the C library,
   proves all `.brat` `extern` declarations against its DWARF debug info, and

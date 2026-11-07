@@ -23,7 +23,7 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CXX = os.environ.get("BRAT_CXX") or os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
-CC = os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc") or "cc"
+CC = os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or shutil.which("cc") or "cc"
 
 
 def cpu_model() -> str:

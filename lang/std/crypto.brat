@@ -29,11 +29,11 @@ fn bit_xor_byte(a: i64, b: i64) -> i64 {
   return res
 }
 
-pub fn sha256(data) {
+pub fn sha256(data) -> Result[vec[i64], str] {
   return sha256_bytes(data)
 }
 
-pub fn sha256_hex(data) {
+pub fn sha256_hex(data) -> Result[str, str] {
   let r = sha256_bytes(data)
   if is_err(r) {
     return r
@@ -55,7 +55,7 @@ fn to_byte_vec(v) {
   return Err("expected str or vec[i64]")
 }
 
-pub fn hmac_sha256(key, msg) {
+pub fn hmac_sha256(key, msg) -> Result[vec[i64], str] {
   let kr = to_byte_vec(key)
   if is_err(kr) {
     return kr
@@ -99,7 +99,7 @@ pub fn hmac_sha256(key, msg) {
   return sha256_bytes(outer)
 }
 
-pub fn hmac_sha256_hex(key, msg) {
+pub fn hmac_sha256_hex(key, msg) -> Result[str, str] {
   let r = hmac_sha256(key, msg)
   if is_err(r) {
     return r
@@ -123,11 +123,11 @@ pub fn constant_time_eq(a: str, b: str) -> bool {
   return diff == 0
 }
 
-pub fn rand_bytes(n: i64) {
+pub fn rand_bytes(n: i64) -> Result[vec[i64], str] {
   return random_bytes(n)
 }
 
-pub fn rand_hex(n_bytes: i64) {
+pub fn rand_hex(n_bytes: i64) -> Result[str, str] {
   let r = random_bytes(n_bytes)
   if is_err(r) {
     return r

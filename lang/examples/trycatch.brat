@@ -1,4 +1,4 @@
-fn fetch(fail: i64) -> i64 {
+fn fetch(fail: i64) -> Result[i64, str] {
   if fail != 0 {
     return Err("net down")
   }

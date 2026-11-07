@@ -1,12 +1,12 @@
 fn now_ms() -> i64
 fn now_mono_ns() -> i64
-fn unix_sec()
+fn unix_sec() -> i64
 fn sleep(ms: i64) -> i64
-fn is_leap_year(year: i64)
-fn days_in_month(year: i64, month: i64)
-fn days_from_civil(y: i64, m: i64, d: i64)
-fn civil_from_days(z_in: i64)
-fn day_of_week(days: i64)
+fn is_leap_year(year: i64) -> bool
+fn days_in_month(year: i64, month: i64) -> i64
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64
+fn civil_from_days(z_in: i64) -> map
+fn day_of_week(days: i64) -> i64
 fn format_iso8601_utc(epoch_sec: i64) -> str
-fn parse_iso8601_utc(s: str)
+fn parse_iso8601_utc(s: str) -> Result[i64, str]
 fn format_duration_ms(ms: i64) -> str

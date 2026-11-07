@@ -67,14 +67,14 @@ Build-time FFI flags accepted by `build` and `run`:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `BRAT_FILES` | current working directory | Colon-separated list (`;` on Windows) of allowed root directories for confined file and SQLite operations (`O_NOFOLLOW`). Set `BRAT_FILES=""` to deny all file I/O. |
+| `BRAT_FILES` | unset (confined) | File and SQLite operations (`O_NOFOLLOW`) confine paths to the program's module root by default; set `BRAT_FILES=1` (`true`, `yes`, `on`) to opt out of module-root confinement for trusted CLI invocations. |
 | `BRAT_EXEC` | `0` (disabled) | Must be set to `1` before `proc_run` / `std.proc.*` will spawn child processes. |
 | `BRAT_EXEC_ALLOW` | unset (all programs when `BRAT_EXEC=1`) | Colon-separated allowlist of executable paths/names permitted under `BRAT_EXEC=1`. |
 | `BRAT_PROC_TIMEOUT_MS` | unset | Default timeout in milliseconds applied to `proc_run` children before `SIGKILL`. |
 | `BRAT_ENV_ALLOW` | unset | Comma/colon-separated allowlist of environment variable names visible to `env_get` / `std.env`, overriding the secret-name denylist. |
 | `BRAT_ENV_DENY_ALL` | unset | Set to `1` to make `env_get` / `std.env` return `None` for every variable. |
 | `BRAT_RECURSION_BUDGET` | `2000` | Maximum BRAT call depth (`1..1000000`) before raising catchable `recursion too deep`. |
-| `BRAT_PIN_BUDGET_BYTES` | `67108864` (64 MiB) | Maximum slab memory used to pin short SSO strings passed across C FFI (`ptr_of_str` / `str`). |
+| `BRAT_PIN_BUDGET_BYTES` | `67108864` (64 MiB) | Maximum slab memory used to pin short SSO strings passed across C FFI (`ptr_of_str` / `str`); `0` disables the cap (unlimited, not recommended for untrusted inputs). |
 | `BRAT_MEM_BYTES` | unset (unlimited) | Hard process resident/heap cap (also settable via `--mem <MB>` on Linux `RLIMIT_AS`). |
 | `BRAT_THREADS` | hardware concurrency | Worker thread count for `par for` and the runtime task pool. |
 | `BRAT_TRACE` | unset | Set to `1` to enable line-number trace updates when compiled with `--trace-lines`. |

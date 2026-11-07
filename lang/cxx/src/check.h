@@ -17,19 +17,24 @@ struct TyField;
 
 struct Ty {
     enum K : uint8_t {
-        Dyn, Int, Float, Str, Bool, None, Tag, Map, Cb, Ptr, Slice, Vec, Struct, Other
+        Dyn, Int, Float, Str, Bool, None, Tag, Map, Cb, Ptr, Slice, Vec, Struct,
+        Option, Result, Enum, Other
     };
     K k = Dyn;
     int arity = 0;
     bool is_union = false;
-    std::string text;                             // callback signature, or `Other`
-    std::shared_ptr<const Ty> inner;              // ptr/slice/vec element
+    std::string text;                             // callback signature, `Enum`, or `Other`
+    std::shared_ptr<const Ty> inner;              // ptr/slice/vec/option/result-ok element
+    std::shared_ptr<const Ty> inner2;             // result-err element
     std::vector<TyField> fields;
 
     // Defined below `TyField`: a `Ty` cannot be built before its field type is complete.
     static Ty dyn();
     static Ty of(K k);
     static Ty wrap(K k, Ty in);
+    static Ty option(Ty in);
+    static Ty result(Ty ok, Ty err);
+    static Ty enm(std::string name);
     static Ty cb(int arity, std::string text);
     static Ty strct(std::vector<TyField> &&f);
     static Ty other(std::string name);
@@ -52,6 +57,25 @@ inline Ty Ty::wrap(K k, Ty in) {
     Ty t;
     t.k = k;
     t.inner = std::make_shared<const Ty>(std::move(in));
+    return t;
+}
+inline Ty Ty::option(Ty in) {
+    Ty t;
+    t.k = Option;
+    t.inner = std::make_shared<const Ty>(std::move(in));
+    return t;
+}
+inline Ty Ty::result(Ty ok, Ty err) {
+    Ty t;
+    t.k = Result;
+    t.inner = std::make_shared<const Ty>(std::move(ok));
+    t.inner2 = std::make_shared<const Ty>(std::move(err));
+    return t;
+}
+inline Ty Ty::enm(std::string name) {
+    Ty t;
+    t.k = Enum;
+    t.text = std::move(name);
     return t;
 }
 inline Ty Ty::cb(int arity, std::string text) {
@@ -100,6 +124,7 @@ struct FnSig {
     // A C function from `extern`: its `ptr[T]` slots are where `&x` may be
     // written, and nowhere else.
     bool extern_fn = false;
+    bool is_ctor = false;
     std::set<size_t> sink_params;
     std::vector<SinkEdge> sink_edges;
 };

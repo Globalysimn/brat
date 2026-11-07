@@ -11,15 +11,16 @@ CI by `lang/tests/test_docs_examples.py`.
 
 ## 1. Records, `impl` methods, and exhaustive `enum` matching
 
-Records need no boilerplate `struct` header: `Job { id: 7, ms: 18 }` creates a
-tagged record with tag `"Job"`. `enum` registers variant constructors, and
-`match` checks exhaustiveness at parse time when matching variants declared in
-the same file:
+Records need no boilerplate `struct` header when prototyping: `Job { id: 7, ms: 18 }`
+creates a tagged record immediately (add `struct Job { ... }` only when you want
+checked fixed slots). `enum` variants can optionally declare payload types, and
+`match` checks exhaustiveness across local and imported `pub enum`s, `Option[T]`,
+and `Result[T, E]`:
 
 ```brat run
 enum Outcome {
-  Done(ms),
-  Retry(attempt, reason),
+  Done(ms: i64),
+  Retry(attempt: i64, reason: str),
   Cancelled
 }
 
@@ -72,7 +73,7 @@ and returns `Err` early from the enclosing function, running any registered
 `defer` statements in reverse order on the way out:
 
 ```brat run
-fn parse_port(line: str) {
+fn parse_port(line: str) -> Result[i64, str] {
   defer print("  leaving parse_port({line})")
   let parts = line.split_once("=")
   if is_none(parts) {

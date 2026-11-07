@@ -1,6 +1,6 @@
 fn has_flag(argv: vec[str], flag: str) -> bool
 fn opt(argv: vec[str], flag: str, fallback: str) -> str
-fn opt_int(argv: vec[str], flag: str, fallback: i64)
+fn opt_int(argv: vec[str], flag: str, fallback: i64) -> Result[i64, str]
 fn positional(argv: vec[str], value_flags: vec[str]) -> vec[str]
 fn subcommand(argv: vec[str], value_flags: vec[str]) -> str
 fn subcommand_args(argv: vec[str], value_flags: vec[str]) -> vec[str]

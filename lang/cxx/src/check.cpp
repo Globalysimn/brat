@@ -47,20 +47,35 @@ bool Ty::operator==(const Ty &o) const {
     case Cb: return arity == o.arity && text == o.text;
     case Ptr:
     case Slice:
-    case Vec: return *inner == *o.inner;
+    case Vec:
+    case Option: return *inner == *o.inner;
+    case Result: return *inner == *o.inner && *inner2 == *o.inner2;
     // Two structs are the same when their layouts are, and a declared name
     // makes the claim checkable even before the fields are in the table.
     case Struct: return (text.empty() || o.text.empty() || text == o.text) &&
                         same_fields(fields, o.fields);
+    case Enum:
     case Other: return text == o.text;
     default: return true;
     }
 }
 
-// The declared `extern struct` and native `struct` fields.
+struct EnumVariantInfo {
+    std::string orig_name;
+    std::vector<Ty> field_tys;
+    std::vector<std::optional<std::string>> field_anns;
+};
+
+struct EnumInfo {
+    std::vector<std::string> order;
+    std::map<std::string, EnumVariantInfo> variants;
+};
+
+// The declared `extern struct`, native `struct`, and `enum` tables.
 static std::map<std::string, std::map<std::string, Ty>> *g_structs = nullptr;
 static std::set<std::string> *g_unions = nullptr;
 static std::set<std::string> *g_native_structs = nullptr;
+static std::map<std::string, EnumInfo> *g_enums = nullptr;
 
 std::string type_name(const Ty &t) {
     switch (t.k) {
@@ -68,6 +83,13 @@ std::string type_name(const Ty &t) {
     case Ty::Ptr: return "ptr[" + type_name(*t.inner) + "]";
     case Ty::Slice: return "slice[" + type_name(*t.inner) + "]";
     case Ty::Vec: return t.inner->k == Ty::Dyn ? "vec" : "vec[" + type_name(*t.inner) + "]";
+    case Ty::Option:
+        return t.inner->k == Ty::Dyn ? "Option" : "Option[" + type_name(*t.inner) + "]";
+    case Ty::Result:
+        return (t.inner->k == Ty::Dyn && t.inner2->k == Ty::Dyn)
+                   ? "Result"
+                   : "Result[" + type_name(*t.inner) + ", " + type_name(*t.inner2) + "]";
+    case Ty::Enum: return t.text;
     case Ty::Struct:
         if (!t.text.empty() && g_native_structs && g_native_structs->count(t.text))
             return t.text;
@@ -96,8 +118,97 @@ static bool scalar(const Ty &t) {
     return t.k == Ty::Int || t.k == Ty::Float || t.k == Ty::Bool || t.k == Ty::None;
 }
 
+static bool slot_ok(const Ty &want, const Ty &got) {
+    if (want.k == Ty::Dyn || got.k == Ty::Dyn) return true;
+    return type_ok(want, got);
+}
+
+static Ty join_ty(const Ty &a, const Ty &b) {
+    if (a == b) return a;
+    if (a.k == Ty::None && b.k == Ty::Option) return b;
+    if (b.k == Ty::None && a.k == Ty::Option) return a;
+    if (a.k == Ty::Option && b.k == Ty::Option) {
+        if (a.inner->k == Ty::Dyn) return b;
+        if (b.inner->k == Ty::Dyn) return a;
+        Ty j = join_ty(*a.inner, *b.inner);
+        return j.k == Ty::Dyn ? Ty::dyn() : Ty::option(j);
+    }
+    if (a.k == Ty::Result && b.k == Ty::Result) {
+        Ty jok = a.inner->k == Ty::Dyn ? *b.inner
+                                       : (b.inner->k == Ty::Dyn ? *a.inner : join_ty(*a.inner, *b.inner));
+        Ty jerr = a.inner2->k == Ty::Dyn
+                      ? *b.inner2
+                      : (b.inner2->k == Ty::Dyn ? *a.inner2 : join_ty(*a.inner2, *b.inner2));
+        if (a.inner->k != Ty::Dyn && b.inner->k != Ty::Dyn && jok.k == Ty::Dyn) return Ty::dyn();
+        if (a.inner2->k != Ty::Dyn && b.inner2->k != Ty::Dyn && jerr.k == Ty::Dyn) return Ty::dyn();
+        return Ty::result(jok, jerr);
+    }
+    if (a.k == Ty::Vec && b.k == Ty::Vec) {
+        if (a.inner->k == Ty::Dyn) return b;
+        if (b.inner->k == Ty::Dyn) return a;
+        return Ty::wrap(Ty::Vec, join_ty(*a.inner, *b.inner));
+    }
+    return Ty::dyn();
+}
+
 bool type_ok(const Ty &want, const Ty &got) {
     if (want.k == Ty::Dyn) return true;
+    if (want.k == Ty::Result) {
+        if (got.k == Ty::Dyn || got.k == Ty::Tag) return true;
+        if (got.k == Ty::Enum && g_enums && g_enums->count(got.text)) {
+            const auto &ei = g_enums->at(got.text);
+            if (ei.variants.size() == 2 && ei.variants.count("ok") && ei.variants.count("err")) {
+                const auto &vok = ei.variants.at("ok");
+                const auto &verr = ei.variants.at("err");
+                if (vok.field_tys.size() == 1 && verr.field_tys.size() == 1)
+                    return slot_ok(*want.inner, vok.field_tys[0]) &&
+                           slot_ok(*want.inner2, verr.field_tys[0]);
+            }
+        }
+        if (got.k != Ty::Result) return false;
+        return slot_ok(*want.inner, *got.inner) && slot_ok(*want.inner2, *got.inner2);
+    }
+    if (want.k == Ty::Option) {
+        if (got.k == Ty::Dyn || got.k == Ty::Tag || got.k == Ty::None) return true;
+        if (got.k != Ty::Option) return false;
+        return slot_ok(*want.inner, *got.inner);
+    }
+    if (want.k == Ty::Enum) {
+        if (got.k == Ty::Dyn || got.k == Ty::Tag) return true;
+        if (got.k == Ty::Enum) return want.text == got.text;
+        if (g_enums && g_enums->count(want.text)) {
+            const auto &ei = g_enums->at(want.text);
+            if (got.k == Ty::None) {
+                auto vit = ei.variants.find("none");
+                return vit != ei.variants.end() && vit->second.field_tys.empty();
+            }
+            if (got.k == Ty::Option) {
+                auto vsome = ei.variants.find("some");
+                if (vsome == ei.variants.end() || vsome->second.field_tys.size() != 1) return false;
+                return slot_ok(vsome->second.field_tys[0], *got.inner);
+            }
+            if (got.k == Ty::Result) {
+                const bool ok_needed = got.inner->k != Ty::Dyn;
+                const bool err_needed = got.inner2->k != Ty::Dyn;
+                if (!ok_needed && !err_needed)
+                    return ei.variants.count("ok") > 0 || ei.variants.count("err") > 0;
+                if (ok_needed) {
+                    auto vok = ei.variants.find("ok");
+                    if (vok == ei.variants.end() || vok->second.field_tys.size() != 1 ||
+                        !slot_ok(vok->second.field_tys[0], *got.inner))
+                        return false;
+                }
+                if (err_needed) {
+                    auto verr = ei.variants.find("err");
+                    if (verr == ei.variants.end() || verr->second.field_tys.size() != 1 ||
+                        !slot_ok(verr->second.field_tys[0], *got.inner2))
+                        return false;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
     if (got.k == Ty::Dyn || got.k == Ty::Tag || got.k == Ty::None) return true;
     if (want == got) return true;
     if (want.k == Ty::Float && got.k == Ty::Int) return true;
@@ -114,6 +225,7 @@ bool type_ok(const Ty &want, const Ty &got) {
             return true;
         }
         if (want.k == got.k) {
+            if (want.k == Ty::Vec) return slot_ok(*want.inner, *got.inner);
             return want.inner->k == Ty::Dyn || got.inner->k == Ty::Dyn ||
                    *want.inner == *got.inner;
         }
@@ -141,6 +253,7 @@ static Ty word_type(const std::string &w) {
         for (const auto &kv : (*g_structs)[w]) t.fields.push_back({kv.first, kv.second});
         return t;
     }
+    if (g_enums && g_enums->count(w)) return Ty::enm(w);
     // A name this pass does not know is kept as written, not erased: two
     // different `ptr[T]` must not compare equal by accident.
     if (!w.empty()) return Ty::other(w);
@@ -233,12 +346,23 @@ static Ty ann_type(const std::string &a) {
         return Ty::wrap(Ty::Slice, word_type(a.substr(6, a.size() - 7)));
     }
     if (a == "slice") return Ty::wrap(Ty::Slice, Ty::dyn());
-    if (a.rfind("vec[", 0) == 0) {
-        std::string inner = a.substr(4);
-        while (!inner.empty() && inner.back() == ']') inner.pop_back();
+    if (a.rfind("vec[", 0) == 0 && a.back() == ']') {
+        std::string inner = a.substr(4, a.size() - 5);
         return Ty::wrap(Ty::Vec, inner.empty() ? Ty::dyn() : ann_type(inner));
     }
     if (a == "vec") return Ty::wrap(Ty::Vec, Ty::dyn());
+    if (a == "Option") return Ty::option(Ty::dyn());
+    if (a.rfind("Option[", 0) == 0 && a.back() == ']') {
+        std::string inner = a.substr(7, a.size() - 8);
+        return Ty::option(inner.empty() ? Ty::dyn() : ann_type(inner));
+    }
+    if (a == "Result") return Ty::result(Ty::dyn(), Ty::dyn());
+    if (a.rfind("Result[", 0) == 0 && a.back() == ']') {
+        auto parts = split_type_list(a.substr(7, a.size() - 8));
+        Ty ok = parts.size() >= 1 ? ann_type(parts[0]) : Ty::dyn();
+        Ty err = parts.size() >= 2 ? ann_type(parts[1]) : Ty::dyn();
+        return Ty::result(std::move(ok), std::move(err));
+    }
     if (a == "map" || a.rfind("map[", 0) == 0) return Ty::of(Ty::Map);
     if (auto lb = a.find('['); lb != std::string::npos && !a.empty() && a.back() == ']') {
         std::string elem = a.substr(0, lb);
@@ -249,6 +373,7 @@ static Ty ann_type(const std::string &a) {
     }
     if (g_unions && g_unions->count(a)) return word_type(a);
     if (g_native_structs && g_native_structs->count(a)) return word_type(a);
+    if (g_enums && g_enums->count(a)) return Ty::enm(a);
     return Ty::dyn();
 }
 
@@ -384,24 +509,26 @@ static bool readonly_mcall_name(const std::string &m) {
         "chunks", "enumerate", "copy", "trim", "lower", "upper", "lines", "chars",
         "repeat", "parse_int", "parse_float", "first", "last", "min", "max", "sum",
         "rev", "map", "filter", "fold", "each", "any", "all", "find", "count",
-        "sort_by", "flat_map", "take", "skip"
+        "sort_by", "flat_map", "take", "skip",
+        "unwrap", "unwrap_or", "is_ok", "is_err", "is_some", "is_none"
     };
     return ro.count(m) > 0;
 }
 
 static bool pure_read_builtin(const std::string &name) {
     static const std::set<std::string> ro = {
-        "len", "str", "print", "eprint", "is_err", "is_none", "is_vec", "is_str",
-        "is_map", "is_bool", "is_int", "is_float", "tagof", "__stag_is", "__shas",
-        "own", "sbuf_add", "tcp_send", "write_file", "write_bytes", "json_stringify"
+        "len", "str", "print", "eprint", "is_ok", "is_err", "is_some", "is_none",
+        "is_vec", "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
+        "__stag_is", "__shas", "own", "sbuf_add", "tcp_send", "write_file",
+        "write_bytes", "json_stringify"
     };
     return ro.count(name) > 0;
 }
 
 static bool scalar_only_call(const std::string &name) {
     static const std::set<std::string> sc = {
-        "own", "len", "is_err", "is_none", "is_vec", "is_str", "is_map",
-        "is_bool", "is_int", "is_float", "__stag_is", "__shas",
+        "own", "len", "is_ok", "is_err", "is_some", "is_none", "is_vec", "is_str",
+        "is_map", "is_bool", "is_int", "is_float", "__stag_is", "__shas",
         "ptr_is_null", "ptr_read_i64", "ptr_read_f64", "ptr_read_f32", "ptr_read_u8",
         "re_match", "sbuf_len", "slice_len", "time_ms", "mono_ns", "errno"
     };
@@ -644,6 +771,24 @@ void collect_sigs(const std::vector<StmtP> &prog, Sigs &sigs) {
             for (const Sig &g : node.sigs) sigs["__impl__." + g.name] = FnSig{};
             continue;
         }
+        if (sp->k == SK::Pub && node.k == SK::Enum) {
+            for (const auto &v : node.variants) {
+                if (v.name == "Ok" || v.name == "Err" || v.name == "Some" || v.name == "None")
+                    continue;
+                FnSig csig;
+                csig.is_ctor = true;
+                csig.ret = Ty::enm(node.a);
+                csig.ret_ann = node.a;
+                for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                    std::optional<std::string> fa =
+                        fi < v.field_anns.size() ? v.field_anns[fi] : std::nullopt;
+                    csig.params.push_back(ann_type(fa));
+                    csig.param_anns.push_back(fa);
+                }
+                sigs[v.name] = std::move(csig);
+            }
+            continue;
+        }
         if (!is_fn_like(node)) continue;
         FnSig sig;
         const std::vector<Param> *params;
@@ -707,14 +852,14 @@ static const std::vector<MethDef> STR_METH = {
     {"starts_with", {"str"}, "bool", false},
     {"ends_with", {"str"}, "bool", false},
     {"contains", {"str"}, "bool", false},
-    {"parse_int", {}, "tag", false},
+    {"parse_int", {}, "res:int:str", false},
     {"replace", {"str", "str"}, "str", false},
     {"index_of", {"str"}, "dyn", false},
     {"repeat", {"int"}, "str", false},
     {"split_once", {"str"}, "dyn", false},
     {"copy", {}, "str", false},
     {"chars", {}, "vec:str", false},
-    {"parse_float", {}, "tag", false},
+    {"parse_float", {}, "res:float:str", false},
     {"slice", {"int", "int"}, "str", false},
 };
 
@@ -757,19 +902,29 @@ static const std::vector<MethDef> MAP_METH = {
 };
 
 static const std::map<std::string, Ty> BRES = {
-    {"len", Ty::of(Ty::Int)}, {"str", Ty::of(Ty::Str)}, {"is_err", Ty::of(Ty::Bool)},
-    {"is_none", Ty::of(Ty::Bool)}, {"tagof", Ty::of(Ty::Str)},
+    {"len", Ty::of(Ty::Int)}, {"str", Ty::of(Ty::Str)},
+    {"is_ok", Ty::of(Ty::Bool)}, {"is_err", Ty::of(Ty::Bool)},
+    {"is_some", Ty::of(Ty::Bool)}, {"is_none", Ty::of(Ty::Bool)},
+    {"tagof", Ty::of(Ty::Str)},
     {"__stag_is", Ty::of(Ty::Bool)}, {"__shas", Ty::of(Ty::Bool)},
-    {"read_file", Ty::of(Ty::Tag)}, {"write_file", Ty::of(Ty::Tag)},
-    {"read_bytes", Ty::of(Ty::Tag)}, {"write_bytes", Ty::of(Ty::Tag)},
-    {"proc_run", Ty::of(Ty::Tag)},
-    {"utf8_bytes", Ty::wrap(Ty::Vec, Ty::of(Ty::Int))}, {"utf8_str", Ty::of(Ty::Tag)},
-    {"json_parse", Ty::of(Ty::Tag)}, {"json_stringify", Ty::of(Ty::Str)},
-    {"fs_rename", Ty::of(Ty::Tag)}, {"fs_remove", Ty::of(Ty::Tag)},
-    {"sha256_bytes", Ty::of(Ty::Tag)}, {"random_bytes", Ty::of(Ty::Tag)},
-    {"https_request_raw", Ty::of(Ty::Tag)},
-    {"sql_open", Ty::of(Ty::Tag)}, {"sql_close", Ty::of(Ty::Tag)},
-    {"sql_exec", Ty::of(Ty::Tag)}, {"sql_query", Ty::of(Ty::Tag)},
+    {"read_file", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
+    {"write_file", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"read_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},
+    {"write_bytes", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"proc_run", Ty::result(Ty::of(Ty::Map), Ty::of(Ty::Str))},
+    {"utf8_bytes", Ty::wrap(Ty::Vec, Ty::of(Ty::Int))},
+    {"utf8_str", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
+    {"json_parse", Ty::result(Ty::dyn(), Ty::of(Ty::Str))},
+    {"json_stringify", Ty::of(Ty::Str)},
+    {"fs_rename", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"fs_remove", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"sha256_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},
+    {"random_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},
+    {"https_request_raw", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
+    {"sql_open", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"sql_close", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"sql_exec", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"sql_query", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Map)), Ty::of(Ty::Str))},
     {"is_vec", Ty::of(Ty::Bool)}, {"is_str", Ty::of(Ty::Bool)},
     {"is_map", Ty::of(Ty::Bool)}, {"is_bool", Ty::of(Ty::Bool)},
     {"is_int", Ty::of(Ty::Bool)}, {"is_float", Ty::of(Ty::Bool)},
@@ -781,13 +936,17 @@ static const std::map<std::string, Ty> BRES = {
     {"time_ms", Ty::of(Ty::Int)}, {"mono_ns", Ty::of(Ty::Int)},
     {"sleep_ms", Ty::dyn()}, {"env_get", Ty::dyn()}, {"env_get_bytes", Ty::dyn()},
     {"$arena_enter", Ty::of(Ty::Int)}, {"$arena_leave", Ty::of(Ty::Int)},
-    {"re_match", Ty::of(Ty::Bool)}, {"re_find", Ty::dyn()},
-    {"re_captures", Ty::dyn()}, {"re_replace", Ty::of(Ty::Str)},
-    {"tcp_listen", Ty::of(Ty::Tag)}, {"tcp_connect", Ty::of(Ty::Tag)},
-    {"tcp_accept", Ty::of(Ty::Tag)}, {"tcp_send", Ty::of(Ty::Tag)},
-    {"tcp_recv", Ty::of(Ty::Tag)}, {"tcp_close", Ty::of(Ty::Tag)},
+    {"re_match", Ty::of(Ty::Bool)}, {"re_find", Ty::option(Ty::of(Ty::Str))},
+    {"re_captures", Ty::option(Ty::wrap(Ty::Vec, Ty::of(Ty::Str)))},
+    {"re_replace", Ty::of(Ty::Str)},
+    {"tcp_listen", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"tcp_connect", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"tcp_accept", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"tcp_send", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"tcp_recv", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
+    {"tcp_close", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"sbuf", Ty::dyn()}, {"sbuf_add", Ty::of(Ty::Int)},
-    {"sbuf_len", Ty::of(Ty::Int)}, {"sbuf_str", Ty::of(Ty::Str)},
+    {"sbuf_len", Ty::of(Ty::Int)}, {"sbuf_str", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
     {"chan", Ty::of(Ty::Int)}, {"ptr_null", Ty::of(Ty::Int)},
     {"ptr_is_null", Ty::of(Ty::Bool)}, {"ptr_read_i64", Ty::of(Ty::Int)},
     {"ptr_write_i64", Ty::of(Ty::Int)}, {"ptr_read_f64", Ty::of(Ty::Float)},
@@ -812,6 +971,8 @@ static Ty from_code(const char *c) {
     if (s == "map") return Ty::of(Ty::Map);
     if (s == "vec:str") return Ty::wrap(Ty::Vec, Ty::of(Ty::Str));
     if (s == "vec:dyn") return Ty::wrap(Ty::Vec, Ty::dyn());
+    if (s == "res:int:str") return Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str));
+    if (s == "res:float:str") return Ty::result(Ty::of(Ty::Float), Ty::of(Ty::Str));
     return Ty::dyn();
 }
 
@@ -822,6 +983,8 @@ struct FnTyper {
     std::vector<TypeErr> &errs;
     int line = 0;
     std::map<std::string, Ty> env;
+    std::set<std::string> annotated_vars;
+    std::map<std::string, std::string> active_tags;
     std::set<std::string> outer_globals;
     std::vector<std::set<std::string>> tainted;
     int region = 0;
@@ -846,6 +1009,8 @@ struct FnTyper {
         if (silent) return;
         if (arena_only && msg.rfind("arena: ", 0) != 0) return;
         if (arity_and_arena && msg.rfind("arena: ", 0) != 0 &&
+            msg.rfind("non-exhaustive match:", 0) != 0 &&
+            msg.rfind("variant `", 0) != 0 &&
             !(msg.rfind("method `", 0) == 0 && msg.find(" wants ") != std::string::npos &&
               msg.find(" args") != std::string::npos)) return;
         errs.push_back(TypeErr{line, msg});
@@ -1057,6 +1222,8 @@ struct FnTyper {
     void closure_body(const Expr &e, int elem_reg = 0, Ty elem_ty = Ty::dyn(),
                       size_t elem_idx = 0) {
         std::map<std::string, Ty> saved = env;
+        std::set<std::string> saved_ann = annotated_vars;
+        std::map<std::string, std::string> saved_tags = active_tags;
         std::map<std::string, int> saved_decl = decl_regions;
         std::map<std::string, int> saved_reg = regions;
         Ty saved_ret = ret;
@@ -1065,6 +1232,9 @@ struct FnTyper {
             Ty pt = ann_type(p.ann);
             if (pt.k == Ty::Dyn && elem_reg > 0 && i == elem_idx) pt = elem_ty;
             env[p.name] = pt;
+            if (p.ann) annotated_vars.insert(p.name);
+            else annotated_vars.erase(p.name);
+            active_tags.erase(p.name);
             decl_regions[p.name] = current_region();
             regions[p.name] = (elem_reg > 0 && i == elem_idx && !scalar(pt)) ? elem_reg : 0;
         }
@@ -1075,6 +1245,8 @@ struct FnTyper {
         ret = saved_ret;
         regions = std::move(saved_reg);
         decl_regions = std::move(saved_decl);
+        active_tags = std::move(saved_tags);
+        annotated_vars = std::move(saved_ann);
         env = std::move(saved);
     }
 
@@ -1088,11 +1260,16 @@ struct FnTyper {
             else local_fn_sinks.erase(*f.name);
         }
         std::map<std::string, Ty> saved = env;
+        std::set<std::string> saved_ann = annotated_vars;
+        std::map<std::string, std::string> saved_tags = active_tags;
         std::map<std::string, int> saved_decl = decl_regions;
         std::map<std::string, int> saved_reg = regions;
         Ty saved_ret = ret;
         for (const auto &p : f.params) {
             env[p.name] = ann_type(p.ann);
+            if (p.ann) annotated_vars.insert(p.name);
+            else annotated_vars.erase(p.name);
+            active_tags.erase(p.name);
             decl_regions[p.name] = current_region();
             regions[p.name] = 0;
         }
@@ -1101,6 +1278,8 @@ struct FnTyper {
         ret = saved_ret;
         regions = std::move(saved_reg);
         decl_regions = std::move(saved_decl);
+        active_tags = std::move(saved_tags);
+        annotated_vars = std::move(saved_ann);
         env = std::move(saved);
     }
 
@@ -1127,12 +1306,111 @@ struct FnTyper {
     Ty slice_call(const std::string &name, const std::vector<ExprP> &args, size_t start);
     void check_cb(const Ty &pt, const Expr &arg, const std::string &name, int pos);
 
+    static bool extract_tagof_eq(const Expr *c, std::string &var_out, std::string &tag_out) {
+        if (!c || c->k != EK::Bin || c->a != "==" || c->kids.size() != 2) return false;
+        const Expr *lhs = c->kids[0].get();
+        const Expr *rhs = c->kids[1].get();
+        auto match_side = [&](const Expr *call_e, const Expr *str_e) -> bool {
+            if (!call_e || !str_e || str_e->k != EK::Str) return false;
+            if (call_e->k == EK::Call && call_e->a == "tagof" && call_e->kids.size() == 1 &&
+                call_e->kids[0]->k == EK::Var) {
+                var_out = call_e->kids[0]->a;
+                tag_out = str_e->a;
+                return true;
+            }
+            return false;
+        };
+        return match_side(lhs, rhs) || match_side(rhs, lhs);
+    }
+
+    static bool extract_pred_var(const Expr *c, const char *pred, std::string &var_out) {
+        if (!c) return false;
+        if (c->k == EK::Call && c->a == pred && c->kids.size() == 1 &&
+            c->kids[0]->k == EK::Var) {
+            var_out = c->kids[0]->a;
+            return true;
+        }
+        if (c->k == EK::MCall && c->b == pred && c->kids.size() == 1 &&
+            c->kids[0]->k == EK::Var) {
+            var_out = c->kids[0]->a;
+            return true;
+        }
+        return false;
+    }
+
+    static bool body_assigns(const std::vector<StmtP> &stmts, const std::string &var);
+    static bool stmt_assigns(const Stmt &s, const std::string &var) {
+        if (s.k == SK::Set && (s.a == var || s.a.rfind(var + ".", 0) == 0)) return true;
+        if (body_assigns(s.body, var) || body_assigns(s.body2, var)) return true;
+        if (s.els && stmt_assigns(*s.els, var)) return true;
+        return false;
+    }
+
+    void check_match_exhaustive(const std::vector<StmtP> &stmts, size_t idx) {
+        if (idx + 1 >= stmts.size() || !stmts[idx] || !stmts[idx + 1]) return;
+        const Stmt &lt = *stmts[idx];
+        if (lt.k != SK::LetTmp || !lt.from_match) return;
+        Ty scrut = env_get(lt.a);
+        const bool is_enum = (scrut.k == Ty::Enum && g_enums && g_enums->count(scrut.text));
+        if (!is_enum && scrut.k != Ty::Option && scrut.k != Ty::Result) return;
+        const Stmt *cur = stmts[idx + 1].get();
+        if (!cur || cur->k != SK::If) return;
+        std::set<std::string> seen;
+        while (cur && cur->k == SK::If) {
+            if (cur->pat_uncond) {
+                std::string v, tag;
+                if (extract_tagof_eq(cur->e1.get(), v, tag) && v == lt.a)
+                    seen.insert(tag);
+                else if (extract_pred_var(cur->e1.get(), "is_none", v) && v == lt.a)
+                    seen.insert("none");
+            }
+            cur = cur->els.get();
+        }
+        if (!cur || cur->k != SK::Block || !cur->from_match) return;
+        std::string missing;
+        auto add_missing = [&](const std::string &tag, const std::string &disp) {
+            if (!seen.count(tag)) {
+                if (!missing.empty()) missing += ", ";
+                missing += disp;
+            }
+        };
+        if (scrut.k == Ty::Option) {
+            add_missing("some", "Some");
+            add_missing("none", "None");
+        } else if (scrut.k == Ty::Result) {
+            add_missing("ok", "Ok");
+            add_missing("err", "Err");
+        } else {
+            const auto &ei = g_enums->at(scrut.text);
+            for (const auto &tag : ei.order) {
+                auto vit = ei.variants.find(tag);
+                add_missing(tag, vit != ei.variants.end() ? vit->second.orig_name : tag);
+            }
+        }
+        if (!missing.empty()) {
+            int saved_line = line;
+            if (lt.line) line = lt.line;
+            note("non-exhaustive match: missing " + missing);
+            line = saved_line;
+        }
+    }
+
     void block(const std::vector<StmtP> &body) {
-        for (const auto &s : body) stmt(*s);
+        for (size_t i = 0; i < body.size(); i++) {
+            stmt(*body[i]);
+            check_match_exhaustive(body, i);
+        }
     }
 
     void stmt(const Stmt &s);
 };
+
+bool FnTyper::body_assigns(const std::vector<StmtP> &stmts, const std::string &var) {
+    for (const auto &sp : stmts) {
+        if (sp && stmt_assigns(*sp, var)) return true;
+    }
+    return false;
+}
 
 Ty FnTyper::expr(const Expr &e) {
     switch (e.k) {
@@ -1147,9 +1425,7 @@ Ty FnTyper::expr(const Expr &e) {
         Ty t = Ty::dyn();
         if (!ts.empty()) {
             t = ts[0];
-            for (const auto &x : ts) {
-                if (!(x == ts[0])) t = Ty::dyn();
-            }
+            for (size_t i = 1; i < ts.size(); i++) t = join_ty(t, ts[i]);
         }
         return Ty::wrap(Ty::Vec, t);
     }
@@ -1283,9 +1559,20 @@ Ty FnTyper::expr(const Expr &e) {
     case EK::Or: {
         Ty a = expr(*e.kids[0]);
         Ty b = expr(*e.kids[1]);
-        return a == b ? a : Ty::dyn();
+        if (a.k == Ty::None) return b;
+        return join_ty(a, b);
     }
-    case EK::Quest: return expr(*e.kids[0]);
+    case EK::Quest: {
+        Ty inner = expr(*e.kids[0]);
+        if (inner.k == Ty::Option || inner.k == Ty::Result) return *inner.inner;
+        if (inner.k == Ty::Enum && g_enums && g_enums->count(inner.text)) {
+            const auto &ei = g_enums->at(inner.text);
+            auto vok = ei.variants.find("ok");
+            if (vok != ei.variants.end() && vok->second.field_tys.size() == 1)
+                return vok->second.field_tys[0];
+        }
+        return inner;
+    }
     case EK::MCall: {
         if ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) ||
             (e.kids[0]->k == EK::Var && !env.count(e.kids[0]->a))) {
@@ -1328,6 +1615,13 @@ Ty FnTyper::expr(const Expr &e) {
         return meth(ot, e.b, e.kids, 1);
     }
     case EK::Field: {
+        if ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) ||
+            (e.kids[0]->k == EK::Var && !env.count(e.kids[0]->a))) {
+            auto sit = sigs.find("__static__." + e.kids[0]->a + "." + e.b);
+            if (sit != sigs.end() && sit->second.is_ctor && sit->second.params.empty()) {
+                return sit->second.ret;
+            }
+        }
         Ty bt = expr(*e.kids[0]);
         if (bt.k == Ty::Struct) {
             Ty ft;
@@ -1365,6 +1659,124 @@ Ty FnTyper::expr(const Expr &e) {
     }
     case EK::Call: {
         const std::string &name = e.a;
+        if (e.kids.empty() && !name.empty() && name[0] >= 'A' && name[0] <= 'Z' &&
+            env.count(name)) {
+            return env_get(name);
+        }
+        if (name == "Some" || name == "Ok" || name == "Err") {
+            if (e.kids.size() != 1) {
+                note("`" + name + "` wants 1 arg, got " + std::to_string(e.kids.size()));
+                for (const auto &k : e.kids) expr(*k);
+                check_arena_call_expr(e);
+                return name == "Some" ? Ty::option(Ty::dyn())
+                                      : Ty::result(Ty::dyn(), Ty::dyn());
+            }
+            Ty inner = expr(*e.kids[0]);
+            check_arena_call_expr(e);
+            if (name == "Some") return Ty::option(std::move(inner));
+            if (name == "Ok") return Ty::result(std::move(inner), Ty::dyn());
+            return Ty::result(Ty::dyn(), std::move(inner));
+        }
+        if (name == "unwrap") {
+            if (e.kids.size() != 1) {
+                note("`unwrap` wants 1 arg, got " + std::to_string(e.kids.size()));
+                for (const auto &k : e.kids) expr(*k);
+                check_arena_call_expr(e);
+                return Ty::dyn();
+            }
+            Ty arg = expr(*e.kids[0]);
+            check_arena_call_expr(e);
+            if (arg.k == Ty::Option || arg.k == Ty::Result) return *arg.inner;
+            if (arg.k == Ty::Dyn || arg.k == Ty::Tag) return Ty::dyn();
+            if (arg.k == Ty::Enum && g_enums && g_enums->count(arg.text)) {
+                const auto &ei = g_enums->at(arg.text);
+                auto vok = ei.variants.find("ok");
+                if (vok != ei.variants.end() && vok->second.field_tys.size() == 1)
+                    return vok->second.field_tys[0];
+                auto vsome = ei.variants.find("some");
+                if (vsome != ei.variants.end() && vsome->second.field_tys.size() == 1)
+                    return vsome->second.field_tys[0];
+            }
+            note("`unwrap` wants Option or Result, got " + type_name(arg));
+            return Ty::dyn();
+        }
+        if (name == "unwrap_or") {
+            if (e.kids.size() != 2) {
+                note("`unwrap_or` wants 2 args, got " + std::to_string(e.kids.size()));
+                for (const auto &k : e.kids) expr(*k);
+                check_arena_call_expr(e);
+                return Ty::dyn();
+            }
+            Ty arg = expr(*e.kids[0]);
+            Ty fb = expr(*e.kids[1]);
+            check_arena_call_expr(e);
+            if (arg.k == Ty::Dyn || arg.k == Ty::Tag) return Ty::dyn();
+            if (arg.k == Ty::None) return fb;
+            Ty pay = Ty::dyn();
+            bool valid = false;
+            if (arg.k == Ty::Option || arg.k == Ty::Result) {
+                pay = *arg.inner;
+                valid = true;
+            } else if (arg.k == Ty::Enum && g_enums && g_enums->count(arg.text)) {
+                const auto &ei = g_enums->at(arg.text);
+                if (ei.variants.count("ok") || ei.variants.count("err") ||
+                    ei.variants.count("some") || ei.variants.count("none")) {
+                    valid = true;
+                    auto vok = ei.variants.find("ok");
+                    auto vsome = ei.variants.find("some");
+                    if (vok != ei.variants.end() && vok->second.field_tys.size() == 1)
+                        pay = vok->second.field_tys[0];
+                    else if (vsome != ei.variants.end() && vsome->second.field_tys.size() == 1)
+                        pay = vsome->second.field_tys[0];
+                }
+            }
+            if (!valid) {
+                note("`unwrap_or` wants Option or Result, got " + type_name(arg));
+                return Ty::dyn();
+            }
+            if (pay.k == Ty::Dyn) return fb;
+            if (fb.k != Ty::Dyn && !type_ok(pay, fb)) {
+                note("arg 2 of `unwrap_or`: want " + type_name(pay) + ", got " + type_name(fb));
+                return pay;
+            }
+            return pay;
+        }
+        if (name == "is_ok" || name == "is_err" || name == "is_some" || name == "is_none") {
+            if (e.kids.size() != 1) {
+                note("`" + name + "` wants 1 arg, got " + std::to_string(e.kids.size()));
+                for (const auto &k : e.kids) expr(*k);
+                check_arena_call_expr(e);
+                return Ty::of(Ty::Bool);
+            }
+            expr(*e.kids[0]);
+            check_arena_call_expr(e);
+            return Ty::of(Ty::Bool);
+        }
+        if (name == "__at" && e.kids.size() == 2 && e.kids[0]->k == EK::Var &&
+            e.kids[1]->k == EK::Num && !e.kids[1]->is_float) {
+            const std::string &v = e.kids[0]->a;
+            const int64_t idx = e.kids[1]->i - 1;
+            expr(*e.kids[0]);
+            expr(*e.kids[1]);
+            auto ait = active_tags.find(v);
+            if (ait != active_tags.end() && idx >= 0) {
+                Ty scrut = env_get(v);
+                const std::string &tag = ait->second;
+                if (scrut.k == Ty::Option && tag == "some" && idx == 0) return *scrut.inner;
+                if (scrut.k == Ty::Result && tag == "ok" && idx == 0) return *scrut.inner;
+                if (scrut.k == Ty::Result && tag == "err" && idx == 0) return *scrut.inner2;
+                if (scrut.k == Ty::Enum && g_enums && g_enums->count(scrut.text)) {
+                    const auto &ei = g_enums->at(scrut.text);
+                    auto vit = ei.variants.find(tag);
+                    if (vit != ei.variants.end() &&
+                        static_cast<size_t>(idx) < vit->second.field_tys.size()) {
+                        return vit->second.field_tys[static_cast<size_t>(idx)];
+                    }
+                }
+            }
+            check_arena_call_expr(e);
+            return Ty::dyn();
+        }
         // A known signature types its arguments in the loop below, one slot at a
         // time -- that is where `&x` learns it is a `ptr[T]` argument. Walking
         // them here first would check each one twice, the first time blind.
@@ -1516,7 +1928,8 @@ int FnTyper::expr_region(const Expr &e) {
     case EK::MCall: {
         if (scalar(peek_expr(e))) return 0;
         static const std::set<std::string> elem_m = {
-            "get", "get_or", "pop", "first", "last", "min", "max", "find", "del", "unwrap", "recv"
+            "get", "get_or", "pop", "first", "last", "min", "max", "find", "del",
+            "unwrap", "unwrap_or", "recv"
         };
         if (elem_m.count(e.b)) {
             int r = 0;
@@ -1532,7 +1945,14 @@ int FnTyper::expr_region(const Expr &e) {
             if (e.a == "slice_get" && scalar(peek_expr(e))) return 0;
             return expr_region(*e.kids[0]);
         }
-        if (!e.a.empty() && e.a[0] >= 'A' && e.a[0] <= 'Z' && !sigs.count(e.a)) {
+        if (e.a == "unwrap" || e.a == "unwrap_or" || e.a == "__at") {
+            if (scalar(peek_expr(e))) return 0;
+            int r = 0;
+            for (const auto &k : e.kids) r = std::max(r, expr_region(*k));
+            return r;
+        }
+        if (!e.a.empty() && e.a[0] >= 'A' && e.a[0] <= 'Z' &&
+            (!sigs.count(e.a) || sigs.at(e.a).is_ctor)) {
             int r = 0;
             for (const auto &k : e.kids) r = std::max(r, expr_region(*k));
             return r;
@@ -1597,7 +2017,98 @@ Ty FnTyper::meth(const Ty &ot, const std::string &name, const std::vector<ExprP>
         }
     }
     if (!tab) {
-        if (ot.k == Ty::Dyn) {
+        auto dispatch_adt_builtin = [&](const Ty &recv) -> std::optional<Ty> {
+            const size_t n = args.size() - start;
+            if (name == "is_ok" || name == "is_err" || name == "is_some" || name == "is_none") {
+                if (n != 0) note("method `" + name + "` wants 0 args");
+                return Ty::of(Ty::Bool);
+            }
+            if (name == "unwrap") {
+                if (n != 0) note("method `unwrap` wants 0 args");
+                if (recv.k == Ty::Option || recv.k == Ty::Result) return *recv.inner;
+                if (recv.k == Ty::Enum && g_enums && g_enums->count(recv.text)) {
+                    const auto &ei = g_enums->at(recv.text);
+                    auto vok = ei.variants.find("ok");
+                    if (vok != ei.variants.end() && vok->second.field_tys.size() == 1)
+                        return vok->second.field_tys[0];
+                    auto vsome = ei.variants.find("some");
+                    if (vsome != ei.variants.end() && vsome->second.field_tys.size() == 1)
+                        return vsome->second.field_tys[0];
+                }
+                return std::nullopt;
+            }
+            if (name == "unwrap_or") {
+                if (n != 1) {
+                    note("method `unwrap_or` wants 1 args");
+                    return Ty::dyn();
+                }
+                Ty fb = expr(*args[start]);
+                if (recv.k == Ty::None) return fb;
+                Ty pay = Ty::dyn();
+                bool valid = false;
+                if (recv.k == Ty::Option || recv.k == Ty::Result) {
+                    pay = *recv.inner;
+                    valid = true;
+                } else if (recv.k == Ty::Enum && g_enums && g_enums->count(recv.text)) {
+                    const auto &ei = g_enums->at(recv.text);
+                    if (ei.variants.count("ok") || ei.variants.count("err") ||
+                        ei.variants.count("some") || ei.variants.count("none")) {
+                        valid = true;
+                        auto vok = ei.variants.find("ok");
+                        auto vsome = ei.variants.find("some");
+                        if (vok != ei.variants.end() && vok->second.field_tys.size() == 1)
+                            pay = vok->second.field_tys[0];
+                        else if (vsome != ei.variants.end() && vsome->second.field_tys.size() == 1)
+                            pay = vsome->second.field_tys[0];
+                    }
+                }
+                if (!valid) return std::nullopt;
+                if (pay.k == Ty::Dyn) return fb;
+                if (fb.k != Ty::Dyn && !type_ok(pay, fb)) {
+                    note("method `unwrap_or` arg 1: want " + type_name(pay) + ", got " +
+                         type_name(fb));
+                }
+                return pay;
+            }
+            return std::nullopt;
+        };
+        if (ot.k == Ty::Enum && !ot.text.empty() && g_enums && g_enums->count(ot.text)) {
+            auto mit = sigs.find("__method__." + ot.text + "." + name);
+            if (mit != sigs.end()) {
+                const FnSig &f = mit->second;
+                const size_t n = args.size() - start;
+                const size_t ndef = f.ndef > 0 ? static_cast<size_t>(f.ndef) : 0;
+                const size_t min_n = f.params.size() >= ndef ? f.params.size() - ndef : 0;
+                if (n < min_n || n > f.params.size()) {
+                    note("method `" + name + "` wants " + std::to_string(f.params.size()) + " args");
+                    return f.ret;
+                }
+                for (size_t i = 0; i < n && i < f.params.size(); i++) {
+                    Ty gt = expr(*args[start + i]);
+                    if (!type_ok(f.params[i], gt)) {
+                        note("method `" + name + "` arg " + std::to_string(i + 1) + ": want " +
+                             type_name(f.params[i]) + ", got " + type_name(gt));
+                    }
+                }
+                return f.ret;
+            }
+            if (auto adt = dispatch_adt_builtin(ot)) return *adt;
+            note("no method `" + name + "` for " + ot.text);
+            return Ty::dyn();
+        }
+        if (ot.k == Ty::Option || ot.k == Ty::Result) {
+            if (auto adt = dispatch_adt_builtin(ot)) return *adt;
+            note("no method `" + name + "` for " + type_name(ot));
+            return Ty::dyn();
+        }
+        if (ot.k == Ty::None &&
+            (name == "unwrap_or" || name == "is_ok" || name == "is_err" ||
+             name == "is_some" || name == "is_none")) {
+            if (auto adt = dispatch_adt_builtin(ot)) return *adt;
+        }
+    }
+    if (!tab) {
+        if (ot.k == Ty::Dyn || ot.k == Ty::Tag) {
             const bool user_defined = sigs.count("__impl__." + name) != 0;
             if (!user_defined) {
                 static const std::map<std::string, std::pair<size_t, size_t>> builtin_arity = {
@@ -1615,6 +2126,8 @@ Ty FnTyper::meth(const Ty &ot, const std::string &name, const std::vector<ExprP>
                     {"send", {1, 1}}, {"recv", {0, 0}}, {"close", {0, 0}},
                     {"map", {1, 1}}, {"filter", {1, 1}}, {"any", {1, 1}}, {"all", {1, 1}},
                     {"find", {1, 1}}, {"sort_by", {1, 1}}, {"fold", {2, 2}},
+                    {"unwrap", {0, 0}}, {"unwrap_or", {1, 1}}, {"is_ok", {0, 0}},
+                    {"is_err", {0, 0}}, {"is_some", {0, 0}}, {"is_none", {0, 0}},
                 };
                 auto it = builtin_arity.find(name);
                 if (it != builtin_arity.end()) {
@@ -1981,6 +2494,9 @@ void FnTyper::stmt(const Stmt &s) {
         }
         Ty vty = want.k != Ty::Dyn ? want : got;
         env[s.a] = vty;
+        if (s.ann && want.k != Ty::Dyn) annotated_vars.insert(s.a);
+        else annotated_vars.erase(s.a);
+        active_tags.erase(s.a);
         std::set<std::string> ms;
         mentions(*s.e1, ms);
         bool outer_alias = false;
@@ -2021,6 +2537,7 @@ void FnTyper::stmt(const Stmt &s) {
         std::string target = s.a;
         auto dot = target.find('.');
         if (dot != std::string::npos) target = target.substr(0, dot);
+        active_tags.erase(target);
         int er = expr_region(*s.e1);
         if (current_region() != 0) {
             if (!inner(target) && escapes(*s.e1)) {
@@ -2059,9 +2576,20 @@ void FnTyper::stmt(const Stmt &s) {
             }
         } else {
             auto it = env.find(s.a);
-            if (it != env.end() && it->second.k != Ty::Dyn && !type_ok(it->second, got)) {
-                note("assign to `" + s.a + "`: want " + type_name(it->second) + ", got " +
-                     type_name(got));
+            if (it != env.end() && it->second.k != Ty::Dyn) {
+                if (!annotated_vars.count(s.a) && it->second.k == Ty::None &&
+                    got.k != Ty::None) {
+                    it->second = got.k == Ty::Option ? got : Ty::dyn();
+                } else if (!type_ok(it->second, got)) {
+                    note("assign to `" + s.a + "`: want " + type_name(it->second) + ", got " +
+                         type_name(got));
+                } else if (!annotated_vars.count(s.a)) {
+                    if (it->second.k == Ty::Result && got.k == Ty::Result) {
+                        it->second = join_ty(it->second, got);
+                    } else if (it->second.k == Ty::Option && got.k == Ty::Option) {
+                        it->second = join_ty(it->second, got);
+                    }
+                }
             }
         }
         break;
@@ -2137,6 +2665,67 @@ void FnTyper::stmt(const Stmt &s) {
     }
     case SK::If: {
         expr(*s.e1);
+        std::string tag_var, tag_name;
+        std::string pred_var;
+        bool has_tag_scope = false;
+        std::optional<std::string> prev_tag;
+        bool has_narrow = false;
+        std::string narrow_var;
+        Ty prev_narrow_ty;
+        if (!is_arena_block(s)) {
+            if (extract_tagof_eq(s.e1.get(), tag_var, tag_name)) {
+                Ty scrut = env_get(tag_var);
+                if (scrut.k == Ty::Enum && g_enums && g_enums->count(scrut.text)) {
+                    const auto &ei = g_enums->at(scrut.text);
+                    auto vit = ei.variants.find(tag_name);
+                    if (vit == ei.variants.end()) {
+                        note("enum `" + scrut.text + "` has no variant `" + tag_name + "`");
+                    } else if (s.pat_arity >= 0 &&
+                               static_cast<size_t>(s.pat_arity) != vit->second.field_tys.size()) {
+                        note("variant `" + vit->second.orig_name + "` of `" + scrut.text +
+                             "` wants " + std::to_string(vit->second.field_tys.size()) +
+                             " field(s), got " + std::to_string(s.pat_arity));
+                    }
+                } else if (scrut.k == Ty::Option) {
+                    if (tag_name != "some" && tag_name != "none") {
+                        note("`" + type_name(scrut) + "` has no variant `" + tag_name + "`");
+                    } else if (s.pat_arity >= 0) {
+                        const size_t want_n = tag_name == "some" ? 1 : 0;
+                        if (static_cast<size_t>(s.pat_arity) != want_n)
+                            note("variant `" + std::string(tag_name == "some" ? "Some" : "None") +
+                                 "` wants " + std::to_string(want_n) + " field(s), got " +
+                                 std::to_string(s.pat_arity));
+                    }
+                } else if (scrut.k == Ty::Result) {
+                    if (tag_name != "ok" && tag_name != "err") {
+                        note("`" + type_name(scrut) + "` has no variant `" + tag_name + "`");
+                    } else if (s.pat_arity >= 0 && s.pat_arity != 1) {
+                        note("variant `" + std::string(tag_name == "ok" ? "Ok" : "Err") +
+                             "` wants 1 field(s), got " + std::to_string(s.pat_arity));
+                    }
+                }
+                auto ait = active_tags.find(tag_var);
+                if (ait != active_tags.end()) prev_tag = ait->second;
+                active_tags[tag_var] = tag_name;
+                has_tag_scope = true;
+            } else if (extract_pred_var(s.e1.get(), "is_err", pred_var)) {
+                Ty scrut = env_get(pred_var);
+                if (scrut.k == Ty::Result && !body_assigns(s.body, pred_var)) {
+                    narrow_var = pred_var;
+                    prev_narrow_ty = scrut;
+                    env[pred_var] = Ty::result(Ty::dyn(), *scrut.inner2);
+                    has_narrow = true;
+                }
+            } else if (extract_pred_var(s.e1.get(), "is_none", pred_var)) {
+                Ty scrut = env_get(pred_var);
+                if (scrut.k == Ty::Option && !body_assigns(s.body, pred_var)) {
+                    narrow_var = pred_var;
+                    prev_narrow_ty = scrut;
+                    env[pred_var] = Ty::of(Ty::None);
+                    has_narrow = true;
+                }
+            }
+        }
         if (is_arena_block(s)) {
             region++;
             region_stack.push_back(region);
@@ -2147,6 +2736,11 @@ void FnTyper::stmt(const Stmt &s) {
         } else {
             block(s.body);
         }
+        if (has_tag_scope) {
+            if (prev_tag) active_tags[tag_var] = *prev_tag;
+            else active_tags.erase(tag_var);
+        }
+        if (has_narrow) env[narrow_var] = prev_narrow_ty;
         if (s.els) {
             if (s.els->k == SK::Block) {
                 block(s.els->body);
@@ -2245,14 +2839,62 @@ void FnTyper::stmt(const Stmt &s) {
     }
 }
 
+static std::string lower_tag_name(const std::string &s) {
+    std::string out = s;
+    for (char &c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+}
+
+static std::string pad4_index(size_t idx) {
+    std::string s = std::to_string(idx);
+    if (s.size() < 4) s.insert(0, 4 - s.size(), '0');
+    return s;
+}
+
+static void register_enum_ctors(const std::map<std::string, EnumInfo> &enums, Sigs &sigs) {
+    std::map<std::string, std::string> ctor_owner;
+    std::set<std::string> ambiguous;
+    for (const auto &[ename, ei] : enums) {
+        for (const auto &tag : ei.order) {
+            auto vit = ei.variants.find(tag);
+            if (vit == ei.variants.end()) continue;
+            const std::string &vname = vit->second.orig_name;
+            if (vname == "Ok" || vname == "Err" || vname == "Some" || vname == "None")
+                continue;
+            auto existing = sigs.find(vname);
+            if (existing != sigs.end() && !existing->second.is_ctor) continue;
+            auto oit = ctor_owner.find(vname);
+            if (oit != ctor_owner.end() && oit->second != ename) {
+                ambiguous.insert(vname);
+                sigs.erase(vname);
+                continue;
+            }
+            if (ambiguous.count(vname)) continue;
+            ctor_owner[vname] = ename;
+            FnSig cs;
+            cs.is_ctor = true;
+            cs.ret = Ty::enm(ename);
+            cs.ret_ann = ename;
+            cs.params = vit->second.field_tys;
+            cs.param_anns = vit->second.field_anns;
+            sigs[vname] = std::move(cs);
+        }
+    }
+}
+
 void collect_exports(const std::vector<StmtP> &prog,
                      std::map<std::string, Ty> &consts,
                      std::map<std::string, std::map<std::string, Ty>> &structs) {
     std::set<std::string> native_names;
+    std::map<std::string, EnumInfo> pub_enums;
     auto *saved = g_structs;
     auto *saved_native = g_native_structs;
+    auto *saved_enums = g_enums;
     g_structs = &structs;
     g_native_structs = &native_names;
+    g_enums = &pub_enums;
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
@@ -2262,16 +2904,47 @@ void collect_exports(const std::vector<StmtP> &prog,
             structs[node.a];
             native_names.insert(node.a);
             structs["__native__"][node.a] = Ty::dyn();
+        } else if (node.k == SK::Enum && sp->k == SK::Pub) {
+            pub_enums[node.a];
+            structs["__enums__"][node.a] = Ty::dyn();
         }
     }
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
-        if (node.k != SK::ExternStruct && !(node.k == SK::Struct && sp->k == SK::Pub)) continue;
-        for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+        if (node.k == SK::ExternStruct || (node.k == SK::Struct && sp->k == SK::Pub)) {
+            for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+        } else if (node.k == SK::Enum && sp->k == SK::Pub) {
+            EnumInfo &ei = pub_enums[node.a];
+            ei.order.clear();
+            ei.variants.clear();
+            for (size_t vi = 0; vi < node.variants.size(); vi++) {
+                const auto &v = node.variants[vi];
+                std::string tag = (v.name == "None" && v.fields.empty())
+                                      ? "none"
+                                      : lower_tag_name(v.name);
+                EnumVariantInfo evi;
+                evi.orig_name = v.name;
+                evi.field_anns = v.field_anns;
+                std::string key = "__enum_var__:" + node.a + ":" + pad4_index(vi) + ":" + tag;
+                structs[key]["__orig__"] = Ty::other(v.name);
+                structs[key]["__arity__"] = Ty::cb(static_cast<int>(v.fields.size()), "");
+                for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                    std::optional<std::string> fa =
+                        fi < v.field_anns.size() ? v.field_anns[fi] : std::nullopt;
+                    Ty fty = ann_type(fa);
+                    evi.field_tys.push_back(fty);
+                    structs[key]["f" + std::to_string(fi)] = fty;
+                    structs[key]["a" + std::to_string(fi)] = Ty::other(fa.value_or(""));
+                }
+                ei.order.push_back(tag);
+                ei.variants[tag] = std::move(evi);
+            }
+        }
     }
     std::vector<TypeErr> dummy;
-    Sigs empty_sigs;
-    FnTyper probe(empty_sigs, Ty::dyn(), dummy);
+    Sigs probe_sigs;
+    register_enum_ctors(pub_enums, probe_sigs);
+    FnTyper probe(probe_sigs, Ty::dyn(), dummy);
     probe.env = consts;
     for (const auto &sp : prog) {
         if (sp->k != SK::Pub || sp->body.empty()) continue;
@@ -2286,6 +2959,7 @@ void collect_exports(const std::vector<StmtP> &prog,
     }
     g_structs = saved;
     g_native_structs = saved_native;
+    g_enums = saved_enums;
 }
 
 std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extra,
@@ -2296,6 +2970,7 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
     std::map<std::string, std::map<std::string, Ty>> structs = extra_structs;
     std::set<std::string> unions;
     std::set<std::string> native_structs;
+    std::map<std::string, EnumInfo> enums;
     if (auto uit = structs.find("__unions__"); uit != structs.end()) {
         for (const auto &kv : uit->second) unions.insert(kv.first);
         structs.erase(uit);
@@ -2304,12 +2979,48 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         for (const auto &kv : nit->second) native_structs.insert(kv.first);
         structs.erase(nit);
     }
+    if (auto eit = structs.find("__enums__"); eit != structs.end()) {
+        for (const auto &kv : eit->second) enums[kv.first];
+        structs.erase(eit);
+    }
+    for (auto it = structs.begin(); it != structs.end();) {
+        if (it->first.rfind("__enum_var__:", 0) == 0) {
+            const std::string rest = it->first.substr(13);
+            size_t c1 = rest.find(':');
+            size_t c2 = c1 == std::string::npos ? std::string::npos : rest.find(':', c1 + 1);
+            if (c1 != std::string::npos && c2 != std::string::npos) {
+                std::string ename = rest.substr(0, c1);
+                std::string tag = rest.substr(c2 + 1);
+                EnumVariantInfo evi;
+                auto oit = it->second.find("__orig__");
+                evi.orig_name = oit != it->second.end() ? oit->second.text : tag;
+                auto ait = it->second.find("__arity__");
+                int arity = ait != it->second.end() ? ait->second.arity : 0;
+                for (int fi = 0; fi < arity; fi++) {
+                    auto raw_it = it->second.find("a" + std::to_string(fi));
+                    std::optional<std::string> fa;
+                    if (raw_it != it->second.end() && !raw_it->second.text.empty())
+                        fa = raw_it->second.text;
+                    evi.field_anns.push_back(fa);
+                    auto fit = it->second.find("f" + std::to_string(fi));
+                    evi.field_tys.push_back(fit != it->second.end() ? fit->second : Ty::dyn());
+                }
+                enums[ename].order.push_back(tag);
+                enums[ename].variants[tag] = std::move(evi);
+            }
+            it = structs.erase(it);
+        } else {
+            ++it;
+        }
+    }
     auto *saved_structs = g_structs;
     auto *saved_unions = g_unions;
     auto *saved_native = g_native_structs;
+    auto *saved_enums = g_enums;
     g_structs = &structs;
     g_unions = &unions;
     g_native_structs = &native_structs;
+    g_enums = &enums;
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
@@ -2318,16 +3029,54 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         } else if (node.k == SK::Struct) {
             structs[node.a];
             native_structs.insert(node.a);
+        } else if (node.k == SK::Enum) {
+            enums[node.a];
         }
     }
     for (int pass = 0; pass < 2; pass++) {
         for (const auto &sp : prog) {
             const Stmt &node = unpub(*sp);
-            if (node.k != SK::ExternStruct && node.k != SK::Struct) continue;
-            for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+            if (node.k == SK::ExternStruct || node.k == SK::Struct) {
+                for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+            } else if (node.k == SK::Enum) {
+                EnumInfo &ei = enums[node.a];
+                ei.order.clear();
+                ei.variants.clear();
+                for (const auto &v : node.variants) {
+                    std::string tag = (v.name == "None" && v.fields.empty())
+                                          ? "none"
+                                          : lower_tag_name(v.name);
+                    EnumVariantInfo evi;
+                    evi.orig_name = v.name;
+                    evi.field_anns = v.field_anns;
+                    for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                        std::optional<std::string> fa =
+                            fi < v.field_anns.size() ? v.field_anns[fi] : std::nullopt;
+                        evi.field_tys.push_back(ann_type(fa));
+                    }
+                    ei.order.push_back(tag);
+                    ei.variants[tag] = std::move(evi);
+                }
+            }
+        }
+        for (auto &[ename, ei] : enums) {
+            for (auto &[tag, evi] : ei.variants) {
+                for (size_t fi = 0; fi < evi.field_anns.size() && fi < evi.field_tys.size(); fi++) {
+                    if (evi.field_anns[fi]) evi.field_tys[fi] = ann_type(evi.field_anns[fi]);
+                }
+            }
         }
     }
     collect_sigs(prog, sigs);
+    for (auto &[fname, f] : sigs) {
+        if (f.is_ctor && fname.rfind("__static__.", 0) != 0) continue;
+        for (size_t k = 0; k < f.params.size() && k < f.param_anns.size(); k++) {
+            if (f.param_anns[k]) f.params[k] = ann_type(*f.param_anns[k]);
+        }
+        if (f.ret_ann) f.ret = ann_type(*f.ret_ann);
+        if (f.varargs && !f.varargs_ann.empty()) f.varargs = ann_type(f.varargs_ann);
+    }
+    register_enum_ctors(enums, sigs);
     std::set<std::string> outer_globals;
     for (const auto &kv : extra_consts) outer_globals.insert(kv.first);
     for (const auto &sp : prog) {
@@ -2395,20 +3144,29 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         const Stmt &node = unpub(*sp);
         if (node.k == SK::Impl) {
             const bool is_native_impl = native_structs.count(node.a) > 0;
+            const bool is_enum_impl = enums.count(node.a) > 0;
             for (const auto &m : node.fns) {
                 Ty mret = ann_type(m.ret);
                 FnTyper tp(sigs, mret, errs);
                 tp.env = const_env;
                 tp.outer_globals = outer_globals;
+                bool has_typed_param = false;
                 for (const auto &p : m.params) {
-                    if (is_native_impl && p.name == "self" && !p.ann) {
-                        tp.env[p.name] = word_type(node.a);
+                    if ((is_native_impl || is_enum_impl) && p.name == "self" && !p.ann) {
+                        tp.env[p.name] = is_enum_impl ? Ty::enm(node.a) : word_type(node.a);
+                        tp.annotated_vars.insert(p.name);
+                        has_typed_param = true;
                     } else {
-                        tp.env[p.name] = ann_type(p.ann);
+                        Ty pt = ann_type(p.ann);
+                        tp.env[p.name] = pt;
+                        if (p.ann && pt.k != Ty::Dyn) {
+                            tp.annotated_vars.insert(p.name);
+                            has_typed_param = true;
+                        }
                     }
                 }
                 if (!unions.empty()) walk_union_stmts(walk_union_stmts, m.body, tp);
-                if (is_native_impl && mret.k != Ty::Dyn) {
+                if ((is_native_impl || is_enum_impl) && (mret.k != Ty::Dyn || has_typed_param)) {
                     tp.block(m.body);
                 } else {
                     tp.arity_and_arena = true;
@@ -2423,8 +3181,16 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         FnTyper tp(sigs, ret, errs);
         tp.env = const_env;
         tp.outer_globals = outer_globals;
-        for (const auto &p : node.fns[0].params) tp.env[p.name] = ann_type(p.ann);
-        if (ret.k == Ty::Dyn) {
+        bool has_typed_param = false;
+        for (const auto &p : node.fns[0].params) {
+            Ty pt = ann_type(p.ann);
+            tp.env[p.name] = pt;
+            if (p.ann && pt.k != Ty::Dyn) {
+                tp.annotated_vars.insert(p.name);
+                has_typed_param = true;
+            }
+        }
+        if (ret.k == Ty::Dyn && !has_typed_param) {
             if (!unions.empty()) walk_union_stmts(walk_union_stmts, node.fns[0].body, tp);
             tp.arity_and_arena = true;
             tp.block(node.fns[0].body);
@@ -2436,7 +3202,8 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
     FnTyper top(sigs, Ty::dyn(), errs);
     top.env = const_env;
     top.outer_globals = outer_globals;
-    for (const auto &sp : prog) {
+    for (size_t idx = 0; idx < prog.size(); idx++) {
+        const auto &sp = prog[idx];
         const Stmt &node = unpub(*sp);
         if (node.k == SK::Fn || node.k == SK::ExportFn || node.k == SK::Impl ||
             node.k == SK::Trait || node.k == SK::Enum || node.k == SK::Struct ||
@@ -2444,10 +3211,12 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
             continue;
         }
         top.stmt(*sp);
+        top.check_match_exhaustive(prog, idx);
     }
     g_structs = saved_structs;
     g_unions = saved_unions;
     g_native_structs = saved_native;
+    g_enums = saved_enums;
     std::vector<TypeErr> out;
     for (const auto &e : errs) {
         bool dup = false;

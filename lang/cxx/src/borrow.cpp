@@ -25,7 +25,8 @@ const std::set<std::string> BUILTINS = {
     "print", "log.info", "log.warn", "log.error",
     "trace.span",
     "join_all",
-    "len", "__at", "__stag_is", "__shas", "Ok", "Err", "Some", "unwrap", "is_err", "is_none", "is_vec",
+    "len", "__at", "__stag_is", "__shas", "Ok", "Err", "Some", "unwrap", "unwrap_or",
+    "is_ok", "is_err", "is_some", "is_none", "is_vec",
     "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
     "str", "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
     "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_rename", "fs_remove", "assert",
@@ -350,11 +351,34 @@ std::string trim_ann(const std::string &raw) {
     return (b == std::string::npos) ? std::string() : raw.substr(b, z - b + 1);
 }
 
+std::string unwrap_adt_ann(const std::string &raw) {
+    std::string a = trim_ann(raw);
+    if (starts_with(a, "Option[") && ends_with(a, "]"))
+        return trim_ann(a.substr(7, a.size() - 8));
+    if (starts_with(a, "Result[") && ends_with(a, "]")) {
+        std::string inner = a.substr(7, a.size() - 8);
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); i++) {
+            if (inner[i] == '[' || inner[i] == '(') depth++;
+            else if (inner[i] == ']' || inner[i] == ')') depth--;
+            else if (inner[i] == ',' && depth == 0)
+                return trim_ann(inner.substr(0, i));
+        }
+        return trim_ann(inner);
+    }
+    return a;
+}
+
 std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
                                           const FnTable *funcs = nullptr) {
-    e = skip_quest(e);
     if (!e) return std::nullopt;
     switch (e->k) {
+    case EK::Quest: {
+        auto sub = infer_expr_ann(e->kids.empty() ? nullptr : e->kids[0].get(), decl, funcs);
+        if (!sub) return std::nullopt;
+        std::string u = unwrap_adt_ann(*sub);
+        return u.empty() ? std::nullopt : std::optional<std::string>(std::move(u));
+    }
     case EK::Move:
         return infer_expr_ann(e->kids.empty() ? nullptr : e->kids[0].get(), decl, funcs);
     case EK::Var: {
@@ -366,24 +390,67 @@ std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
         if (funcs && funcs->struct_fields.count(e->a)) return e->a;
         return std::nullopt;
     case EK::Call: {
-        if (!funcs) return std::nullopt;
         if (e->a == "own" && e->kids.size() == 1)
             return infer_expr_ann(e->kids[0].get(), decl, funcs);
+        if (e->a == "is_ok" || e->a == "is_err" || e->a == "is_some" || e->a == "is_none")
+            return std::string("bool");
+        if (e->a == "Some" && e->kids.size() == 1) {
+            auto in = infer_expr_ann(e->kids[0].get(), decl, funcs);
+            if (in && !in->empty()) return "Option[" + *in + "]";
+            return std::nullopt;
+        }
+        if (e->a == "Ok" && e->kids.size() == 1) {
+            auto in = infer_expr_ann(e->kids[0].get(), decl, funcs);
+            if (in && !in->empty()) return "Result[" + *in + ", dyn]";
+            return std::nullopt;
+        }
+        if (e->a == "unwrap" && e->kids.size() == 1) {
+            auto in = infer_expr_ann(e->kids[0].get(), decl, funcs);
+            if (!in) return std::nullopt;
+            std::string u = unwrap_adt_ann(*in);
+            return (u.empty() || u == *in) ? std::nullopt : std::optional<std::string>(std::move(u));
+        }
+        if (e->a == "unwrap_or" && e->kids.size() == 2) {
+            auto in = infer_expr_ann(e->kids[0].get(), decl, funcs);
+            if (in) {
+                std::string u = unwrap_adt_ann(*in);
+                if (!u.empty() && u != *in && u != "dyn") return u;
+            }
+            return infer_expr_ann(e->kids[1].get(), decl, funcs);
+        }
+        if (e->a == "read_file") return std::string("Result[str, str]");
+        if (e->a == "re_find") return std::string("Option[str]");
+        if (!funcs) return std::nullopt;
         auto rit = funcs->fn_rets.find(e->a);
         return rit == funcs->fn_rets.end() ? std::nullopt : std::optional<std::string>(trim_ann(rit->second));
     }
     case EK::MCall: {
-        if (!funcs || e->kids.empty()) return std::nullopt;
-        if ((e->kids[0]->k == EK::Call && e->kids[0]->kids.empty()) ||
-            (e->kids[0]->k == EK::Var && !decl.has(e->kids[0]->a))) {
+        if (e->kids.empty()) return std::nullopt;
+        if (e->b == "is_ok" || e->b == "is_err" || e->b == "is_some" || e->b == "is_none")
+            return std::string("bool");
+        if (e->b == "parse_int") return std::string("Result[i64, str]");
+        if (e->b == "parse_float") return std::string("Result[f64, str]");
+        if (funcs && ((e->kids[0]->k == EK::Call && e->kids[0]->kids.empty()) ||
+                      (e->kids[0]->k == EK::Var && !decl.has(e->kids[0]->a)))) {
             auto sit = funcs->fn_rets.find(e->kids[0]->a + "." + e->b);
             if (sit != funcs->fn_rets.end()) return trim_ann(sit->second);
         }
         auto recv_ann = infer_expr_ann(e->kids[0].get(), decl, funcs);
         if (recv_ann) {
             if (e->b == "copy") return *recv_ann;
-            auto mit = funcs->fn_rets.find(*recv_ann + "." + e->b);
-            if (mit != funcs->fn_rets.end()) return trim_ann(mit->second);
+            if (e->b == "unwrap") {
+                std::string u = unwrap_adt_ann(*recv_ann);
+                if (!u.empty() && u != *recv_ann) return u;
+            }
+            if (e->b == "unwrap_or") {
+                std::string u = unwrap_adt_ann(*recv_ann);
+                if (!u.empty() && u != *recv_ann && u != "dyn") return u;
+                if (e->kids.size() >= 2) return infer_expr_ann(e->kids[1].get(), decl, funcs);
+            }
+            if (funcs) {
+                auto mit = funcs->fn_rets.find(*recv_ann + "." + e->b);
+                if (mit != funcs->fn_rets.end()) return trim_ann(mit->second);
+            }
         }
         return std::nullopt;
     }
@@ -438,7 +505,11 @@ bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullp
         return d && d->copy;
     }
     case EK::Call:
-        return funcs != nullptr && funcs->scalar_ret.count(e->a) > 0;
+        return (funcs != nullptr && funcs->scalar_ret.count(e->a) > 0) ||
+               expr_is_copy_slot(e, decl, funcs);
+    case EK::Quest:
+    case EK::MCall:
+        return expr_is_copy_slot(e, decl, funcs);
     case EK::Idx:
     case EK::Field:
         return expr_is_copy_slot(e, decl, funcs) ||
@@ -561,6 +632,7 @@ std::vector<std::string> borrow_srcs_at(const std::string &name, const Decls &de
 
 std::vector<std::string> borrow_srcs(const Expr *e, const Decls &decl, FnTable &funcs) {
     std::vector<std::string> out;
+    if (expr_is_copy_slot(e, decl, &funcs)) return out;
     e = skip_quest(e);
     if (!e) return out;
     if (auto v = deref_var(e, decl, funcs)) return borrow_srcs_at(*v, decl, funcs);
@@ -2441,7 +2513,21 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
             auto bix = extern_borrows_indices(in.ext);
             if (!bix.empty()) out.borrows_ret[in.ext.name] = std::move(bix);
         } else if (in.k == SK::Enum) {
-            for (const Variant &v : in.variants) out.sigs[v.name] = {};
+            out.heads.insert(in.a);
+            auto &ef = out.struct_fields["__enum__:" + in.a];
+            size_t slot = 0;
+            for (const Variant &v : in.variants) {
+                out.sigs[v.name] = {};
+                if (v.name != "Ok" && v.name != "Err" && v.name != "Some" && v.name != "None")
+                    out.fn_rets[v.name] = in.a;
+                for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                    std::string fann = (fi < v.field_anns.size() && v.field_anns[fi] &&
+                                        !v.field_anns[fi]->empty())
+                                           ? *v.field_anns[fi]
+                                           : "dyn";
+                    ef["f" + std::to_string(slot++)] = std::move(fann);
+                }
+            }
         } else if (in.k == SK::Struct) {
             out.heads.insert(in.a);
             for (const auto &f : in.fields) {
@@ -2692,7 +2778,20 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
                     funcs.owned_ret.insert(node->ext.name);
             }
         } else if (node->k == SK::Enum) {
-            for (const Variant &v : node->variants) funcs.sigs[v.name] = {};
+            auto &ef = funcs.struct_fields["__enum__:" + node->a];
+            size_t slot = 0;
+            for (const Variant &v : node->variants) {
+                funcs.sigs[v.name] = {};
+                if (v.name != "Ok" && v.name != "Err" && v.name != "Some" && v.name != "None")
+                    funcs.fn_rets[v.name] = node->a;
+                for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                    std::string fann = (fi < v.field_anns.size() && v.field_anns[fi] &&
+                                        !v.field_anns[fi]->empty())
+                                           ? *v.field_anns[fi]
+                                           : "dyn";
+                    ef["f" + std::to_string(slot++)] = std::move(fann);
+                }
+            }
         } else if (node->k == SK::Trait) {
             std::vector<std::string> names;
             for (const Sig &g : node->sigs) names.push_back(g.name);

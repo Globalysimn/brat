@@ -13,8 +13,8 @@ credentials. See [SECURITY.md](SECURITY.md) for security-sensitive bugs.
 Build the native compiler and run the test suite from the repository root:
 
 ```sh
-make -j2
-python3 lang/tests/run_all.py -j 2
+make -j4                         # minimum -j2; locally use -j$(nproc)
+python3 lang/tests/run_all.py -j 4
 ```
 
 Run targeted native suites while iterating:
@@ -44,7 +44,8 @@ sharding. Every test in `lang/tests/` compiles and executes directly against
 - **Performance changes** must include `make bench` (`python3 scripts/bench.py --runs 5`)
   before/after numbers, CPU model, OS and C compiler version.
 - **Documentation changes** must run `python3 lang/tests/test_docs_examples.py`
-  and `python3 lang/tests/test_newcomer.py` so code fences, test counts and
-  internal links stay verified.
+  and `python3 lang/tests/test_newcomer.py` (which verifies README quickstart
+  commands, repository links, test-suite count, `newcomer.brat` and newcomer
+  error diagnostics) so code fences and references stay verified.
 - Keep compiled binaries, `.brat-build-*` staging directories and scratch files
   out of git commits.

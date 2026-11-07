@@ -1,5 +1,7 @@
 # Known Risks and Technical Ledger
 
+_Updated: 2026-11; applies to `brat-cxx` 0.7.x._
+
 This ledger records current architectural limits and residual risks in the
 implementation. Passing `brat-cxx check` and the test suite does not prove
 absence of memory errors, data races or sandbox escapes.

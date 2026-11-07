@@ -152,7 +152,14 @@ UW = os.path.join(TMP, "uw.brat")
 with open(UW, "w", encoding="utf-8", newline="\n") as fh:
     fh.write("fn main() -> i64 {\n  let v = 5\n  print(unwrap(v))\n  return 0\n}\n")
 p = run(CLI, "run", "--interp", UW)
-check(p.returncode == 1, "unwrap wants exit=1 have %d" % p.returncode)
+check(p.returncode == 1, "unwrap typed wants exit=1 have %d" % p.returncode)
+check("`unwrap` wants Option or Result, got i64" in p.stderr, "unwrap static check have %r" % p.stderr[-300:])
+
+UW_DYN = os.path.join(TMP, "uw_dyn.brat")
+with open(UW_DYN, "w", encoding="utf-8", newline="\n") as fh:
+    fh.write("fn main() {\n  let v = 5\n  print(unwrap(v))\n}\n")
+p = run(CLI, "run", "--interp", UW_DYN)
+check(p.returncode == 1, "unwrap dyn wants exit=1 have %d" % p.returncode)
 check("unwrap of i64 (want Ok/Err/Some)" in p.stderr, "unwrap wants the type have %r" % p.stderr[-300:])
 
 

@@ -41,10 +41,19 @@
     "prefix": "enum",
     "body": [
       "enum ${1:Name} {",
-      "  ${2:Variant}(${3:value}),",
+      "  ${2:Variant}(${3:value}: ${4:i64}),",
       "}"
     ],
-    "description": "Tagged enum declaration"
+    "description": "Typed algebraic enum declaration"
+  },
+  "Public Enum": {
+    "prefix": "pubenum",
+    "body": [
+      "pub enum ${1:Name} {",
+      "  ${2:Variant}(${3:value}: ${4:i64}),",
+      "}"
+    ],
+    "description": "Exported algebraic enum declaration"
   },
   "Match": {
     "prefix": "match",

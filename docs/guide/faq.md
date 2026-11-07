@@ -178,7 +178,8 @@ None of them cause C undefined behavior:
   `0..63`.
 - **Division / modulo by zero:** checked before executing `/` or `%`; raises a
   catchable runtime error (`div by zero`) instead of `SIGFPE`.
-- **Deep recursion:** capped at `2000` frames by default (`BRAT_RECURSION_BUDGET`),
+- **Deep recursion:** capped at `2000` frames by default (`BRAT_RECURSION_BUDGET`,
+  range `1..1000000`),
   plus a Linux pthread stack-floor check, raising catchable `recursion too deep`
   instead of `SIGSEGV`.
 

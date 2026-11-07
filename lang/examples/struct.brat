@@ -1,4 +1,4 @@
-fn origin() -> i64 {
+fn origin() -> Result[dyn, str] {
   return Ok(Point { x: 0, y: 0 })
 }
 fn main() -> i64 {

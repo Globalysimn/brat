@@ -8,7 +8,7 @@ pub fn now_mono_ns() -> i64 {
   return mono_ns()
 }
 
-pub fn unix_sec() {
+pub fn unix_sec() -> i64 {
   return time_ms() / 1000
 }
 
@@ -17,11 +17,11 @@ pub fn sleep(ms: i64) -> i64 {
   return 0
 }
 
-pub fn is_leap_year(year: i64) {
+pub fn is_leap_year(year: i64) -> bool {
   return (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-pub fn days_in_month(year: i64, month: i64) {
+pub fn days_in_month(year: i64, month: i64) -> i64 {
   if month == 1 || month == 3 || month == 5 || month == 7 || month == 8 || month == 10 || month == 12 {
     return 31
   }
@@ -38,7 +38,7 @@ pub fn days_in_month(year: i64, month: i64) {
 }
 
 // Howard Hinnant's civil-from-days / days-from-civil algorithms (epoch 1970-01-01).
-pub fn days_from_civil(y: i64, m: i64, d: i64) {
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
   let mut yr = y
   if m <= 2 {
     yr = yr - 1
@@ -54,7 +54,7 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) {
   return era * 146097 + doe - 719468
 }
 
-pub fn civil_from_days(z_in: i64) {
+pub fn civil_from_days(z_in: i64) -> map {
   let z = z_in + 719468
   let era = z / 146097
   let doe = z - era * 146097
@@ -74,7 +74,7 @@ pub fn civil_from_days(z_in: i64) {
 }
 
 // Weekday: 0 = Sunday .. 6 = Saturday. BRAT `%` is Euclidean.
-pub fn day_of_week(days: i64) {
+pub fn day_of_week(days: i64) -> i64 {
   return (days + 4) % 7
 }
 
@@ -124,7 +124,7 @@ fn is_ascii_digits(s: str) -> bool {
   return true
 }
 
-pub fn parse_iso8601_utc(s: str) {
+pub fn parse_iso8601_utc(s: str) -> Result[i64, str] {
   if len(s) != 20 {
     return Err("ISO-8601 UTC string must be YYYY-MM-DDTHH:MM:SSZ")
   }

@@ -25,7 +25,7 @@ pub fn dump(rows: vec[vec[str]]) -> str {
   return out
 }
 
-fn decode_field(bytes) {
+fn decode_field(bytes: vec[i64]) -> Result[str, str] {
   let decoded = utf8_str(bytes)
   if is_err(decoded) {
     return Err("invalid UTF-8 in CSV input")
@@ -33,7 +33,7 @@ fn decode_field(bytes) {
   return decoded
 }
 
-pub fn parse(text: str) {
+pub fn parse(text: str) -> Result[vec[vec[str]], str] {
   let bytes = utf8_bytes(text)
   let mut out_rows = []
   let mut row = []

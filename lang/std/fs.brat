@@ -11,7 +11,7 @@ pub fn read_or(path: str, fallback: str) -> str {
   return unwrap(r)
 }
 
-pub fn read_lines(path: str) {
+pub fn read_lines(path: str) -> Result[vec[str], str] {
   let r = read_file(path)
   if is_err(r) {
     return r
@@ -20,19 +20,19 @@ pub fn read_lines(path: str) {
   return Ok(text.lines())
 }
 
-pub fn write_lines(path: str, lines: vec[str]) {
+pub fn write_lines(path: str, lines: vec[str]) -> Result[i64, str] {
   if len(lines) == 0 {
     return write_file(path, "")
   }
   return write_file(path, lines.join("\n") + "\n")
 }
 
-pub fn append_text(path: str, extra: str) {
+pub fn append_text(path: str, extra: str) -> Result[i64, str] {
   let prev = read_or(path, "")
   return write_file(path, prev + extra)
 }
 
-pub fn write_atomic(path: str, content: str) {
+pub fn write_atomic(path: str, content: str) -> Result[i64, str] {
   let tmp = path + ".brat.tmp"
   let wr = write_file(tmp, content)
   if is_err(wr) {
@@ -46,6 +46,6 @@ pub fn write_atomic(path: str, content: str) {
   return wr
 }
 
-pub fn remove(path: str) {
+pub fn remove(path: str) -> Result[i64, str] {
   return fs_remove(path)
 }

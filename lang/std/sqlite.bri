@@ -1,7 +1,7 @@
-fn open(path: str)
-fn open_memory()
-fn close(db: i64)
-fn exec(db: i64, sql: str)
-fn query(db: i64, sql: str, params)
-fn query_one(db: i64, sql: str, params)
-fn scalar_int(db: i64, sql: str, params)
+fn open(path: str) -> Result[i64, str]
+fn open_memory() -> Result[i64, str]
+fn close(db: i64) -> Result[i64, str]
+fn exec(db: i64, sql: str) -> Result[i64, str]
+fn query(db: i64, sql: str, params) -> Result[vec[map], str]
+fn query_one(db: i64, sql: str, params) -> Result[Option[map], str]
+fn scalar_int(db: i64, sql: str, params) -> Result[i64, str]

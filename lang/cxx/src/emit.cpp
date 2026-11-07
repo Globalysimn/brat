@@ -126,6 +126,9 @@ StmtP clone_stmt(const Stmt &s) {
     c->ann = s.ann;
     c->mut = s.mut;
     c->konst = s.konst;
+    c->from_match = s.from_match;
+    c->pat_uncond = s.pat_uncond;
+    c->pat_arity = s.pat_arity;
     if (s.e1) c->e1 = clone(*s.e1);
     if (s.e2) c->e2 = clone(*s.e2);
     if (s.e3) c->e3 = clone(*s.e3);
@@ -576,7 +579,16 @@ struct Closure {
     const std::vector<Param> *params = nullptr;
     StmtList body;
     std::set<std::string> caps;
+    bool ret_result = false;
 };
+
+static bool is_result_ret_ann(const std::optional<std::string> &ret) {
+    if (!ret) return false;
+    size_t i = 0;
+    while (i < ret->size() && (*ret)[i] == ' ') i++;
+    return ret->compare(i, 6, "Result") == 0 &&
+           (i + 6 == ret->size() || (*ret)[i + 6] == '[' || (*ret)[i + 6] == ' ');
+}
 
 struct Late {
     std::string name;
@@ -668,6 +680,7 @@ struct Emitter {
     int try_n = 0;
     std::set<std::string> alias_ret;
     std::set<std::string> cur_params;  // parameters of the function being emitted
+    bool cur_ret_result = false;       // true when current fn declares `-> Result[...]`
     std::vector<std::string> scopes;
     // Lexical boundaries for each loop body: early exits must drain every
     // defer frame and task scope entered since the loop began.
@@ -952,7 +965,7 @@ struct Emitter {
     void define_fn(const std::string &cname_, const std::vector<Param> &params, const StmtList &body,
                    const std::set<std::string> *caps, const std::string *fastraw,
                    const std::string *fastkind, const std::string *fastname,
-                   bool positional = false);
+                   bool positional = false, bool ret_result = false);
     void emit_fn_by_key(const std::string &key);
     void emit_prelude_tables();
     void run_pipeline();
@@ -1779,9 +1792,10 @@ std::set<std::string> Emitter::may_fail() {
     std::function<bool(const Expr &)> touches = [&](const Expr &e) {
         if (e.k == EK::Quest || e.k == EK::Idx) return true;
         if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) return true;
-        if (e.k == EK::Call && (e.a == "raise" || e.a == "unwrap" || e.a == "assert" ||
-                                e.a == "exit"))
+        if (e.k == EK::Call && (e.a == "raise" || e.a == "unwrap" || e.a == "unwrap_or" ||
+                                e.a == "assert" || e.a == "exit"))
             return true;
+        if (e.k == EK::MCall && (e.b == "unwrap" || e.b == "unwrap_or")) return true;
         for (const auto &k : e.kids)
             if (touches(*k)) return true;
         return false;
@@ -2611,7 +2625,8 @@ const std::set<std::string> FRESH_RESULT = {
     "chars", "lines", "zip", "chunks", "enumerate", "copy", "keys", "items",
     "vals", "sum", "index_of", "starts_with", "ends_with", "contains", "has",
     "parse_int", "parse_float", "rev", "fold", "any", "all", "map", "filter",
-    "pop", "del", "slice"};
+    "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
+    "is_some", "is_none"};
 // True when evaluating `e` can raise: it calls something, or it divides. The
 // emitter uses this to check between a failing operand and the operator that
 // would otherwise read the placeholder value it left behind.
@@ -2630,9 +2645,11 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
     case EK::Or:
         return true;
     case EK::Call:
-        // `unwrap` returns a reference the caller owns (see vtag_payload), and
+        // `unwrap`/`unwrap_or` return a reference the caller owns (see vtag_payload), and
         // `Ok(x)`/`Err(x)`/`Some(x)` build a fresh tag on the spot.
-        if (e.a == "unwrap" || e.a == "Ok" || e.a == "Err" || e.a == "Some") return true;
+        if (e.a == "unwrap" || e.a == "unwrap_or" || e.a == "Ok" || e.a == "Err" ||
+            e.a == "Some")
+            return true;
         // `__at` is the desugared `a[i]`, which hands back an owned reference.
         if (e.a == "__at") return true;
         if (e.kids.empty() && !e.a.empty() && e.a[0] >= 'A' && e.a[0] <= 'Z' &&
@@ -2746,7 +2763,8 @@ V Emitter::ex(const Expr &e) {
     }
     case EK::Quest: {
         V a = ex(*e.kids[0]);
-        return part_of_temp(a, *e.kids[0], "vquest_ok(vquest(", "))");
+        return part_of_temp(a, *e.kids[0],
+                            cur_ret_result ? "vquest_ok(vquest_ret(" : "vquest_ok(vquest(", "))");
     }
     case EK::VecLit:
         return ex_vec(ptrs(e.kids));
@@ -4121,6 +4139,29 @@ V Emitter::ex_mcall(const Expr &e) {
          (meth == "fold" && args.size() == 2 && fusible_fnlit(args[1], 2)))) {
         return ex_fused_stream(*obj, meth, args);
     }
+    if (meth == "unwrap_or" && args.size() == 1 && !user_meths.count(meth)) {
+        V a = ex(*obj);
+        V b = ex(*args[0]);
+        std::string ta = new_tmp("uo");
+        std::string tr = new_tmp("ur");
+        std::string st = new_tmp("us");
+        std::vector<std::string> pre = a.pre;
+        pre.push_back(cat("Val ", ta, " = (", a.val, ");"));
+        pre.push_back(cat("int ", st, " = vunwrap_or_state(", ta, ");"));
+        const bool drop_a = dec_able(*obj, heap_returns());
+        if (drop_a)
+            pre.push_back(cat("if (", st, " < 0) { vdrop_temp(", ta, "); ", err_bail(), " }"));
+        else
+            pre.push_back(cat("if (", st, " < 0) { ", err_bail(), " }"));
+        pre.push_back(cat("Val ", tr, " = vnil();"));
+        pre.push_back(cat("if (", st, ") { ", tr, " = vtag_payload(", ta, ");",
+                          drop_a ? cat(" vdrop_temp(", ta, ");") : "", " } else {"));
+        if (drop_a) pre.push_back(cat("    vdrop_temp(", ta, ");"));
+        for (auto &p : b.pre) pre.push_back(cat("    ", p));
+        pre.push_back(cat("    ", tr, " = (", own_operand(*args[0], b.val), ");"));
+        pre.push_back("}");
+        return {pre, tr};
+    }
     V o = ex(*obj);
     // `"a,b".split(",")` builds a container nothing else names: the receiver is
     // released once the call returns, or every chain leaks its first link.
@@ -4759,7 +4800,7 @@ V Emitter::ex_parfor(const Expr &e) {
     std::set<std::string> capnames;
     for (const auto &n : avail)
         if (free.count(n)) capnames.insert(n);
-    clos.push_back({&decl.params, view(decl.body), capnames});
+    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret)});
     std::string m = new_tmp("m");
     const int body_cb = tmp;
     std::string opc = new_tmp("c");
@@ -4804,7 +4845,7 @@ V Emitter::ex_closure(const Expr &e) {
         if (free.count(n) && (!named || n != *decl.name)) others.insert(n);
     std::set<std::string> capnames = others;
     if (self_used) capnames.insert(*decl.name);
-    clos.push_back({&decl.params, view(decl.body), capnames});
+    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret)});
     std::string t = new_tmp("m");
     if (capnames.empty()) {
         return {{cat("Val ", t, " = vclosure0(", code, ");")}, t};
@@ -6250,7 +6291,8 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
 
 void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params, const StmtList &body,
                         const std::set<std::string> *caps, const std::string *fastraw,
-                        const std::string *fastkind, const std::string *fastname, bool positional) {
+                        const std::string *fastkind, const std::string *fastname, bool positional,
+                        bool ret_result) {
     std::vector<std::string> names;
     for (const auto &p : params) names.push_back(p.name);
     const std::string impl = positional ? cn + "_p" : cn;
@@ -6259,6 +6301,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         arg_exprs.push_back(positional ? cat("bf_arg_", i) : cat("args->items[", i, "]"));
     auto saved_params = cur_params;
     cur_params = std::set<std::string>(names.begin(), names.end());
+    bool saved_ret_result = cur_ret_result;
+    cur_ret_result = ret_result;
     auto saved_scalar_vars = scalar_vars;
     scalar_vars.clear();
     static const std::set<std::string> scalar_types = {
@@ -6552,9 +6596,23 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     catch_cns = saved_catch_cns;
     frame_arr_n = saved_frame_arr_n;
     frame_idx = saved_frame_idx;
+    cur_ret_result = saved_ret_result;
 }
 
 void Emitter::emit_fn_by_key(const std::string &key) {
+    auto safe_comment = [](const std::string &s) {
+        std::string r;
+        r.reserve(s.size());
+        for (size_t i = 0; i < s.size(); i++) {
+            if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+                r += "* /";
+                i++;
+            } else {
+                r.push_back(s[i]);
+            }
+        }
+        return r;
+    };
     if (key.rfind("fn:", 0) == 0) {
         std::string name = key.substr(3);
         const FnDecl &f = *fns[name].decl;
@@ -6564,13 +6622,17 @@ void Emitter::emit_fn_by_key(const std::string &key) {
             kind = &fastkinds[name];
             fname = &name;
         }
-        define_fn(cfn(key), f.params, view(f.body), nullptr, raw, kind, fname, true);
+        ln("", cat("/* fn ", safe_comment(name), " */"));
+        define_fn(cfn(key), f.params, view(f.body), nullptr, raw, kind, fname, true,
+                  is_result_ret_ann(f.ret));
     } else if (key.rfind("meth:", 0) == 0) {
         std::string rest = key.substr(5);
         auto dot = rest.rfind('.');
         std::string tname = rest.substr(0, dot), mname = rest.substr(dot + 1);
         const FnDecl &f = *fns[tname + "." + mname].decl;
-        define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true);
+        ln("", cat("/* meth ", safe_comment(tname + "." + mname), " */"));
+        define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true,
+                  is_result_ret_ann(f.ret));
     } else {
         throw EmitError("bad fn key " + key);
     }
@@ -7126,7 +7188,8 @@ void Emitter::emit_closures_queue() {
     while (clos_done < static_cast<int>(clos.size())) {
         emit_closure_protos();
         const Closure &c = clos[clos_done];
-        define_fn(cfn(cat("clo:", clos_done)), *c.params, c.body, &c.caps, nullptr, nullptr, nullptr);
+        define_fn(cfn(cat("clo:", clos_done)), *c.params, c.body, &c.caps, nullptr, nullptr, nullptr,
+                  false, c.ret_result);
         clos_done++;
         emit_closure_protos();
     }
@@ -8051,14 +8114,43 @@ V Emitter::ex_call(const Expr &e) {
         need_arity(args, 1, name);
         return ex_tag(lower(name), args);
     }
-    if (name == "unwrap" || name == "is_err" || name == "is_none" || name == "is_vec" ||
-        name == "is_str" || name == "is_map" || name == "is_bool" || name == "is_int" ||
-        name == "is_float" || name == "tagof" || name == "str") {
+    if (name == "unwrap_or") {
+        need_arity(args, 2, name);
+        V a = ex(*args[0]);
+        V b = ex(*args[1]);
+        std::string ta = new_tmp("uo");
+        std::string tr = new_tmp("ur");
+        std::string st = new_tmp("us");
+        std::vector<std::string> pre = a.pre;
+        pre.push_back(cat("Val ", ta, " = (", a.val, ");"));
+        pre.push_back(cat("int ", st, " = vunwrap_or_state(", ta, ");"));
+        const bool drop_a = dec_able(*args[0], heap_returns());
+        if (drop_a)
+            pre.push_back(cat("if (", st, " < 0) { vdrop_temp(", ta, "); ", err_bail(), " }"));
+        else
+            pre.push_back(cat("if (", st, " < 0) { ", err_bail(), " }"));
+        pre.push_back(cat("Val ", tr, " = vnil();"));
+        pre.push_back(cat("if (", st, ") { ", tr, " = vtag_payload(", ta, ");",
+                          drop_a ? cat(" vdrop_temp(", ta, ");") : "", " } else {"));
+        if (drop_a) pre.push_back(cat("    vdrop_temp(", ta, ");"));
+        for (auto &p : b.pre) pre.push_back(cat("    ", p));
+        pre.push_back(cat("    ", tr, " = (", own_operand(*args[1], b.val), ");"));
+        pre.push_back("}");
+        return {pre, tr};
+    }
+    if (name == "unwrap" || name == "is_ok" || name == "is_err" || name == "is_some" ||
+        name == "is_none" || name == "is_vec" || name == "is_str" || name == "is_map" ||
+        name == "is_bool" || name == "is_int" || name == "is_float" || name == "tagof" ||
+        name == "str") {
         need_arity(args, 1, name);
         if (name == "str") return read_only(*args[0], "vstr_of");
         if (name == "tagof") return read_only(*args[0], "vtagof");
+        if (name == "is_ok")
+            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_ok(", v, "))"); });
         if (name == "is_err")
             return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_err(", v, "))"); });
+        if (name == "is_some")
+            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_some(", v, "))"); });
         if (name == "is_none")
             return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_none(", v, "))"); });
         if (name == "is_vec")

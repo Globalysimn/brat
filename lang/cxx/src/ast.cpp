@@ -683,7 +683,15 @@ void stmt(const Stmt &s, std::string &o) {
             o.push_back('(');
             quoted(o, s.variants[i].name);
             space(o);
-            words(s.variants[i].fields, o);
+            std::vector<std::string> fdisp;
+            fdisp.reserve(s.variants[i].fields.size());
+            for (size_t j = 0; j < s.variants[i].fields.size(); j++) {
+                std::string fd = s.variants[i].fields[j];
+                if (j < s.variants[i].field_anns.size() && s.variants[i].field_anns[j])
+                    fd += ":" + *s.variants[i].field_anns[j];
+                fdisp.push_back(std::move(fd));
+            }
+            words(fdisp, o);
             o.push_back(')');
         }
         o += "])";

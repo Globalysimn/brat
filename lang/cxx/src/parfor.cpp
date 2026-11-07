@@ -102,6 +102,7 @@ std::set<std::string> local_row(const View &body) {
             else if (kIo.count(e.a) || kIoHeads.count(head_of(e.a))) row.insert("io");
             break;
         case EK::MCall:
+            if (e.b == "unwrap") row.insert("raise");
             if (kAllocMeth.count(e.b)) row.insert("alloc");
             if (e.b == "send" || e.b == "close" || e.b == "recv") row.insert("io");
             break;

@@ -425,6 +425,16 @@ std::string interface_signature(const std::string &name,
         out << " }";
         return out.str();
     }
+    if (sig.second == "@enum" && name.rfind("enum:", 0) == 0) {
+        std::ostringstream out;
+        out << "enum " << name.substr(5) << " { ";
+        for (size_t i = 0; i < sig.first.size(); ++i) {
+            if (i) out << ", ";
+            out << sig.first[i];
+        }
+        out << " }";
+        return out.str();
+    }
     std::ostringstream out;
     out << "fn " << name << '(';
     for (size_t i = 0; i < sig.first.size(); ++i) {

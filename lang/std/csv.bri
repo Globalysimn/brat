@@ -1,2 +1,2 @@
-fn parse(text: str)
+fn parse(text: str) -> Result[vec[vec[str]], str]
 fn dump(rows: vec[vec[str]]) -> str

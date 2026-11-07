@@ -31,6 +31,8 @@ struct SourceFile {
     std::map<std::string, std::string> functions;         // original -> mangled
     std::map<std::string, std::vector<std::optional<std::string>>> callback_params;
     std::set<std::string> pub;
+    std::map<std::string, int> pub_ctors;                 // variant -> arity for exported enums
+    std::set<std::string> priv_ctors;                     // variant names of private enums
     // A re-export remembers where it came from, so a name two modules claim is a
     // diagnostic instead of whichever statement ran last.
     std::map<std::string, std::pair<std::string, std::string>> reexports;

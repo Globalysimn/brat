@@ -190,6 +190,26 @@ std::string fn_ret(const FnDecl &f) {
 }
 
 
+std::vector<std::string> enum_variant_specs(const Stmt &en) {
+    std::vector<std::string> vspecs;
+    for (const auto &v : en.variants) {
+        std::string vs = v.name;
+        if (!v.fields.empty()) {
+            vs.push_back('(');
+            for (size_t j = 0; j < v.fields.size(); j++) {
+                if (j) vs += ", ";
+                if (j < v.field_anns.size() && v.field_anns[j] && !v.field_anns[j]->empty())
+                    vs += *v.field_anns[j];
+                else
+                    vs += "dyn";
+            }
+            vs.push_back(')');
+        }
+        vspecs.push_back(std::move(vs));
+    }
+    return vspecs;
+}
+
 // Each `fn name(params) -> type` line is parsed with a body appended, so the
 // signature syntax is the same one an implementation uses.
 ModuleInterface parse_interface(const fs::path &path) {
@@ -210,15 +230,37 @@ ModuleInterface parse_interface(const fs::path &path) {
         }
     }
     lines.push_back(cur);
-    int number = 0;
-    for (const std::string &raw : lines) {
-        number++;
+    for (size_t li = 0; li < lines.size(); li++) {
+        const std::string &raw = lines[li];
+        int number = static_cast<int>(li + 1);
         size_t b = raw.find_first_not_of(" \t\r\n");
         if (b == std::string::npos) continue;
         size_t e = raw.find_last_not_of(" \t\r\n");
         std::string text = raw.substr(b, e - b + 1);
         if (text.compare(0, 2, "//") == 0) continue;
-        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0) {
+        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0 ||
+            text.rfind("enum ", 0) == 0 || text.rfind("pub enum ", 0) == 0) {
+            auto brace_delta = [](const std::string &s) -> int {
+                int d = 0;
+                for (size_t k = 0; k < s.size(); k++) {
+                    if (k + 1 < s.size() && s[k] == '/' && s[k + 1] == '/') break;
+                    if (s[k] == '{') d++;
+                    else if (s[k] == '}') d--;
+                }
+                return d;
+            };
+            int depth = brace_delta(text);
+            while (depth > 0 && li + 1 < lines.size()) {
+                li++;
+                const std::string &next_raw = lines[li];
+                size_t nb = next_raw.find_first_not_of(" \t\r\n");
+                if (nb == std::string::npos) continue;
+                size_t ne = next_raw.find_last_not_of(" \t\r\n");
+                std::string next_trim = next_raw.substr(nb, ne - nb + 1);
+                if (next_trim.compare(0, 2, "//") == 0) continue;
+                text += "\n" + next_trim;
+                depth += brace_delta(next_trim);
+            }
             std::vector<StmtP> sbody;
             try {
                 sbody = parse(text).body;
@@ -234,6 +276,11 @@ ModuleInterface parse_interface(const fs::path &path) {
                 for (const auto &fld : st->fields)
                     fspecs.push_back(fld.name + ": " + fld.ann.value_or("none"));
                 sigs["struct:" + st->a] = {std::move(fspecs), "@struct"};
+                continue;
+            }
+            if (sbody.size() == 1 && inner(*sbody[0])->k == SK::Enum) {
+                const Stmt *en = inner(*sbody[0]);
+                sigs["enum:" + en->a] = {enum_variant_specs(*en), "@enum"};
                 continue;
             }
         }
@@ -436,6 +483,11 @@ struct Mangler {
         size_t target = targets[0];
         auto it = set.files[target].functions.find(fn);
         if (it == set.files[target].functions.end()) {
+            if (set.files[target].pub_ctors.count(fn)) return fn;
+            if (target != cur && set.files[target].priv_ctors.count(fn)) {
+                throw ModuleError("variant `" + fn + "` is private in module `" +
+                                  module_name(target) + "`");
+            }
             throw ModuleError("module `" + qualifier + "` has no function `" + fn + "`");
         }
         if (target != cur && !set.files[target].pub.count(fn)) {
@@ -443,6 +495,34 @@ struct Mangler {
                               module_name(target) + "`");
         }
         return it->second;
+    }
+
+    std::optional<std::string> resolve_qualified_zero_ctor(const std::string &name, size_t cur) {
+        size_t dot = name.rfind('.');
+        if (dot == std::string::npos) return std::nullopt;
+        std::string qualifier = name.substr(0, dot);
+        std::string ctor = name.substr(dot + 1);
+        std::vector<size_t> targets;
+        for (const auto &[imported, target] : set.files[cur].imports) {
+            bool match = qualifier == imported;
+            if (!match) {
+                size_t tail = imported.rfind('.');
+                match = qualifier == (tail == std::string::npos ? imported
+                                                               : imported.substr(tail + 1));
+            }
+            if (match && std::find(targets.begin(), targets.end(), target) == targets.end()) {
+                targets.push_back(target);
+            }
+        }
+        if (targets.size() != 1) return std::nullopt;
+        size_t target = targets[0];
+        auto cit = set.files[target].pub_ctors.find(ctor);
+        if (cit != set.files[target].pub_ctors.end() && cit->second == 0) return ctor;
+        if (target != cur && set.files[target].priv_ctors.count(ctor)) {
+            throw ModuleError("variant `" + ctor + "` is private in module `" +
+                              module_name(target) + "`");
+        }
+        return std::nullopt;
     }
 
     std::string resolve_call(const std::string &name, size_t cur) {
@@ -502,6 +582,19 @@ struct Mangler {
             e->a = resolve_call(e->a, cur);
             resolve_callback_args(e->kids, original, e->a, cur);
             return e;
+        }
+        if (e->k == EK::Field && !e->kids.empty()) {
+            auto path = name_path(e->kids[0].get());
+            if (path && !set.files[cur].functions.count(*path)) {
+                auto ctor = resolve_qualified_zero_ctor(*path + "." + e->b, cur);
+                if (ctor) {
+                    e->k = EK::Call;
+                    e->a = *ctor;
+                    e->b.clear();
+                    e->kids.clear();
+                    return e;
+                }
+            }
         }
         if (e->k == EK::MCall) {
             auto path = name_path(e->kids[0].get());
@@ -587,7 +680,8 @@ struct Mangler {
         for (const auto &[name, want] : *f.iface) {
             const auto *got = find(name);
             const bool is_struct = want.second == "@struct" && name.rfind("struct:", 0) == 0;
-            const std::string disp = is_struct ? name.substr(7) : name;
+            const bool is_enum = want.second == "@enum" && name.rfind("enum:", 0) == 0;
+            const std::string disp = is_struct ? name.substr(7) : (is_enum ? name.substr(5) : name);
             if (!got) {
                 throw ModuleError("The implementation of module `" + where +
                                   "` does not match its interface: `" + disp +
@@ -600,6 +694,14 @@ struct Mangler {
                     throw ModuleError("The implementation of module `" + where +
                                       "` does not match its interface: struct `" + disp +
                                       "` fields differ from the interface");
+                }
+                continue;
+            }
+            if (is_enum) {
+                if (params != want_params) {
+                    throw ModuleError("The implementation of module `" + where +
+                                      "` does not match its interface: enum `" + disp +
+                                      "` variants differ from the interface");
                 }
                 continue;
             }
@@ -717,6 +819,21 @@ struct Mangler {
                         fspecs.push_back(fld.name + ": " + fld.ann.value_or("none"));
                     arity.emplace_back("struct:" + node->a,
                                        std::make_pair(std::move(fspecs), std::string("@struct")));
+                    continue;
+                }
+                if (node->k == SK::Enum) {
+                    arity.emplace_back("enum:" + node->a,
+                                       std::make_pair(enum_variant_specs(*node), std::string("@enum")));
+                    bool exported = set.files[i].iface
+                                        ? set.files[i].iface->count("enum:" + node->a) > 0
+                                        : sp->k == SK::Pub;
+                    for (const auto &v : node->variants) {
+                        if (exported) {
+                            set.files[i].pub_ctors[v.name] = static_cast<int>(v.fields.size());
+                        } else if (set.files[i].ns) {
+                            set.files[i].priv_ctors.insert(v.name);
+                        }
+                    }
                     continue;
                 }
                 if (node->k != SK::Fn) continue;

@@ -70,6 +70,7 @@ struct FnDecl {
 struct Variant {
     std::string name;
     std::vector<std::string> fields;
+    std::vector<std::optional<std::string>> field_anns;
 };
 
 struct StructField {
@@ -115,6 +116,9 @@ struct Stmt {
     std::optional<std::string> ann;
     bool mut = false;
     bool konst = false;
+    bool from_match = false;
+    bool pat_uncond = false;
+    int pat_arity = -1;
     ExprP e1, e2, e3;
     std::vector<StmtP> body, body2;
     StmtP els;

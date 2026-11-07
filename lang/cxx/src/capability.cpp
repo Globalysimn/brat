@@ -22,10 +22,11 @@ const std::set<std::string> kResourceClose{"tcp_close", "lib_close"};
 const std::set<std::string> kMutate{"pop", "sort", "sort_by", "del", "clear"};
 const std::set<std::string> kNumOps{"-", "*", "/", "%", "&", "|", "^", "<<", ">>",
                                     "==", "!=", "<", ">", "<=", ">=", "&&", "||"};
-const std::set<std::string> kScalarCalls{"own", "len", "is_err", "is_none", "is_vec",
-                                         "is_str", "is_map", "is_bool", "is_int", "is_float",
-                                         "__stag_is", "__shas", "ptr_is_null", "ptr_read_i64",
-                                         "ptr_read_f64", "ptr_read_f32", "re_match"};
+const std::set<std::string> kScalarCalls{"own", "len", "is_ok", "is_err", "is_some", "is_none",
+                                         "is_vec", "is_str", "is_map", "is_bool", "is_int",
+                                         "is_float", "__stag_is", "__shas", "ptr_is_null",
+                                         "ptr_read_i64", "ptr_read_f64", "ptr_read_f32",
+                                         "re_match"};
 const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
 
@@ -389,17 +390,41 @@ std::string trim_type(const std::string &s) {
     return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
 }
 
+bool is_acyclic_type(const std::string &raw, const std::set<std::string> &acyc_structs) {
+    std::string t = trim_type(raw);
+    if (kAcyclicScalars.count(t) > 0 || acyc_structs.count(t) > 0) return true;
+    if (t.size() > 8 && t.rfind("Option[", 0) == 0 && t.back() == ']') {
+        return is_acyclic_type(t.substr(7, t.size() - 8), acyc_structs);
+    }
+    if (t.size() > 8 && t.rfind("Result[", 0) == 0 && t.back() == ']') {
+        std::string inner = t.substr(7, t.size() - 8);
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); i++) {
+            if (inner[i] == '[' || inner[i] == '(') depth++;
+            else if (inner[i] == ']' || inner[i] == ')') depth--;
+            else if (inner[i] == ',' && depth == 0) {
+                return is_acyclic_type(inner.substr(0, i), acyc_structs) &&
+                       is_acyclic_type(inner.substr(i + 1), acyc_structs);
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 std::set<std::string> compute_acyclic_structs(const StructFields &sf) {
     std::set<std::string> acyc;
     bool changed = true;
     while (changed) {
         changed = false;
-        for (const auto &[sname, fields] : sf) {
+        for (const auto &[raw_name, fields] : sf) {
+            std::string sname = raw_name.rfind("__enum__:", 0) == 0
+                                    ? raw_name.substr(9)
+                                    : raw_name;
             if (acyc.count(sname)) continue;
             bool all_ok = true;
             for (const auto &[_, fann] : fields) {
-                std::string t = trim_type(fann);
-                if (!kAcyclicScalars.count(t) && !acyc.count(t)) {
+                if (!is_acyclic_type(fann, acyc)) {
                     all_ok = false;
                     break;
                 }
@@ -413,17 +438,35 @@ std::set<std::string> compute_acyclic_structs(const StructFields &sf) {
     return acyc;
 }
 
-bool is_acyclic_type(const std::string &raw, const std::set<std::string> &acyc_structs) {
-    std::string t = trim_type(raw);
-    return kAcyclicScalars.count(t) > 0 || acyc_structs.count(t) > 0;
+std::string unwrap_cap_adt(const std::string &raw) {
+    std::string a = trim_type(raw);
+    if (a.size() > 8 && a.rfind("Option[", 0) == 0 && a.back() == ']')
+        return trim_type(a.substr(7, a.size() - 8));
+    if (a.size() > 8 && a.rfind("Result[", 0) == 0 && a.back() == ']') {
+        std::string inner = a.substr(7, a.size() - 8);
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); i++) {
+            if (inner[i] == '[' || inner[i] == '(') depth++;
+            else if (inner[i] == ']' || inner[i] == ')') depth--;
+            else if (inner[i] == ',' && depth == 0)
+                return trim_type(inner.substr(0, i));
+        }
+        return trim_type(inner);
+    }
+    return a;
 }
 
 std::optional<std::string> infer_cap_type(const Expr *e,
                                           const std::map<std::string, std::string> &vars,
                                           const StructFields &sf) {
-    while (e && (e->k == EK::Move || e->k == EK::Quest))
+    while (e && e->k == EK::Move)
         e = e->kids.empty() ? nullptr : e->kids[0].get();
     if (!e) return std::nullopt;
+    if (e->k == EK::Quest) {
+        auto sub = infer_cap_type(e->kids.empty() ? nullptr : e->kids[0].get(), vars, sf);
+        if (!sub) return std::nullopt;
+        return unwrap_cap_adt(*sub);
+    }
     switch (e->k) {
     case EK::Num: return e->is_float ? std::string("f64") : std::string("i64");
     case EK::Bool: return std::string("bool");
@@ -445,6 +488,22 @@ std::optional<std::string> infer_cap_type(const Expr *e,
         return std::nullopt;
     case EK::Call:
         if (kScalarCalls.count(e->a) || e->a == "str") return std::string("i64");
+        if (e->a == "Some" && e->kids.size() == 1) {
+            auto in = infer_cap_type(e->kids[0].get(), vars, sf);
+            if (in && !in->empty()) return "Option[" + *in + "]";
+        }
+        if (e->a == "unwrap" && e->kids.size() == 1) {
+            auto in = infer_cap_type(e->kids[0].get(), vars, sf);
+            if (in) return unwrap_cap_adt(*in);
+        }
+        if (e->a == "unwrap_or" && e->kids.size() == 2) {
+            auto in = infer_cap_type(e->kids[0].get(), vars, sf);
+            if (in) {
+                std::string u = unwrap_cap_adt(*in);
+                if (!u.empty() && u != *in && u != "dyn") return u;
+            }
+            return infer_cap_type(e->kids[1].get(), vars, sf);
+        }
         return std::nullopt;
     case EK::Var: {
         auto it = vars.find(e->a);
@@ -1268,7 +1327,18 @@ std::vector<BorrowDiag> sharing_check(
         if (n->k == SK::Struct || n->k == SK::ExternStruct) {
             sf[n->a];
             for (const auto &f : n->fields) {
-                if (f.ann) sf[n->a][f.name] = *f.ann;
+                sf[n->a][f.name] = f.ann ? *f.ann : "dyn";
+            }
+        } else if (n->k == SK::Enum) {
+            auto &ef = sf["__enum__:" + n->a];
+            size_t slot = 0;
+            for (const auto &v : n->variants) {
+                for (size_t fi = 0; fi < v.fields.size(); fi++) {
+                    ef["f" + std::to_string(slot++)] =
+                        (fi < v.field_anns.size() && v.field_anns[fi] && !v.field_anns[fi]->empty())
+                            ? *v.field_anns[fi]
+                            : "dyn";
+                }
             }
         }
     }
@@ -1284,7 +1354,8 @@ std::vector<BorrowDiag> sharing_check(
                     std::map<std::string, std::string> fvars;
                     for (const auto &p : f.params) {
                         if (p.ann && !p.ann->empty()) fvars[p.name] = trim_type(*p.ann);
-                        else if (node->k == SK::Impl && p.name == "self" && sf.count(node->a))
+                        else if (node->k == SK::Impl && p.name == "self" &&
+                                 (sf.count(node->a) || sf.count("__enum__:" + node->a)))
                             fvars[p.name] = node->a;
                     }
                     collect_var_types(view(f.body), fvars, sf);

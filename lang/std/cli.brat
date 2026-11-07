@@ -51,7 +51,7 @@ pub fn opt(argv: vec[str], flag: str, fallback: str) -> str {
   return fallback
 }
 
-pub fn opt_int(argv: vec[str], flag: str, fallback: i64) {
+pub fn opt_int(argv: vec[str], flag: str, fallback: i64) -> Result[i64, str] {
   let prefix = flag + "="
   let mut i = 0
   let n = len(argv)

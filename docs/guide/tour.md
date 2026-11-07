@@ -78,13 +78,17 @@ fn main() -> i64 {
 }
 ```
 
-See [ownership.md](ownership.md) for the exact place rules and checker limits.
+See [ownership.md](ownership.md) for the exact place rules and checker limits,
+or run `./bin/brat explain E0382` to inspect any diagnostic code in the terminal.
 
-## 4. Errors as values and `?`
+## 4. Errors as values, `Option[T]` and `Result[T, E]`
 
-`Ok(v)`, `Err(e)`, `Some(v)` and `None` are built-in tagged values. `?` unwraps
-`Ok(v)` / `Some(v)` and returns `Err(e)` early from the enclosing function.
-`or` provides a fallback for `None` only, never swallowing an `Err`.
+`Ok(v)`, `Err(e)`, `Some(v)` and `None` are built-in tagged values, typed as
+`Result[T, E]` and `Option[T]` when annotated (or left dynamic in unannotated
+functions). `?` unwraps `Ok(v)` / `Some(v)` — returning `Err(e)` early from
+`-> Result[T, E]` functions and unwinding to `try` / `catch` otherwise;
+`unwrap_or(x, fallback)` (or `x.unwrap_or(fb)`) evaluates `fallback` lazily only
+on `Err`/`None`; `or` provides a fallback for `None` without swallowing `Err`.
 
 `try`/`catch` catches both `Err` unwinding and runtime errors (division by zero,
 out-of-bounds indexing, missing map keys):
@@ -111,11 +115,14 @@ caught: boom
 `defer` statements execute in reverse registration order (LIFO) at scope exit on
 both normal control flow and error unwinding.
 
-## 5. `match`, enums and `impl` methods
+## 5. `match`, enums, structs and `impl` methods
 
-`enum` registers variant constructors. When all arms match variants of an enum
-declared in the same file (or `bool`), the parser checks exhaustiveness unless a
-trailing `_` catch-all arm is present.
+BRAT does not require upfront type boilerplate: `Point { x: 3, y: 4 }` creates an
+ad-hoc tagged record immediately, while `struct Point { x: i64, y: i64 }` opts
+into fixed-slot layout and field checking. Likewise, `enum` variants can omit
+types (`Done(ms)`) or declare payload types (`Done(ms: i64)`, `Click(x: i64, y: i64)`);
+`match` checks exhaustiveness across local and imported `pub enum`s, `Option[T]`,
+`Result[T, E]`, and `bool` unless a `_` catch-all arm is present.
 
 `impl Type` attaches methods (`self`, `mut self`, `move self`) and associated
 functions without `self` (`Type.make(...)`):
@@ -149,9 +156,9 @@ check`.
 
 Closures (`fn(x) { ... }`) capture outer bindings by shallow copy and are
 first-class values. Named top-level functions (`fn double(x: i64) -> i64`) are
-not first-class values: pass them directly as callbacks to `map`, `filter`,
-`fold`, `any`, `all`, `find` and `sort_by`, or wrap them in `fn(x) { return
-double(x) }`.
+not first-class values (`let f = double` is an error): pass them directly as
+callbacks (`[1, 2, 3].map(double)`) to `map`, `filter`, `fold`, `any`, `all`,
+`find` and `sort_by`, or wrap them in `let f = fn(x) { return double(x) }`.
 
 ## 7. Memory and `arena` blocks
 

@@ -272,6 +272,10 @@ void collect_decl(const Stmt &s, std::vector<Decl> &out, bool is_pub) {
         out.push_back({s.ext.name, s.line, "extern", true});
     } else if (s.k == SK::ExternStruct || s.k == SK::Struct || s.k == SK::Enum || s.k == SK::Trait) {
         out.push_back({s.a, s.line, "type", is_pub});
+        if (s.k == SK::Enum) {
+            for (const auto &v : s.variants)
+                out.push_back({v.name, s.line, "enum " + s.a, is_pub});
+        }
     } else if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::ForRange ||
                s.k == SK::ForIter) {
         out.push_back({s.a, s.line, "", is_pub});
@@ -371,7 +375,13 @@ uint64_t compute_signature_hash(const std::vector<StmtP> &body) {
         } else if (s->k == SK::Enum) {
             mix("enum");
             mix(s->a);
-            for (const auto &v : s->variants) mix(v.name);
+            for (const auto &v : s->variants) {
+                mix(v.name);
+                mix(std::to_string(v.fields.size()));
+                for (size_t fi = 0; fi < v.fields.size(); ++fi) {
+                    mix((fi < v.field_anns.size() && v.field_anns[fi]) ? *v.field_anns[fi] : "");
+                }
+            }
         } else if ((s->k == SK::Let || s->k == SK::LetTmp) && s->konst) {
             mix("const");
             mix(s->a);
@@ -883,7 +893,8 @@ bool parse_bri_document(const std::string &src, const LineIndex &lines,
         if (text.substr(0, 2) == "//") continue;
 
         const int start_ln = static_cast<int>(idx) + 1;
-        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0) {
+        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0 ||
+            text.rfind("enum ", 0) == 0 || text.rfind("pub enum ", 0) == 0) {
             std::string chunk;
             int depth = 0;
             bool opened = false;
@@ -930,7 +941,7 @@ bool parse_bri_document(const std::string &src, const LineIndex &lines,
             }
             if (!inner_fn || inner_fn->fns.empty()) {
                 out.push_back({start_ln, 1, "P0001",
-                               "expected `fn name(params) -> type` or `struct Name { ... }` in .bri interface",
+                               "expected `fn name(params) -> type`, `struct Name { ... }`, or `enum Name { ... }` in .bri interface",
                                std::nullopt});
                 return false;
             }
@@ -1413,8 +1424,14 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"re_find", "fn re_find(s: str, pat: str) -> Option[str]: first regex match"},
         {"re_captures", "fn re_captures(s: str, pat: str) -> Option[vec[str]]: full match + groups"},
         {"re_replace", "fn re_replace(s: str, pat: str, repl: str) -> str: global replace ($0..$9, $$)"},
-        {"unwrap", "fn unwrap(res): extract Ok(v)/Some(v) or raise"},
+        {"Ok", "fn Ok(value: T) -> Result[T, E]"},
+        {"Err", "fn Err(err: E) -> Result[T, E]"},
+        {"Some", "fn Some(value: T) -> Option[T]"},
+        {"unwrap", "fn unwrap(res: Result[T, E] | Option[T]) -> T: extract payload or raise"},
+        {"unwrap_or", "fn unwrap_or(res: Result[T, E] | Option[T], fallback: T) -> T: extract payload or evaluate fallback"},
+        {"is_ok", "fn is_ok(x) -> bool"},
         {"is_err", "fn is_err(x) -> bool"},
+        {"is_some", "fn is_some(x) -> bool"},
         {"is_none", "fn is_none(x) -> bool"},
         {"is_vec", "fn is_vec(x) -> bool"},
         {"is_str", "fn is_str(x) -> bool"},
@@ -1422,12 +1439,12 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"is_bool", "fn is_bool(x) -> bool"},
         {"is_int", "fn is_int(x) -> bool"},
         {"is_float", "fn is_float(x) -> bool"},
-        {"json_parse", "fn json_parse(s: str) -> Result[any, str]"},
+        {"json_parse", "fn json_parse(s: str) -> Result[dyn, str]"},
         {"json_stringify", "fn json_stringify(v, indent: i64) -> str"},
         {"args", "fn args() -> vec[str]: command-line arguments (UTF-8 only)"},
         {"args_bytes", "fn args_bytes() -> vec[vec[i64]]: raw OS argument bytes"},
-        {"env_get", "fn env_get(key: str) -> Option[str]"},
-        {"env_get_bytes", "fn env_get_bytes(key: str) -> Option[vec[i64]]: raw OS environment bytes"},
+        {"env_get", "fn env_get(key: str) -> str | none"},
+        {"env_get_bytes", "fn env_get_bytes(key: str) -> vec[i64] | none: raw OS environment bytes"},
         {"time_ms", "fn time_ms() -> i64: epoch milliseconds"},
         {"mono_ns", "fn mono_ns() -> i64: monotonic clock nanoseconds"},
         {"sleep_ms", "fn sleep_ms(ms: i64)"},
@@ -1449,6 +1466,64 @@ const std::map<std::string, std::string> &builtin_docs() {
     return m;
 }
 
+std::string unwrap_hint_adt(const std::string &raw) {
+    size_t b = raw.find_first_not_of(" \t");
+    size_t z = raw.find_last_not_of(" \t");
+    if (b == std::string::npos) return {};
+    std::string a = raw.substr(b, z - b + 1);
+    if (a.size() > 8 && a.rfind("Option[", 0) == 0 && a.back() == ']') {
+        std::string p = a.substr(7, a.size() - 8);
+        size_t pb = p.find_first_not_of(" \t");
+        size_t pz = p.find_last_not_of(" \t");
+        return pb == std::string::npos ? std::string() : p.substr(pb, pz - pb + 1);
+    }
+    if (a.size() > 8 && a.rfind("Result[", 0) == 0 && a.back() == ']') {
+        std::string inner = a.substr(7, a.size() - 8);
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); ++i) {
+            if (inner[i] == '[' || inner[i] == '(') ++depth;
+            else if (inner[i] == ']' || inner[i] == ')') --depth;
+            else if (inner[i] == ',' && depth == 0) {
+                std::string p = inner.substr(0, i);
+                size_t pb = p.find_first_not_of(" \t");
+                size_t pz = p.find_last_not_of(" \t");
+                return pb == std::string::npos ? std::string() : p.substr(pb, pz - pb + 1);
+            }
+        }
+    }
+    return {};
+}
+
+std::string format_enum_variant_sig(const Variant &v) {
+    std::string s = v.name;
+    if (!v.fields.empty()) {
+        s += "(";
+        for (size_t i = 0; i < v.fields.size(); ++i) {
+            if (i) s += ", ";
+            const std::string &fn = v.fields[i];
+            const bool synth = fn.size() >= 2 && fn[0] == '_' && std::isdigit(static_cast<unsigned char>(fn[1]));
+            const std::string fann = (i < v.field_anns.size() && v.field_anns[i] && !v.field_anns[i]->empty())
+                                         ? *v.field_anns[i]
+                                         : std::string();
+            if (!synth && !fann.empty()) s += fn + ": " + fann;
+            else if (!synth) s += fn;
+            else if (!fann.empty()) s += fann;
+            else s += "dyn";
+        }
+        s += ")";
+    }
+    return s;
+}
+
+std::string format_enum_hover(const Stmt &s, bool is_pub) {
+    std::string md = std::string("```brat\n") + (is_pub ? "pub enum " : "enum ") + s.a + " {\n";
+    for (const auto &v : s.variants) {
+        md += "  " + format_enum_variant_sig(v) + ",\n";
+    }
+    md += "}\n```";
+    return md;
+}
+
 std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_body,
                                  const std::map<std::string, std::string> *ext_rets = nullptr) {
     switch (e.k) {
@@ -1459,7 +1534,21 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
     case EK::VecLit: return "vec";
     case EK::MapLit: return "map";
     case EK::StructLit: return e.a;
+    case EK::Quest:
+        if (!e.kids.empty())
+            return unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
+        return {};
     case EK::MCall: {
+        if (e.b == "is_ok" || e.b == "is_err" || e.b == "is_some" || e.b == "is_none")
+            return "bool";
+        if (e.b == "parse_int") return "Result[i64, str]";
+        if (e.b == "parse_float") return "Result[f64, str]";
+        if (!e.kids.empty() && (e.b == "unwrap" || e.b == "unwrap_or")) {
+            std::string u = unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
+            if (!u.empty() && u != "dyn") return u;
+            if (e.b == "unwrap_or" && e.kids.size() >= 2)
+                return infer_expr_type_hint(*e.kids[1], root_body, ext_rets);
+        }
         if (!e.kids.empty() &&
             ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) || e.kids[0]->k == EK::Var)) {
             const std::string &rname = e.kids[0]->a;
@@ -1487,7 +1576,29 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
     case EK::Call: {
         if (e.a == "len" || e.a == "time_ms" || e.a == "mono_ns") return "i64";
         if (e.a == "str") return "str";
-        if (e.a == "is_err" || e.a == "is_none" || e.a == "re_match") return "bool";
+        if (e.a == "is_ok" || e.a == "is_err" || e.a == "is_some" || e.a == "is_none" ||
+            e.a == "re_match") return "bool";
+        if (e.a == "read_file") return "Result[str, str]";
+        if (e.a == "re_find") return "Option[str]";
+        if (e.a == "Some" && e.kids.size() == 1) {
+            std::string in = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);
+            return in.empty() ? "Option[dyn]" : "Option[" + in + "]";
+        }
+        if (e.a == "Ok" && e.kids.size() == 1) {
+            std::string in = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);
+            return in.empty() ? "Result[dyn, dyn]" : "Result[" + in + ", dyn]";
+        }
+        if (e.a == "Err" && e.kids.size() == 1) {
+            std::string in = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);
+            return in.empty() ? "Result[dyn, dyn]" : "Result[dyn, " + in + "]";
+        }
+        if (e.a == "unwrap" && e.kids.size() == 1)
+            return unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
+        if (e.a == "unwrap_or" && e.kids.size() == 2) {
+            std::string u = unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
+            if (!u.empty() && u != "dyn") return u;
+            return infer_expr_type_hint(*e.kids[1], root_body, ext_rets);
+        }
         for (const auto &sp : root_body) {
             if (!sp) continue;
             const Stmt *s = (sp->k == SK::Pub && !sp->body.empty()) ? sp->body.front().get() : sp.get();
@@ -1498,6 +1609,11 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
             }
             if (s->k == SK::Extern && s->ext.name == e.a && s->ext.ret) {
                 return *s->ext.ret;
+            }
+            if (s->k == SK::Enum) {
+                for (const auto &v : s->variants) {
+                    if (v.name == e.a) return s->a;
+                }
             }
         }
         if (ext_rets) {
@@ -2168,6 +2284,31 @@ private:
                         send_md(md);
                         return;
                     }
+                    if (inner.k == SK::Struct && inner.a == word.name) {
+                        std::string md = "```brat\npub struct " + inner.a + " {\n";
+                        for (const auto &f : inner.fields)
+                            md += "  " + f.name + ": " + f.ann.value_or("dyn") + ",\n";
+                        md += "}\n```";
+                        const std::string doc = extract_doc_comment(rm.text, *rm.lines, sp->line);
+                        if (!doc.empty()) md += "\n\n" + doc;
+                        send_md(md);
+                        return;
+                    }
+                    if (inner.k == SK::Enum) {
+                        if (inner.a == word.name) {
+                            std::string md = format_enum_hover(inner, true);
+                            const std::string doc = extract_doc_comment(rm.text, *rm.lines, sp->line);
+                            if (!doc.empty()) md += "\n\n" + doc;
+                            send_md(md);
+                            return;
+                        }
+                        for (const auto &v : inner.variants) {
+                            if (v.name == word.name) {
+                                send_md("```brat\n" + format_enum_variant_sig(v) + " -> " + inner.a + "\n```");
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2228,17 +2369,20 @@ private:
                     send_md(md);
                     return;
                 }
-                if (s.k == SK::Enum && s.a == word.name) {
-                    std::string md = "```brat\nenum " + s.a + " { ";
-                    for (size_t i = 0; i < s.variants.size(); ++i) {
-                        if (i) md += ", ";
-                        md += s.variants[i].name;
+                if (s.k == SK::Enum) {
+                    if (s.a == word.name) {
+                        std::string md = format_enum_hover(s, is_pub);
+                        const std::string doc = extract_doc_comment(st->text, st->lines, doc_line);
+                        if (!doc.empty()) md += "\n\n" + doc;
+                        send_md(md);
+                        return;
                     }
-                    md += " }\n```";
-                    const std::string doc = extract_doc_comment(st->text, st->lines, doc_line);
-                    if (!doc.empty()) md += "\n\n" + doc;
-                    send_md(md);
-                    return;
+                    for (const auto &v : s.variants) {
+                        if (v.name == word.name) {
+                            send_md("```brat\n" + format_enum_variant_sig(v) + " -> " + s.a + "\n```");
+                            return;
+                        }
+                    }
                 }
             }
             if (auto lh = find_let_hover(st->ast_body, word.name, line)) {
@@ -2297,7 +2441,7 @@ private:
 
         if (qual == "std") {
             for (const char *m : {"bytes", "cli", "crypto", "csv", "env", "fs",
-                                  "http", "json", "net", "path", "proc", "regex", "sqlite", "time"}) {
+                                  "http", "json", "path", "proc", "sqlite", "time"}) {
                 add_item(m, 9, std::string("std.") + m);
             }
             writer_.end_arr();
@@ -2325,6 +2469,10 @@ private:
                         add_item(inner.a, 21, "pub const " + inner.a);
                     } else if (inner.k == SK::Struct) {
                         add_item(inner.a, 22, "pub struct " + inner.a);
+                    } else if (inner.k == SK::Enum) {
+                        add_item(inner.a, 13, "pub enum " + inner.a);
+                        for (const auto &v : inner.variants)
+                            add_item(v.name, 20, format_enum_variant_sig(v) + " -> " + inner.a);
                     }
                 }
             }
@@ -2350,7 +2498,7 @@ private:
                         for (const auto &sp : ss) {
                             if (!sp) continue;
                             const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
-                            if ((s.k == SK::Struct || s.k == SK::ExternStruct) && s.a == qual)
+                            if ((s.k == SK::Struct || s.k == SK::ExternStruct || s.k == SK::Enum) && s.a == qual)
                                 static_struct = true;
                             if (s.k == SK::Fn || s.k == SK::ExportFn || s.k == SK::Impl) {
                                 for (const FnDecl &fn : s.fns) {
@@ -2375,6 +2523,19 @@ private:
                 };
                 if (body_ptr) find_var_ty(*body_ptr);
                 bool matched_struct = false;
+                bool is_native_struct = false;
+                if (!static_struct && (recv_ty.rfind("Option", 0) == 0 || recv_ty.rfind("Result", 0) == 0)) {
+                    matched_struct = true;
+                    add_item("unwrap", 2, "extract payload or raise");
+                    add_item("unwrap_or", 2, "extract payload or fallback");
+                    if (recv_ty.rfind("Result", 0) == 0) {
+                        add_item("is_ok", 2, "Result.is_ok() -> bool");
+                        add_item("is_err", 2, "Result.is_err() -> bool");
+                    } else {
+                        add_item("is_some", 2, "Option.is_some() -> bool");
+                        add_item("is_none", 2, "Option.is_none() -> bool");
+                    }
+                }
                 auto emit_struct_members = [&](const std::vector<StmtP> &b) {
                     for (const auto &sp : b) {
                         if (!sp) continue;
@@ -2390,6 +2551,7 @@ private:
                         } else if (!recv_ty.empty()) {
                             if ((s.k == SK::Struct || s.k == SK::ExternStruct) && s.a == recv_ty) {
                                 matched_struct = true;
+                                if (s.k == SK::Struct) is_native_struct = true;
                                 for (const auto &f : s.fields)
                                     add_item(f.name, 5, s.a + "." + f.name + ": " + f.ann.value_or("dyn"));
                             } else if (s.k == SK::Impl && s.a == recv_ty) {
@@ -2406,7 +2568,7 @@ private:
                 if (body_ptr && (static_struct || !recv_ty.empty())) {
                     emit_struct_members(*body_ptr);
                     for (const ResolvedModule &rm : mods) emit_struct_members(*rm.body);
-                    if (matched_struct && !static_struct) add_item("copy", 2, "shallow copy struct");
+                    if (is_native_struct && !static_struct) add_item("copy", 2, "shallow copy struct");
                 }
                 if (!matched_struct) {
                     if (body_ptr) {
@@ -2425,7 +2587,8 @@ private:
                     for (const char *m : {"push", "pop", "slice", "split", "join", "trim", "lower", "upper",
                                           "contains", "starts_with", "ends_with", "index_of", "replace",
                                           "lines", "chars", "parse_int", "parse_float", "keys", "has",
-                                          "get", "set", "del", "map", "filter", "fold", "sort", "sort_by"}) {
+                                          "get", "set", "del", "map", "filter", "fold", "sort", "sort_by",
+                                          "unwrap", "unwrap_or", "is_ok", "is_err", "is_some", "is_none"}) {
                         add_item(m, 2, "builtin method");
                     }
                 }

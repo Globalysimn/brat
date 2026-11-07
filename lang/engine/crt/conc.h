@@ -288,8 +288,14 @@ BFN Vec *vvec_of(Val v) {
     if (v.tag != V_VEC) { vraise("not a vec"); vpoison_vec_s.len = 0; return &vpoison_vec_s; }
     return v.as.vec;
 }
+BFN int vis_ok(Val v) {
+    return v.tag == V_TAG && !strcmp(v.as.tv->tag, "ok");
+}
 BFN int vis_err(Val v) {
     return v.tag == V_TAG && !strcmp(v.as.tv->tag, "err");
+}
+BFN int vis_some(Val v) {
+    return v.tag == V_TAG && !strcmp(v.as.tv->tag, "some");
 }
 BFN int vis_none(Val v) {
     return v.tag == V_NIL;
@@ -342,6 +348,14 @@ BFN Val vunwrap(Val v) {
 
     vraisef("unwrap of %s (want Ok/Err/Some)", vtypename(v));
     return vnil();
+}
+BFN int vunwrap_or_state(Val v) {
+    if (v.tag == V_TAG && (!strcmp(v.as.tv->tag, "ok") || !strcmp(v.as.tv->tag, "some")))
+        return 1;
+    if (v.tag == V_NIL || (v.tag == V_TAG && (!strcmp(v.as.tv->tag, "err") || !strcmp(v.as.tv->tag, "none"))))
+        return 0;
+    vraisef("unwrap_or of %s (want Ok/Err/Some/None)", vtypename(v));
+    return -1;
 }
 BFN int vor_fb(Val v) {
     return v.tag == V_NIL;
@@ -1313,6 +1327,8 @@ static int _vcheck_meth_arity(const char *meth, bint got) {
         {"zip", 1, 1}, {"chunks", 1, 1}, {"pos", 1, 1}, {"get", 1, 1},
         {"has", 1, 1}, {"keys", 0, 0}, {"set", 2, 2}, {"items", 0, 0},
         {"vals", 0, 0}, {"get_or", 2, 2}, {"copy", 0, 0}, {"chars", 0, 0},
+        {"unwrap", 0, 0}, {"unwrap_or", 1, 1}, {"is_ok", 0, 0}, {"is_err", 0, 0},
+        {"is_some", 0, 0}, {"is_none", 0, 0},
         {"send", 1, 1}, {"recv", 0, 0}, {"close", 0, 0}, {0, 0, 0}
     };
     for (int i = 0; tab[i].m; i++) {
@@ -1395,6 +1411,18 @@ BFN Val vbuiltin(Val obj, const char *meth, Vec *a) {
         if (!strcmp(meth, "vals")) return vmap_vals(obj);
         if (!strcmp(meth, "copy")) return vcopy(obj);
         if (!strcmp(meth, "get_or")) return vmap_get_or(obj, VARG(a, 0), VARG(a, 1));
+    }
+    if (obj.tag == V_TAG || obj.tag == V_NIL) {
+        if (!strcmp(meth, "unwrap")) return vunwrap(obj);
+        if (!strcmp(meth, "unwrap_or")) {
+            int st = vunwrap_or_state(obj);
+            if (st < 0) return vunwind;
+            return st ? vtag_payload(obj) : vrc_inc(VARG(a, 0));
+        }
+        if (!strcmp(meth, "is_ok")) return vbool(vis_ok(obj));
+        if (!strcmp(meth, "is_err")) return vbool(vis_err(obj));
+        if (!strcmp(meth, "is_some")) return vbool(vis_some(obj));
+        if (!strcmp(meth, "is_none")) return vbool(vis_none(obj));
     }
     vraisef("no method %s", meth); return vunwind;
 }

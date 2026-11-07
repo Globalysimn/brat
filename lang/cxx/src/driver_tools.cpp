@@ -1266,7 +1266,18 @@ int cmd_doc(int argc, char **argv) {
                         vs.push_back('(');
                         for (size_t vfi = 0; vfi < node->variants[vi].fields.size(); ++vfi) {
                             if (vfi) vs += ", ";
-                            vs += node->variants[vi].fields[vfi];
+                            const std::string &fnm = node->variants[vi].fields[vfi];
+                            const bool has_ann =
+                                vfi < node->variants[vi].field_anns.size() &&
+                                node->variants[vi].field_anns[vfi] &&
+                                !node->variants[vi].field_anns[vfi]->empty();
+                            if (has_ann && fnm == "_" + std::to_string(vfi)) {
+                                vs += *node->variants[vi].field_anns[vfi];
+                            } else if (has_ann) {
+                                vs += fnm + ": " + *node->variants[vi].field_anns[vfi];
+                            } else {
+                                vs += fnm;
+                            }
                         }
                         vs.push_back(')');
                     }
