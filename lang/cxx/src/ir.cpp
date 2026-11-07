@@ -71,6 +71,97 @@ IV neg_iv(const IV &a) {
     return rng(-a.hi, -a.lo);
 }
 
+int64_t eval_shl64(int64_t a, int64_t b) {
+    return static_cast<int64_t>(static_cast<uint64_t>(a) << (static_cast<uint64_t>(b) & 63u));
+}
+
+int64_t eval_shr64(int64_t a, int64_t b) {
+    uint64_t s = static_cast<uint64_t>(b) & 63u;
+    if (s == 0) return a;
+    uint64_t ua = static_cast<uint64_t>(a);
+    return a < 0 ? static_cast<int64_t>((ua >> s) | (~0ULL << (64u - s)))
+                 : static_cast<int64_t>(ua >> s);
+}
+
+int64_t bitmask_ceil64(int64_t x) {
+    if (x <= 0) return 0;
+    uint64_t u = static_cast<uint64_t>(x);
+    u |= u >> 1;
+    u |= u >> 2;
+    u |= u >> 4;
+    u |= u >> 8;
+    u |= u >> 16;
+    u |= u >> 32;
+    return static_cast<int64_t>(u);
+}
+
+IV bitnot_iv(const IV &a) {
+    if (is_empty(a)) return a;
+    if (a.top) return unknown_iv();
+    return rng(~a.hi, ~a.lo);
+}
+
+bool nonneg(const IV &a);
+bool negative(const IV &a);
+
+IV bitwise_iv(const std::string &op, const IV &a, const IV &c) {
+    if (is_empty(a) || is_empty(c)) return rng(1, 0);
+    if (!a.top && a.lo == a.hi && !c.top && c.lo == c.hi) {
+        uint64_t ua = static_cast<uint64_t>(a.lo), uc = static_cast<uint64_t>(c.lo);
+        if (op == "&") return cst(static_cast<int64_t>(ua & uc));
+        if (op == "|") return cst(static_cast<int64_t>(ua | uc));
+        if (op == "^") return cst(static_cast<int64_t>(ua ^ uc));
+        if (op == "<<") return cst(eval_shl64(a.lo, c.lo));
+        if (op == ">>") return cst(eval_shr64(a.lo, c.lo));
+    }
+    if (op == "&") {
+        if (nonneg(c)) return rng(0, nonneg(a) ? std::min(a.hi, c.hi) : c.hi);
+        if (nonneg(a)) return rng(0, a.hi);
+        if (negative(a) && negative(c)) {
+            int64_t worst = std::min(a.lo, c.lo);
+            int64_t lo_bound = -bitmask_ceil64(~worst) - 1;
+            return rng(lo_bound, std::min(a.hi, c.hi));
+        }
+        return unknown_iv();
+    }
+    if (op == "|") {
+        if (nonneg(a) && nonneg(c))
+            return rng(std::max(a.lo, c.lo), bitmask_ceil64(a.hi | c.hi));
+        return unknown_iv();
+    }
+    if (op == "^") {
+        if (nonneg(a) && nonneg(c))
+            return rng(0, bitmask_ceil64(a.hi | c.hi));
+        return unknown_iv();
+    }
+    if (op == ">>") {
+        if (!c.top && c.lo >= 0 && c.hi <= 63) {
+            if (a.top && c.lo == 0) return unknown_iv();
+            int64_t alo = a.top ? INT64_MIN : a.lo;
+            int64_t ahi = a.top ? INT64_MAX : a.hi;
+            if (alo >= 0) return rng(eval_shr64(alo, c.hi), eval_shr64(ahi, c.lo));
+            if (ahi < 0) return rng(eval_shr64(alo, c.lo), eval_shr64(ahi, c.hi));
+            return rng(eval_shr64(alo, c.lo), eval_shr64(ahi, c.lo));
+        }
+        return unknown_iv();
+    }
+    if (op == "<<") {
+        if (!a.top && !c.top && c.lo >= 0 && c.hi <= 62) {
+            __int128 mlo = static_cast<__int128>(1ULL << c.lo);
+            __int128 mhi = static_cast<__int128>(1ULL << c.hi);
+            __int128 p1 = static_cast<__int128>(a.lo) * mlo;
+            __int128 p2 = static_cast<__int128>(a.lo) * mhi;
+            __int128 p3 = static_cast<__int128>(a.hi) * mlo;
+            __int128 p4 = static_cast<__int128>(a.hi) * mhi;
+            __int128 l = std::min(std::min(p1, p2), std::min(p3, p4));
+            __int128 h = std::max(std::max(p1, p2), std::max(p3, p4));
+            if (fits(l) && fits(h)) return rng(static_cast<int64_t>(l), static_cast<int64_t>(h));
+        }
+        return unknown_iv();
+    }
+    return unknown_iv();
+}
+
 IV meet_iv(const IV &a, const IV &b) {
     if (a.top) return b;
     if (b.top) return a;
@@ -483,7 +574,11 @@ int Walker::val(const Expr &e) {
         if (x < 0) return -1;
         if (e.a == "-") return b.neg(x, line);
         if (e.a == "!") return b.cmp(x, b.konst(0), "!", line);
-        if (e.a == "~") return b.call("`~` at line " + std::to_string(line), line);
+        if (e.a == "~") {
+            int id = b.call("`~` at line " + std::to_string(line), line);
+            b.vals[id].iv = bitnot_iv(b.vals[x].iv);
+            return id;
+        }
         return -1;
     }
     case EK::Bin: {
@@ -500,11 +595,7 @@ int Walker::val(const Expr &e) {
         if (c < 0) return -1;
         if (bw) {
             int id = b.call("`" + op + "` at line " + std::to_string(line), line);
-            if (op == "&") {
-                const IV &av = b.vals[a].iv, &cv = b.vals[c].iv;
-                if (nonneg(cv)) b.vals[id].iv = rng(0, nonneg(av) ? std::min(av.hi, cv.hi) : cv.hi);
-                else if (nonneg(av)) b.vals[id].iv = rng(0, av.hi);
-            }
+            b.vals[id].iv = bitwise_iv(op, b.vals[a].iv, b.vals[c].iv);
             return id;
         }
         if (ar) return b.arith(op[0], a, c, line);
@@ -839,6 +930,79 @@ Cong sub_cong(const Cong &a, const Cong &b, bool wrapped) {
 
 Cong neg_cong(const Cong &a, bool wrapped) {
     return sub_cong(cst_cong(0), a, wrapped);
+}
+
+Cong bitnot_cong(const Cong &a) {
+    if (a.bot) return a;
+    if (a.m == 0) return cst_cong(~static_cast<int64_t>(a.r));
+    return sub_cong(cst_cong(-1), a, false);
+}
+
+Cong bitwise_cong(const std::string &op, const Cong &a, const Cong &c,
+                  const IV &av, const IV &cv) {
+    if (a.bot || c.bot) return Cong{true, 1, 0};
+    if (a.m == 0 && c.m == 0) {
+        int64_t va = static_cast<int64_t>(a.r), vc = static_cast<int64_t>(c.r);
+        if (op == "&") return cst_cong(static_cast<int64_t>(a.r & c.r));
+        if (op == "|") return cst_cong(static_cast<int64_t>(a.r | c.r));
+        if (op == "^") return cst_cong(static_cast<int64_t>(a.r ^ c.r));
+        if (op == "<<") return cst_cong(eval_shl64(va, vc));
+        if (op == ">>") return cst_cong(eval_shr64(va, vc));
+    }
+    if (op == "<<") {
+        if (!cv.top && cv.lo >= 1 && cv.hi <= 62) {
+            uint64_t sh = 1ULL << cv.lo;
+            Cong base = wrap_cong(a);
+            if (cv.lo == cv.hi && base.m >= 2) {
+                unsigned __int128 m128 = static_cast<unsigned __int128>(base.m) << cv.lo;
+                uint64_t nm = m128 > (1ULL << 62) ? (1ULL << 62) : static_cast<uint64_t>(m128);
+                uint64_t nr = (base.r << cv.lo) % nm;
+                return norm_cong(nm, nr);
+            }
+            return Cong{false, sh, 0};
+        }
+        return top_cong();
+    }
+    if (op == "&") {
+        auto mask_cong = [](const Cong &x, uint64_t mask) -> Cong {
+            uint64_t lowbit = mask & (~mask + 1ULL);
+            Cong out = top_cong();
+            if (lowbit >= 2 && lowbit <= (1ULL << 62)) out = Cong{false, lowbit, 0};
+            uint64_t m1 = mask + 1ULL;
+            if (m1 >= 2 && (m1 & mask) == 0 && m1 <= (1ULL << 62) && x.m != 1) {
+                uint64_t g = x.m == 0 ? m1 : gcd64(x.m, m1);
+                if (g >= 2) {
+                    uint64_t rx = (x.m == 0 ? x.r : x.r) % g;
+                    if (g > out.m) out = Cong{false, g, rx};
+                }
+            }
+            return out;
+        };
+        if (c.m == 0) return mask_cong(a, c.r);
+        if (a.m == 0) return mask_cong(c, a.r);
+        return top_cong();
+    }
+    if (op == "|" || op == "^") {
+        auto lowbits_op = [&](const Cong &x, uint64_t k) -> Cong {
+            Cong wx = wrap_cong(x);
+            if (wx.m >= 2 && (wx.m & (wx.m - 1)) == 0 && k < wx.m) {
+                uint64_t nr = (op == "|") ? (wx.r | k) : (wx.r ^ k);
+                return Cong{false, wx.m, nr % wx.m};
+            }
+            if (op == "|" && (k & 1ULL) != 0) return Cong{false, 2, 1};
+            return top_cong();
+        };
+        if (c.m == 0) return lowbits_op(a, c.r);
+        if (a.m == 0) return lowbits_op(c, a.r);
+        if (op == "|") {
+            Cong wa = wrap_cong(a), wc = wrap_cong(c);
+            if ((wa.m >= 2 && (wa.r & 1ULL) != 0) || (wc.m >= 2 && (wc.r & 1ULL) != 0))
+                return Cong{false, 2, 1};
+        }
+        return top_cong();
+    }
+    (void)av;
+    return top_cong();
 }
 
 uint64_t safe_mul_gcd(uint64_t x, uint64_t y) {
@@ -1317,7 +1481,8 @@ struct Builder2 {
             reason = "Granger congruence proves exact divisibility (`a % b == 0`) with nonzero divisor";
         } else {
             const bool b_nz = positive(bv.iv) || negative(bv.iv) ||
-                              (!bv.cg.bot && bv.cg.m >= 2 && bv.cg.r != 0 && !bv.iv.top);
+                              (!bv.cg.bot && bv.cg.m >= 2 && bv.cg.r != 0 &&
+                               (!bv.iv.top || (bv.cg.m & (bv.cg.m - 1)) == 0));
             if (b_nz) {
                 nz_only = true;
                 reason = "divisor proven non-zero (div-by-zero trap elided)";
@@ -1662,8 +1827,9 @@ struct Walker2 {
             if (e.a == "~") {
                 Val2 u;
                 u.k = VK::Call;
-                u.iv = unknown_iv();
-                u.cg = top_cong();
+                u.iv = bitnot_iv(b.vals[x].iv);
+                u.cg = bitnot_cong(b.vals[x].cg);
+                reduce_iv_cong(u.iv, u.cg);
                 u.line = line;
                 u.name = "%t" + std::to_string(b.seq++);
                 u.why = "`~` at line " + std::to_string(line);
@@ -1686,14 +1852,11 @@ struct Walker2 {
             if (is_bw) {
                 Val2 u;
                 u.k = VK::Call;
-                u.iv = unknown_iv();
-                u.cg = top_cong();
-                u.line = line;
                 const IV &av = b.vals[a].iv, &cv = b.vals[c].iv;
-                if (op == "&") {
-                    if (nonneg(cv)) u.iv = rng(0, nonneg(av) ? std::min(av.hi, cv.hi) : cv.hi);
-                    else if (nonneg(av)) u.iv = rng(0, av.hi);
-                }
+                u.iv = bitwise_iv(op, av, cv);
+                u.cg = bitwise_cong(op, b.vals[a].cg, b.vals[c].cg, av, cv);
+                reduce_iv_cong(u.iv, u.cg);
+                u.line = line;
                 u.name = "%t" + std::to_string(b.seq++);
                 u.why = "`" + op + "` at line " + std::to_string(line);
                 return b.push(std::move(u));
