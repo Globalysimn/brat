@@ -69,7 +69,12 @@ Thumbs.db
 *.swp
 *~
 .idea/
-.vscode/
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+editors/vscode/node_modules/
+editors/vscode/*.vsix
 
 # Stray directories created by legacy Windows path handling.
 C\:*/

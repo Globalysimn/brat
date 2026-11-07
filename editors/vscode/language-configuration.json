@@ -20,8 +20,30 @@
     ["\"", "\""]
   ],
   "indentationRules": {
-    "increaseIndentPattern": "^.*\\{[^}\"']*$",
+    "increaseIndentPattern": "^((?!//).)*\\{[^}\"]*(//.*)?$",
     "decreaseIndentPattern": "^\\s*\\}"
+  },
+  "onEnterRules": [
+    {
+      "beforeText": "^\\s*///.*$",
+      "action": {
+        "indent": "none",
+        "appendText": "/// "
+      }
+    },
+    {
+      "beforeText": "^((?!//).)*\\{\\s*(//.*)?$",
+      "afterText": "^\\s*\\}",
+      "action": {
+        "indent": "indentOutdent"
+      }
+    }
+  ],
+  "folding": {
+    "markers": {
+      "start": "^\\s*//\\s*#?region\\b",
+      "end": "^\\s*//\\s*#?endregion\\b"
+    }
   },
   "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
 }

@@ -1,0 +1,87 @@
+{
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}) -> ${3:i64} {",
+      "  $0",
+      "}"
+    ],
+    "description": "Function declaration"
+  },
+  "Public Function": {
+    "prefix": "pubfn",
+    "body": [
+      "pub fn ${1:name}(${2:params}) -> ${3:i64} {",
+      "  $0",
+      "}"
+    ],
+    "description": "Exported function declaration"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": [
+      "struct ${1:Name} {",
+      "  ${2:field}: ${3:i64},",
+      "}"
+    ],
+    "description": "Typed struct declaration"
+  },
+  "Impl": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Type} {",
+      "  fn ${2:new}(${3}) -> ${1:Type} {",
+      "    $0",
+      "  }",
+      "}"
+    ],
+    "description": "Method implementation block"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name} {",
+      "  ${2:Variant}(${3:value}),",
+      "}"
+    ],
+    "description": "Tagged enum declaration"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value} {",
+      "  ${2:Pattern} => {",
+      "    $0",
+      "  }",
+      "}"
+    ],
+    "description": "Pattern match statement"
+  },
+  "If Let": {
+    "prefix": "iflet",
+    "body": [
+      "if let ${1:Some(v)} = ${2:expr} {",
+      "  $0",
+      "}"
+    ],
+    "description": "Conditional pattern binding"
+  },
+  "Arena Block": {
+    "prefix": "arena",
+    "body": [
+      "arena {",
+      "  $0",
+      "}"
+    ],
+    "description": "Scoped arena region"
+  },
+  "Test Function": {
+    "prefix": "test",
+    "body": [
+      "fn test_${1:case}() {",
+      "  assert(${2:true})",
+      "}"
+    ],
+    "description": "Unit test function for brat test"
+  }
+}

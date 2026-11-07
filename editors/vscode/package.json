@@ -1,17 +1,22 @@
 {
   "name": "brat-lang",
   "displayName": "BRAT Language Support",
-  "description": "Syntax highlighting, language configuration, and native brat-cxx LSP integration for BRAT (.brat, .bri).",
-  "version": "0.7.0",
+  "description": "Syntax highlighting, snippets, language configuration, and native brat-cxx LSP integration for BRAT (.brat, .bri).",
+  "version": "0.8.0",
   "publisher": "brat-lang",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Globalysimn/brat.git",
+    "directory": "editors/vscode"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Syntax support works in Restricted Mode. A workspace-contained language server is started only after trust is granted; a globally configured server may be used."
+      "description": "Syntax highlighting and snippets work in Restricted Mode. A workspace-contained language server starts only after workspace trust is granted; an explicit user-level brat.lsp.path may be used."
     }
   },
   "categories": [
@@ -43,20 +48,62 @@
         "path": "./syntaxes/brat.tmLanguage.json"
       }
     ],
+    "snippets": [
+      {
+        "language": "brat",
+        "path": "./snippets/brat.code-snippets"
+      }
+    ],
     "commands": [
       {
         "command": "brat.restartServer",
         "title": "BRAT: Restart Language Server"
+      },
+      {
+        "command": "brat.runFile",
+        "title": "BRAT: Run Current File"
+      },
+      {
+        "command": "brat.checkFile",
+        "title": "BRAT: Check Current File"
+      },
+      {
+        "command": "brat.showOptProofs",
+        "title": "BRAT: Show -O2 Optimization Proofs"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "brat.runFile",
+          "when": "editorLangId == brat && resourceExtname == .brat",
+          "group": "brat@1"
+        },
+        {
+          "command": "brat.showOptProofs",
+          "when": "editorLangId == brat && resourceExtname == .brat",
+          "group": "brat@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "BRAT",
       "properties": {
         "brat.lsp.path": {
           "type": "string",
-          "scope": "machine",
+          "scope": "machine-overridable",
           "default": "",
-          "description": "Explicit path to the brat-cxx or brat executable. When empty, searches a trusted workspace's lang/cxx/bin/brat-cxx and PATH."
+          "description": "Path to the brat-cxx or brat executable. Supports ${workspaceFolder} in trusted workspaces. When empty, searches trusted workspace checkouts (lang/cxx/bin/brat-cxx, bin/brat) and PATH."
+        },
+        "brat.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces JSON-RPC communication between VS Code and brat-cxx lsp."
         }
       }
     }

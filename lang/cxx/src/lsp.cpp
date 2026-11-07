@@ -270,7 +270,7 @@ void collect_decl(const Stmt &s, std::vector<Decl> &out, bool is_pub) {
         }
     } else if (s.k == SK::Extern) {
         out.push_back({s.ext.name, s.line, "extern", true});
-    } else if (s.k == SK::ExternStruct || s.k == SK::Enum || s.k == SK::Trait) {
+    } else if (s.k == SK::ExternStruct || s.k == SK::Struct || s.k == SK::Enum || s.k == SK::Trait) {
         out.push_back({s.a, s.line, "type", is_pub});
     } else if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::ForRange ||
                s.k == SK::ForIter) {
@@ -320,7 +320,7 @@ void extract_doc_symbols(std::string_view text, const LineIndex &lines,
                 if (fn.name) push_sym(*fn.name, 12, s->line, is_pub || s->k == SK::ExportFn);
         } else if (s->k == SK::Extern) {
             push_sym(s->ext.name, 12, s->line, true);
-        } else if (s->k == SK::ExternStruct) {
+        } else if (s->k == SK::ExternStruct || s->k == SK::Struct) {
             push_sym(s->a, 23, s->line, is_pub);
         } else if (s->k == SK::Enum) {
             push_sym(s->a, 10, s->line, is_pub);
@@ -361,8 +361,8 @@ uint64_t compute_signature_hash(const std::vector<StmtP> &body) {
             mix(s->ext.ret.value_or(""));
             for (const Param &p : s->ext.params) mix(p.ann.value_or(""));
             for (const std::string &ef : s->ext.effects) mix(ef);
-        } else if (s->k == SK::ExternStruct) {
-            mix(s->opt1.value_or("struct"));
+        } else if (s->k == SK::ExternStruct || s->k == SK::Struct) {
+            mix(s->k == SK::Struct ? "nativestruct" : s->opt1.value_or("struct"));
             mix(s->a);
             for (const auto &f : s->fields) {
                 mix(f.name);
@@ -492,6 +492,8 @@ struct ImportedEnv {
     std::set<std::string> scalar_rets;
     std::map<std::string, std::vector<size_t>> borrows_rets;
     std::set<std::string> owned_rets;
+    std::map<std::string, std::map<std::string, std::string>> struct_fields;
+    std::map<std::string, std::string> fn_rets;
     Sigs type_sigs;
     std::map<std::string, Ty> type_consts;
     std::map<std::string, std::map<std::string, Ty>> type_structs;
@@ -596,6 +598,31 @@ public:
         return &ins_it->second;
     }
 
+    void invalidate_file(const std::string &raw_path) {
+        std::error_code ec;
+        const auto p = std::filesystem::weakly_canonical(raw_path, ec);
+        const std::string key = ec ? raw_path : p.string();
+        files_.erase(key);
+        if (std::filesystem::path(key).extension() == ".brat") {
+            get_file(key);
+        }
+    }
+
+    void evict_file(const std::string &raw_path) {
+        std::error_code ec;
+        const auto p = std::filesystem::weakly_canonical(raw_path, ec);
+        const std::string key = ec ? raw_path : p.string();
+        files_.erase(key);
+        known_workspace_files_.erase(key);
+    }
+
+    std::string primary_root() const {
+        if (!roots_.empty()) return *roots_.begin();
+        std::error_code ec;
+        const auto cwd = std::filesystem::current_path(ec);
+        return ec ? std::string(".") : cwd.string();
+    }
+
     void ensure_roots_indexed() {
         if (!dirty_scan_) return;
         dirty_scan_ = false;
@@ -604,10 +631,22 @@ public:
         if (!ec && std::filesystem::is_directory(std_dir, ec)) roots_.insert(std_dir.string());
 
         for (const std::string &r : roots_) {
-            for (const auto &dent : std::filesystem::recursive_directory_iterator(
-                     r, std::filesystem::directory_options::skip_permission_denied, ec)) {
+            auto it = std::filesystem::recursive_directory_iterator(
+                r, std::filesystem::directory_options::skip_permission_denied, ec);
+            const std::filesystem::recursive_directory_iterator end;
+            for (; it != end; it.increment(ec)) {
                 if (ec) { ec.clear(); continue; }
-                if (!dent.is_regular_file(ec)) continue;
+                const auto &dent = *it;
+                if (dent.is_directory(ec)) {
+                    const std::string dname = dent.path().filename().string();
+                    if (dname == ".git" || dname == "node_modules" || dname == "build" ||
+                        dname == "dist" || dname == "out" || dname == ".venv" ||
+                        dname == "__pycache__") {
+                        it.disable_recursion_pending();
+                    }
+                    continue;
+                }
+                if (ec || !dent.is_regular_file(ec)) { ec.clear(); continue; }
                 const auto &p = dent.path();
                 if (p.extension() != ".brat") continue;
                 get_file(p.string());
@@ -724,7 +763,7 @@ void run_check_passes(std::vector<Diagnostic> &out,
                       const Sigs &type_all) {
     BorrowOut borrow = borrow_check(body, borrow_all, stray, imp.module_heads,
                                     imp.pub_consts, imp.scalar_rets, imp.borrows_rets,
-                                    imp.owned_rets);
+                                    imp.owned_rets, imp.struct_fields, imp.fn_rets);
     for (const BorrowDiag &d : borrow.errs)
         out.push_back({d.line, 1, classify(d.msg), d.msg, d.note});
     for (const BorrowDiag &d : borrow.warns)
@@ -745,6 +784,7 @@ bool can_build_incremental_spans(const std::vector<StmtP> &body) {
         case SK::ExportFn:
         case SK::Extern:
         case SK::ExternStruct:
+        case SK::Struct:
         case SK::Enum:
         case SK::Trait:
         case SK::Impl:
@@ -827,12 +867,111 @@ void rebuild_fn_spans(DocState &state) {
     state.incremental = !state.fn_spans.empty();
 }
 
+bool is_bri_path(std::string_view path) {
+    return path.size() > 4 && path.substr(path.size() - 4) == ".bri";
+}
+
+bool parse_bri_document(const std::string &src, const LineIndex &lines,
+                        ParseOut &parsed, std::vector<Diagnostic> &out) {
+    const size_t nlines = lines.line_count();
+    for (size_t idx = 0; idx < nlines; ++idx) {
+        std::string_view raw = lines.line_view(src, static_cast<int>(idx));
+        const size_t b = raw.find_first_not_of(" \t\r");
+        if (b == std::string_view::npos) continue;
+        const size_t e = raw.find_last_not_of(" \t\r");
+        std::string_view text = raw.substr(b, e - b + 1);
+        if (text.substr(0, 2) == "//") continue;
+
+        const int start_ln = static_cast<int>(idx) + 1;
+        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0) {
+            std::string chunk;
+            int depth = 0;
+            bool opened = false;
+            size_t end_idx = idx;
+            for (; end_idx < nlines; ++end_idx) {
+                std::string_view ln_view = lines.line_view(src, static_cast<int>(end_idx));
+                chunk.append(ln_view.data(), ln_view.size());
+                chunk.push_back('\n');
+                for (char ch : ln_view) {
+                    if (ch == '{') { opened = true; ++depth; }
+                    else if (ch == '}' && opened) --depth;
+                }
+                if (opened && depth <= 0) break;
+            }
+            idx = std::min(end_idx, nlines > 0 ? nlines - 1 : 0);
+            try {
+                ParseOut sp = parse(chunk, start_ln);
+                for (auto &st : sp.body) {
+                    if (st) {
+                        st->line = start_ln;
+                        if (st->k == SK::Pub && !st->body.empty() && st->body[0])
+                            st->body[0]->line = start_ln;
+                        parsed.body.push_back(std::move(st));
+                    }
+                }
+            } catch (const ParseError &err) {
+                const int ln = err.line > 0 ? err.line : start_ln;
+                out.push_back({ln, 1, "P0001", err.what(), std::nullopt});
+                return false;
+            }
+            continue;
+        }
+
+        try {
+            ParseOut fp = parse(std::string(text) + " { return 0 }", start_ln);
+            Stmt *inner_fn = nullptr;
+            if (fp.body.size() == 1 && fp.body[0]) {
+                Stmt *top = fp.body[0].get();
+                if (top->k == SK::Fn) inner_fn = top;
+                else if (top->k == SK::Pub && !top->body.empty() && top->body[0] &&
+                         top->body[0]->k == SK::Fn) {
+                    inner_fn = top->body[0].get();
+                }
+            }
+            if (!inner_fn || inner_fn->fns.empty()) {
+                out.push_back({start_ln, 1, "P0001",
+                               "expected `fn name(params) -> type` or `struct Name { ... }` in .bri interface",
+                               std::nullopt});
+                return false;
+            }
+            inner_fn->fns[0].body.clear();
+            inner_fn->line = start_ln;
+            fp.body[0]->line = start_ln;
+            parsed.body.push_back(std::move(fp.body[0]));
+        } catch (const ParseError &err) {
+            out.push_back({start_ln, 1, "P0001", err.what(), std::nullopt});
+            return false;
+        }
+    }
+    return true;
+}
+
 void analyze_document_full(const std::string &path, DocState &state,
                            const std::map<std::string, DocState> &open_docs,
                            WorkspaceDB &ws_db) {
     state.text_hash = fnv1a64(state.text);
     std::vector<Diagnostic> out;
     ParseOut parsed;
+    if (is_bri_path(path)) {
+        if (!parse_bri_document(state.text, state.lines, parsed, out)) {
+            state.diagnostics = std::move(out);
+            state.ast_valid = false;
+            state.incremental = false;
+            state.symbols.clear();
+            state.decls.clear();
+            state.decls_dirty = false;
+            return;
+        }
+        state.ast_valid = true;
+        state.imports = ImportedEnv{};
+        state.diagnostics = std::move(out);
+        state.ast_body = std::move(parsed.body);
+        state.sig_hash = compute_signature_hash(state.ast_body);
+        extract_doc_symbols(state.text, state.lines, state.ast_body, state.symbols);
+        state.decls_dirty = true;
+        state.incremental = false;
+        return;
+    }
     try {
         parsed = parse(state.text);
     } catch (const ParseError &e) {
@@ -869,13 +1008,18 @@ void analyze_document_full(const std::string &path, DocState &state,
         }
     }
 
+    const std::string effective_path =
+        (path.rfind("untitled:", 0) == 0)
+            ? (std::filesystem::path(ws_db.primary_root()) / "__untitled__.brat").string()
+            : path;
+
     std::error_code fs_ec;
-    const bool can_resolve_path = !path.empty() &&
-        (std::filesystem::exists(path, fs_ec) ||
-         std::filesystem::is_directory(std::filesystem::path(path).parent_path(), fs_ec));
+    const bool can_resolve_path = !effective_path.empty() &&
+        (std::filesystem::exists(effective_path, fs_ec) ||
+         std::filesystem::is_directory(std::filesystem::path(effective_path).parent_path(), fs_ec));
     if (has_imports && can_resolve_path) {
         try {
-            ModuleSet modules = load_modules(path, state.text);
+            ModuleSet modules = load_modules(effective_path, state.text);
             if (!modules.files.empty()) {
                 for (const auto &[imp_name, target] : modules.files[0].imports) {
                     (void)target;
@@ -897,13 +1041,29 @@ void analyze_document_full(const std::string &path, DocState &state,
                            cached && cached->parse_ok) {
                     dep_body = &cached->ast_body;
                 }
+                const std::string dep_stem = std::filesystem::path(sf.path).stem().string();
                 FnTable ft = pub_sigs(*dep_body);
                 for (auto &[nm, modes] : ft.sigs) state.imports.borrow_sigs[nm] = std::move(modes);
+                state.imports.module_heads.insert(ft.heads.begin(), ft.heads.end());
                 for (const auto &c : ft.pub_consts) state.imports.pub_consts.insert(c);
                 for (const auto &sr : ft.scalar_ret) state.imports.scalar_rets.insert(sr);
                 for (auto &[nm, bix] : ft.borrows_ret) state.imports.borrows_rets[nm] = std::move(bix);
                 for (const auto &or_ : ft.owned_ret) state.imports.owned_rets.insert(or_);
-                collect_sigs(*dep_body, state.imports.type_sigs);
+                for (auto &[sn, flds] : ft.struct_fields) state.imports.struct_fields[sn] = std::move(flds);
+                for (auto &[fnm, fr] : ft.fn_rets) {
+                    if (!dep_stem.empty() && fnm.find('.') == std::string::npos) {
+                        state.imports.fn_rets[dep_stem + "." + fnm] = fr;
+                    }
+                    state.imports.fn_rets[fnm] = std::move(fr);
+                }
+                Sigs mod_sigs;
+                collect_sigs(*dep_body, mod_sigs);
+                for (auto &[snm, fsig] : mod_sigs) {
+                    if (!dep_stem.empty() && snm.rfind("__", 0) != 0) {
+                        state.imports.type_sigs["__static__." + dep_stem + "." + snm] = fsig;
+                    }
+                    state.imports.type_sigs[snm] = std::move(fsig);
+                }
                 collect_exports(*dep_body, state.imports.type_consts, state.imports.type_structs);
                 dep_h ^= compute_signature_hash(*dep_body);
             }
@@ -1300,7 +1460,25 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
     case EK::MapLit: return "map";
     case EK::StructLit: return e.a;
     case EK::MCall: {
+        if (!e.kids.empty() &&
+            ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) || e.kids[0]->k == EK::Var)) {
+            const std::string &rname = e.kids[0]->a;
+            for (const auto &sp : root_body) {
+                if (!sp) continue;
+                const Stmt *s = (sp->k == SK::Pub && !sp->body.empty()) ? sp->body.front().get() : sp.get();
+                if (s && s->k == SK::Impl && s->a == rname) {
+                    for (const auto &fn : s->fns) {
+                        if (fn.name && *fn.name == e.b && fn.ret) return *fn.ret;
+                    }
+                }
+            }
+        }
         if (ext_rets) {
+            if (!e.kids.empty() &&
+                ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) || e.kids[0]->k == EK::Var)) {
+                auto sit = ext_rets->find(e.kids[0]->a + "." + e.b);
+                if (sit != ext_rets->end()) return sit->second;
+            }
             auto it = ext_rets->find(e.b);
             if (it != ext_rets->end()) return it->second;
         }
@@ -1352,7 +1530,9 @@ std::optional<std::string> find_let_hover(const std::vector<StmtP> &body, const 
                             std::string h = "parameter ";
                             if (p.mode == Mode::Mut) h += "mut ";
                             else if (p.mode == Mode::Move) h += "move ";
-                            h += p.name + ": " + p.ann.value_or("dyn");
+                            const std::string pty = p.ann ? *p.ann
+                                                          : ((s.k == SK::Impl && p.name == "self") ? s.a : "dyn");
+                            h += p.name + ": " + pty;
                             found = "```brat\n" + h + "\n```";
                         }
                     }
@@ -1667,6 +1847,24 @@ private:
         }
     }
 
+    void on_disk_file_changed(const std::string &uri, int change_type) {
+        const std::string changed_path = path_from_uri(uri);
+        if (changed_path.empty()) return;
+        if (change_type == 3) ws_db_.evict_file(changed_path);
+        else ws_db_.invalidate_file(changed_path);
+        const std::string stem = std::filesystem::path(changed_path).stem().string();
+        if (stem.empty()) return;
+        for (auto &[other_uri, other_st] : docs_) {
+            if (other_uri == uri) continue;
+            if (other_st.text.find("import ") == std::string::npos ||
+                other_st.text.find(stem) == std::string::npos) {
+                continue;
+            }
+            analyze_document_full(path_from_uri(other_uri), other_st, docs_, ws_db_);
+            publish_diagnostics(other_uri, other_st);
+        }
+    }
+
     const DocState *find_doc(const std::string &uri) const {
         auto it = docs_.find(uri);
         return it == docs_.end() ? nullptr : &it->second;
@@ -1677,6 +1875,18 @@ private:
         if (!root_uri.empty()) {
             ws_db_.add_root(path_from_uri(root_uri));
         }
+        const uint32_t wf = tape_.get(params, "workspaceFolders");
+        if (tape_.is_array(wf)) {
+            for (uint32_t item = tape_.at(wf).first_child; item != 0;
+                 item = tape_.at(item).next_sibling) {
+                const std::string_view furi = tape_.str_view(tape_.get(item, "uri"));
+                if (!furi.empty()) ws_db_.add_root(path_from_uri(furi));
+            }
+        }
+        const uint32_t td_caps = tape_.get(tape_.get(params, "capabilities"), "textDocument");
+        const bool client_prepare_rename =
+            tape_.bool_val(tape_.get(tape_.get(td_caps, "rename"), "prepareSupport"), false);
+
         writer_.reset();
         writer_.begin_obj();
         writer_.key_lit("jsonrpc"); writer_.str("2.0");
@@ -1704,7 +1914,14 @@ private:
         writer_.begin_arr(); writer_.str("("); writer_.str(","); writer_.end_arr();
         writer_.end_obj();
         writer_.key_lit("referencesProvider"); writer_.boolean(true);
-        writer_.key_lit("renameProvider"); writer_.boolean(true);
+        writer_.key_lit("renameProvider");
+        if (client_prepare_rename) {
+            writer_.begin_obj();
+            writer_.key_lit("prepareProvider"); writer_.boolean(true);
+            writer_.end_obj();
+        } else {
+            writer_.boolean(true);
+        }
         writer_.key_lit("workspaceSymbolProvider"); writer_.boolean(true);
         writer_.key_lit("codeActionProvider");
         writer_.begin_obj();
@@ -1999,6 +2216,18 @@ private:
                     send_md(md);
                     return;
                 }
+                if (s.k == SK::Struct && s.a == word.name) {
+                    std::string md = std::string("```brat\n") +
+                                     (sp->k == SK::Pub ? "pub struct " : "struct ") + s.a + " {\n";
+                    for (const auto &f : s.fields) {
+                        md += "  " + f.name + ": " + f.ann.value_or("dyn") + ",\n";
+                    }
+                    md += "}\n```";
+                    const std::string doc = extract_doc_comment(st->text, st->lines, doc_line);
+                    if (!doc.empty()) md += "\n\n" + doc;
+                    send_md(md);
+                    return;
+                }
                 if (s.k == SK::Enum && s.a == word.name) {
                     std::string md = "```brat\nenum " + s.a + " { ";
                     for (size_t i = 0; i < s.variants.size(); ++i) {
@@ -2068,7 +2297,7 @@ private:
 
         if (qual == "std") {
             for (const char *m : {"bytes", "cli", "crypto", "csv", "env", "fs",
-                                  "http", "json", "path", "proc", "sqlite", "time"}) {
+                                  "http", "json", "net", "path", "proc", "regex", "sqlite", "time"}) {
                 add_item(m, 9, std::string("std.") + m);
             }
             writer_.end_arr();
@@ -2094,6 +2323,8 @@ private:
                         add_item(*inner.fns.front().name, 3, format_fn_sig(inner.fns.front(), true));
                     } else if ((inner.k == SK::Let || inner.k == SK::LetTmp) && inner.konst) {
                         add_item(inner.a, 21, "pub const " + inner.a);
+                    } else if (inner.k == SK::Struct) {
+                        add_item(inner.a, 22, "pub struct " + inner.a);
                     }
                 }
             }
@@ -2101,26 +2332,102 @@ private:
                 const std::vector<StmtP> *body_ptr = st->ast_valid ? &st->ast_body : nullptr;
                 ParseOut fallback;
                 if (!body_ptr) {
-                    try { fallback = parse(st->text); body_ptr = &fallback.body; } catch (...) {}
-                }
-                if (body_ptr) {
-                    for (const auto &sp : *body_ptr) {
-                        if (!sp) continue;
-                        const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
-                        if (s.k == SK::Impl) {
-                            for (const FnDecl &fn : s.fns)
-                                if (fn.name) add_item(*fn.name, 2, "impl " + s.a + ": " + format_fn_sig(fn));
-                        } else if (s.k == SK::ExternStruct) {
-                            for (const auto &f : s.fields)
-                                add_item(f.name, 5, s.a + "." + f.name + ": " + f.ann.value_or("dyn"));
+                    try { fallback = parse(st->text); body_ptr = &fallback.body; } catch (...) {
+                        std::string patched = st->text;
+                        const size_t loff = st->lines.line_start_offset(st->text, line);
+                        const size_t dot_pos = loff + id_start - 1;
+                        if (dot_pos < patched.size() && patched[dot_pos] == '.') {
+                            for (size_t k = dot_pos; k < loff + col_byte && k < patched.size(); ++k)
+                                patched[k] = ' ';
+                            try { fallback = parse(patched); body_ptr = &fallback.body; } catch (...) {}
                         }
                     }
                 }
-                for (const char *m : {"push", "pop", "slice", "split", "join", "trim", "lower", "upper",
-                                      "contains", "starts_with", "ends_with", "index_of", "replace",
-                                      "lines", "chars", "parse_int", "parse_float", "keys", "has",
-                                      "get", "set", "del", "map", "filter", "fold", "sort", "sort_by"}) {
-                    add_item(m, 2, "builtin method");
+                std::string recv_ty;
+                bool static_struct = false;
+                auto find_var_ty = [&](const std::vector<StmtP> &b) {
+                    std::function<void(const std::vector<StmtP> &)> walk = [&](const std::vector<StmtP> &ss) {
+                        for (const auto &sp : ss) {
+                            if (!sp) continue;
+                            const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
+                            if ((s.k == SK::Struct || s.k == SK::ExternStruct) && s.a == qual)
+                                static_struct = true;
+                            if (s.k == SK::Fn || s.k == SK::ExportFn || s.k == SK::Impl) {
+                                for (const FnDecl &fn : s.fns) {
+                                    for (const Param &p : fn.params) {
+                                        if (p.name == qual && s.line - 1 <= line) {
+                                            if (p.ann && !p.ann->empty()) recv_ty = *p.ann;
+                                            else if (s.k == SK::Impl && p.name == "self") recv_ty = s.a;
+                                        }
+                                    }
+                                    walk(fn.body);
+                                }
+                            } else if ((s.k == SK::Let || s.k == SK::LetTmp) && s.a == qual && s.line - 1 <= line) {
+                                if (s.ann && !s.ann->empty()) recv_ty = *s.ann;
+                                else if (s.e1) recv_ty = infer_expr_type_hint(*s.e1, b);
+                            }
+                            walk(s.body);
+                            walk(s.body2);
+                            if (s.els) walk(s.els->body);
+                        }
+                    };
+                    walk(b);
+                };
+                if (body_ptr) find_var_ty(*body_ptr);
+                bool matched_struct = false;
+                auto emit_struct_members = [&](const std::vector<StmtP> &b) {
+                    for (const auto &sp : b) {
+                        if (!sp) continue;
+                        const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
+                        if (static_struct && s.k == SK::Impl && s.a == qual) {
+                            for (const FnDecl &fn : s.fns) {
+                                const bool has_self = !fn.params.empty() && fn.params[0].name == "self";
+                                if (fn.name && !has_self) {
+                                    matched_struct = true;
+                                    add_item(*fn.name, 3, "impl " + s.a + ": " + format_fn_sig(fn));
+                                }
+                            }
+                        } else if (!recv_ty.empty()) {
+                            if ((s.k == SK::Struct || s.k == SK::ExternStruct) && s.a == recv_ty) {
+                                matched_struct = true;
+                                for (const auto &f : s.fields)
+                                    add_item(f.name, 5, s.a + "." + f.name + ": " + f.ann.value_or("dyn"));
+                            } else if (s.k == SK::Impl && s.a == recv_ty) {
+                                matched_struct = true;
+                                for (const FnDecl &fn : s.fns) {
+                                    const bool has_self = !fn.params.empty() && fn.params[0].name == "self";
+                                    if (fn.name && has_self)
+                                        add_item(*fn.name, 2, "impl " + s.a + ": " + format_fn_sig(fn));
+                                }
+                            }
+                        }
+                    }
+                };
+                if (body_ptr && (static_struct || !recv_ty.empty())) {
+                    emit_struct_members(*body_ptr);
+                    for (const ResolvedModule &rm : mods) emit_struct_members(*rm.body);
+                    if (matched_struct && !static_struct) add_item("copy", 2, "shallow copy struct");
+                }
+                if (!matched_struct) {
+                    if (body_ptr) {
+                        for (const auto &sp : *body_ptr) {
+                            if (!sp) continue;
+                            const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
+                            if (s.k == SK::Impl) {
+                                for (const FnDecl &fn : s.fns)
+                                    if (fn.name) add_item(*fn.name, 2, "impl " + s.a + ": " + format_fn_sig(fn));
+                            } else if (s.k == SK::ExternStruct || s.k == SK::Struct) {
+                                for (const auto &f : s.fields)
+                                    add_item(f.name, 5, s.a + "." + f.name + ": " + f.ann.value_or("dyn"));
+                            }
+                        }
+                    }
+                    for (const char *m : {"push", "pop", "slice", "split", "join", "trim", "lower", "upper",
+                                          "contains", "starts_with", "ends_with", "index_of", "replace",
+                                          "lines", "chars", "parse_int", "parse_float", "keys", "has",
+                                          "get", "set", "del", "map", "filter", "fold", "sort", "sort_by"}) {
+                        add_item(m, 2, "builtin method");
+                    }
                 }
             }
             writer_.end_arr();
@@ -3219,6 +3526,19 @@ private:
                     if (ver >= 0) it->second.version = ver;
                     publish_diagnostics(uri, it->second);
                     propagate_signature_change(uri, old_sig, it->second.sig_hash);
+                }
+            }
+        } else if (method == "textDocument/didSave") {
+            const std::string uri(tape_.str_view(tape_.get(tape_.get(params, "textDocument"), "uri")));
+            if (!uri.empty()) on_disk_file_changed(uri, 2);
+        } else if (method == "workspace/didChangeWatchedFiles") {
+            const uint32_t changes = tape_.get(params, "changes");
+            if (tape_.is_array(changes)) {
+                for (uint32_t item = tape_.at(changes).first_child; item != 0;
+                     item = tape_.at(item).next_sibling) {
+                    const std::string uri(tape_.str_view(tape_.get(item, "uri")));
+                    const int ctype = tape_.int_or(tape_.get(item, "type"), 2);
+                    if (!uri.empty()) on_disk_file_changed(uri, ctype);
                 }
             }
         } else if (method == "textDocument/didClose") {

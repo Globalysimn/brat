@@ -1,17 +1,23 @@
 # BRAT for Visual Studio Code
 
-Provides TextMate syntax highlighting for `.brat` and `.bri` files, bracket and
-comment configuration, and a client for `brat-cxx lsp` (diagnostics, quick
-fixes, hover types, completions, go-to-definition, cross-file rename, find
-references, inlay hints, semantic tokens, formatting and code folding).
+Syntax highlighting, snippets, bracket/comment configuration, and native `brat-cxx lsp` integration for `.brat` and `.bri` files.
+
+## Features
+
+- Live borrow, ownership, region, FFI, and type diagnostics (`E0xxx`, `T0xxx`, `P0xxx`) with quick fixes
+- Hover signatures, dot completions (`std.`, structs, `impl` methods, `vec`, `map`, `str`), signature help, inlay hints, and semantic tokens
+- Go to definition, find references, workspace symbols, `prepareRename` + cross-file rename, folding, and lossless source formatting
+- `.bri` module interface parsing with outline symbols and syntax diagnostics
+- Commands: `BRAT: Restart Language Server`, `BRAT: Run Current File`, `BRAT: Check Current File`, and `BRAT: Show -O2 Optimization Proofs`
 
 ## Setup
 
-1. Build `lang/cxx/bin/brat-cxx` in your BRAT checkout (`make -j2`) or add
-   `brat-cxx` to `PATH`.
+1. Build `lang/cxx/bin/brat-cxx` in the repository root (`make -j4`) or place `brat-cxx` on `PATH`.
 2. Install extension dependencies in `editors/vscode/`:
    ```sh
    npm install
    ```
-3. Press `F5` in VS Code to open an Extension Development Host, or package a
-   `.vsix` archive with `npx @vscode/vsce package`.
+3. Press `F5` in VS Code to launch an Extension Development Host, or package a `.vsix` archive:
+   ```sh
+   npx @vscode/vsce package
+   ```
