@@ -232,8 +232,9 @@ visible.
 
 ## Is the compiler self-hosted?
 
-No. `brat-cxx` is ~30k lines of C++20 (`lang/cxx/src/`, 27 `.cpp` files) with
-zero third-party C++ dependencies, emitting C11 against `lang/engine/crt.h`.
+No. `brat-cxx` is ~55k lines of C++20 (`lang/cxx/src/`, 26 `.cpp` and 25 `.h`
+files) with zero third-party C++ dependencies, emitting C11 against
+`lang/engine/crt.h`.
 Self-hosting a young language too early freezes bad syntax decisions in amber
 and doubles build bootstrap complexity; keeping the compiler in dependency-free
 C++20 makes changing the language cheap.

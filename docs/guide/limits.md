@@ -12,7 +12,8 @@ Median of 3 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, CPython 3.14.
 | Workload | C (`gcc -O2`) | BRAT (`brat-cxx build -O2`) | CPython 3.14 |
 |---|---:|---:|---:|
 | `int_loop(100M)` (wrapping `i64` arithmetic loop) | 0.126 s | 0.126 s | 17.075 s |
-| `fib(35)` (29.9M recursive `i64` calls) | 0.025 s | 0.081 s | 1.155 s |
+| `vec3_sra(50M)` (loop-carried nested `struct` step) | 0.134 s | 0.157 s | n/a |
+| `fib(35)` (29.9M recursive `i64` calls) | 0.025 s | 0.068 s | 1.131 s |
 | `dyn_records(100k)` (`map` + `str` concat + RC drops) | n/a | 0.020 s | 0.047 s |
 | `json_roundtrip(5k)` (`std.json` parse + stringify) | n/a | 0.010 s | 0.067 s |
 
@@ -22,7 +23,16 @@ Performance follows value representation:
   functions (`int64_t` / `double`). Tight arithmetic loops match `gcc -O2`
   (`0.126 s` vs `0.126 s`). Call-heavy recursion (`fib(35)`) sinks pure leaf
   returns ahead of depth-counter writes and amortizes Linux stack-floor probes
-  to 64-frame intervals (`0.081 s` median / `0.061 s` best vs unchecked C's `0.025 s`).
+  to 64-frame intervals (`0.068 s` vs unchecked C's `0.025 s`).
+- **Nominal `struct` values** use a canonical declaration-order `BShape` layout
+  regardless of field order at the literal site, lowering statically typed field
+  loads and stores directly to constant-slot accesses (`vstruct_slot_ptr` /
+  `vstruct_slot_set`) with a gradual-typing fallback when an unshaped `map`
+  arrives via `Dyn`. At `-O1` and `-O2`, multi-level Escape Analysis + Scalar
+  Replacement of Aggregates (SRA) decomposes non-escaping, unaliased local
+  `struct` bindings directly into unboxed C scalars or local `Val` slots (`0.157 s`
+  vs `0.134 s` in `gcc -O2` across 50M nested `Body { pos: Vec3, vel: Vec3 }`
+  steps; inspect with `brat-cxx cc -O2 --why-opt`).
 - **Dynamic records, maps and strings** use 16-byte tagged `Val` values with
   14-byte inline SSO strings, SWAR ASCII scanning, constant-key shaped maps
   (`vmap_shaped`) backed by small-container freelists, and 4-way inline caches

@@ -852,6 +852,19 @@ BFN void vfieldset(Val s, const char *k, Val v) {
     BRAT_CTR_UNLOCK_OBJ(s.as.map);
     vrelease1(old);
 }
+BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic);
+BFN_HOT void vstruct_slot_set(Val s, const BShape *shp, bint slot, const char *k, Val v) {
+    if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp)) {
+        Map *m = s.as.map;
+        BRAT_CTR_LOCK_OBJ(m);
+        Val old = m->vals[slot];
+        m->vals[slot] = v;
+        BRAT_CTR_UNLOCK_OBJ(m);
+        vrelease1(old);
+        return;
+    }
+    vfieldset_ic(s, k, v, NULL);
+}
 BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic) {
     if (s.tag != V_STRUCT) { vrelease1(v); vraise("bad field set"); return; }
     Map *m = s.as.map;

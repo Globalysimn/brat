@@ -257,6 +257,11 @@ static BStripeLock BRAT_UNUSED _brat_stripes[64] = { BSTRIPE_16_, BSTRIPE_16_, B
 #else
 #define _BRAT_MT() (g_pool_n != 0)
 #endif
+#if defined(__GNUC__) || defined(__clang__)
+#define BRAT_LIKELY(x_) (__builtin_expect(!!(x_), 1))
+#else
+#define BRAT_LIKELY(x_) (x_)
+#endif
 #define BRAT_CTR_LOCK_OBJ(p_)   do { if (_BRAT_MT()) BMUTEX_LOCK(&_brat_stripes[BSTRIPE_IDX(p_)].mu); } while (0)
 #define BRAT_CTR_UNLOCK_OBJ(p_) do { if (_BRAT_MT()) BMUTEX_UNLOCK(&_brat_stripes[BSTRIPE_IDX(p_)].mu); } while (0)
 static bmutex_t BRAT_UNUSED _brat_plugin_lock = BMUTEX_INIT;

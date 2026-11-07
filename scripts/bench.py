@@ -4,8 +4,9 @@
 Measures wall-clock execution time (median and best of N runs) across:
   1. fib(35)              -- recursive i64 calls (29.86M calls)
   2. int_loop(100M)       -- tight 64-bit wrapping integer loop
-  3. dyn_records(100k)    -- map allocation + string concat + RC drops
-  4. json_roundtrip(5k)   -- std.json.parse + std.json.stringify on nested objects
+  3. vec3_sra(50M)        -- loop-carried nested struct (Body { pos: Vec3, vel: Vec3 })
+  4. dyn_records(100k)    -- map allocation + string concat + RC drops
+  5. json_roundtrip(5k)   -- std.json.parse + std.json.stringify on nested objects
 
 Also measures single-function `-O2` compile-time scaling across 50..400 managed
 string locals with the compilation cache disabled.
@@ -139,6 +140,93 @@ def run_loop(n):
 print(run_loop(100000000))
 """
 
+VEC3_C = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef struct { uint64_t x, y, z; } Vec3;
+typedef struct { Vec3 pos, vel; } Body;
+__attribute__((noinline)) static int64_t run_vec3(int64_t n) {
+    uint64_t acc = 1;
+    for (int64_t i = 0; i < n; ++i) {
+        uint64_t u = (uint64_t)(i ^ ((int64_t)acc >> 32));
+        Body b = { { u, u + 1ULL, u + 2ULL }, { 3ULL, 5ULL, 7ULL } };
+        b.pos.x += b.vel.x;
+        b.pos.y += b.vel.y;
+        b.pos.z += b.vel.z;
+        acc = acc * 2862933555777941757ULL + b.pos.x * 3ULL + b.pos.y * 5ULL + b.pos.z * 7ULL;
+    }
+    int64_t out;
+    memcpy(&out, &acc, sizeof out);
+    return out;
+}
+int main(void) {
+    printf("%lld\n", (long long)run_vec3(50000000LL));
+    return 0;
+}
+"""
+
+VEC3_BRAT = """\
+struct Vec3 {
+  x: i64,
+  y: i64,
+  z: i64,
+}
+struct Body {
+  pos: Vec3,
+  vel: Vec3,
+}
+fn run_vec3(n: i64) -> i64 {
+  let mut acc = 1
+  let mut i = 0
+  while i < n {
+    let u = i ^ (acc >> 32)
+    let mut b = Body {
+      pos: Vec3 { x: u, y: u + 1, z: u + 2 },
+      vel: Vec3 { x: 3, y: 5, z: 7 },
+    }
+    b.pos.x = b.pos.x + b.vel.x
+    b.pos.y = b.pos.y + b.vel.y
+    b.pos.z = b.pos.z + b.vel.z
+    acc = acc * 2862933555777941757 + b.pos.x * 3 + b.pos.y * 5 + b.pos.z * 7
+    i = i + 1
+  }
+  return acc
+}
+fn main() -> i64 {
+  print(run_vec3(50000000))
+  return 0
+}
+"""
+
+VEC3_PY = """\
+MASK = (1 << 64) - 1
+SIGN = 1 << 63
+def to_i64(u):
+    u &= MASK
+    return u - (1 << 64) if (u & SIGN) else u
+class Vec3:
+    __slots__ = ("x", "y", "z")
+    def __init__(self, x, y, z):
+        self.x = x; self.y = y; self.z = z
+class Body:
+    __slots__ = ("pos", "vel")
+    def __init__(self, pos, vel):
+        self.pos = pos; self.vel = vel
+def run_vec3(n):
+    acc = 1
+    for i in range(n):
+        u = to_i64(i ^ (acc >> 32))
+        b = Body(Vec3(u, to_i64(u + 1), to_i64(u + 2)), Vec3(3, 5, 7))
+        b.pos.x = to_i64(b.pos.x + b.vel.x)
+        b.pos.y = to_i64(b.pos.y + b.vel.y)
+        b.pos.z = to_i64(b.pos.z + b.vel.z)
+        acc = to_i64(acc * 2862933555777941757 + b.pos.x * 3 + b.pos.y * 5 + b.pos.z * 7)
+    return acc
+
+print(run_vec3(50000000))
+"""
+
 DYN_BRAT = """\
 fn run_dyn(n: i64) -> i64 {
   let mut total = 0
@@ -248,6 +336,19 @@ def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         loop_expect = subprocess.run([loop_c_exe], capture_output=True, text=True, check=True).stdout.strip()
 
+        vec3_c = os.path.join(td, "vec3.c")
+        vec3_c_exe = os.path.join(td, "vec3_c")
+        vec3_b = os.path.join(td, "vec3.brat")
+        vec3_b_exe = os.path.join(td, "vec3_brat")
+        vec3_py = os.path.join(td, "vec3.py")
+        open(vec3_c, "w", encoding="utf-8").write(VEC3_C)
+        open(vec3_b, "w", encoding="utf-8").write(VEC3_BRAT)
+        open(vec3_py, "w", encoding="utf-8").write(VEC3_PY)
+        subprocess.run([CC, "-std=c99", "-O2", vec3_c, "-o", vec3_c_exe], check=True)
+        subprocess.run([CXX, "build", "-O2", vec3_b, "-o", vec3_b_exe], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        vec3_expect = subprocess.run([vec3_c_exe], capture_output=True, text=True, check=True).stdout.strip()
+
         dyn_b = os.path.join(td, "dyn.brat")
         dyn_b_exe = os.path.join(td, "dyn_brat")
         dyn_py = os.path.join(td, "dyn.py")
@@ -283,6 +384,15 @@ def main():
             lp_m, _ = bench_cmd([sys.executable, loop_py], 1, loop_expect)
             lp_str = f"{lp_m:.3f}s"
         print(f"| `int_loop(100M)` (wrapping `i64`) | {lc_m:.3f}s ({lc_b:.3f}s) | {lb_m:.3f}s ({lb_b:.3f}s) | {lp_str} |")
+
+        vc_m, vc_b = bench_cmd([vec3_c_exe], args.runs, vec3_expect)
+        vb_m, vb_b = bench_cmd([vec3_b_exe], args.runs, vec3_expect)
+        if args.skip_python_slow:
+            vp_str = "skipped"
+        else:
+            vp_m, _ = bench_cmd([sys.executable, vec3_py], 1, vec3_expect)
+            vp_str = f"{vp_m:.3f}s"
+        print(f"| `vec3_sra(50M)` (nested `struct`) | {vc_m:.3f}s ({vc_b:.3f}s) | {vb_m:.3f}s ({vb_b:.3f}s) | {vp_str} |")
 
         db_m, db_b = bench_cmd([dyn_b_exe], args.runs, dyn_expect)
         dp_m, dp_b = bench_cmd([sys.executable, dyn_py], args.runs, dyn_expect)

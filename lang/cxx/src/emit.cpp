@@ -659,6 +659,7 @@ struct Emitter {
     std::map<std::string, size_t> ext_ix;
     std::set<std::string> errno_externs;
     std::map<std::string, const std::vector<StructField> *> structs;
+    std::map<std::string, const std::vector<StructField> *> native_structs;
     std::set<std::string> packed;
     std::set<std::string> unions;
     std::vector<std::string> struct_order;
@@ -729,6 +730,10 @@ struct Emitter {
     std::set<std::string> moved, captured, shared, dropped, alias_temps, catch_cns;
     std::vector<std::string> call_cleanup;
     std::set<std::string> scalar_vars;
+    std::map<std::string, std::string> var_structs;
+    std::deque<FnDecl> sra_fns;
+    bool sra_done = false;
+    int sra_seq = 0;
     int clos_done = 0, clos_declared = 0, late_done = 0, late_declared = 0;
     std::string base;
     // A defer body is a statement built here; `clos` points into this deque.
@@ -753,7 +758,7 @@ struct Emitter {
     }
     std::string cfn(const std::string &key) { return cat("bf_c", fn_code(key)); }
     std::string direct_cfn(const std::string &key) { return cat(cfn(key), "_p"); }
-    std::string fn_key(const std::string &name) {
+    std::string fn_key(const std::string &name) const {
         auto it = fn_alias.find(name);
         return it == fn_alias.end() ? name : it->second;
     }
@@ -965,7 +970,18 @@ struct Emitter {
     void define_fn(const std::string &cname_, const std::vector<Param> &params, const StmtList &body,
                    const std::set<std::string> *caps, const std::string *fastraw,
                    const std::string *fastkind, const std::string *fastname,
-                   bool positional = false, bool ret_result = false);
+                   bool positional = false, bool ret_result = false,
+                   const std::string *self_struct = nullptr);
+    int struct_field_slot(const std::string &sname, const std::string &fname) const;
+    std::optional<std::string> struct_field_ann(const std::string &sname, const std::string &fname) const;
+    int canonical_struct_shape(const std::string &sname);
+    std::string infer_expr_struct(const Expr *e, const std::map<std::string, std::string> &known) const;
+    std::map<std::string, std::string> compute_var_structs(const std::vector<Param> &params,
+                                                           const StmtList &body,
+                                                           const std::string *self_struct) const;
+    bool sra_round(const std::string &fn_name, FnDecl &decl);
+    bool sra_rewrite_decl(const std::string &fn_name, FnDecl &decl);
+    void run_sra();
     void emit_fn_by_key(const std::string &key);
     void emit_prelude_tables();
     void run_pipeline();
@@ -2382,11 +2398,15 @@ void Emitter::collect_top(const Stmt &s) {
             std::string key = s.a + "." + *f.name;
             if (!fns.count(key)) {
                 fns[key].decl = &f;
+                fn_ret[key] = f.ret;
                 order.push_back({true, s.a, *f.name});
             }
         }
         return;
     }
+    case SK::Struct:
+        native_structs[s.a] = &s.fields;
+        return;
     case SK::Enum: {
         enums.insert(s.a);
         for (const auto &v : s.variants) {
@@ -2777,20 +2797,26 @@ V Emitter::ex(const Expr &e) {
         std::string t = new_tmp("f");
         std::string fname = clit(e.b);
         std::string bail = err_bail();
-        // `v[0].x` and `f().x` read a field out of a value nobody owns: the
-        // receiver arrived as an owned reference and was used twice below, so it
-        // was never released. Held in a temp, the field is lifted with its own
-        // reference and the receiver goes, the way `f()[0]` already did.
         const bool owned = dec_able(*e.kids[0], heap_returns());
         std::string recv = a.val;
         if (owned) {
             recv = new_tmp("r");
             a.pre.push_back("Val " + recv + " = (" + a.val + ");");
         }
-        a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { vraise(\"no field ",
-                            fname, "\"); ", bail, " }"));
-        a.pre.push_back(cat("Val *", t, " = map_get_ic((", recv, ").as.map, \"", fname, "\", ", next_fic(), ");"));
-        a.pre.push_back(cat("if (!", t, ") { vraise(\"no field ", fname, "\"); ", bail, " }"));
+        std::string st = infer_expr_struct(e.kids[0].get(), var_structs);
+        int slot = !st.empty() ? struct_field_slot(st, e.b) : -1;
+        if (slot >= 0) {
+            int sid = canonical_struct_shape(st);
+            a.pre.push_back(cat("Val *", t, " = vstruct_slot_ptr(", recv, ", &_shp[", sid, "], ",
+                                slot, ", \"", fname, "\");"));
+            a.pre.push_back(cat("if (!", t, ") { ", bail, " }"));
+        } else {
+            a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { vraise(\"no field ",
+                                fname, "\"); ", bail, " }"));
+            a.pre.push_back(cat("Val *", t, " = map_get_ic((", recv, ").as.map, \"", fname, "\", ",
+                                next_fic(), ");"));
+            a.pre.push_back(cat("if (!", t, ") { vraise(\"no field ", fname, "\"); ", bail, " }"));
+        }
         if (owned) {
             std::string v = new_tmp("v");
             a.pre.push_back("Val " + v + " = vrc_inc(*" + t + ");");
@@ -2884,8 +2910,22 @@ std::string Emitter::path_ref(const std::string &path) {
     }
     parts.push_back(cur);
     std::string e = var_ref(parts[0]);
-    for (size_t i = 1; i < parts.size(); i++)
-        e = cat("vfield_ic(", e, ", \"", clit(parts[i]), "\", ", next_fic(), ")");
+    std::string cur_st;
+    auto vit = var_structs.find(parts[0]);
+    if (vit != var_structs.end()) cur_st = vit->second;
+    for (size_t i = 1; i < parts.size(); i++) {
+        int slot = !cur_st.empty() ? struct_field_slot(cur_st, parts[i]) : -1;
+        if (slot >= 0) {
+            int sid = canonical_struct_shape(cur_st);
+            e = cat("vstruct_slot_val(", e, ", &_shp[", sid, "], ", slot, ", \"",
+                    clit(parts[i]), "\")");
+            auto fann = struct_field_ann(cur_st, parts[i]);
+            cur_st = (fann && native_structs.count(*fann)) ? *fann : "";
+        } else {
+            e = cat("vfield_ic(", e, ", \"", clit(parts[i]), "\", ", next_fic(), ")");
+            cur_st.clear();
+        }
+    }
     return e;
 }
 
@@ -3525,6 +3565,32 @@ V Emitter::ex_maplit(const ExprList &kids) {
 V Emitter::ex_struct(const Expr &e) {
     std::string t = new_tmp("m");
     std::set<std::string> uniq(e.names.begin(), e.names.end());
+    auto nit = native_structs.find(e.a);
+    if (nit != native_structs.end() && !nit->second->empty() &&
+        e.names.size() == nit->second->size() && uniq.size() == e.names.size()) {
+        std::vector<int> slots(e.names.size(), -1);
+        bool all_valid = true;
+        for (size_t i = 0; i < e.names.size(); i++) {
+            slots[i] = struct_field_slot(e.a, e.names[i]);
+            if (slots[i] < 0) {
+                all_valid = false;
+                break;
+            }
+        }
+        if (all_valid) {
+            int sid = canonical_struct_shape(e.a);
+            std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid, "], \"",
+                                                clit(e.a), "\", _sk", sid, ", ",
+                                                static_cast<int>(nit->second->size()), ");")};
+            for (size_t i = 0; i < e.names.size(); i++) {
+                const Expr &fv = *e.kids[i];
+                V f = ex(fv);
+                for (auto &p : f.pre) pre.push_back(p);
+                pre.push_back(cat(t, "->vals[", slots[i], "] = ", keep(fv, f.val), ";"));
+            }
+            return {pre, cat("vstruct(", t, ")")};
+        }
+    }
     if (!e.names.empty() && uniq.size() == e.names.size()) {
         int sid = shape_id(e.a, e.names);
         std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid, "], \"",
@@ -3688,12 +3754,21 @@ static bool body_returns_owned(const StmtList &body, const std::set<std::string>
 
 std::set<std::string> Emitter::heap_returns() {
     std::set<std::string> out_;
+    auto add_fn_names = [](std::set<std::string> &dst, const std::string &name) {
+        dst.insert(name);
+        size_t sep = name.find_last_of(":.");
+        if (sep != std::string::npos) dst.insert(name.substr(sep + 1));
+    };
     for (const auto &[name, ret] : fn_ret) {
         std::string r = ret.value_or("");
-        if (r == "vec" || r == "map" || r == "str" || r == "tag" || r.rfind("vec[", 0) == 0) {
-            out_.insert(name);
-        } else if ((ret && structs.count(r)) || (!r.empty() && enums.count(r))) {
-            out_.insert(name);
+        if (r == "vec" || r == "map" || r == "str" || r == "tag" ||
+            r.rfind("vec[", 0) == 0 || r.rfind("map[", 0) == 0 ||
+            r == "Option" || r.rfind("Option[", 0) == 0 ||
+            r == "Result" || r.rfind("Result[", 0) == 0) {
+            add_fn_names(out_, name);
+        } else if ((ret && (structs.count(r) || native_structs.count(r))) ||
+                   (!r.empty() && enums.count(r))) {
+            add_fn_names(out_, name);
         }
     }
     // Bodies that prove it, whatever the annotation claims. Two passes reach
@@ -3702,7 +3777,8 @@ std::set<std::string> Emitter::heap_returns() {
         std::set<std::string> grown = out_;
         for (const auto &[name, entry] : fns) {
             if (!entry.decl || entry.ctor) continue;
-            std::string short_name = name.substr(name.rfind(':') == std::string::npos ? 0 : name.rfind(':') + 1);
+            size_t sep = name.find_last_of(":.");
+            std::string short_name = sep == std::string::npos ? name : name.substr(sep + 1);
             // First check non-self base cases (`saw` requires at least one non-self owned return),
             // then verify all returns assuming self is owned by induction on recursion depth.
             std::set<std::string> with_self = grown;
@@ -5813,15 +5889,29 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         V v = ex(*s.e2);
         for (auto &p : b.pre) ln(ind, p);
         for (auto &p : v.pre) ln(ind, p);
+        std::string st = infer_expr_struct(s.e1.get(), var_structs);
+        int slot = !st.empty() ? struct_field_slot(st, s.a) : -1;
         // Same receiver rule as a field read: `v[0].x = 5` stores through a
         // reference nobody owns, so it is held and released like `m[k][j] = v`.
         if (dec_able(*s.e1, heap_returns())) {
             std::string r = new_tmp("r");
             ln(ind, "Val " + r + " = (" + b.val + ");");
-            ln(ind, cat("vfieldset_ic(", r, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ", next_fic(), ");"));
+            if (slot >= 0) {
+                int sid = canonical_struct_shape(st);
+                ln(ind, cat("vstruct_slot_set(", r, ", &_shp[", sid, "], ", slot, ", \"",
+                            clit(s.a), "\", ", keep(*s.e2, v.val), ");"));
+            } else {
+                ln(ind, cat("vfieldset_ic(", r, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ",
+                            next_fic(), ");"));
+            }
             ln(ind, "vdrop_temp(" + r + ");");
+        } else if (slot >= 0) {
+            int sid = canonical_struct_shape(st);
+            ln(ind, cat("vstruct_slot_set(", b.val, ", &_shp[", sid, "], ", slot, ", \"",
+                        clit(s.a), "\", ", keep(*s.e2, v.val), ");"));
         } else {
-            ln(ind, cat("vfieldset_ic(", b.val, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ", next_fic(), ");"));
+            ln(ind, cat("vfieldset_ic(", b.val, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ",
+                        next_fic(), ");"));
         }
         emit_err_check(ind);
         return;
@@ -6292,7 +6382,7 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
 void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params, const StmtList &body,
                         const std::set<std::string> *caps, const std::string *fastraw,
                         const std::string *fastkind, const std::string *fastname, bool positional,
-                        bool ret_result) {
+                        bool ret_result, const std::string *self_struct) {
     std::vector<std::string> names;
     for (const auto &p : params) names.push_back(p.name);
     const std::string impl = positional ? cn + "_p" : cn;
@@ -6303,6 +6393,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     cur_params = std::set<std::string>(names.begin(), names.end());
     bool saved_ret_result = cur_ret_result;
     cur_ret_result = ret_result;
+    auto saved_var_structs = var_structs;
+    var_structs = compute_var_structs(params, body, self_struct);
     auto saved_scalar_vars = scalar_vars;
     scalar_vars.clear();
     static const std::set<std::string> scalar_types = {
@@ -6597,6 +6689,692 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     frame_arr_n = saved_frame_arr_n;
     frame_idx = saved_frame_idx;
     cur_ret_result = saved_ret_result;
+    var_structs = std::move(saved_var_structs);
+}
+
+int Emitter::struct_field_slot(const std::string &sname, const std::string &fname) const {
+    auto it = native_structs.find(sname);
+    if (it == native_structs.end() || !it->second) return -1;
+    const auto &flds = *it->second;
+    for (size_t i = 0; i < flds.size(); i++) {
+        if (flds[i].name == fname) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+std::optional<std::string> Emitter::struct_field_ann(const std::string &sname,
+                                                     const std::string &fname) const {
+    auto it = native_structs.find(sname);
+    if (it == native_structs.end() || !it->second) return std::nullopt;
+    for (const auto &f : *it->second) {
+        if (f.name == fname) return f.ann;
+    }
+    return std::nullopt;
+}
+
+int Emitter::canonical_struct_shape(const std::string &sname) {
+    auto it = native_structs.find(sname);
+    std::vector<std::string> fnames;
+    if (it != native_structs.end() && it->second) {
+        fnames.reserve(it->second->size());
+        for (const auto &f : *it->second) fnames.push_back(f.name);
+    }
+    return shape_id(sname, fnames);
+}
+
+std::string Emitter::infer_expr_struct(const Expr *e,
+                                       const std::map<std::string, std::string> &known) const {
+    if (!e) return "";
+    switch (e->k) {
+    case EK::StructLit:
+        return native_structs.count(e->a) ? e->a : "";
+    case EK::Var: {
+        auto it = known.find(e->a);
+        return it != known.end() ? it->second : "";
+    }
+    case EK::Move:
+        return e->kids.empty() ? "" : infer_expr_struct(e->kids[0].get(), known);
+    case EK::Call: {
+        auto rit = fn_ret.find(fn_key(e->a));
+        if (rit != fn_ret.end() && rit->second && native_structs.count(*rit->second))
+            return *rit->second;
+        return "";
+    }
+    case EK::MCall: {
+        if (e->kids.empty()) return "";
+        std::string ot = infer_expr_struct(e->kids[0].get(), known);
+        if (!ot.empty()) {
+            auto rit = fn_ret.find(ot + "." + e->b);
+            if (rit != fn_ret.end() && rit->second && native_structs.count(*rit->second))
+                return *rit->second;
+        }
+        return "";
+    }
+    case EK::Field: {
+        if (e->kids.empty()) return "";
+        std::string ot = infer_expr_struct(e->kids[0].get(), known);
+        if (!ot.empty()) {
+            auto fann = struct_field_ann(ot, e->b);
+            if (fann && native_structs.count(*fann)) return *fann;
+        }
+        return "";
+    }
+    default:
+        return "";
+    }
+}
+
+std::map<std::string, std::string> Emitter::compute_var_structs(const std::vector<Param> &params,
+                                                                const StmtList &body,
+                                                                const std::string *self_struct) const {
+    if (native_structs.empty()) return {};
+    std::map<std::string, std::string> known;
+    std::set<std::string> poisoned = global_lets;
+    for (const auto &p : params) {
+        if (poisoned.count(p.name)) continue;
+        if (p.name == "self" && self_struct && native_structs.count(*self_struct)) {
+            known[p.name] = *self_struct;
+        } else if (p.ann && native_structs.count(*p.ann)) {
+            known[p.name] = *p.ann;
+        }
+    }
+    std::function<void(const StmtList &)> scan = [&](const StmtList &stmts) {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            switch (s.k) {
+            case SK::Fn: case SK::ExportFn: case SK::Impl: case SK::Trait:
+            case SK::Enum: case SK::Struct:
+                break;
+            case SK::Pub:
+                if (!s.body.empty()) scan(view(s.body));
+                break;
+            case SK::Let:
+            case SK::LetTmp: {
+                if (s.a.find('.') != std::string::npos) {
+                    std::string root = s.a.substr(0, s.a.find('.'));
+                    poisoned.insert(root);
+                    known.erase(root);
+                    break;
+                }
+                std::string st = (s.ann && native_structs.count(*s.ann))
+                                     ? *s.ann
+                                     : infer_expr_struct(s.e1.get(), known);
+                if (st.empty() || poisoned.count(s.a) ||
+                    (known.count(s.a) && known[s.a] != st)) {
+                    poisoned.insert(s.a);
+                    known.erase(s.a);
+                } else {
+                    known[s.a] = st;
+                }
+                break;
+            }
+            case SK::Set: {
+                if (s.a.find('.') != std::string::npos) break;
+                std::string st = infer_expr_struct(s.e1.get(), known);
+                if (st.empty() || poisoned.count(s.a) ||
+                    (known.count(s.a) && known[s.a] != st)) {
+                    poisoned.insert(s.a);
+                    known.erase(s.a);
+                } else {
+                    known[s.a] = st;
+                }
+                break;
+            }
+            case SK::ForRange:
+            case SK::ForIter:
+                if (!s.a.empty()) {
+                    poisoned.insert(s.a);
+                    known.erase(s.a);
+                }
+                scan(view(s.body));
+                break;
+            case SK::Try:
+                if (s.opt1 && !s.opt1->empty()) {
+                    poisoned.insert(*s.opt1);
+                    known.erase(*s.opt1);
+                }
+                scan(view(s.body));
+                scan(view(s.body2));
+                break;
+            default:
+                if (!s.body.empty()) scan(view(s.body));
+                if (!s.body2.empty()) scan(view(s.body2));
+                if (s.els) {
+                    StmtList el{s.els.get()};
+                    scan(el);
+                }
+                break;
+            }
+        }
+    };
+    scan(body);
+    scan(body);
+    for (const auto &p : poisoned) known.erase(p);
+    return known;
+}
+
+bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
+    if (native_structs.empty()) return false;
+    std::set<std::string> banned = global_lets;
+    for (const auto &p : decl.params) banned.insert(p.name);
+    std::map<std::string, int> let_count;
+    std::map<std::string, std::string> cand_type;
+    std::map<std::string, int> cand_line;
+    std::map<std::string, std::set<std::string>> used_fields;
+
+    auto is_full_struct_lit = [&](const Expr *e) -> std::string {
+        if (!e || e->k != EK::StructLit) return "";
+        auto it = native_structs.find(e->a);
+        if (it == native_structs.end() || !it->second || it->second->empty()) return "";
+        if (e->names.size() != it->second->size() || e->kids.size() != e->names.size()) return "";
+        std::set<std::string> seen;
+        for (const auto &nm : e->names) {
+            if (!seen.insert(nm).second || struct_field_slot(e->a, nm) < 0) return "";
+        }
+        return e->a;
+    };
+
+    std::function<void(const Expr *, std::set<std::string> &)> all_mentions_expr;
+    std::function<void(const std::vector<StmtP> &, std::set<std::string> &)> all_mentions_stmts;
+    all_mentions_expr = [&](const Expr *e, std::set<std::string> &acc) {
+        if (!e) return;
+        if (e->k == EK::Var) acc.insert(e->a);
+        else if (e->k == EK::Call && !e->a.empty())
+            acc.insert(e->a.substr(0, e->a.find('.')));
+        else if (e->k == EK::Str) {
+            for (const auto &[ck, cv] : split_interp(e->a))
+                if (ck == "var") acc.insert(cv.substr(0, cv.find('.')));
+        }
+        for (const auto &k : e->kids) all_mentions_expr(k.get(), acc);
+        if (e->fn) {
+            for (const auto &p : e->fn->params) all_mentions_expr(p.def.get(), acc);
+            all_mentions_stmts(e->fn->body, acc);
+        }
+    };
+    all_mentions_stmts = [&](const std::vector<StmtP> &stmts, std::set<std::string> &acc) {
+        for (const auto &sp : stmts) {
+            if (!sp) continue;
+            if (sp->k == SK::Let || sp->k == SK::LetTmp || sp->k == SK::Set)
+                acc.insert(sp->a.substr(0, sp->a.find('.')));
+            all_mentions_expr(sp->e1.get(), acc);
+            all_mentions_expr(sp->e2.get(), acc);
+            all_mentions_expr(sp->e3.get(), acc);
+            all_mentions_stmts(sp->body, acc);
+            all_mentions_stmts(sp->body2, acc);
+            if (sp->els) {
+                std::vector<const Stmt *> one{sp->els.get()};
+                all_mentions_expr(sp->els->e1.get(), acc);
+                all_mentions_expr(sp->els->e2.get(), acc);
+                all_mentions_expr(sp->els->e3.get(), acc);
+                all_mentions_stmts(sp->els->body, acc);
+                all_mentions_stmts(sp->els->body2, acc);
+                if (sp->els->els) {
+                    std::vector<StmtP> dummy;
+                    // walk chained else-if iteratively
+                    const Stmt *cur = sp->els->els.get();
+                    while (cur) {
+                        all_mentions_expr(cur->e1.get(), acc);
+                        all_mentions_expr(cur->e2.get(), acc);
+                        all_mentions_expr(cur->e3.get(), acc);
+                        all_mentions_stmts(cur->body, acc);
+                        all_mentions_stmts(cur->body2, acc);
+                        cur = cur->els.get();
+                    }
+                }
+            }
+            for (const auto &f : sp->fns) {
+                for (const auto &p : f.params) all_mentions_expr(p.def.get(), acc);
+                all_mentions_stmts(f.body, acc);
+            }
+        }
+    };
+
+    auto plain_lit_str = [](const Expr *e, std::string &out) -> bool {
+        if (!e || e->k != EK::Str) return false;
+        auto parts = split_interp(e->a);
+        if (parts.empty()) {
+            out.clear();
+            return true;
+        }
+        if (parts.size() == 1 && parts[0].first == "lit") {
+            out = parts[0].second;
+            return true;
+        }
+        return false;
+    };
+
+    std::function<void(const Expr *)> scan_expr = [&](const Expr *e) {
+        if (!e) return;
+        switch (e->k) {
+        case EK::Var:
+            banned.insert(e->a);
+            return;
+        case EK::Field:
+            if (!e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Var) {
+                used_fields[e->kids[0]->a].insert(e->b);
+                return;
+            }
+            for (const auto &k : e->kids) scan_expr(k.get());
+            return;
+        case EK::Move:
+            if (!e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Field &&
+                !e->kids[0]->kids.empty() && e->kids[0]->kids[0] &&
+                e->kids[0]->kids[0]->k == EK::Var) {
+                used_fields[e->kids[0]->kids[0]->a].insert(e->kids[0]->b);
+                return;
+            }
+            for (const auto &k : e->kids) scan_expr(k.get());
+            return;
+        case EK::Call: {
+            std::string lit;
+            if ((e->a == "__stag_is" || e->a == "__shas") && e->kids.size() == 2 &&
+                e->kids[0] && e->kids[0]->k == EK::Var && plain_lit_str(e->kids[1].get(), lit)) {
+                return;
+            }
+            if (!e->a.empty()) banned.insert(e->a.substr(0, e->a.find('.')));
+            for (const auto &k : e->kids) scan_expr(k.get());
+            return;
+        }
+        case EK::Str:
+            for (const auto &[ck, cv] : split_interp(e->a)) {
+                if (ck != "var") continue;
+                size_t dot = cv.find('.');
+                if (dot == std::string::npos) {
+                    banned.insert(cv);
+                } else {
+                    std::string root = cv.substr(0, dot);
+                    std::string rest = cv.substr(dot + 1);
+                    std::string fld = rest.substr(0, rest.find('.'));
+                    used_fields[root].insert(fld);
+                }
+            }
+            return;
+        case EK::Closure:
+            if (e->fn) {
+                auto sub = closure_free_vars(*e->fn);
+                if (e->fn->name) sub.erase(*e->fn->name);
+                for (const auto &x : sub) banned.insert(x);
+            }
+            return;
+        case EK::ParFor:
+            if (e->kids.size() >= 2) {
+                scan_expr(e->kids[0].get());
+                scan_expr(e->kids[1].get());
+            }
+            if (!e->b.empty()) banned.insert(e->b);
+            if (e->fn) {
+                auto sub = closure_free_vars(*e->fn);
+                for (const auto &x : sub) banned.insert(x);
+            }
+            return;
+        default:
+            for (const auto &k : e->kids) scan_expr(k.get());
+            return;
+        }
+    };
+
+    std::function<void(const Stmt &)> scan_stmt;
+    auto scan_stmts = [&](const std::vector<StmtP> &stmts) {
+        for (const auto &sp : stmts)
+            if (sp) scan_stmt(*sp);
+    };
+    scan_stmt = [&](const Stmt &s) {
+        switch (s.k) {
+        case SK::Fn:
+        case SK::ExportFn:
+        case SK::Impl: {
+            std::set<std::string> m;
+            for (const auto &f : s.fns) {
+                for (const auto &p : f.params) all_mentions_expr(p.def.get(), m);
+                all_mentions_stmts(f.body, m);
+            }
+            for (const auto &x : m) banned.insert(x);
+            return;
+        }
+        case SK::Spawn:
+        case SK::Defer: {
+            std::set<std::string> m;
+            all_mentions_expr(s.e1.get(), m);
+            all_mentions_stmts(s.body, m);
+            for (const auto &x : m) banned.insert(x);
+            return;
+        }
+        case SK::Let:
+        case SK::LetTmp: {
+            if (s.a.find('.') != std::string::npos) {
+                banned.insert(s.a.substr(0, s.a.find('.')));
+                scan_expr(s.e1.get());
+                return;
+            }
+            let_count[s.a]++;
+            if (let_count[s.a] > 1) banned.insert(s.a);
+            std::string st = is_full_struct_lit(s.e1.get());
+            if (!st.empty() && (!s.ann || *s.ann == st)) {
+                if (cand_type.count(s.a) && cand_type[s.a] != st) banned.insert(s.a);
+                else {
+                    cand_type[s.a] = st;
+                    if (!cand_line.count(s.a)) cand_line[s.a] = static_cast<int>(s.line);
+                }
+            } else {
+                banned.insert(s.a);
+            }
+            std::set<std::string> self_m;
+            all_mentions_expr(s.e1.get(), self_m);
+            if (self_m.count(s.a)) banned.insert(s.a);
+            if (s.e1 && s.e1->k == EK::StructLit && !st.empty()) {
+                for (const auto &k : s.e1->kids) scan_expr(k.get());
+            } else {
+                scan_expr(s.e1.get());
+            }
+            return;
+        }
+        case SK::Set: {
+            if (s.a.find('.') != std::string::npos) {
+                banned.insert(s.a.substr(0, s.a.find('.')));
+                scan_expr(s.e1.get());
+                return;
+            }
+            std::string st = is_full_struct_lit(s.e1.get());
+            if (!st.empty()) {
+                if (cand_type.count(s.a) && cand_type[s.a] != st) banned.insert(s.a);
+                else cand_type[s.a] = st;
+                for (const auto &k : s.e1->kids) scan_expr(k.get());
+            } else {
+                banned.insert(s.a);
+                scan_expr(s.e1.get());
+            }
+            return;
+        }
+        case SK::SetField:
+            if (s.e1 && s.e1->k == EK::Var) {
+                used_fields[s.e1->a].insert(s.a);
+            } else {
+                scan_expr(s.e1.get());
+            }
+            scan_expr(s.e2.get());
+            return;
+        case SK::ForRange:
+        case SK::ForIter:
+            if (!s.a.empty()) banned.insert(s.a);
+            scan_expr(s.e1.get());
+            scan_expr(s.e2.get());
+            scan_stmts(s.body);
+            return;
+        case SK::Try:
+            if (s.opt1 && !s.opt1->empty()) banned.insert(*s.opt1);
+            scan_stmts(s.body);
+            scan_stmts(s.body2);
+            return;
+        default:
+            scan_expr(s.e1.get());
+            scan_expr(s.e2.get());
+            scan_expr(s.e3.get());
+            scan_stmts(s.body);
+            scan_stmts(s.body2);
+            if (s.els) scan_stmt(*s.els);
+            return;
+        }
+    };
+    scan_stmts(decl.body);
+
+    std::set<std::string> approved;
+    for (const auto &[v, st] : cand_type) {
+        if (banned.count(v) || let_count[v] != 1) continue;
+        bool fields_ok = true;
+        auto uf = used_fields.find(v);
+        if (uf != used_fields.end()) {
+            for (const auto &fnm : uf->second) {
+                if (struct_field_slot(st, fnm) < 0) {
+                    fields_ok = false;
+                    break;
+                }
+            }
+        }
+        if (fields_ok) approved.insert(v);
+    }
+    if (approved.empty()) return false;
+
+    auto clean_ident = [](const std::string &s) {
+        std::string r;
+        r.reserve(s.size());
+        for (char c : s) {
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') r.push_back(c);
+            else r.push_back('_');
+        }
+        return r;
+    };
+
+    std::map<std::string, std::map<std::string, std::string>> sra_names;
+    for (const auto &v : approved) {
+        const std::string &st = cand_type[v];
+        int id = sra_seq++;
+        for (const auto &fld : *native_structs.at(st)) {
+            sra_names[v][fld.name] = cat("_sra_", id, "_", clean_ident(v), "_", fld.name);
+        }
+        if (opt >= 2 && proofs && v.rfind("_sra_", 0) != 0) {
+            proofs->push_back(ir::Proof{
+                fn_name, cand_line[v],
+                cat("sra: scalarized non-escaping struct `", st, "` local `", v, "` (",
+                    static_cast<int>(native_structs.at(st)->size()), " fields)")});
+        }
+    }
+
+    std::function<ExprP(ExprP)> rw_expr = [&](ExprP e) -> ExprP {
+        if (!e) return nullptr;
+        if (e->k == EK::Field && !e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Var &&
+            approved.count(e->kids[0]->a)) {
+            return mk_var(sra_names[e->kids[0]->a][e->b]);
+        }
+        if (e->k == EK::Move && !e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Field &&
+            !e->kids[0]->kids.empty() && e->kids[0]->kids[0] &&
+            e->kids[0]->kids[0]->k == EK::Var && approved.count(e->kids[0]->kids[0]->a)) {
+            return mk_var(sra_names[e->kids[0]->kids[0]->a][e->kids[0]->b]);
+        }
+        if (e->k == EK::Call && (e->a == "__stag_is" || e->a == "__shas") &&
+            e->kids.size() == 2 && e->kids[0] && e->kids[0]->k == EK::Var &&
+            approved.count(e->kids[0]->a)) {
+            std::string lit;
+            if (plain_lit_str(e->kids[1].get(), lit)) {
+                const std::string &st = cand_type[e->kids[0]->a];
+                bool ans = (e->a == "__stag_is") ? (st == lit) : (struct_field_slot(st, lit) >= 0);
+                return mk_bool(ans);
+            }
+        }
+        if (e->k == EK::Str) {
+            auto parts = split_interp(e->a);
+            bool changed = false;
+            std::string rebuilt;
+            for (const auto &[ck, cv] : parts) {
+                if (ck == "lit") {
+                    rebuilt += cv;
+                } else {
+                    size_t dot = cv.find('.');
+                    if (dot != std::string::npos) {
+                        std::string root = cv.substr(0, dot);
+                        if (approved.count(root)) {
+                            std::string rest = cv.substr(dot + 1);
+                            size_t d2 = rest.find('.');
+                            std::string fld = rest.substr(0, d2);
+                            std::string tail = d2 == std::string::npos ? "" : rest.substr(d2);
+                            rebuilt += "{" + sra_names[root][fld] + tail + "}";
+                            changed = true;
+                            continue;
+                        }
+                    }
+                    rebuilt += "{" + cv + "}";
+                }
+            }
+            if (changed) e->a = std::move(rebuilt);
+            return e;
+        }
+        if (e->k == EK::Closure || e->k == EK::ParFor) {
+            for (auto &k : e->kids) k = rw_expr(std::move(k));
+            return e;
+        }
+        for (auto &k : e->kids) k = rw_expr(std::move(k));
+        return e;
+    };
+
+    std::function<void(std::vector<StmtP> &)> rw_stmts;
+    std::function<StmtP(StmtP)> rw_single = [&](StmtP s) -> StmtP {
+        if (!s) return nullptr;
+        if (s->k == SK::Block || s->k == SK::Unsafe) {
+            rw_stmts(s->body);
+            return s;
+        }
+        if (s->k == SK::If) {
+            s->e1 = rw_expr(std::move(s->e1));
+            rw_stmts(s->body);
+            if (s->els) s->els = rw_single(std::move(s->els));
+            return s;
+        }
+        std::vector<StmtP> one;
+        one.push_back(std::move(s));
+        rw_stmts(one);
+        if (one.size() == 1) return std::move(one[0]);
+        return mk_block(std::move(one));
+    };
+
+    rw_stmts = [&](std::vector<StmtP> &stmts) {
+        std::vector<StmtP> out_s;
+        out_s.reserve(stmts.size());
+        for (auto &sp : stmts) {
+            if (!sp) continue;
+            if (sp->k == SK::Fn || sp->k == SK::ExportFn || sp->k == SK::Impl ||
+                sp->k == SK::Spawn || sp->k == SK::Defer) {
+                out_s.push_back(std::move(sp));
+                continue;
+            }
+            if ((sp->k == SK::Let || sp->k == SK::LetTmp) && approved.count(sp->a)) {
+                const std::string &st = cand_type[sp->a];
+                Expr *lit = sp->e1.get();
+                for (size_t k = 0; k < lit->names.size(); k++) {
+                    const std::string &fnm = lit->names[k];
+                    ExprP init = rw_expr(std::move(lit->kids[k]));
+                    auto fann = struct_field_ann(st, fnm);
+                    StmtP ls = mk_let(sra_names[sp->a][fnm], std::move(init), true, false, fann);
+                    ls->line = sp->line;
+                    out_s.push_back(std::move(ls));
+                }
+                continue;
+            }
+            if (sp->k == SK::Set && approved.count(sp->a)) {
+                const std::string &st = cand_type[sp->a];
+                Expr *lit = sp->e1.get();
+                const size_t klen = lit->names.size();
+                if (klen == 1) {
+                    const std::string &fnm = lit->names[0];
+                    auto ns = std::make_unique<Stmt>();
+                    ns->k = SK::Set;
+                    ns->line = sp->line;
+                    ns->a = sra_names[sp->a][fnm];
+                    ns->e1 = rw_expr(std::move(lit->kids[0]));
+                    out_s.push_back(std::move(ns));
+                } else {
+                    std::vector<std::string> tnames(klen);
+                    for (size_t k = 0; k < klen; k++) {
+                        const std::string &fnm = lit->names[k];
+                        tnames[k] = cat("_srat_", sra_seq++, "_", fnm);
+                        ExprP rhs = rw_expr(std::move(lit->kids[k]));
+                        StmtP lt = mk_let(tnames[k], std::move(rhs), false, false,
+                                          struct_field_ann(st, fnm));
+                        lt->line = sp->line;
+                        out_s.push_back(std::move(lt));
+                    }
+                    for (size_t k = 0; k < klen; k++) {
+                        const std::string &fnm = lit->names[k];
+                        auto ns = std::make_unique<Stmt>();
+                        ns->k = SK::Set;
+                        ns->line = sp->line;
+                        ns->a = sra_names[sp->a][fnm];
+                        ns->e1 = mk_var(tnames[k]);
+                        out_s.push_back(std::move(ns));
+                    }
+                }
+                continue;
+            }
+            if (sp->k == SK::SetField && sp->e1 && sp->e1->k == EK::Var &&
+                approved.count(sp->e1->a)) {
+                auto ns = std::make_unique<Stmt>();
+                ns->k = SK::Set;
+                ns->line = sp->line;
+                ns->a = sra_names[sp->e1->a][sp->a];
+                ns->e1 = rw_expr(std::move(sp->e2));
+                out_s.push_back(std::move(ns));
+                continue;
+            }
+            sp->e1 = rw_expr(std::move(sp->e1));
+            sp->e2 = rw_expr(std::move(sp->e2));
+            sp->e3 = rw_expr(std::move(sp->e3));
+            rw_stmts(sp->body);
+            rw_stmts(sp->body2);
+            if (sp->els) sp->els = rw_single(std::move(sp->els));
+            out_s.push_back(std::move(sp));
+        }
+        stmts = std::move(out_s);
+    };
+    rw_stmts(decl.body);
+    return true;
+}
+
+bool Emitter::sra_rewrite_decl(const std::string &fn_name, FnDecl &decl) {
+    bool any = false;
+    for (int round = 0; round < 4; round++) {
+        if (!sra_round(fn_name, decl)) break;
+        any = true;
+    }
+    std::function<void(std::vector<StmtP> &)> walk_clos_stmts;
+    std::function<void(Expr *)> walk_clos_expr = [&](Expr *e) {
+        if (!e) return;
+        for (auto &k : e->kids) walk_clos_expr(k.get());
+        if (e->k == EK::Closure && e->fn) {
+            if (sra_rewrite_decl(fn_name, *e->fn)) any = true;
+        }
+    };
+    walk_clos_stmts = [&](std::vector<StmtP> &stmts) {
+        for (auto &sp : stmts) {
+            if (!sp) continue;
+            if (sp->k == SK::Fn || sp->k == SK::ExportFn || sp->k == SK::Impl) continue;
+            walk_clos_expr(sp->e1.get());
+            walk_clos_expr(sp->e2.get());
+            walk_clos_expr(sp->e3.get());
+            walk_clos_stmts(sp->body);
+            walk_clos_stmts(sp->body2);
+            if (sp->els) {
+                Stmt *cur = sp->els.get();
+                while (cur) {
+                    walk_clos_expr(cur->e1.get());
+                    walk_clos_expr(cur->e2.get());
+                    walk_clos_expr(cur->e3.get());
+                    walk_clos_stmts(cur->body);
+                    walk_clos_stmts(cur->body2);
+                    cur = cur->els.get();
+                }
+            }
+        }
+    };
+    walk_clos_stmts(decl.body);
+    return any;
+}
+
+void Emitter::run_sra() {
+    if (native_structs.empty()) return;
+    std::map<const FnDecl *, const FnDecl *> replaced;
+    for (auto &[name, entry] : fns) {
+        if (entry.ctor || !entry.decl) continue;
+        FnDecl copy = clone_fn(*entry.decl);
+        if (sra_rewrite_decl(name, copy)) {
+            const FnDecl *old_ptr = entry.decl;
+            sra_fns.push_back(std::move(copy));
+            entry.decl = &sra_fns.back();
+            replaced[old_ptr] = entry.decl;
+        }
+    }
+    for (auto &l : late) {
+        auto it = replaced.find(l.decl);
+        if (it != replaced.end()) l.decl = it->second;
+    }
 }
 
 void Emitter::emit_fn_by_key(const std::string &key) {
@@ -6630,9 +7408,10 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         auto dot = rest.rfind('.');
         std::string tname = rest.substr(0, dot), mname = rest.substr(dot + 1);
         const FnDecl &f = *fns[tname + "." + mname].decl;
+        const std::string *self_st = native_structs.count(tname) ? &tname : nullptr;
         ln("", cat("/* meth ", safe_comment(tname + "." + mname), " */"));
         define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true,
-                  is_result_ret_ann(f.ret));
+                  is_result_ret_ann(f.ret), self_st);
     } else {
         throw EmitError("bad fn key " + key);
     }
@@ -6759,6 +7538,10 @@ void Emitter::run_pipeline() {
         if (o.meth) mtab[std::make_pair(o.a, o.b)] = fn_code("meth:" + o.a + "." + o.b);
     user_meths.clear();
     for (const auto &[k, v] : mtab) user_meths.insert(k.second);
+    if (opt >= 1 && !sra_done) {
+        sra_done = true;
+        run_sra();
+    }
     compute_fast();
     if (opt >= 1) run_opt();
     const std::string opt_unused = "BRAT_UNUSED ";
@@ -7834,7 +8617,7 @@ std::string Emitter::emit_program() {
                 if (j) klits += ", ";
                 klits += cat("\"", clit(fnames[j]), "\"");
             }
-            ic_decls.push_back(cat("static const char *const _sk", static_cast<int>(sid), "[",
+            ic_decls.push_back(cat("static BRAT_UNUSED const char *const _sk", static_cast<int>(sid), "[",
                                    static_cast<int>(fnames.size()), "] = {", klits, "};"));
         }
         if (!shape_defs.empty())

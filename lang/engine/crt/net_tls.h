@@ -159,6 +159,23 @@ BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
     vraisef("no field %s\n", k); return vunwind;
 }
 
+BFN_HOT Val *vstruct_slot_ptr(Val s, const BShape *shp, bint slot, const char *k) {
+    if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp))
+        return &s.as.map->vals[slot];
+    if (s.tag == V_STRUCT) {
+        Val *o = map_get(s.as.map, k);
+        if (o) return o;
+    }
+    vraisef("no field %s\n", k);
+    return NULL;
+}
+
+BFN_HOT Val vstruct_slot_val(Val s, const BShape *shp, bint slot, const char *k) {
+    if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp))
+        return s.as.map->vals[slot];
+    return vfield(s, k);
+}
+
 
 BFN Val verr(const char *msg) {
     Vec *e = vvec();
