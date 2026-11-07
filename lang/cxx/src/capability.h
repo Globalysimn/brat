@@ -12,4 +12,6 @@
 #include "ast.h"
 #include "borrow.h"
 
-std::vector<BorrowDiag> sharing_check(const std::vector<StmtP> &body);
+std::vector<BorrowDiag> sharing_check(
+    const std::vector<StmtP> &body,
+    const std::map<std::string, std::map<std::string, std::string>> &extra_structs = {});

@@ -20,11 +20,13 @@ const std::set<std::string> kPtrAliasCalls{"ptr_offset", "slice_of", "slice_of_p
                                            "slice_of_struct"};
 const std::set<std::string> kResourceClose{"tcp_close", "lib_close"};
 const std::set<std::string> kMutate{"pop", "sort", "sort_by", "del", "clear"};
-const std::set<std::string> kNumOps{"-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||"};
+const std::set<std::string> kNumOps{"-", "*", "/", "%", "&", "|", "^", "<<", ">>",
+                                    "==", "!=", "<", ">", "<=", ">=", "&&", "||"};
 const std::set<std::string> kScalarCalls{"own", "len", "is_err", "is_none", "is_vec",
-                                         "is_str", "is_map", "ptr_is_null", "ptr_read_i64",
+                                         "is_str", "is_map", "is_bool", "is_int", "is_float",
+                                         "__stag_is", "__shas", "ptr_is_null", "ptr_read_i64",
                                          "ptr_read_f64", "ptr_read_f32", "re_match"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Extern,
+const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
 
 std::string cycle_msg(const std::string &value, const std::string &container) {
@@ -375,6 +377,149 @@ void declared_expr(const Expr *e, std::set<std::string> &out) {
     for (const auto &k : e->kids) declared_expr(k.get(), out);
 }
 
+using StructFields = std::map<std::string, std::map<std::string, std::string>>;
+
+const std::set<std::string> kAcyclicScalars{
+    "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
+    "usize", "isize", "f32", "f64", "str", "none"};
+
+std::string trim_type(const std::string &s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+}
+
+std::set<std::string> compute_acyclic_structs(const StructFields &sf) {
+    std::set<std::string> acyc;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto &[sname, fields] : sf) {
+            if (acyc.count(sname)) continue;
+            bool all_ok = true;
+            for (const auto &[_, fann] : fields) {
+                std::string t = trim_type(fann);
+                if (!kAcyclicScalars.count(t) && !acyc.count(t)) {
+                    all_ok = false;
+                    break;
+                }
+            }
+            if (all_ok) {
+                acyc.insert(sname);
+                changed = true;
+            }
+        }
+    }
+    return acyc;
+}
+
+bool is_acyclic_type(const std::string &raw, const std::set<std::string> &acyc_structs) {
+    std::string t = trim_type(raw);
+    return kAcyclicScalars.count(t) > 0 || acyc_structs.count(t) > 0;
+}
+
+std::optional<std::string> infer_cap_type(const Expr *e,
+                                          const std::map<std::string, std::string> &vars,
+                                          const StructFields &sf) {
+    while (e && (e->k == EK::Move || e->k == EK::Quest))
+        e = e->kids.empty() ? nullptr : e->kids[0].get();
+    if (!e) return std::nullopt;
+    switch (e->k) {
+    case EK::Num: return e->is_float ? std::string("f64") : std::string("i64");
+    case EK::Bool: return std::string("bool");
+    case EK::Str:
+    case EK::RStr: return std::string("str");
+    case EK::None: return std::string("none");
+    case EK::Un:
+        if (e->a == "!") return std::string("bool");
+        if (e->a == "-" || e->a == "~") return std::string("i64");
+        return std::nullopt;
+    case EK::Bin:
+        if (kNumOps.count(e->a)) return std::string("i64");
+        if (e->a == "+" && e->kids.size() == 2) {
+            auto l = infer_cap_type(e->kids[0].get(), vars, sf);
+            auto r = infer_cap_type(e->kids[1].get(), vars, sf);
+            if (l && (*l == "i64" || *l == "f64" || *l == "str")) return l;
+            if (r && (*r == "i64" || *r == "f64" || *r == "str")) return r;
+        }
+        return std::nullopt;
+    case EK::Call:
+        if (kScalarCalls.count(e->a) || e->a == "str") return std::string("i64");
+        return std::nullopt;
+    case EK::Var: {
+        auto it = vars.find(e->a);
+        return it == vars.end() ? std::nullopt : std::optional<std::string>(it->second);
+    }
+    case EK::StructLit:
+        if (sf.count(e->a)) return e->a;
+        return std::nullopt;
+    case EK::Idx: {
+        auto bt = infer_cap_type(e->kids.empty() ? nullptr : e->kids[0].get(), vars, sf);
+        if (!bt) return std::nullopt;
+        std::string a = trim_type(*bt);
+        if (a.rfind("vec[", 0) == 0 && a.back() == ']')
+            return trim_type(a.substr(4, a.size() - 5));
+        if (a.rfind("map[", 0) == 0 && a.back() == ']') {
+            std::string inner = a.substr(4, a.size() - 5);
+            int depth = 0;
+            size_t split = std::string::npos;
+            for (size_t i = 0; i < inner.size(); i++) {
+                if (inner[i] == '[') depth++;
+                else if (inner[i] == ']') depth--;
+                else if (inner[i] == ',' && depth == 0) split = i;
+            }
+            return trim_type(split == std::string::npos ? inner : inner.substr(split + 1));
+        }
+        return std::nullopt;
+    }
+    case EK::Field: {
+        auto bt = infer_cap_type(e->kids.empty() ? nullptr : e->kids[0].get(), vars, sf);
+        if (!bt) return std::nullopt;
+        auto sit = sf.find(trim_type(*bt));
+        if (sit == sf.end()) return std::nullopt;
+        auto fit = sit->second.find(e->b);
+        if (fit == sit->second.end()) return std::nullopt;
+        return trim_type(fit->second);
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+void collect_var_types(const View &body, std::map<std::string, std::string> &vars,
+                       const StructFields &sf) {
+    for (const Stmt *s : body) {
+        if (!s) continue;
+        if ((s->k == SK::Let || s->k == SK::LetTmp) && !s->a.empty()) {
+            if (auto inf = infer_cap_type(s->e1.get(), vars, sf)) {
+                vars[s->a] = *inf;
+            } else if (s->ann && !s->ann->empty() &&
+                       (!s->e1 || s->e1->k != EK::Var || vars.count(s->e1->a))) {
+                vars[s->a] = trim_type(*s->ann);
+            }
+        } else if (s->k == SK::ForRange && !s->a.empty()) {
+            vars[s->a] = "i64";
+        } else if (s->k == SK::ForIter && !s->a.empty()) {
+            if (auto bt = infer_cap_type(s->e1.get(), vars, sf)) {
+                std::string a = trim_type(*bt);
+                if (a.rfind("vec[", 0) == 0 && a.back() == ']')
+                    vars[s->a] = trim_type(a.substr(4, a.size() - 5));
+                else if (a == "str")
+                    vars[s->a] = "str";
+            }
+        }
+        collect_var_types(view(s->body), vars, sf);
+        collect_var_types(view(s->body2), vars, sf);
+        collect_var_types(else_of(*s), vars, sf);
+    }
+}
+
+bool is_acyclic_expr(const Expr *e, const std::map<std::string, std::string> &vars,
+                     const StructFields &sf, const std::set<std::string> &acyc_structs) {
+    auto t = infer_cap_type(e, vars, sf);
+    return t && is_acyclic_type(*t, acyc_structs);
+}
+
 void alias_map(const View &body, std::map<std::string, std::string> &out) {
     for (const Stmt *s : body) {
         if (!s) continue;
@@ -389,6 +534,28 @@ void alias_map(const View &body, std::map<std::string, std::string> &out) {
         alias_map(view(s->body), out);
         alias_map(view(s->body2), out);
         alias_map(else_of(*s), out);
+    }
+}
+
+void cycle_alias_map(const View &body, std::map<std::string, std::string> &out,
+                     const std::map<std::string, std::string> &vars,
+                     const StructFields &sf, const std::set<std::string> &acyc_structs) {
+    for (const Stmt *s : body) {
+        if (!s) continue;
+        if ((s->k == SK::Let || s->k == SK::LetTmp) && s->e1) {
+            if (!is_acyclic_expr(s->e1.get(), vars, sf, acyc_structs) &&
+                !(vars.count(s->a) && is_acyclic_type(vars.at(s->a), acyc_structs))) {
+                std::string r = root(s->e1.get());
+                if (r.empty() && s->e1->k == EK::Call && kPtrAliasCalls.count(s->e1->a) &&
+                    !s->e1->kids.empty())
+                    r = root(s->e1->kids[0].get());
+                if (!r.empty() && r != s->a) out[s->a] = r;
+            }
+        }
+        if (s->k == SK::Try && s->opt1) out.erase(*s->opt1);
+        cycle_alias_map(view(s->body), out, vars, sf, acyc_structs);
+        cycle_alias_map(view(s->body2), out, vars, sf, acyc_structs);
+        cycle_alias_map(else_of(*s), out, vars, sf, acyc_structs);
     }
 }
 
@@ -482,12 +649,16 @@ void all_stmts(const View &body, std::vector<const Stmt *> &out) {
 using ContainsMap = std::map<std::string, std::set<std::string>>;
 
 ContainsMap containment_graph(const View &body, const std::map<std::string, std::string> &alias,
-                              const FnSummaries *fns = nullptr) {
+                              const FnSummaries *fns = nullptr,
+                              const std::map<std::string, std::string> *vars = nullptr,
+                              const StructFields *sf = nullptr,
+                              const std::set<std::string> *acyc = nullptr) {
     ContainsMap contains;
     std::vector<const Stmt *> stmts;
     all_stmts(body, stmts);
     for (const Stmt *s : stmts) {
         for (const auto &ed : inserts(*s, fns)) {
+            if (vars && sf && acyc && is_acyclic_expr(ed.v_expr, *vars, *sf, *acyc)) continue;
             std::string rc = ed.c_override.empty() ? root(ed.c_expr) : ed.c_override;
             std::string rv = root(ed.v_expr);
             if (rc.empty() || rv.empty()) continue;
@@ -535,15 +706,21 @@ struct Owner {
 
 void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
             const std::map<std::string, std::string> &alias,
-            const FnSummaries *fns = nullptr) {
+            const FnSummaries *fns,
+            const std::map<std::string, std::string> &vars,
+            const StructFields &sf,
+            const std::set<std::string> &acyc) {
     for (const Stmt *s : body) {
         if (!s) continue;
         for (const auto &ed : inserts(*s, fns)) {
+            if (is_acyclic_expr(ed.v_expr, vars, sf, acyc)) continue;
             std::string rc = ed.c_override.empty() ? root(ed.c_expr) : ed.c_override;
             std::string rv = root(ed.v_expr);
             if (rc.empty() || rv.empty()) continue;
+            if (vars.count(rv) && is_acyclic_type(vars.at(rv), acyc)) continue;
             rc = resolve(rc, alias);
             rv = resolve(rv, alias);
+            if (vars.count(rv) && is_acyclic_type(vars.at(rv), acyc)) continue;
             if (own.owns(rc, rv))
                 out.push_back(BorrowDiag{s->line, cycle_msg(rv, rc), std::nullopt});
             else if (rc != rv && !own.parent.count(rv))
@@ -557,17 +734,22 @@ void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
         case SK::Spawn:
         case SK::Scope:
         case SK::Try:
-            cycles(view(s->body), out, own, alias, fns);
-            cycles(view(s->body2), out, own, alias, fns);
-            cycles(else_of(*s), out, own, alias, fns);
+            cycles(view(s->body), out, own, alias, fns, vars, sf, acyc);
+            cycles(view(s->body2), out, own, alias, fns, vars, sf, acyc);
+            cycles(else_of(*s), out, own, alias, fns, vars, sf, acyc);
             break;
         case SK::Fn:
         case SK::ExportFn:
             for (const auto &f : s->fns) {
                 Owner fresh;
+                std::map<std::string, std::string> fvars = vars;
+                for (const auto &p : f.params) {
+                    if (p.ann && !p.ann->empty()) fvars[p.name] = trim_type(*p.ann);
+                }
+                collect_var_types(view(f.body), fvars, sf);
                 std::map<std::string, std::string> inner;
-                alias_map(view(f.body), inner);
-                cycles(view(f.body), out, fresh, inner, fns);
+                cycle_alias_map(view(f.body), inner, fvars, sf, acyc);
+                cycles(view(f.body), out, fresh, inner, fns, fvars, sf, acyc);
             }
             break;
         default:
@@ -1071,16 +1253,26 @@ std::vector<BorrowDiag> callback_contracts(const View &stmts, const View &top,
     return out;
 }
 
-std::vector<BorrowDiag> sharing_check(const std::vector<StmtP> &body) {
+std::vector<BorrowDiag> sharing_check(
+    const std::vector<StmtP> &body,
+    const std::map<std::string, std::map<std::string, std::string>> &extra_structs) {
     std::vector<BorrowDiag> out;
     View top;
     std::set<std::string> top_globals;
+    StructFields sf = extra_structs;
     for (const auto &sp : body) {
         if (!sp) continue;
         const Stmt *n = sp.get();
         while (n->k == SK::Pub && !n->body.empty()) n = n->body[0].get();
         if (n->k == SK::Let && !n->a.empty()) top_globals.insert(n->a);
+        if (n->k == SK::Struct || n->k == SK::ExternStruct) {
+            sf[n->a];
+            for (const auto &f : n->fields) {
+                if (f.ann) sf[n->a][f.name] = *f.ann;
+            }
+        }
     }
+    const std::set<std::string> acyc = compute_acyclic_structs(sf);
     FnSummaries fns = build_fn_summaries(body, top_globals);
     for (const auto &sp : body) {
         const Stmt *node = sp.get();
@@ -1089,9 +1281,16 @@ std::vector<BorrowDiag> sharing_check(const std::vector<StmtP> &body) {
             if (node->k == SK::Fn || node->k == SK::ExportFn || node->k == SK::Impl) {
                 for (const auto &f : node->fns) {
                     Owner own;
+                    std::map<std::string, std::string> fvars;
+                    for (const auto &p : f.params) {
+                        if (p.ann && !p.ann->empty()) fvars[p.name] = trim_type(*p.ann);
+                        else if (node->k == SK::Impl && p.name == "self" && sf.count(node->a))
+                            fvars[p.name] = node->a;
+                    }
+                    collect_var_types(view(f.body), fvars, sf);
                     std::map<std::string, std::string> alias;
-                    alias_map(view(f.body), alias);
-                    cycles(view(f.body), out, own, alias, &fns);
+                    cycle_alias_map(view(f.body), alias, fvars, sf, acyc);
+                    cycles(view(f.body), out, own, alias, &fns, fvars, sf, acyc);
                     races(view(f.body), out, &fns, true);
                 }
             }
@@ -1100,9 +1299,11 @@ std::vector<BorrowDiag> sharing_check(const std::vector<StmtP> &body) {
         top.push_back(sp.get());
     }
     Owner own;
+    std::map<std::string, std::string> top_vars;
+    collect_var_types(top, top_vars, sf);
     std::map<std::string, std::string> alias;
-    alias_map(top, alias);
-    cycles(top, out, own, alias, &fns);
+    cycle_alias_map(top, alias, top_vars, sf, acyc);
+    cycles(top, out, own, alias, &fns, top_vars, sf, acyc);
     races(top, out, &fns, false);
     for (const auto &d : callback_contracts(view(body), top, fns)) out.push_back(d);
     return out;

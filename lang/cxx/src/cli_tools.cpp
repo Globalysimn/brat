@@ -415,6 +415,16 @@ struct ApiChange {
 
 std::string interface_signature(const std::string &name,
                                const std::pair<std::vector<std::string>, std::string> &sig) {
+    if (sig.second == "@struct" && name.rfind("struct:", 0) == 0) {
+        std::ostringstream out;
+        out << "struct " << name.substr(7) << " { ";
+        for (size_t i = 0; i < sig.first.size(); ++i) {
+            if (i) out << ", ";
+            out << sig.first[i];
+        }
+        out << " }";
+        return out.str();
+    }
     std::ostringstream out;
     out << "fn " << name << '(';
     for (size_t i = 0; i < sig.first.size(); ++i) {

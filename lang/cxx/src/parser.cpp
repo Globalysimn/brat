@@ -433,6 +433,7 @@ private:
     uint32_t curline_ = 1;
     std::unordered_map<std::string, std::vector<std::string>> enums_;
     std::unordered_map<std::string, std::optional<std::string>> enums_rev_;
+    std::unordered_map<std::string, std::vector<std::string>> structs_;
     std::vector<std::pair<uint32_t, std::string>> stray_;
 
     const Tok &peek() const { return t_[i_]; }
@@ -635,6 +636,11 @@ private:
             }
         }
 
+        if (c.kind == TK::Id && c.text == "struct" && peek(1).kind == TK::Id &&
+            peek(2).text == "{") {
+            return one(struct_stmt());
+        }
+
         // `scope { }` is a block with a join, not a keyword: the name stays
         // usable as an ordinary binding.
         if (c.kind == TK::Id && c.text == "scope" && next_is("{")) {
@@ -737,6 +743,45 @@ private:
                 if (names[k] == "_") continue;
                 out.push_back(mk_let_tmp(names[k], mk_idx(mk_var(tm), mk_num(static_cast<int64_t>(k))), mut));
             }
+            return out;
+        }
+        if (at("{") || (peek().kind == TK::Id && peek(1).text == "{")) {
+            if (konst) fail("const destructure unsupported");
+            PatP pat = struct_pat();
+            std::optional<std::string> ann;
+            if (at(":")) {
+                step();
+                std::vector<std::string> toks;
+                int depth = 0;
+                for (;;) {
+                    const Tok &x = peek();
+                    if (x.kind == TK::Eof || (x.text == "=" && depth == 0)) break;
+                    if (x.text == "[") depth++;
+                    if (x.text == "]") depth--;
+                    toks.push_back(to_str(x.text));
+                    step();
+                }
+                ann = ann_text(toks);
+            }
+            want("=");
+            auto e = expr();
+            eat(";");
+            std::string tm = fresh('d');
+            std::vector<StmtP> out;
+            if (!pat->a.empty()) {
+                out.push_back(mk_let(tm, std::move(e), false, false,
+                                     ann ? std::move(ann) : std::optional<std::string>(pat->a)));
+                std::vector<ExprP> stargs;
+                stargs.push_back(mk_var(tm));
+                stargs.push_back(mk_str(pat->a));
+                std::vector<ExprP> aargs;
+                aargs.push_back(mk_call("__stag_is", std::move(stargs)));
+                aargs.push_back(mk_str("expected struct " + pat->a));
+                out.push_back(mk_expr(mk_call("assert", std::move(aargs))));
+            } else {
+                out.push_back(mk_let(tm, std::move(e), false, false, std::move(ann)));
+            }
+            lower_let_struct(tm, *pat, mut, out);
             return out;
         }
         std::string name = to_str(step().text);
@@ -927,7 +972,11 @@ private:
                 return s;
             }
         }
-        fail("pub wants fn/enum/trait/impl/use");
+        if (c.kind == TK::Id && c.text == "struct" && peek(1).kind == TK::Id &&
+            peek(2).text == "{") {
+            return wrap_pub(struct_stmt());
+        }
+        fail("pub wants fn/struct/enum/trait/impl/use");
     }
 
     static StmtP wrap_pub(StmtP inner) {
@@ -1056,6 +1105,47 @@ private:
         s->k = SK::Enum;
         s->a = std::move(tname);
         s->variants = std::move(variants);
+        return s;
+    }
+
+    StmtP struct_stmt() {
+        want("struct");
+        std::string tname = to_str(want_id("struct name").text);
+        if (structs_.count(tname)) fail("duplicate struct '" + tname + "'");
+        want("{");
+        std::vector<StructField> fields;
+        std::vector<std::string> fnames;
+        while (!at("}")) {
+            StructField f;
+            f.name = to_str(want_id("struct field").text);
+            for (const auto &prev : fnames) {
+                if (prev == f.name)
+                    fail("duplicate field '" + f.name + "' in struct " + tname);
+            }
+            fnames.push_back(f.name);
+            want(":");
+            std::vector<std::string> toks;
+            int depth = 0;
+            for (;;) {
+                const Tok &x = peek();
+                if (x.kind == TK::Eof || (depth == 0 && (x.text == "," || x.text == "}"))) break;
+                if (x.text == "[" || x.text == "(") depth++;
+                if (x.text == "]" || x.text == ")") depth--;
+                toks.push_back(to_str(x.text));
+                step();
+            }
+            f.ann = ann_text(toks);
+            if (!f.ann || f.ann->empty())
+                fail("field '" + f.name + "' in struct " + tname + " needs a type");
+            fields.push_back(std::move(f));
+            eat(",");
+        }
+        want("}");
+        structs_[tname] = std::move(fnames);
+        auto s = std::make_unique<Stmt>();
+        s->k = SK::Struct;
+        s->a = std::move(tname);
+        s->fields = std::move(fields);
         return s;
     }
 
@@ -1580,6 +1670,12 @@ private:
             p->lit = mk_bool(c.text == "true");
             return p;
         }
+        if (c.kind == TK::Id && next_is("{")) {
+            return struct_pat();
+        }
+        if (c.text == "{") {
+            return struct_pat();
+        }
         if (c.kind == TK::Id && next_is("(")) {
             step();
             auto p = std::make_unique<Pat>();
@@ -1619,6 +1715,66 @@ private:
         fail("bad pattern arg '" + to_str(c.text) + "'", c.line);
     }
 
+    PatP struct_pat() {
+        auto p = std::make_unique<Pat>();
+        p->k = PK::Struct;
+        if (peek().kind == TK::Id && next_is("{")) {
+            p->a = to_str(step().text);
+        }
+        want("{");
+        while (!at("}")) {
+            if (eat("..")) {
+                p->open = true;
+                eat(",");
+                break;
+            }
+            bool fmut = (peek().kind == TK::Kw && eat("mut"));
+            Tok fn = want_id("field name");
+            std::string fname = to_str(fn.text);
+            for (const auto &prev : p->names) {
+                if (prev == fname) fail("duplicate field '" + fname + "' in pattern", fn.line);
+            }
+            p->names.push_back(fname);
+            if (!fmut && eat(":")) {
+                p->subs.push_back(pat_arg());
+            } else {
+                auto b = std::make_unique<Pat>();
+                b->k = PK::Bind;
+                b->a = fname;
+                b->mut = fmut;
+                p->subs.push_back(std::move(b));
+            }
+            eat(",");
+        }
+        want("}");
+        return p;
+    }
+
+    void lower_let_struct(const std::string &tm, const Pat &pat, bool outer_mut,
+                          std::vector<StmtP> &out) {
+        const bool named = !pat.a.empty();
+        for (size_t j = 0; j < pat.subs.size(); j++) {
+            const std::string &fname = pat.names[j];
+            const Pat &sp = *pat.subs[j];
+            if (sp.k == PK::Wild) continue;
+            ExprP acc = named ? mk_field(mk_var(tm), fname)
+                              : mk_idx(mk_var(tm), mk_str(fname));
+            if (sp.k == PK::Bind) {
+                out.push_back(mk_let_tmp(sp.a, std::move(acc), outer_mut || sp.mut));
+            } else if (sp.k == PK::Struct) {
+                std::string sub_tm = fresh('d');
+                if (!sp.a.empty()) {
+                    out.push_back(mk_let(sub_tm, std::move(acc), false, false, sp.a));
+                } else {
+                    out.push_back(mk_let_tmp(sub_tm, std::move(acc), false));
+                }
+                lower_let_struct(sub_tm, sp, outer_mut, out);
+            } else {
+                fail("refutable sub-pattern in `let`; use `if let` or `match`");
+            }
+        }
+    }
+
     // One pattern becomes a chain of `if`s over the temporary `tm`. A plain
     // binding becomes a block. `rest` is what a failed test falls through to.
     StmtP build_if(const std::string &tm, Pat pat, std::vector<StmtP> body, StmtP rest,
@@ -1649,9 +1805,50 @@ private:
         }
         case PK::Bind: {
             std::vector<StmtP> out;
-            out.push_back(mk_let_tmp(pat.a, mk_var(tm), false));
+            out.push_back(mk_let_tmp(pat.a, mk_var(tm), pat.mut));
             for (auto &s : body) out.push_back(std::move(s));
             return mk_block(std::move(out));
+        }
+        case PK::Struct: {
+            const bool named = !pat.a.empty();
+            ExprP cond;
+            if (named) {
+                std::vector<ExprP> stargs;
+                stargs.push_back(mk_var(tm));
+                stargs.push_back(mk_str(pat.a));
+                cond = mk_call("__stag_is", std::move(stargs));
+            } else {
+                std::vector<ExprP> margs;
+                margs.push_back(mk_var(tm));
+                cond = mk_call("is_map", std::move(margs));
+            }
+            for (const auto &fname : pat.names) {
+                std::vector<ExprP> hargs;
+                hargs.push_back(mk_var(tm));
+                hargs.push_back(mk_str(fname));
+                cond = mk_bin("&&", std::move(cond), mk_call("__shas", std::move(hargs)));
+            }
+            std::vector<StmtP> pre;
+            std::vector<StmtP> inner = std::move(body);
+            for (size_t j = pat.subs.size(); j-- > 0;) {
+                const std::string &fname = pat.names[j];
+                ExprP acc = named ? mk_field(mk_var(tm), fname)
+                                  : mk_idx(mk_var(tm), mk_str(fname));
+                Pat &sp = *pat.subs[j];
+                if (sp.k == PK::Bind) {
+                    pre.push_back(mk_let_tmp(sp.a, std::move(acc), sp.mut));
+                } else if (sp.k == PK::Wild) {
+                    continue;
+                } else {
+                    std::string sub_tmp = fresh('p');
+                    pre.push_back(mk_let_tmp(sub_tmp, std::move(acc), false));
+                    StmtP sub = build_if(sub_tmp, std::move(sp), std::move(inner),
+                                         clone_stmt(*rest), nullptr);
+                    inner = one(std::move(sub));
+                }
+            }
+            for (auto &s : inner) pre.push_back(std::move(s));
+            return mk_if(std::move(cond), std::move(pre), std::move(rest));
         }
         case PK::Variant: {
             std::vector<ExprP> tagargs;
@@ -1735,18 +1932,43 @@ private:
                     if (arms_follow) fail("_ must be last");
                     node = mk_block(std::move(a.body));
                 } else {
-                    node = build_if(tm, Pat{PK::Wild, {}, nullptr, {}}, std::move(a.body),
-                                    std::move(rest), std::move(a.guard));
+                    node = build_if(tm, Pat{PK::Wild, {}, nullptr, {}, {}, false, false},
+                                    std::move(a.body), std::move(rest), std::move(a.guard));
                 }
                 continue;
             }
             if (a.pat->k == PK::Bind && !a.guard) {
                 if (arms_follow) fail("_ must be last");
                 std::vector<StmtP> v;
-                v.push_back(mk_let_tmp(a.pat->a, mk_var(tm), false));
+                v.push_back(mk_let_tmp(a.pat->a, mk_var(tm), a.pat->mut));
                 for (auto &s : a.body) v.push_back(std::move(s));
                 node = mk_block(std::move(v));
                 continue;
+            }
+            if (!arms_follow && a.pat->k == PK::Struct && !a.pat->a.empty() && !a.guard &&
+                structs_.count(a.pat->a) && space_total(*a.pat)) {
+                bool only_same_struct = true;
+                for (size_t prev = 0; prev < k; prev++) {
+                    if (!arms[prev].pat || arms[prev].pat->k != PK::Struct ||
+                        arms[prev].pat->a != a.pat->a) {
+                        only_same_struct = false;
+                        break;
+                    }
+                }
+                if (only_same_struct) {
+                    std::vector<StmtP> v;
+                    std::vector<ExprP> stargs;
+                    stargs.push_back(mk_var(tm));
+                    stargs.push_back(mk_str(a.pat->a));
+                    std::vector<ExprP> aargs;
+                    aargs.push_back(mk_call("__stag_is", std::move(stargs)));
+                    aargs.push_back(mk_str("expected struct " + a.pat->a));
+                    v.push_back(mk_expr(mk_call("assert", std::move(aargs))));
+                    lower_let_struct(tm, *a.pat, false, v);
+                    for (auto &s : a.body) v.push_back(std::move(s));
+                    node = mk_block(std::move(v));
+                    continue;
+                }
             }
             node = build_if(tm, std::move(*a.pat), std::move(a.body), std::move(rest),
                             std::move(a.guard));
@@ -1776,6 +1998,12 @@ private:
                     return true;
                 }
             }
+        }
+        if (p.k == PK::Struct && !p.a.empty() && structs_.count(p.a)) {
+            for (const auto &sp : p.subs) {
+                if (sp && !space_total(*sp)) return false;
+            }
+            return true;
         }
         return false;
     }
@@ -1875,6 +2103,25 @@ private:
             }
             if (onlybool && !(saw_true && saw_false)) {
                 fail(std::string("non-exhaustive match: missing ") + (saw_true ? "false" : "true"), ml);
+            }
+            std::string struct_owner;
+            bool only_same_struct = !arms.empty();
+            bool covered_struct = false;
+            for (const auto &a : arms) {
+                if (!a.pat || a.pat->k != PK::Struct || a.pat->a.empty() ||
+                    !structs_.count(a.pat->a)) {
+                    only_same_struct = false;
+                    break;
+                }
+                if (struct_owner.empty()) struct_owner = a.pat->a;
+                else if (struct_owner != a.pat->a) {
+                    only_same_struct = false;
+                    break;
+                }
+                if (!a.guard && space_total(*a.pat)) covered_struct = true;
+            }
+            if (only_same_struct && !covered_struct) {
+                fail("non-exhaustive match on struct " + struct_owner, ml);
             }
         }
     }
@@ -2196,15 +2443,19 @@ private:
             return mk_call(name, std::move(args));
         }
         const bool upper = !name.empty() && name[0] >= 'A' && name[0] <= 'Z';
-        if (at("{") && t.kind == TK::Id && upper && struct_literal_ahead()) {
+        if (at("{") && t.kind == TK::Id && upper && struct_literal_ahead(name)) {
             step();
             auto s = std::make_unique<Expr>();
             s->k = EK::StructLit;
             s->a = name;
             while (!at("}")) {
-                s->names.push_back(to_str(want_id("field name").text));
-                want(":");
-                s->kids.push_back(expr());
+                std::string fname = to_str(want_id("field name").text);
+                s->names.push_back(fname);
+                if (eat(":")) {
+                    s->kids.push_back(expr());
+                } else {
+                    s->kids.push_back(mk_var(fname));
+                }
                 eat(",");
             }
             want("}");
@@ -2214,12 +2465,13 @@ private:
         return mk_var(name);
     }
 
-    // `Point { x: 1 }` is a struct literal; `if x {` is a block. The lookahead
-    // after `{` decides: `}` or `name :` means a literal.
-    bool struct_literal_ahead() const {
+    bool struct_literal_ahead(const std::string &name) const {
         const Tok &first = peek(1);
         if (first.text == "}") return true;
-        return first.kind == TK::Id && peek(2).text == ":";
+        if (first.kind == TK::Id && peek(2).text == ":") return true;
+        if (first.kind == TK::Id && peek(2).text == ",") return true;
+        if (first.kind == TK::Id && peek(2).text == "}" && structs_.count(name) > 0) return true;
+        return false;
     }
 
     // `"a{x}b"` becomes `("bin" "+" ("rstr" "a") ("bin" "+" x ("rstr" "b")))`.

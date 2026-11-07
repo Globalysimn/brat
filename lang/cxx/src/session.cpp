@@ -10,7 +10,7 @@ namespace {
 using View = std::vector<const Stmt *>;
 
 const std::set<std::string> kOps{"send", "recv", "close"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Extern,
+const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
 
 std::string need_send(const std::string &name, int recv, int send) {

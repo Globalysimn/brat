@@ -2250,7 +2250,7 @@ void Emitter::emit_fast_fn(const std::string &name) {
 
 static bool is_top_kind(SK k) {
     switch (k) {
-    case SK::Fn: case SK::Impl: case SK::Trait: case SK::Enum: case SK::Pub:
+    case SK::Fn: case SK::Impl: case SK::Trait: case SK::Enum: case SK::Struct: case SK::Pub:
     case SK::Extern: case SK::ExternStruct: case SK::ExportFn:
         return true;
     default:
@@ -5239,7 +5239,8 @@ std::set<std::string> Emitter::compute_ub_vars(const StmtList &body, const std::
             if (!sp) continue;
             const Stmt &s = *sp;
             if (s.k == SK::Spawn || s.k == SK::Scope || s.k == SK::Defer || s.k == SK::Fn ||
-                s.k == SK::Impl || s.k == SK::Trait || s.k == SK::Enum || s.k == SK::Pub) {
+                s.k == SK::Impl || s.k == SK::Trait || s.k == SK::Enum || s.k == SK::Struct ||
+                s.k == SK::Pub) {
                 cand.clear();
                 return;
             }
@@ -5540,6 +5541,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         return;
     case SK::Trait:
     case SK::Enum:
+    case SK::Struct:
     case SK::Impl:
     case SK::Import:
     case SK::PubUse:
@@ -6832,7 +6834,8 @@ void Emitter::emit_main_open() {
     std::function<void(const Stmt &)> scan = [&](const Stmt &s) {
         if (s.k == SK::Pub) {
             scan(*s.body[0]);
-        } else if (s.k == SK::Fn || s.k == SK::Impl || s.k == SK::Trait || s.k == SK::Enum) {
+        } else if (s.k == SK::Fn || s.k == SK::Impl || s.k == SK::Trait || s.k == SK::Enum ||
+                   s.k == SK::Struct) {
             return;
         } else {
             collect_vars({&s}, names);
@@ -8023,6 +8026,26 @@ V Emitter::ex_call(const Expr &e) {
         std::vector<std::string> pre = a.pre;
         for (auto &p : b.pre) pre.push_back(p);
         return {pre, cat("vtag_at_owned(", a.val, ", ", b.val, ")")};
+    }
+    if (name == "__stag_is") {
+        need_arity(args, 2, name);
+        std::string tname;
+        if (plain_cstr_key(*args[1], tname)) {
+            return read_only_call(*args[0], [&](const std::string &v) {
+                return cat("vstag_is(", v, ", \"", clit(tname), "\")");
+            });
+        }
+        throw EmitError("__stag_is requires string literal tag");
+    }
+    if (name == "__shas") {
+        need_arity(args, 2, name);
+        std::string fname;
+        if (plain_cstr_key(*args[1], fname)) {
+            return read_only_call(*args[0], [&](const std::string &v) {
+                return cat("vshas_ic(", v, ", \"", clit(fname), "\", ", next_fic(), ")");
+            });
+        }
+        throw EmitError("__shas requires string literal field");
     }
     if (name == "Ok" || name == "Err" || name == "Some") {
         need_arity(args, 1, name);

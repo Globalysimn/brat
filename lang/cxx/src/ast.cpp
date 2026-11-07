@@ -312,6 +312,23 @@ void pat(const Pat &p, std::string &o) {
         }
         o += "])";
         break;
+    case PK::Struct:
+        open(o, "structpat");
+        word(o, p.a.empty() ? "_" : p.a);
+        space(o);
+        o.push_back('[');
+        for (size_t i = 0; i < p.subs.size(); i++) {
+            if (i) space(o);
+            o.push_back('(');
+            quoted(o, i < p.names.size() ? p.names[i] : "");
+            space(o);
+            pat(*p.subs[i], o);
+            o.push_back(')');
+        }
+        o.push_back(']');
+        boolean(o, p.open);
+        o.push_back(')');
+        break;
     }
 }
 
@@ -708,6 +725,20 @@ void stmt(const Stmt &s, std::string &o) {
         }
         o.push_back(')');
         o.push_back(')');
+        break;
+    case SK::Struct:
+        open(o, "struct");
+        word(o, s.a);
+        space(o);
+        o.push_back('[');
+        for (size_t i = 0; i < s.fields.size(); i++) {
+            if (i) space(o);
+            o.push_back('(');
+            quoted(o, s.fields[i].name);
+            opt(o, s.fields[i].ann);
+            o.push_back(')');
+        }
+        o += "])";
         break;
     case SK::ExternStruct:
         open(o, "externstruct");

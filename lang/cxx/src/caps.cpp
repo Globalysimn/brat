@@ -62,7 +62,7 @@ const std::set<std::string> kCopyAnns{"i8", "u8", "i16", "u16", "i32", "u32",
 const std::set<std::string> kMutators{"push", "pop", "sort", "sort_by", "ins",
                                       "del", "set", "clear"};
 const std::set<SK> kDecls{SK::Fn,        SK::Impl,   SK::Trait, SK::Enum,
-                          SK::Extern,    SK::ExternStruct, SK::ExportFn};
+                          SK::Struct,    SK::Extern, SK::ExternStruct, SK::ExportFn};
 
 int join(int a, int b) {
     if (a == b) return a;
@@ -418,10 +418,71 @@ std::map<std::string, int> index_uses(const View &body) {
 
 struct Walk {
     std::map<std::string, std::vector<Mode>> modes;   // fn -> parameter modes
+    std::map<std::string, std::map<std::string, std::string>> struct_fields;
+    std::map<std::string, std::string> fn_rets;
     std::map<std::string, int> last;                  // name -> last use index
     std::vector<BorrowDiag> out;
     int index = 0;
     int cur = 0;                                      // line of the current statement
+
+    std::string infer_ann(const State &st, const Expr *e) const {
+        while (e && (e->k == EK::Quest || e->k == EK::Move) && !e->kids.empty())
+            e = e->kids[0].get();
+        if (e == nullptr) return "";
+        if (e->k == EK::Var) {
+            auto it = st.anns.find(e->a);
+            return it == st.anns.end() ? "" : it->second;
+        }
+        if (e->k == EK::StructLit && !e->a.empty()) return e->a;
+        if (e->k == EK::Call) {
+            if (e->a == "own" && e->kids.size() == 1)
+                return infer_ann(st, e->kids[0].get());
+            auto it = fn_rets.find(e->a);
+            return it == fn_rets.end() ? "" : it->second;
+        }
+        if (e->k == EK::MCall && !e->kids.empty()) {
+            if (e->b == "copy" && e->kids.size() == 1)
+                return infer_ann(st, e->kids[0].get());
+            if ((e->kids[0]->k == EK::Call && e->kids[0]->kids.empty()) ||
+                (e->kids[0]->k == EK::Var && !st.anns.count(e->kids[0]->a))) {
+                auto sit = fn_rets.find(e->kids[0]->a + "." + e->b);
+                if (sit != fn_rets.end()) return sit->second;
+            }
+            std::string rty = infer_ann(st, e->kids[0].get());
+            if (!rty.empty()) {
+                auto mit = fn_rets.find(rty + "." + e->b);
+                if (mit != fn_rets.end()) return mit->second;
+            }
+            return "";
+        }
+        if (e->k == EK::Idx && !e->kids.empty()) {
+            std::string a = infer_ann(st, e->kids[0].get());
+            if (a.size() > 5 && a.rfind("vec[", 0) == 0 && a.back() == ']') {
+                a = a.substr(4, a.size() - 5);
+            } else if (a.rfind("map[", 0) == 0 && a.back() == ']') {
+                std::string inner = a.substr(4, a.size() - 5);
+                auto comma = inner.rfind(',');
+                a = comma == std::string::npos ? inner : inner.substr(comma + 1);
+            } else {
+                return "";
+            }
+            auto first = a.find_first_not_of(" \t");
+            if (first == std::string::npos) return "";
+            a.erase(0, first);
+            while (!a.empty() && (a.back() == ' ' || a.back() == '\t')) a.pop_back();
+            return a;
+        }
+        if (e->k == EK::Field && !e->kids.empty()) {
+            std::string a = infer_ann(st, e->kids[0].get());
+            auto sit = struct_fields.find(a);
+            if (sit != struct_fields.end()) {
+                auto fit = sit->second.find(e->b);
+                if (fit != sit->second.end()) return fit->second;
+            }
+            return "";
+        }
+        return "";
+    }
 
     void note(int line, const std::string &msg,
               std::optional<std::pair<int, std::string>> rel = std::nullopt) {
@@ -589,7 +650,8 @@ struct Walk {
         const std::string &name = s.a;
         const Expr *e = s.e1.get();
         const bool mut = s.mut;
-        const std::string ann = s.ann.value_or("");
+        std::string ann = s.ann.value_or("");
+        if (ann.empty()) ann = infer_ann(st, e);
         if (!ann.empty()) st.anns[name] = ann;
         if (mut) st.muts.insert(name);   // a mutable binding is a writer of its place
         expr(e, st, false, cur);
@@ -742,7 +804,8 @@ struct Walk {
                     auto place = place_of(e->kids[i].get());
                     const Expr *arg = e->kids[i].get();
                     bool copied = copy_expr(arg) ||
-                                  (arg->k == EK::Var && st.copies.count(arg->a));
+                                  (arg->k == EK::Var && st.copies.count(arg->a)) ||
+                                  kCopyAnns.count(infer_ann(st, arg)) > 0;
                     if (i == 1 && place && !copied) {
                         const std::string p = st.place(*place);
                         if (moved_under(st, p)) note(line, gone_message(st, p, p).first);
@@ -807,16 +870,26 @@ struct Walk {
 
 void one_body(const View &stmts, const std::vector<Param> &params,
               const std::map<std::string, std::vector<Mode>> &modes,
-              std::vector<BorrowDiag> &out) {
+              const std::map<std::string, std::map<std::string, std::string>> &struct_fields,
+              const std::map<std::string, std::string> &fn_rets,
+              std::vector<BorrowDiag> &out,
+              const std::string &impl_type = "") {
     Walk walk;
     walk.modes = modes;
+    walk.struct_fields = struct_fields;
+    walk.fn_rets = fn_rets;
     walk.last = index_uses(stmts);
     State st;
     for (const Param &p : params) {
         st.params.insert(p.name);
-        if (p.ann && !p.ann->empty()) {
-            st.anns[p.name] = *p.ann;
-            if (kCopyAnns.count(*p.ann)) st.copies.insert(p.name);
+        std::string ann = p.ann.value_or("");
+        if (ann.empty() && p.name == "self" && !impl_type.empty() &&
+            struct_fields.count(impl_type)) {
+            ann = impl_type;
+        }
+        if (!ann.empty()) {
+            st.anns[p.name] = ann;
+            if (kCopyAnns.count(ann)) st.copies.insert(p.name);
         }
     }
     walk.block(stmts, st);
@@ -827,7 +900,9 @@ void one_body(const View &stmts, const std::vector<Param> &params,
 
 std::vector<BorrowDiag> cap_verdicts(
     const std::vector<StmtP> &body,
-    const std::map<std::string, std::vector<ParamMode>> &sigs) {
+    const std::map<std::string, std::vector<ParamMode>> &sigs,
+    const std::map<std::string, std::map<std::string, std::string>> &struct_fields,
+    const std::map<std::string, std::string> &fn_rets) {
     std::map<std::string, std::vector<Mode>> modes;
     for (const auto &kv : sigs) {
         std::vector<Mode> m;
@@ -856,20 +931,20 @@ std::vector<BorrowDiag> cap_verdicts(
         while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
         if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
             const FnDecl &f = node->fns[0];
-            one_body(view(f.body), f.params, modes, out);
+            one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out);
             continue;
         }
         if (kDecls.count(node->k)) {
             if (node->k == SK::Impl) {
                 for (const FnDecl &f : node->fns) {
-                    one_body(view(f.body), f.params, modes, out);
+                    one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out, node->a);
                 }
             }
             continue;
         }
         top.push_back(sp.get());
     }
-    one_body(top, {}, modes, out);
+    one_body(top, {}, modes, struct_fields, fn_rets, out);
     // The same finding twice is one finding.
     std::vector<BorrowDiag> unique;
     std::set<std::pair<int, std::string>> seen;

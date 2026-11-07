@@ -218,6 +218,25 @@ ModuleInterface parse_interface(const fs::path &path) {
         size_t e = raw.find_last_not_of(" \t\r\n");
         std::string text = raw.substr(b, e - b + 1);
         if (text.compare(0, 2, "//") == 0) continue;
+        if (text.rfind("struct ", 0) == 0 || text.rfind("pub struct ", 0) == 0) {
+            std::vector<StmtP> sbody;
+            try {
+                sbody = parse(text).body;
+            } catch (ParseError &err) {
+                std::string detail = err.what();
+                if (err.line > 0) detail += " at line " + std::to_string(err.line);
+                throw ModuleError(path.string() + ":" + std::to_string(number) +
+                                  ": bad interface line: " + detail);
+            }
+            if (sbody.size() == 1 && inner(*sbody[0])->k == SK::Struct) {
+                const Stmt *st = inner(*sbody[0]);
+                std::vector<std::string> fspecs;
+                for (const auto &fld : st->fields)
+                    fspecs.push_back(fld.name + ": " + fld.ann.value_or("none"));
+                sigs["struct:" + st->a] = {std::move(fspecs), "@struct"};
+                continue;
+            }
+        }
         std::vector<StmtP> body;
         try {
             body = parse(text + " { return 0 }").body;
@@ -567,13 +586,23 @@ struct Mangler {
         };
         for (const auto &[name, want] : *f.iface) {
             const auto *got = find(name);
+            const bool is_struct = want.second == "@struct" && name.rfind("struct:", 0) == 0;
+            const std::string disp = is_struct ? name.substr(7) : name;
             if (!got) {
                 throw ModuleError("The implementation of module `" + where +
-                                  "` does not match its interface: `" + name +
+                                  "` does not match its interface: `" + disp +
                                   "` is declared in the interface but not defined");
             }
             const std::vector<std::string> &params = got->first;
             const std::vector<std::string> &want_params = want.first;
+            if (is_struct) {
+                if (params != want_params) {
+                    throw ModuleError("The implementation of module `" + where +
+                                      "` does not match its interface: struct `" + disp +
+                                      "` fields differ from the interface");
+                }
+                continue;
+            }
             if (params.size() != want_params.size()) {
                 throw ModuleError(
                     "The implementation of module `" + where +
@@ -680,6 +709,14 @@ struct Mangler {
                     for (const Param &p : node->ext.params) params.push_back(p.ann);
                     set.files[i].callback_params[node->ext.name] = params;
                     callback_params[node->ext.name] = std::move(params);
+                    continue;
+                }
+                if (node->k == SK::Struct) {
+                    std::vector<std::string> fspecs;
+                    for (const auto &fld : node->fields)
+                        fspecs.push_back(fld.name + ": " + fld.ann.value_or("none"));
+                    arity.emplace_back("struct:" + node->a,
+                                       std::make_pair(std::move(fspecs), std::string("@struct")));
                     continue;
                 }
                 if (node->k != SK::Fn) continue;

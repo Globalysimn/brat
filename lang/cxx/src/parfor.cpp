@@ -37,7 +37,7 @@ const std::set<std::string> kPluginFfi{
     "str_from_ptr", "slice_of", "slice_of_ptr", "slice_of_struct", "slice_struct_of",
     "slice_len", "slice_get", "slice_set"};
 const std::set<std::string> kOrder{"raise", "io", "alloc", "spawn", "ffi"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Extern,
+const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
 
 std::string head_of(const std::string &name) {

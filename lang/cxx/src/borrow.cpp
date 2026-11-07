@@ -25,7 +25,7 @@ const std::set<std::string> BUILTINS = {
     "print", "log.info", "log.warn", "log.error",
     "trace.span",
     "join_all",
-    "len", "__at", "Ok", "Err", "Some", "unwrap", "is_err", "is_none", "is_vec",
+    "len", "__at", "__stag_is", "__shas", "Ok", "Err", "Some", "unwrap", "is_err", "is_none", "is_vec",
     "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
     "str", "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
     "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_rename", "fs_remove", "assert",
@@ -344,6 +344,90 @@ bool paths_conflict(const std::string &p, const std::string &q) {
 }
 
 
+std::string trim_ann(const std::string &raw) {
+    size_t b = raw.find_first_not_of(" \t\r\n");
+    size_t z = raw.find_last_not_of(" \t\r\n");
+    return (b == std::string::npos) ? std::string() : raw.substr(b, z - b + 1);
+}
+
+std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
+                                          const FnTable *funcs = nullptr) {
+    e = skip_quest(e);
+    if (!e) return std::nullopt;
+    switch (e->k) {
+    case EK::Move:
+        return infer_expr_ann(e->kids.empty() ? nullptr : e->kids[0].get(), decl, funcs);
+    case EK::Var: {
+        const Decl *d = decl.find(e->a);
+        if (!d || !d->ann) return std::nullopt;
+        return trim_ann(*d->ann);
+    }
+    case EK::StructLit:
+        if (funcs && funcs->struct_fields.count(e->a)) return e->a;
+        return std::nullopt;
+    case EK::Call: {
+        if (!funcs) return std::nullopt;
+        if (e->a == "own" && e->kids.size() == 1)
+            return infer_expr_ann(e->kids[0].get(), decl, funcs);
+        auto rit = funcs->fn_rets.find(e->a);
+        return rit == funcs->fn_rets.end() ? std::nullopt : std::optional<std::string>(trim_ann(rit->second));
+    }
+    case EK::MCall: {
+        if (!funcs || e->kids.empty()) return std::nullopt;
+        if ((e->kids[0]->k == EK::Call && e->kids[0]->kids.empty()) ||
+            (e->kids[0]->k == EK::Var && !decl.has(e->kids[0]->a))) {
+            auto sit = funcs->fn_rets.find(e->kids[0]->a + "." + e->b);
+            if (sit != funcs->fn_rets.end()) return trim_ann(sit->second);
+        }
+        auto recv_ann = infer_expr_ann(e->kids[0].get(), decl, funcs);
+        if (recv_ann) {
+            if (e->b == "copy") return *recv_ann;
+            auto mit = funcs->fn_rets.find(*recv_ann + "." + e->b);
+            if (mit != funcs->fn_rets.end()) return trim_ann(mit->second);
+        }
+        return std::nullopt;
+    }
+    case EK::Idx: {
+        auto ba = infer_expr_ann(e->kids.empty() ? nullptr : e->kids[0].get(), decl, funcs);
+        if (!ba) return std::nullopt;
+        const std::string &a = *ba;
+        if (starts_with(a, "vec[") && ends_with(a, "]"))
+            return trim_ann(a.substr(4, a.size() - 5));
+        if (starts_with(a, "map[") && ends_with(a, "]")) {
+            std::string inner = a.substr(4, a.size() - 5);
+            int depth = 0;
+            size_t split = std::string::npos;
+            for (size_t i = 0; i < inner.size(); i++) {
+                if (inner[i] == '[') depth++;
+                else if (inner[i] == ']') depth--;
+                else if (inner[i] == ',' && depth == 0) split = i;
+            }
+            return trim_ann(split == std::string::npos ? inner : inner.substr(split + 1));
+        }
+        return std::nullopt;
+    }
+    case EK::Field: {
+        if (!funcs) return std::nullopt;
+        auto ba = infer_expr_ann(e->kids.empty() ? nullptr : e->kids[0].get(), decl, funcs);
+        if (!ba) return std::nullopt;
+        auto sit = funcs->struct_fields.find(*ba);
+        if (sit == funcs->struct_fields.end()) return std::nullopt;
+        auto fit = sit->second.find(e->b);
+        if (fit == sit->second.end()) return std::nullopt;
+        return trim_ann(fit->second);
+    }
+    default:
+        return std::nullopt;
+    }
+}
+
+bool expr_is_copy_slot(const Expr *e, const Decls &decl, const FnTable *funcs = nullptr) {
+    auto a = infer_expr_ann(e, decl, funcs);
+    return a && COPY_ANNS.count(*a) > 0;
+}
+
+bool elem_copy(const Decls &decl, const Expr *base);
+
 bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullptr) {
     if (!e) return false;
     switch (e->k) {
@@ -355,6 +439,10 @@ bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullp
     }
     case EK::Call:
         return funcs != nullptr && funcs->scalar_ret.count(e->a) > 0;
+    case EK::Idx:
+    case EK::Field:
+        return expr_is_copy_slot(e, decl, funcs) ||
+               (e->k == EK::Idx && elem_copy(decl, e->kids.empty() ? nullptr : e->kids[0].get()));
     case EK::Un: return is_copy_expr(e->kids[0].get(), decl, funcs);
     case EK::Move: return is_copy_expr(e->kids[0].get(), decl, funcs);
     case EK::Bin:
@@ -480,10 +568,10 @@ std::vector<std::string> borrow_srcs(const Expr *e, const Decls &decl, FnTable &
     case EK::Var: return borrow_srcs_at(e->a, decl, funcs);
     case EK::Move: return borrow_srcs(e->kids[0].get(), decl, funcs);
     case EK::Idx:
-        if (elem_copy(decl, e->kids[0].get())) return out;
+        if (elem_copy(decl, e->kids[0].get()) || expr_is_copy_slot(e, decl, &funcs)) return out;
         return borrow_srcs(e->kids[0].get(), decl, funcs);
     case EK::Field:
-        if (elem_copy(decl, e->kids[0].get())) return out;
+        if (elem_copy(decl, e->kids[0].get()) || expr_is_copy_slot(e, decl, &funcs)) return out;
         return borrow_srcs(e->kids[0].get(), decl, funcs);
     case EK::VecLit:
         for (const auto &x : e->kids) add_unique(out, borrow_srcs(x.get(), decl, funcs));
@@ -688,6 +776,7 @@ void used_in_stmt(const Stmt &s, std::vector<std::string> &acc) {
     case SK::Pub: used_in_stmt(*s.body[0], acc); break;
     case SK::Block: used_in_block(wrap(s.body), acc); break;
     case SK::Enum:
+    case SK::Struct:
     case SK::Trait:
     case SK::Import:
     case SK::Extern:
@@ -762,16 +851,11 @@ std::optional<BorrowNote> undeclared_rel(const std::string &name,
                                          const Decls *decl = nullptr,
                                          const FnTable *funcs = nullptr) {
     if (node && CUT_PARTS.count(node)) return std::nullopt;
-    if (name == "struct") {
-        return BorrowNote{0,
-                          "help: BRAT has no `struct` declaration: a value is written "
-                          "`Name { field: value, ... }`, and `Name` is only a tag"};
-    }
     if (TYPE_WORDS.count(name)) {
         return BorrowNote{0, "help: `" + name + "` is a type name for annotations (`let n: " +
                                  name + " = ...`), not a value"};
     }
-    if (name == "enum" || name == "trait" || name == "impl") {
+    if (name == "enum" || name == "trait" || name == "impl" || name == "struct") {
         return BorrowNote{0, "help: `" + name + "` starts a declaration, so it cannot be used "
                              "inside an expression"};
     }
@@ -1709,7 +1793,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         bool ann_copy = has(COPY_ANNS, s.ann);
         d.copy = ann_copy || is_copy_expr(e, decl, funcs);
         d.pinned = ann_copy;
-        d.ann = s.ann;
+        d.ann = s.ann ? s.ann : infer_expr_ann(e, decl, &funcs);
         d.dl = errs.line;
         bool owned_call = e && e->k == EK::Call && funcs.owned_ret.count(e->a) > 0;
         if (owned_call) d.owned = true;
@@ -1981,7 +2065,12 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
             auto saved_sinks = std::move(errs.try_sinks);
             errs.fn_floor.clear();
             for (const auto &kv : decl.v) errs.fn_floor.insert(kv.first);
-            for (const Param &p : f.params) sub.set(p.name, param_decl(p));
+            for (const Param &p : f.params) {
+                Decl pd = param_decl(p);
+                if (p.name == "self" && !pd.ann && funcs.struct_fields.count(s.a))
+                    pd.ann = s.a;
+                sub.set(p.name, std::move(pd));
+            }
             errs.active_defers.clear();
             errs.try_sinks.clear();
             Borrows none;
@@ -2001,6 +2090,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         walk_block(wrap(s.body), decl, borrows, errs, funcs);
         return;
     case SK::Trait:
+    case SK::Struct:
     case SK::Import:
     case SK::Extern:
     case SK::ExternStruct:
@@ -2275,7 +2365,7 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
                 bool &slot = funcs.umeth[f.name.value_or("")];
                 slot = slot || is_self_mut;
             }
-        } else if (node->k == SK::Enum) {
+        } else if (node->k == SK::Enum || node->k == SK::Struct) {
             funcs.heads.insert(node->a);
         }
     }
@@ -2332,13 +2422,18 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
         }
         if (sp->k == SK::Fn && !sp->fns.empty()) {
             const std::string fnm = sp->fns[0].name.value_or("");
-            if (exp_fns.count(fnm)) out.sigs[fnm] = fn_modes(sp->fns[0].params);
+            if (exp_fns.count(fnm)) {
+                out.sigs[fnm] = fn_modes(sp->fns[0].params);
+                if (sp->fns[0].ret) out.fn_rets[fnm] = *sp->fns[0].ret;
+            }
             continue;
         }
         if (sp->k != SK::Pub || sp->body.empty()) continue;
         const Stmt &in = *sp->body[0];
         if (in.k == SK::Fn) {
-            out.sigs[in.fns[0].name.value_or("")] = fn_modes(in.fns[0].params);
+            const std::string fnm = in.fns[0].name.value_or("");
+            out.sigs[fnm] = fn_modes(in.fns[0].params);
+            if (in.fns[0].ret) out.fn_rets[fnm] = *in.fns[0].ret;
         } else if (in.k == SK::Extern) {
             out.sigs[in.ext.name] = fn_modes(in.ext.params);
             if (in.ext.ret && copy_rets.count(*in.ext.ret)) out.scalar_ret.insert(in.ext.name);
@@ -2347,6 +2442,16 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
             if (!bix.empty()) out.borrows_ret[in.ext.name] = std::move(bix);
         } else if (in.k == SK::Enum) {
             for (const Variant &v : in.variants) out.sigs[v.name] = {};
+        } else if (in.k == SK::Struct) {
+            out.heads.insert(in.a);
+            for (const auto &f : in.fields) {
+                if (f.ann) out.struct_fields[in.a][f.name] = *f.ann;
+            }
+        } else if (in.k == SK::Impl) {
+            out.heads.insert(in.a);
+            for (const FnDecl &f : in.fns) {
+                if (f.name && f.ret) out.fn_rets[in.a + "." + *f.name] = *f.ret;
+            }
         } else if ((in.k == SK::Let || in.k == SK::LetTmp) && in.konst) {
             out.pub_consts.insert(in.a);
         }
@@ -2529,7 +2634,9 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
                        const std::set<std::string> &extra_consts,
                        const std::set<std::string> &extra_scalar_rets,
                        const std::map<std::string, std::vector<size_t>> &extra_borrows_rets,
-                       const std::set<std::string> &extra_owned_rets) {
+                       const std::set<std::string> &extra_owned_rets,
+                       const std::map<std::string, std::map<std::string, std::string>> &extra_struct_fields,
+                       const std::map<std::string, std::string> &extra_fn_rets) {
     BorrowOut out;
     Errs errs;
     std::vector<BorrowDiag> warns;
@@ -2541,7 +2648,24 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
     funcs.scalar_ret.insert(extra_scalar_rets.begin(), extra_scalar_rets.end());
     for (const auto &kv : extra_borrows_rets) funcs.borrows_ret[kv.first] = kv.second;
     funcs.owned_ret.insert(extra_owned_rets.begin(), extra_owned_rets.end());
+    funcs.struct_fields = extra_struct_fields;
+    funcs.fn_rets = extra_fn_rets;
     std::map<std::string, std::vector<std::string>> traits;
+    for (const auto &sp : body) {
+        const Stmt *node = pub_inner(*sp);
+        if (node->k == SK::Struct || node->k == SK::ExternStruct) {
+            for (const auto &f : node->fields) {
+                if (f.ann) funcs.struct_fields[node->a][f.name] = *f.ann;
+            }
+        } else if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
+            const FnDecl &f = node->fns[0];
+            if (f.name && f.ret) funcs.fn_rets[*f.name] = *f.ret;
+        } else if (node->k == SK::Impl) {
+            for (const FnDecl &f : node->fns) {
+                if (f.name && f.ret) funcs.fn_rets[node->a + "." + *f.name] = *f.ret;
+            }
+        }
+    }
     for (const auto &sp : body) {
         const Stmt *node = pub_inner(*sp);
         if (node->k == SK::Fn || node->k == SK::ExportFn) {
@@ -2660,7 +2784,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
 
     // Sharing: cycles (a refcount cannot reclaim them) and writes that escape a
     // spawn. Same order as the reference: functions first, then the script body.
-    for (const BorrowDiag &d : sharing_check(body)) errs.v.push_back(d);
+    for (const BorrowDiag &d : sharing_check(body, funcs.struct_fields)) errs.v.push_back(d);
     // Channels: a straight-line pipe whose ends do not match cannot finish.
     for (const BorrowDiag &d : session_check(body)) errs.v.push_back(d);
     // A `par for` is only parallel-safe when its operation and body are pure.
@@ -2672,7 +2796,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
     // Capability lattice: what each place still allows, joined at every branch.
     // A line the lexical walk already judged is left alone, so these verdicts
     // only ever add what a list of live borrows cannot see.
-    for (const BorrowDiag &d : cap_verdicts(body, funcs.sigs)) {
+    for (const BorrowDiag &d : cap_verdicts(body, funcs.sigs, funcs.struct_fields, funcs.fn_rets)) {
         bool seen = false;
         for (const BorrowDiag &e : errs.v) {
             if (e.line == d.line) {

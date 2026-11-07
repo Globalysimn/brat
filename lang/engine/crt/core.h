@@ -2258,6 +2258,16 @@ BFN_HOT Val vmap_has_ic(Val m, const char *k, BFieldIC *ic) {
     BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return vbool(o != 0);
 }
+BFN_HOT Val vstag_is(Val v, const char *t) {
+    return vbool(v.tag == V_STRUCT && v.as.map && v.as.map->type && strcmp(v.as.map->type, t) == 0);
+}
+BFN_HOT Val vshas_ic(Val m, const char *k, BFieldIC *ic) {
+    if (m.tag != V_STRUCT || !m.as.map) return vbool(0);
+    BRAT_CTR_LOCK_OBJ(m.as.map);
+    Val *o = map_get_ic(m.as.map, k, ic);
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
+    return vbool(o != 0);
+}
 BFN Val vmap_keys(Val m) {
     if (m.tag != V_STRUCT) { vraise("no method keys"); return vunwind; }
     Vec *o = vvec();

@@ -14,4 +14,6 @@
 
 std::vector<BorrowDiag> cap_verdicts(
     const std::vector<StmtP> &body,
-    const std::map<std::string, std::vector<ParamMode>> &sigs = {});
+    const std::map<std::string, std::vector<ParamMode>> &sigs = {},
+    const std::map<std::string, std::map<std::string, std::string>> &struct_fields = {},
+    const std::map<std::string, std::string> &fn_rets = {});

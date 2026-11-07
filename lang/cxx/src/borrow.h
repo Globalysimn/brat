@@ -50,6 +50,8 @@ struct FnTable {
     // returns a value, so a `let` bound to it is a copy and not a borrow.
     std::set<std::string> scalar_ret;
     std::set<std::string> pub_consts;
+    std::map<std::string, std::map<std::string, std::string>> struct_fields;
+    std::map<std::string, std::string> fn_rets;
 };
 
 struct BorrowOut {
@@ -70,4 +72,6 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
                        const std::set<std::string> &extra_consts = {},
                        const std::set<std::string> &extra_scalar_rets = {},
                        const std::map<std::string, std::vector<size_t>> &extra_borrows_rets = {},
-                       const std::set<std::string> &extra_owned_rets = {});
+                       const std::set<std::string> &extra_owned_rets = {},
+                       const std::map<std::string, std::map<std::string, std::string>> &extra_struct_fields = {},
+                       const std::map<std::string, std::string> &extra_fn_rets = {});

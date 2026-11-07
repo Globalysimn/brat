@@ -57,13 +57,21 @@ bool Ty::operator==(const Ty &o) const {
     }
 }
 
+// The declared `extern struct` and native `struct` fields.
+static std::map<std::string, std::map<std::string, Ty>> *g_structs = nullptr;
+static std::set<std::string> *g_unions = nullptr;
+static std::set<std::string> *g_native_structs = nullptr;
+
 std::string type_name(const Ty &t) {
     switch (t.k) {
     case Ty::Cb: return t.text;
     case Ty::Ptr: return "ptr[" + type_name(*t.inner) + "]";
     case Ty::Slice: return "slice[" + type_name(*t.inner) + "]";
     case Ty::Vec: return t.inner->k == Ty::Dyn ? "vec" : "vec[" + type_name(*t.inner) + "]";
-    case Ty::Struct: return "struct";
+    case Ty::Struct:
+        if (!t.text.empty() && g_native_structs && g_native_structs->count(t.text))
+            return t.text;
+        return "struct";
     case Ty::Other: return t.text;
     case Ty::Int: return "i64";
     case Ty::Float: return "f64";
@@ -97,7 +105,13 @@ bool type_ok(const Ty &want, const Ty &got) {
     if (want.k == Ty::Struct && want.is_union && got.k == Ty::Map) return true;
     if (is_tuple(want) && is_tuple(got)) {
         if (want.k == Ty::Struct || got.k == Ty::Struct) {
-            return want.k == Ty::Struct && got.k == Ty::Struct;
+            if (want.k != Ty::Struct || got.k != Ty::Struct) return false;
+            if (g_native_structs &&
+                ((!want.text.empty() && g_native_structs->count(want.text)) ||
+                 (!got.text.empty() && g_native_structs->count(got.text)))) {
+                return want.text == got.text;
+            }
+            return true;
         }
         if (want.k == got.k) {
             return want.inner->k == Ty::Dyn || got.inner->k == Ty::Dyn ||
@@ -109,11 +123,6 @@ bool type_ok(const Ty &want, const Ty &got) {
     if (want.k == Ty::Int && got.k == Ty::Ptr) return true;
     return false;
 }
-
-// The declared `extern struct` fields: `ptr[T]` is dereferenced through this
-// table, so a field T never declared is a type error, not a run-time guess.
-static std::map<std::string, std::map<std::string, Ty>> *g_structs = nullptr;
-static std::set<std::string> *g_unions = nullptr;
 
 static Ty word_type(const std::string &w) {
     if (w == "i8" || w == "u8" || w == "i16" || w == "u16" || w == "i32" || w == "u32" ||
@@ -239,6 +248,7 @@ static Ty ann_type(const std::string &a) {
         if (!elem.empty() && all_dig) return Ty::wrap(Ty::Vec, ann_type(elem));
     }
     if (g_unions && g_unions->count(a)) return word_type(a);
+    if (g_native_structs && g_native_structs->count(a)) return word_type(a);
     return Ty::dyn();
 }
 
@@ -382,8 +392,8 @@ static bool readonly_mcall_name(const std::string &m) {
 static bool pure_read_builtin(const std::string &name) {
     static const std::set<std::string> ro = {
         "len", "str", "print", "eprint", "is_err", "is_none", "is_vec", "is_str",
-        "is_map", "is_bool", "is_int", "is_float", "tagof", "own", "sbuf_add",
-        "tcp_send", "write_file", "write_bytes", "json_stringify"
+        "is_map", "is_bool", "is_int", "is_float", "tagof", "__stag_is", "__shas",
+        "own", "sbuf_add", "tcp_send", "write_file", "write_bytes", "json_stringify"
     };
     return ro.count(name) > 0;
 }
@@ -391,7 +401,7 @@ static bool pure_read_builtin(const std::string &name) {
 static bool scalar_only_call(const std::string &name) {
     static const std::set<std::string> sc = {
         "own", "len", "is_err", "is_none", "is_vec", "is_str", "is_map",
-        "is_bool", "is_int", "is_float",
+        "is_bool", "is_int", "is_float", "__stag_is", "__shas",
         "ptr_is_null", "ptr_read_i64", "ptr_read_f64", "ptr_read_f32", "ptr_read_u8",
         "re_match", "sbuf_len", "slice_len", "time_ms", "mono_ns", "errno"
     };
@@ -611,7 +621,22 @@ void collect_sigs(const std::vector<StmtP> &prog, Sigs &sigs) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::Impl) {
             for (const FnDecl &fn : node.fns) {
-                if (fn.name) sigs["__impl__." + *fn.name] = FnSig{};
+                if (!fn.name) continue;
+                sigs["__impl__." + *fn.name] = FnSig{};
+                const bool has_self = !fn.params.empty() && fn.params[0].name == "self";
+                FnSig msig;
+                msig.ret = ann_type(fn.ret);
+                msig.ret_ann = fn.ret;
+                for (size_t pi = has_self ? 1 : 0; pi < fn.params.size(); pi++) {
+                    msig.params.push_back(ann_type(fn.params[pi].ann));
+                    msig.param_anns.push_back(fn.params[pi].ann);
+                    if (fn.params[pi].def) msig.ndef++;
+                }
+                if (has_self) {
+                    sigs["__method__." + node.a + "." + *fn.name] = std::move(msig);
+                } else {
+                    sigs["__static__." + node.a + "." + *fn.name] = std::move(msig);
+                }
             }
             continue;
         }
@@ -734,6 +759,7 @@ static const std::vector<MethDef> MAP_METH = {
 static const std::map<std::string, Ty> BRES = {
     {"len", Ty::of(Ty::Int)}, {"str", Ty::of(Ty::Str)}, {"is_err", Ty::of(Ty::Bool)},
     {"is_none", Ty::of(Ty::Bool)}, {"tagof", Ty::of(Ty::Str)},
+    {"__stag_is", Ty::of(Ty::Bool)}, {"__shas", Ty::of(Ty::Bool)},
     {"read_file", Ty::of(Ty::Tag)}, {"write_file", Ty::of(Ty::Tag)},
     {"read_bytes", Ty::of(Ty::Tag)}, {"write_bytes", Ty::of(Ty::Tag)},
     {"proc_run", Ty::of(Ty::Tag)},
@@ -1161,7 +1187,36 @@ Ty FnTyper::expr(const Expr &e) {
             }
             return word_type(e.a);
         }
-        return Ty::strct(std::move(fields));
+        if (g_native_structs && g_native_structs->count(e.a) && g_structs && g_structs->count(e.a)) {
+            const auto &sfields = (*g_structs)[e.a];
+            std::set<std::string> seen_names;
+            for (const auto &fname : e.names) {
+                if (!seen_names.insert(fname).second)
+                    note("duplicate field `" + fname + "` in struct `" + e.a + "`");
+            }
+            std::string known;
+            for (auto it = sfields.begin(); it != sfields.end(); ++it) {
+                if (it != sfields.begin()) known += ", ";
+                known += it->first;
+            }
+            for (const auto &field : fields) {
+                auto fit = sfields.find(field.name);
+                if (fit == sfields.end()) {
+                    note("no field `" + field.name + "` on struct (has " + known + ")");
+                } else if (!type_ok(fit->second, field.type)) {
+                    note("field `" + field.name + "` of struct `" + e.a + "` wants " +
+                         type_name(fit->second) + ", got " + type_name(field.type));
+                }
+            }
+            for (const auto &kv : sfields) {
+                if (!seen_names.count(kv.first))
+                    note("missing field `" + kv.first + "` in struct `" + e.a + "`");
+            }
+            return word_type(e.a);
+        }
+        Ty out_st = Ty::strct(std::move(fields));
+        out_st.text = e.a;
+        return out_st;
     }
     case EK::Var: return env_get(e.a);
     case EK::Un: {
@@ -1232,6 +1287,29 @@ Ty FnTyper::expr(const Expr &e) {
     }
     case EK::Quest: return expr(*e.kids[0]);
     case EK::MCall: {
+        if ((e.kids[0]->k == EK::Call && e.kids[0]->kids.empty()) ||
+            (e.kids[0]->k == EK::Var && !env.count(e.kids[0]->a))) {
+            auto sit = sigs.find("__static__." + e.kids[0]->a + "." + e.b);
+            if (sit != sigs.end()) {
+                const FnSig &f = sit->second;
+                const size_t n = e.kids.size() - 1;
+                const size_t ndef = f.ndef > 0 ? static_cast<size_t>(f.ndef) : 0;
+                const size_t min_n = f.params.size() >= ndef ? f.params.size() - ndef : 0;
+                if (n < min_n || n > f.params.size()) {
+                    note("`" + e.kids[0]->a + "." + e.b + "` wants " +
+                         std::to_string(f.params.size()) + " args, got " + std::to_string(n));
+                }
+                for (size_t i = 0; i < n; i++) {
+                    Ty gt = expr(*e.kids[i + 1]);
+                    if (i < f.params.size() && !type_ok(f.params[i], gt)) {
+                        note("arg " + std::to_string(i + 1) + " of `" + e.kids[0]->a + "." + e.b +
+                             "`: want " + type_name(f.params[i]) + ", got " + type_name(gt));
+                    }
+                }
+                check_arena_call_expr(e);
+                return f.ret;
+            }
+        }
         Ty ot = expr(*e.kids[0]);
         int recv_reg = current_region() != 0 ? expr_region(*e.kids[0]) : 0;
         Ty elem_ty = (ot.k == Ty::Vec && ot.inner) ? *ot.inner
@@ -1482,6 +1560,41 @@ Ty FnTyper::meth(const Ty &ot, const std::string &name, const std::vector<ExprP>
         tab = &VEC_METH;
     } else if (ot.k == Ty::Map) {
         tab = &MAP_METH;
+    }
+    if (!tab) {
+        if (ot.k == Ty::Struct && !ot.text.empty() && g_native_structs &&
+            g_native_structs->count(ot.text)) {
+            auto mit = sigs.find("__method__." + ot.text + "." + name);
+            if (mit != sigs.end()) {
+                const FnSig &f = mit->second;
+                const size_t n = args.size() - start;
+                const size_t ndef = f.ndef > 0 ? static_cast<size_t>(f.ndef) : 0;
+                const size_t min_n = f.params.size() >= ndef ? f.params.size() - ndef : 0;
+                if (n < min_n || n > f.params.size()) {
+                    note("method `" + name + "` wants " + std::to_string(f.params.size()) + " args");
+                    return f.ret;
+                }
+                for (size_t i = 0; i < n && i < f.params.size(); i++) {
+                    Ty gt = expr(*args[start + i]);
+                    if (!type_ok(f.params[i], gt)) {
+                        note("method `" + name + "` arg " + std::to_string(i + 1) + ": want " +
+                             type_name(f.params[i]) + ", got " + type_name(gt));
+                    }
+                }
+                return f.ret;
+            }
+            if (name == "copy") {
+                if (args.size() - start != 0) note("method `copy` wants 0 args");
+                return ot;
+            }
+            for (const auto &m : MAP_METH) {
+                if (m.name == name) { tab = &MAP_METH; break; }
+            }
+            if (!tab) {
+                note("no method `" + name + "` for " + ot.text);
+                return Ty::dyn();
+            }
+        }
     }
     if (!tab) {
         if (ot.k == Ty::Dyn) {
@@ -1735,7 +1848,8 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
         // slice_of_struct(p, n, "T"): a window over a table of records. The
         // layout must be declared, or reading an element would be a guess.
         const Expr &sn = at(2);
-        if (!(sn.k == EK::Str && g_structs && g_structs->count(sn.a))) {
+        if (!(sn.k == EK::Str && g_structs && g_structs->count(sn.a) &&
+              !(g_native_structs && g_native_structs->count(sn.a)))) {
             note(sn.k != EK::Str ? "slice_of_struct wants a struct name as a string literal"
                                  : "slice_of_struct: " + sn.a + " is not an extern struct");
             return Ty::wrap(Ty::Slice, Ty::dyn());
@@ -2092,6 +2206,7 @@ void FnTyper::stmt(const Stmt &s) {
         nested_fn(s);
         break;
     case SK::Impl:
+    case SK::Struct:
     case SK::Extern:
     case SK::ExternStruct:
     case SK::PubUse: break;
@@ -2133,18 +2248,25 @@ void FnTyper::stmt(const Stmt &s) {
 void collect_exports(const std::vector<StmtP> &prog,
                      std::map<std::string, Ty> &consts,
                      std::map<std::string, std::map<std::string, Ty>> &structs) {
+    std::set<std::string> native_names;
     auto *saved = g_structs;
+    auto *saved_native = g_native_structs;
     g_structs = &structs;
+    g_native_structs = &native_names;
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
             structs[node.a];
             if (node.opt1 && *node.opt1 == "union") structs["__unions__"][node.a] = Ty::dyn();
+        } else if (node.k == SK::Struct && sp->k == SK::Pub) {
+            structs[node.a];
+            native_names.insert(node.a);
+            structs["__native__"][node.a] = Ty::dyn();
         }
     }
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
-        if (node.k != SK::ExternStruct) continue;
+        if (node.k != SK::ExternStruct && !(node.k == SK::Struct && sp->k == SK::Pub)) continue;
         for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
     }
     std::vector<TypeErr> dummy;
@@ -2163,6 +2285,7 @@ void collect_exports(const std::vector<StmtP> &prog,
         }
     }
     g_structs = saved;
+    g_native_structs = saved_native;
 }
 
 std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extra,
@@ -2170,30 +2293,39 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
                                 const std::map<std::string, std::map<std::string, Ty>> &extra_structs) {
     std::vector<TypeErr> errs;
     Sigs sigs = extra;
-    // `extern struct T` declares what `ptr[T]` points at, so the table is built
-    // before anything is typed -- signatures included: a `ptr[Node]` return is
-    // a pointer to Node only if Node is already known.
     std::map<std::string, std::map<std::string, Ty>> structs = extra_structs;
     std::set<std::string> unions;
+    std::set<std::string> native_structs;
     if (auto uit = structs.find("__unions__"); uit != structs.end()) {
         for (const auto &kv : uit->second) unions.insert(kv.first);
         structs.erase(uit);
     }
+    if (auto nit = structs.find("__native__"); nit != structs.end()) {
+        for (const auto &kv : nit->second) native_structs.insert(kv.first);
+        structs.erase(nit);
+    }
     auto *saved_structs = g_structs;
     auto *saved_unions = g_unions;
+    auto *saved_native = g_native_structs;
     g_structs = &structs;
     g_unions = &unions;
+    g_native_structs = &native_structs;
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
-            structs[node.a];   // a name is enough to exist
+            structs[node.a];
             if (node.opt1 && *node.opt1 == "union") unions.insert(node.a);
+        } else if (node.k == SK::Struct) {
+            structs[node.a];
+            native_structs.insert(node.a);
         }
     }
-    for (const auto &sp : prog) {
-        const Stmt &node = unpub(*sp);
-        if (node.k != SK::ExternStruct) continue;
-        for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+    for (int pass = 0; pass < 2; pass++) {
+        for (const auto &sp : prog) {
+            const Stmt &node = unpub(*sp);
+            if (node.k != SK::ExternStruct && node.k != SK::Struct) continue;
+            for (const auto &f : node.fields) structs[node.a][f.name] = ann_type(f.ann);
+        }
     }
     collect_sigs(prog, sigs);
     std::set<std::string> outer_globals;
@@ -2262,16 +2394,27 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::Impl) {
+            const bool is_native_impl = native_structs.count(node.a) > 0;
             for (const auto &m : node.fns) {
                 Ty mret = ann_type(m.ret);
                 FnTyper tp(sigs, mret, errs);
                 tp.env = const_env;
                 tp.outer_globals = outer_globals;
-                for (const auto &p : m.params) tp.env[p.name] = ann_type(p.ann);
+                for (const auto &p : m.params) {
+                    if (is_native_impl && p.name == "self" && !p.ann) {
+                        tp.env[p.name] = word_type(node.a);
+                    } else {
+                        tp.env[p.name] = ann_type(p.ann);
+                    }
+                }
                 if (!unions.empty()) walk_union_stmts(walk_union_stmts, m.body, tp);
-                tp.arity_and_arena = true;
-                tp.block(m.body);
-                tp.arity_and_arena = false;
+                if (is_native_impl && mret.k != Ty::Dyn) {
+                    tp.block(m.body);
+                } else {
+                    tp.arity_and_arena = true;
+                    tp.block(m.body);
+                    tp.arity_and_arena = false;
+                }
             }
             continue;
         }
@@ -2296,13 +2439,15 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::Fn || node.k == SK::ExportFn || node.k == SK::Impl ||
-            node.k == SK::Trait || node.k == SK::Enum || node.k == SK::Extern) {
+            node.k == SK::Trait || node.k == SK::Enum || node.k == SK::Struct ||
+            node.k == SK::Extern) {
             continue;
         }
         top.stmt(*sp);
     }
     g_structs = saved_structs;
     g_unions = saved_unions;
+    g_native_structs = saved_native;
     std::vector<TypeErr> out;
     for (const auto &e : errs) {
         bool dup = false;

@@ -256,18 +256,24 @@ int check_programs(const std::vector<SourceFile> &progs, bool quiet) {
         std::set<std::string> extra_scalar;
         std::map<std::string, std::vector<size_t>> extra_borrows;
         std::set<std::string> extra_owned;
+        std::map<std::string, std::map<std::string, std::string>> extra_sfields;
+        std::map<std::string, std::string> extra_frets;
+        std::set<std::string> module_heads = imported_module_heads(progs[i]);
         for (size_t j = 0; j < progs.size(); j++) {
             if (j == i) continue;
             FnTable ps = pub_sigs(progs[j].body, exported_fn_names(progs[j]));
             for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
+            module_heads.insert(ps.heads.begin(), ps.heads.end());
             extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
             extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
             for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
             extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
+            for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
+            for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
         }
-        std::set<std::string> module_heads = imported_module_heads(progs[i]);
         BorrowOut out = borrow_check(progs[i].body, extra, progs[i].stray, module_heads,
-                                     extra_consts, extra_scalar, extra_borrows, extra_owned);
+                                     extra_consts, extra_scalar, extra_borrows, extra_owned,
+                                     extra_sfields, extra_frets);
         // Quiet on success: `run` is not `check`, and a program that runs must
         // not print a report first.
         if (!quiet || !out.errs.empty() || !out.warns.empty())
@@ -2233,18 +2239,24 @@ std::size_t ownership_errors(const std::vector<SourceFile> &files, std::size_t i
     std::set<std::string> extra_scalar;
     std::map<std::string, std::vector<size_t>> extra_borrows;
     std::set<std::string> extra_owned;
+    std::map<std::string, std::map<std::string, std::string>> extra_sfields;
+    std::map<std::string, std::string> extra_frets;
+    std::set<std::string> module_heads = imported_module_heads(files[i]);
     for (std::size_t j = 0; j < files.size(); j++) {
         if (j == i) continue;
         FnTable ps = pub_sigs(files[j].body, exported_fn_names(files[j]));
         for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
+        module_heads.insert(ps.heads.begin(), ps.heads.end());
         extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
         extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
         for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
         extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
+        for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
+        for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
     }
-    std::set<std::string> module_heads = imported_module_heads(files[i]);
     BorrowOut out = borrow_check(files[i].body, extra, files[i].stray, module_heads,
-                                 extra_consts, extra_scalar, extra_borrows, extra_owned);
+                                 extra_consts, extra_scalar, extra_borrows, extra_owned,
+                                 extra_sfields, extra_frets);
     report(files[i].path, files[i].src, out.errs, "error");
     return out.errs.size();
 }
@@ -2676,18 +2688,24 @@ int brat_cli_main(int argc, char **argv) {
         std::set<std::string> extra_scalar;
         std::map<std::string, std::vector<size_t>> extra_borrows;
         std::set<std::string> extra_owned;
+        std::map<std::string, std::map<std::string, std::string>> extra_sfields;
+        std::map<std::string, std::string> extra_frets;
+        std::set<std::string> module_heads = imported_module_heads(progs[i]);
         for (size_t j = 0; j < progs.size(); j++) {
             if (j == i) continue;
             FnTable ps = pub_sigs(progs[j].body, exported_fn_names(progs[j]));
             for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
+            module_heads.insert(ps.heads.begin(), ps.heads.end());
             extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
             extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
             for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
             extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
+            for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
+            for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
         }
-        std::set<std::string> module_heads = imported_module_heads(progs[i]);
         BorrowOut out = borrow_check(progs[i].body, extra, progs[i].stray, module_heads,
-                                     extra_consts, extra_scalar, extra_borrows, extra_owned);
+                                     extra_consts, extra_scalar, extra_borrows, extra_owned,
+                                     extra_sfields, extra_frets);
         std::printf("%s: %d error(s), %d warning(s)\n", progs[i].path.c_str(),
                     static_cast<int>(out.errs.size()), static_cast<int>(out.warns.size()));
         report(progs[i].path, progs[i].src, out.errs, "error");

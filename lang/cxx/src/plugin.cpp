@@ -268,7 +268,7 @@ struct FnEntry {
     const std::vector<StmtP> *body = nullptr;
 };
 
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Extern,
+const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
                           SK::ExternStruct, SK::ExportFn};
 
 struct State {

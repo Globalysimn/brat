@@ -26,10 +26,10 @@ enum class EK : uint8_t {
 enum class SK : uint8_t {
     Let, LetTmp, Set, SetIdx, SetField, Expr, Block, If, While, ForRange, ForIter,
     Return, Break, Continue, Spawn, Scope, Unsafe, Defer, Try, Fn, ExportFn, Impl,
-    Trait, Enum, Pub, PubUse, Import, Extern, ExternStruct,
+    Trait, Enum, Struct, Pub, PubUse, Import, Extern, ExternStruct,
 };
 
-enum class PK : uint8_t { Wild, None, Lit, Bind, Variant };
+enum class PK : uint8_t { Wild, None, Lit, Bind, Variant, Struct };
 
 struct Expr;
 struct Stmt;
@@ -130,9 +130,12 @@ struct Stmt {
 
 struct Pat {
     PK k;
-    std::string a;                     // variant tag or binding name
+    std::string a;                     // variant/struct tag or binding name
     ExprP lit;
     std::vector<PatP> subs;
+    std::vector<std::string> names;    // struct/map pattern field names
+    bool mut = false;
+    bool open = false;
 };
 
 // Constructors: the only place that knows how a node is filled.

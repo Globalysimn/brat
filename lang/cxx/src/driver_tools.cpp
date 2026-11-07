@@ -290,20 +290,26 @@ int cmd_check_json(const std::vector<std::string> &files) {
             std::map<std::string, Ty> merged_ty_consts;
             std::map<std::string, std::map<std::string, Ty>> merged_ty_structs;
             std::set<std::string> extra_owned;
+            std::map<std::string, std::map<std::string, std::string>> extra_sfields;
+            std::map<std::string, std::string> extra_frets;
+            std::set<std::string> module_heads = imported_module_heads(sf);
             for (size_t j = 0; j < loaded.files.size(); ++j) {
                 if (j == i) continue;
                 FnTable ps = pub_sigs(loaded.files[j].body, exported_fn_names(loaded.files[j]));
                 for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
+                module_heads.insert(ps.heads.begin(), ps.heads.end());
                 extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
                 extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
                 for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
                 extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
+                for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
+                for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
                 collect_exports(loaded.files[j].body, merged_ty_consts, merged_ty_structs);
                 collect_sigs(loaded.files[j].body, merged_ty);
             }
-            std::set<std::string> module_heads = imported_module_heads(sf);
             BorrowOut bout = borrow_check(sf.body, extra, sf.stray, module_heads,
-                                          extra_consts, extra_scalar, extra_borrows, extra_owned);
+                                          extra_consts, extra_scalar, extra_borrows, extra_owned,
+                                          extra_sfields, extra_frets);
             std::vector<TypeErr> terrs = type_check(sf.body, merged_ty, merged_ty_consts, merged_ty_structs);
 
             std::vector<JsonDiag> diags;
@@ -1234,6 +1240,20 @@ int cmd_doc(int argc, char **argv) {
                 it.has_packed = true;
                 it.packed = is_packed;
                 it.signature = "extern " + kw + " " + node->a + " { " + flds + " }";
+                it.line = ln;
+                it.doc = doc;
+                dm.items.push_back(std::move(it));
+            } else if (node->k == SK::Struct && is_pub) {
+                std::string flds;
+                for (size_t fi = 0; fi < node->fields.size(); ++fi) {
+                    if (fi) flds += ", ";
+                    flds += node->fields[fi].name + ": " + node->fields[fi].ann.value_or("dyn");
+                }
+                DocItem it;
+                it.kind = "struct";
+                it.name = node->a;
+                it.pub = true;
+                it.signature = "pub struct " + node->a + " { " + flds + " }";
                 it.line = ln;
                 it.doc = doc;
                 dm.items.push_back(std::move(it));
