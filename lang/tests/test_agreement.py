@@ -1,13 +1,15 @@
 """Native conformance against pinned corpus outputs, with ASan checks."""
-import _cxx
 import argparse
-import _scratch
+import concurrent.futures
 import json
-import shutil
 import os
 import re
+import shutil
 import subprocess
 import sys
+
+import _cxx
+import _scratch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
@@ -15,7 +17,6 @@ CORPUS = os.path.join(HERE, "corpus", "agreement.json")
 TMP = _scratch.mkdtemp(prefix="brat-agreement-")
 
 TS = re.compile(r'"ts": [\d.]+')
-
 
 CC_ARGS = ["-O2", "-w", "-I", ENGINE, "-lm"]
 if os.name != "nt":
@@ -50,7 +51,59 @@ def build(cfile, exe, extra=()):
     return run(argv)
 
 
-def main(native_only=False):
+def run_one_case(case):
+    name = case["name"]
+    path = write_case(case)
+
+    try:
+        native_c = _cxx.emit_file(path)
+        if _cxx.emit_file(path) != native_c:
+            return False, False, "FAIL %-16s the native emitter is not deterministic" % name
+    except Exception as e:
+        return False, False, "FAIL %-16s emit failed: %s: %s" % (name, type(e).__name__, e)
+
+    cfile = os.path.join(TMP, name + ".native.c")
+    with open(cfile, "w", encoding="utf-8") as f:
+        f.write(native_c)
+    exe = os.path.join(TMP, name + ".native.exe")
+    b = build(cfile, exe)
+    if b.returncode != 0:
+        return False, False, ("FAIL %-16s cc refused the emitted C: %s"
+                              % (name, (b.stdout + b.stderr)[-400:]))
+
+    native_run = run([exe])
+    got = (native_run.returncode, norm(native_run.stdout))
+    if case["rc"] is not None and got != (case["rc"], case["out"]):
+        return True, False, ("FAIL %-16s want %r, got %r"
+                             % (name, (case["rc"], case["out"]), got))
+
+    if case["asan"]:
+        asan_exe = os.path.join(TMP, name + ".asan")
+        ab = build(cfile, asan_exe, extra=["-fsanitize=address", "-g", "-O1"])
+        if ab.returncode != 0:
+            return True, False, ("FAIL %-16s asan build: %s"
+                                 % (name, (ab.stdout + ab.stderr)[-400:]))
+        lsan = "0" if sys.platform == "darwin" else "1"
+        r = run([asan_exe], env=dict(
+            os.environ, ASAN_OPTIONS=f"detect_leaks={lsan}:exitcode=0"))
+        report = r.stdout + r.stderr
+        if any(w in report for w in ("AddressSanitizer", "LeakSanitizer",
+                                     "heap-use-after-free", "SEGV")):
+            return True, False, "FAIL %-16s asan report: %s" % (name, report[-600:])
+
+    return True, True, None
+
+
+def default_jobs():
+    env_j = os.environ.get("BRAT_AGREEMENT_JOBS")
+    if env_j:
+        return max(1, int(env_j))
+    if "BRAT_NESTED" in os.environ:
+        return 2
+    return max(1, min(4, os.cpu_count() or 1))
+
+
+def main(jobs=None):
     _cxx.build()
     with open(CORPUS, encoding="utf-8") as f:
         cases = json.load(f)["cases"]
@@ -60,60 +113,18 @@ def main(native_only=False):
     if not cases:
         print("NATIVE CONFORMANCE: no independently pinned cases")
         return 1
+
+    workers = jobs if jobs and jobs > 0 else default_jobs()
     bad = 0
     ran = 0
-
-    for case in cases:
-        name = case["name"]
-        path = write_case(case)
-
-        try:
-            native_c = _cxx.emit_file(path)
-            if _cxx.emit_file(path) != native_c:
-                print("FAIL %-16s the native emitter is not deterministic" % name)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for did_run, ok, msg in pool.map(run_one_case, cases):
+            if did_run:
+                ran += 1
+            if not ok:
                 bad += 1
-                continue
-        except Exception as e:
-            print("FAIL %-16s emit failed: %s: %s" % (name, type(e).__name__, e))
-            bad += 1
-            continue
-
-        cfile = os.path.join(TMP, name + ".native.c")
-        with open(cfile, "w", encoding="utf-8") as f:
-            f.write(native_c)
-        exe = os.path.join(TMP, name + ".native.exe")
-        b = build(cfile, exe)
-        if b.returncode != 0:
-            print("FAIL %-16s cc refused the emitted C: %s"
-                  % (name, (b.stdout + b.stderr)[-400:]))
-            bad += 1
-            continue
-        native_run = run([exe])
-        got = (native_run.returncode, norm(native_run.stdout))
-        ran += 1
-        if case["rc"] is not None and got != (case["rc"], case["out"]):
-            bad += 1
-            print("FAIL %-16s want %r, got %r"
-                  % (name, (case["rc"], case["out"]), got))
-            continue
-        if case["asan"]:
-            asan_exe = os.path.join(TMP, name + ".asan")
-            ab = build(cfile, asan_exe,
-                       extra=["-fsanitize=address", "-g", "-O1"])
-            if ab.returncode != 0:
-                bad += 1
-                print("FAIL %-16s asan build: %s"
-                      % (name, (ab.stdout + ab.stderr)[-400:]))
-                continue
-            lsan = "0" if sys.platform == "darwin" else "1"
-            r = run([asan_exe], env=dict(
-                os.environ, ASAN_OPTIONS=f"detect_leaks={lsan}:exitcode=0"))
-            report = r.stdout + r.stderr
-            if any(w in report for w in ("AddressSanitizer", "LeakSanitizer",
-                                         "heap-use-after-free", "SEGV")):
-                bad += 1
-                print("FAIL %-16s asan report: %s" % (name, report[-600:]))
-                continue
+                if msg:
+                    print(msg)
 
     if bad:
         print("AGREEMENT: %d case(s) failed of %d" % (bad, len(cases)))
@@ -125,6 +136,9 @@ def main(native_only=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--native-only', action='store_true',
-                        help='check pinned expectations without invoking the interpreter')
-    sys.exit(main(native_only=parser.parse_args().native_only))
+    parser.add_argument("--native-only", action="store_true",
+                        help="retained for Makefile compatibility (native C++20 pipeline is the sole backend)")
+    parser.add_argument("-j", "--jobs", type=int, default=0,
+                        help="worker threads for C compilation/execution")
+    args = parser.parse_args()
+    sys.exit(main(jobs=args.jobs))

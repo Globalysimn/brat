@@ -237,6 +237,8 @@ fn heap_and_arena_sra() -> str {
     i = i + 1
   }
   let mut arena_sum = 0
+  let mut promoted_field = ""
+  let mut promoted_whole = Packet { tag: "", items: [], weight: 0 }
   arena {
     let mut j = 0
     while j < 100 {
@@ -244,8 +246,51 @@ fn heap_and_arena_sra() -> str {
       arena_sum = arena_sum + p.x + p.y
       j = j + 1
     }
+    // SRA-decomposed struct inside arena whose heap field is promoted via own(h1.tag)
+    let h1 = Packet {
+      tag: "long_arena_header_payload_" + str(123456),
+      items: [10, 20, 30, 40],
+      weight: 42,
+    }
+    promoted_field = own(h1.tag)
+    arena {
+      let mut k = 0
+      while k < 30 {
+        let inner = Packet {
+          tag: "inner_nested_arena_chunk_" + str(k),
+          items: [k, k + 1],
+          weight: k * 2,
+        }
+        arena_sum = arena_sum + inner.weight + len(inner.tag) + len(inner.items)
+        k = k + 1
+      }
+      // Whole struct escaping into own(whole) inside nested arena (must NOT be broken by SRA)
+      let whole = Packet { tag: "whole_" + str(99), items: [7, 8], weight: 99 }
+      promoted_whole = own(whole)
+    }
   }
-  return "{sum}|{last}|{arena_sum}"
+  // Loop with `continue` out of `arena` + immediate pooled BChunk overwrite on next iteration
+  let mut c = 0
+  while c < 4 {
+    arena {
+      if c == 1 {
+        let overwrite = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        arena_sum = arena_sum + len(overwrite)
+      }
+      let transient = Packet {
+        tag: "transient_arena_payload_" + str(c),
+        items: [c, c + 1],
+        weight: c + 10,
+      }
+      if c == 0 {
+        c = c + 1
+        continue
+      }
+      arena_sum = arena_sum + transient.weight + len(transient.tag)
+    }
+    c = c + 1
+  }
+  return "{sum}|{last}|{arena_sum}|{promoted_field}|{promoted_whole.tag}:{promoted_whole.weight}:{len(promoted_whole.items)}"
 }
 
 fn pure_dot(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
@@ -357,5 +402,70 @@ if sys.platform.startswith("linux"):
     ar = subprocess.run([bin_out], capture_output=True, text=True, timeout=60, env=asan_env)
     check(ar.returncode == 0 and ar.stdout == outs["-O2"],
           f"ASan/LSan run failed: rc={ar.returncode}\nout={ar.stdout}\nerr={ar.stderr}")
+
+    # 5. C FFI (`extern struct` by-value + contiguous pointer memory with `--header` verification) alongside SRA
+    ffi_h = write_src("ffi_vec.h", """#include <stdint.h>
+typedef struct CVec2 {
+    int64_t x;
+    int64_t y;
+} CVec2;
+CVec2 c_vec2_step(CVec2 v, int64_t scale);
+CVec2 *c_vec2_alloc(void);
+void c_vec2_free(CVec2 *p);
+int64_t c_vec2_ptr_sum(const CVec2 *vp);
+""")
+    ffi_c = write_src("ffi_vec.c", """#include "ffi_vec.h"
+#include <stdlib.h>
+CVec2 c_vec2_step(CVec2 v, int64_t scale) {
+    CVec2 out = { v.x * scale, v.y * scale + 1 };
+    return out;
+}
+CVec2 *c_vec2_alloc(void) { return (CVec2 *)calloc(1, sizeof(CVec2)); }
+void c_vec2_free(CVec2 *p) { free(p); }
+int64_t c_vec2_ptr_sum(const CVec2 *vp) {
+    return vp->x * 100 + vp->y;
+}
+""")
+    ffi_o = os.path.join(TMP, "ffi_vec.o")
+    comp_o = subprocess.run([cc_bin, "-std=c11", "-O2", "-c", ffi_c, "-o", ffi_o],
+                            capture_output=True, text=True, timeout=60)
+    check(comp_o.returncode == 0, f"ffi_vec.c compile failed: {comp_o.stderr}")
+
+    ffi_brat = write_src("ffi_sra.brat", """extern struct CVec2 {
+  x: i64,
+  y: i64,
+}
+extern fn c_vec2_step(v: CVec2, scale: i64) -> CVec2
+extern fn c_vec2_alloc() -> ptr[CVec2]
+extern fn c_vec2_free(mut p: ptr[CVec2])
+extern fn c_vec2_ptr_sum(vp: ptr[CVec2]) -> i64
+
+struct LocalPair {
+  a: i64,
+  b: i64,
+}
+
+fn main() -> i64 {
+  let lp = LocalPair { a: 3, b: 4 }
+  let cv = CVec2 { x: lp.a, y: lp.b }
+  unsafe {
+    let stepped = c_vec2_step(cv, 10)
+    let mut buf = c_vec2_alloc()
+    ptr_write_struct(buf, stepped, "CVec2")
+    let psum = c_vec2_ptr_sum(buf)
+    let round = ptr_read_struct(buf, "CVec2")
+    c_vec2_free(buf)
+    print("{stepped.x},{stepped.y}|{psum}|{round.x},{round.y}")
+  }
+  return 0
+}
+""")
+    for fl in ("-O0", "-O1", "-O2"):
+        ffi_exe = os.path.join(TMP, f"ffi_sra_{fl[1:]}")
+        b_res = run_cxx("build", fl, "--header", ffi_h, "--object", ffi_o, ffi_brat, "-o", ffi_exe)
+        check(b_res.returncode == 0, f"FFI build {fl} failed:\n{b_res.stdout}\n{b_res.stderr}")
+        r_res = subprocess.run([ffi_exe], capture_output=True, text=True, timeout=30, env=ENV)
+        check(r_res.returncode == 0 and r_res.stdout.strip() == "30,41|3041|30,41",
+              f"FFI run {fl} mismatch: rc={r_res.returncode} out={r_res.stdout!r} err={r_res.stderr!r}")
 
 print(f"ok: {n} struct layout & SRA checks passed")

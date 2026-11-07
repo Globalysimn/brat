@@ -677,6 +677,7 @@ struct Emitter {
     std::optional<std::pair<std::string, std::set<std::string>>> cap;
     std::map<std::string, int64_t> cap_slots;
     std::vector<std::string> dfb;
+    std::vector<std::vector<std::string>> dfb_vars;
     std::set<std::string> dfb_locals;
     int try_n = 0;
     std::set<std::string> alias_ret;
@@ -5591,23 +5592,39 @@ void Emitter::emit_block(const StmtList &body, const std::string &ind) {
     ln(ind, cat("volatile int64_t ", b, " = vdfsp;"));
     ln(ind, "vdfpush();");
     dfb.push_back(b);
+    auto bnames = block_let_names(body);
+    dfb_vars.emplace_back(bnames.begin(), bnames.end());
     for (const Stmt *t : body) st(*t, ind);
+    dfb_vars.pop_back();
     dfb.pop_back();
-    ln(ind, cat("vdfreset(", b, ");"));
     if (move_rt)
-        for (const auto &name : block_let_names(body)) emit_drop(name, ind);
+        for (const auto &name : bnames) emit_drop(name, ind);
     drop_alias_temps(body, ind);
+    ln(ind, cat("vdfreset(", b, ");"));
 }
 
 void Emitter::emit_loop_exit(const std::string &k, const std::string &ind) {
     // Every lexical block between the loop boundary and this exit is left by
-    // break/continue. Drain its defers, then join any scope it leaves.
+    // break/continue. Release block-local owned slots before draining defers
+    // (such as $arena_leave) so recycled arena chunks never leave stale BHead
+    // pointers in loop-local slots, then join any scope it leaves.
     const size_t scope_depth = loop_exit_depths.empty()
         ? scopes.size() : loop_exit_depths.back().first;
     const size_t defer_depth = loop_exit_depths.empty()
         ? (dfb.empty() ? 0 : dfb.size() - 1) : loop_exit_depths.back().second;
-    for (size_t i = dfb.size(); i > defer_depth; --i)
+    for (size_t i = dfb.size(); i > defer_depth; --i) {
+        if (move_rt && i - 1 < dfb_vars.size()) {
+            for (const auto &vname : dfb_vars[i - 1]) {
+                auto sit = sym.find(vname);
+                if (sit != sym.end() && sit->second.own == Own::Owned &&
+                    !moved.count(vname) && !shared.count(vname)) {
+                    ln(ind, cat("vrelease(", sit->second.cn, ");"));
+                    ln(ind, cat(sit->second.cn, " = vnil();"));
+                }
+            }
+        }
         ln(ind, cat("vdfreset(", dfb[i - 1], ");"));
+    }
     for (size_t i = scopes.size(); i > scope_depth; --i)
         ln(ind, cat("vscope_end(vint(", scopes[i - 1], "));"));
     ln(ind, k + ";");
@@ -6406,6 +6423,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     auto saved_cap = cap;
     auto saved_cap_slots = cap_slots;
     auto saved_dfb = dfb;
+    auto saved_dfb_vars = dfb_vars;
     auto saved_fin = fin;
     auto saved_scopes = scopes;
     size_t saved_err_scope_depth = err_scope_depth;
@@ -6428,6 +6446,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     }
     std::string dfbname = cat("__vdf_", cn);
     dfb.clear();
+    dfb_vars.clear();
     scopes.clear();
     err_scope_depth = 0;
     fin = cat("__fin_", cn);
@@ -6673,6 +6692,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     cap = saved_cap;
     cap_slots = saved_cap_slots;
     dfb = saved_dfb;
+    dfb_vars = std::move(saved_dfb_vars);
     fin = saved_fin;
     scopes = saved_scopes;
     err_scope_depth = saved_err_scope_depth;

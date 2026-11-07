@@ -33,7 +33,7 @@ absence of memory errors, data races or sandbox escapes.
   credentials), which catches accidental leaks in logs but cannot know custom
   secret names. Use `BRAT_ENV_DENY_ALL=1` or `BRAT_ENV_ALLOW` in sensitive
   deployments.
-- **Platform verification scope.** Linux x86-64 runs all 169 test suites and
+- **Platform verification scope.** Linux x86-64 runs all 174 test suites and
   ASan/UBSan/LSan on every push. Native macOS arm64 (`macos-15`) and Windows
   x86-64 (`windows-2022`, MinGW-w64 LLP64) CI jobs verify `brat-cxx` compilation,
   frontend/checker/borrow/module suites, `bindgen`/`ffi --preprocess` ABI probes
