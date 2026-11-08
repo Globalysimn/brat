@@ -11,7 +11,9 @@ using View = std::vector<const Stmt *>;
 const std::set<std::string> kRaise{"raise", "unwrap", "assert", "exit"};
 const std::set<std::string> kIo{"print", "eprint", "log.info", "log.warn", "log.error",
                                 "trace.span", "read_file", "write_file", "append_file", "read_bytes",
-                                "write_bytes", "proc_run", "fs_exists", "fs_rename", "fs_remove",
+                                "write_bytes", "proc_run",
+                                "fs_exists", "fs_open", "fs_read_line", "fs_close", "stdin_read_line",
+                                "fs_rename", "fs_remove",
                                 "random_bytes", "https_request_raw",
                                 "sql_open", "sql_close", "sql_exec", "sql_query",
                                 "args", "args_bytes", "env_get", "env_get_bytes",

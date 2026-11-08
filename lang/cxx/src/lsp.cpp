@@ -1424,6 +1424,10 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"utf8_bytes", "fn utf8_bytes(s: str) -> vec[i64]: UTF-8 octets 0..255"},
         {"utf8_str", "fn utf8_str(data: vec[i64]) -> Result[str, str]: decode validated UTF-8"},
         {"fs_exists", "fn fs_exists(path: str|vec[i64]) -> bool (confined regular-file probe)"},
+        {"fs_open", "fn fs_open(path: str|vec[i64]) -> Result[i64, str] (confined streaming reader)"},
+        {"fs_read_line", "fn fs_read_line(handle: i64) -> Result[Option[str], str] (read one UTF-8 line up to 16 MiB)"},
+        {"fs_close", "fn fs_close(handle: i64) -> Result[i64, str] (close streaming reader)"},
+        {"stdin_read_line", "fn stdin_read_line() -> Result[Option[str], str] (read one UTF-8 line from stdin)"},
         {"fs_rename", "fn fs_rename(src: str|vec[i64], dst: str|vec[i64]) -> Result[i64, str] (confined atomic rename)"},
         {"fs_remove", "fn fs_remove(path: str|vec[i64]) -> Result[i64, str] (confined unlink)"},
         {"proc_run", "fn proc_run(prog: str, argv: vec[str|vec[i64]]) -> Result[map, str] (gated by BRAT_EXEC)"},
@@ -1610,7 +1614,11 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
         if (e.a == "is_ok" || e.a == "is_err" || e.a == "is_some" || e.a == "is_none" ||
             e.a == "re_match" || e.a == "fs_exists") return "bool";
         if (e.a == "read_file") return "Result[str, str]";
-        if (e.a == "write_file" || e.a == "append_file") return "Result[i64, str]";
+        if (e.a == "fs_read_line" || e.a == "stdin_read_line")
+            return "Result[Option[str], str]";
+        if (e.a == "write_file" || e.a == "append_file" ||
+            e.a == "fs_open" || e.a == "fs_close")
+            return "Result[i64, str]";
         if (e.a == "re_find") return "Option[str]";
         if (e.a == "Some" && e.kids.size() == 1) {
             std::string in = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);

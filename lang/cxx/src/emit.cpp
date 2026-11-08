@@ -626,7 +626,9 @@ const std::string LOCAL_BINDING_PREFIX = "\x01local:";
 const std::set<std::string> HEAP_CALLS = {
     "str", "own", "str_from_ptr", "args", "args_bytes", "read_file", "write_file",
     "append_file", "read_bytes", "write_bytes", "proc_run", "env_get", "env_get_bytes",
-    "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_rename", "fs_remove",
+    "utf8_bytes", "utf8_str", "json_parse", "json_stringify",
+    "fs_open", "fs_read_line", "fs_close", "stdin_read_line",
+    "fs_rename", "fs_remove",
     "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
     "re_find", "re_captures", "re_replace",
@@ -10101,7 +10103,9 @@ V Emitter::ex_call(const Expr &e) {
         name == "read_bytes" || name == "write_bytes" ||
         name == "proc_run" || name == "utf8_bytes" || name == "utf8_str" ||
         name == "json_parse" || name == "json_stringify" ||
-        name == "fs_exists" || name == "fs_rename" || name == "fs_remove" ||
+        name == "fs_exists" || name == "fs_open" || name == "fs_read_line" ||
+        name == "fs_close" || name == "stdin_read_line" ||
+        name == "fs_rename" || name == "fs_remove" ||
         name == "sha256_bytes" || name == "random_bytes" || name == "https_request_raw" ||
         name == "sql_open" || name == "sql_close" || name == "sql_exec" || name == "sql_query" ||
         name == "tcp_listen" || name == "tcp_connect" ||
@@ -10114,7 +10118,9 @@ V Emitter::ex_call(const Expr &e) {
             {"read_file", "vreadfile"}, {"read_bytes", "vreadbytes"},
             {"utf8_bytes", "vutf8_bytes"}, {"utf8_str", "vutf8_str"},
             {"json_parse", "vjson_parse"},
-            {"fs_exists", "vfs_exists"}, {"fs_remove", "vfs_remove"},
+            {"fs_exists", "vfs_exists"}, {"fs_open", "vfs_open"},
+            {"fs_read_line", "vfs_read_line"}, {"fs_close", "vfs_close"},
+            {"fs_remove", "vfs_remove"},
             {"sha256_bytes", "vsha256_bytes"},
             {"random_bytes", "vrandom_bytes"},
             {"sql_open", "vsql_open"}, {"sql_close", "vsql_close"},
@@ -10152,6 +10158,10 @@ V Emitter::ex_call(const Expr &e) {
         if (name == "sbuf") {
             need_arity(args, 0, name);
             return {{}, "vsbuf()"};
+        }
+        if (name == "stdin_read_line") {
+            need_arity(args, 0, name);
+            return {{}, "vstdin_read_line()"};
         }
         if (name == "chan") {
             need_arity(args, 1, name);

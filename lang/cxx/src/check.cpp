@@ -544,7 +544,8 @@ static bool pure_read_builtin(const std::string &name) {
         "len", "str", "print", "eprint", "is_ok", "is_err", "is_some", "is_none",
         "is_vec", "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
         "__stag_is", "__shas", "own", "sbuf_add", "tcp_send", "write_file",
-        "append_file", "fs_exists", "write_bytes", "json_stringify"
+        "append_file", "fs_exists", "fs_open", "fs_close", "fs_read_line",
+        "write_bytes", "json_stringify"
     };
     return ro.count(name) > 0;
 }
@@ -942,6 +943,10 @@ static const std::map<std::string, Ty> BRES = {
     {"json_parse", Ty::result(Ty::dyn(), Ty::of(Ty::Str))},
     {"json_stringify", Ty::of(Ty::Str)},
     {"fs_exists", Ty::of(Ty::Bool)},
+    {"fs_open", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"fs_read_line", Ty::result(Ty::option(Ty::of(Ty::Str)), Ty::of(Ty::Str))},
+    {"fs_close", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"stdin_read_line", Ty::result(Ty::option(Ty::of(Ty::Str)), Ty::of(Ty::Str))},
     {"fs_rename", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"fs_remove", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"sha256_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},

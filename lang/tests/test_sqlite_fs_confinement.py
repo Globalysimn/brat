@@ -145,6 +145,104 @@ with open(os.path.join(td, "bin.dat"), "rb") as f:
     assert f.read() == b"\xff\x00\xfetail"
 assert open(outside_txt, encoding="utf-8").read() == "secret"
 
+# 3c. Streaming line reader (std.fs.open_read / read_line / close / stdin_line) >64 MiB + arena
+big_path = os.path.join(td, "huge.jsonl")
+row_bytes = (b'{"ok":true,"n":3,"pad":"' + (b"x" * 1000) + b'"}\n')  # 1025 bytes/line
+line_count = 68000  # ~69.7 MB (> 64 MiB whole-file cap)
+with open(big_path, "wb") as f:
+    chunk = row_bytes * 1000
+    for _ in range(line_count // 1000):
+        f.write(chunk)
+with open(os.path.join(td, "crlf_nul.txt"), "wb") as f:
+    f.write(b"alpha\r\nbeta\ngamma\x00bad\ndelta")
+
+stream_code = '''import std.fs
+import std.json
+
+fn main() -> Result[i64, str] {
+    let whole_blocked = is_err(read_file("huge.jsonl"))
+    let lnk_blocked = is_err(std.fs.open_read("link_keep.txt"))
+    let fake_bad = is_err(std.fs.read_line(42))
+
+    let fh = std.fs.open_read("huge.jsonl")?
+    let mut rows = 0
+    let mut sum = 0
+    while true {
+        let mut done = false
+        arena {
+            match std.fs.read_line(fh)? {
+                Some(line) => {
+                    if rows < 20 || rows == 67999 {
+                        let obj = std.json.parse(line)?
+                        sum += std.json.get_int(obj, "n", 0)
+                    }
+                    rows += 1
+                }
+                None => {
+                    done = true
+                }
+            }
+        }
+        if done { break }
+    }
+    let _c = std.fs.close(fh)?
+    let after_close_bad = is_err(std.fs.read_line(fh))
+    let double_close_bad = is_err(std.fs.close(fh))
+
+    let fh2 = std.fs.open_read("crlf_nul.txt")?
+    let l1 = unwrap(std.fs.read_line(fh2)?)
+    let l2 = unwrap(std.fs.read_line(fh2)?)
+    let nul_err = is_err(std.fs.read_line(fh2))
+    let l4 = unwrap(std.fs.read_line(fh2)?)
+    let eof_none = std.fs.read_line(fh2)?.is_none()
+    let _c2 = std.fs.close(fh2)?
+
+    let mut piped: vec[str] = []
+    while true {
+        match std.fs.stdin_line()? {
+            Some(s) => { piped.push(s) }
+            None => { break }
+        }
+    }
+
+    print("{whole_blocked} {lnk_blocked} {fake_bad} {rows} {sum} {after_close_bad} {double_close_bad}")
+    print("{l1}|{l2}|{nul_err}|{l4}|{eof_none}|{piped.join(",")}")
+    return Ok(0)
+}
+'''
+stream_path = os.path.join(td, "stream_test.brat")
+with open(stream_path, "w", encoding="utf-8") as f:
+    f.write(stream_code)
+stream_nat = subprocess.run(
+    [NATIVE, "run", stream_path],
+    cwd=td,
+    input="one\r\ntwo\nthree",
+    capture_output=True,
+    text=True,
+    timeout=120,
+)
+assert stream_nat.returncode == 0, stream_nat.stdout + stream_nat.stderr
+s_lines = stream_nat.stdout.strip().splitlines()
+assert s_lines[0].lower() == "true true true 68000 63 true true", s_lines
+assert s_lines[1] == "alpha|beta|true|delta|true|one,two,three", s_lines
+os.remove(big_path)
+
+# Static arena escape check rejects returning `std.fs.read_line` string directly out of `arena`
+esc_stream = os.path.join(td, "escape_stream_arena.brat")
+with open(esc_stream, "w", encoding="utf-8") as f:
+    f.write('''import std.fs
+fn bad_line(fh: i64) -> Result[Option[str], str] {
+    arena {
+        return std.fs.read_line(fh)
+    }
+}
+fn main() -> i64 { return 0 }
+''')
+chk_stream = subprocess.run([NATIVE, "check", esc_stream], capture_output=True, text=True, timeout=30)
+assert chk_stream.returncode != 0 and "arena" in (chk_stream.stdout + chk_stream.stderr).lower(), (
+    chk_stream.stdout + chk_stream.stderr
+)
+
 # 4. Static borrow checker rejects inline `return ptr_of_str(local_s)` escape
 esc_bad = os.path.join(td, "escape_ptr.brat")
 with open(esc_bad, "w", encoding="utf-8") as f:

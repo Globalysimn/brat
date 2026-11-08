@@ -47,3 +47,19 @@ pub fn write_atomic(path: str, content: str) -> Result[i64, str] {
 pub fn remove(path: str) -> Result[i64, str] {
   return fs_remove(path)
 }
+
+pub fn open_read(path: str) -> Result[i64, str] {
+  return fs_open(path)
+}
+
+pub fn read_line(handle: i64) -> Result[Option[str], str] {
+  return fs_read_line(handle)
+}
+
+pub fn close(handle: i64) -> Result[i64, str] {
+  return fs_close(handle)
+}
+
+pub fn stdin_line() -> Result[Option[str], str] {
+  return stdin_read_line()
+}

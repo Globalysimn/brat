@@ -498,7 +498,11 @@ struct Walk {
             }
             if (e->a == "fs_exists") return "bool";
             if (e->a == "read_file") return "Result[str, str]";
-            if (e->a == "append_file" || e->a == "write_file") return "Result[i64, str]";
+            if (e->a == "fs_read_line" || e->a == "stdin_read_line")
+                return "Result[Option[str], str]";
+            if (e->a == "append_file" || e->a == "write_file" ||
+                e->a == "fs_open" || e->a == "fs_close")
+                return "Result[i64, str]";
             if (e->a == "re_find") return "Option[str]";
             auto it = fn_rets.find(e->a);
             return it == fn_rets.end() ? "" : it->second;

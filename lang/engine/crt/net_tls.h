@@ -1127,6 +1127,342 @@ BFN Val vfs_exists(Val p) {
 #endif
 }
 
+#define _VFSTR_MAX 256
+#define _VFSTR_BUF 8192
+#ifndef BRAT_MAX_LINE_BYTES
+#define BRAT_MAX_LINE_BYTES (16u * 1024u * 1024u)
+#endif
+
+typedef struct {
+    FILE *fp;
+    char *buf;
+    size_t pos;
+    size_t len;
+    uint64_t gen;
+    int active;
+    int closing;
+    int mu_inited;
+    bmutex_t op_mu;
+} BFileSlot;
+
+static BFileSlot BRAT_UNUSED _vfstr_slots[_VFSTR_MAX];
+static uint64_t _vfstr_next_gen = 1;
+static bmutex_t BRAT_UNUSED _vfstr_mu = BMUTEX_INIT;
+static bmutex_t BRAT_UNUSED _vstdin_mu = BMUTEX_INIT;
+
+static BFileSlot *_vfstr_acquire(bint handle) {
+    if (handle <= 0) return NULL;
+    int slot = (int)((uint64_t)handle & 0xFFu);
+    uint64_t gen = (uint64_t)handle >> 8;
+    if (slot <= 0 || slot >= _VFSTR_MAX || gen == 0) return NULL;
+    BMUTEX_LOCK(&_vfstr_mu);
+    BFileSlot *s = &_vfstr_slots[slot];
+    if (!s->fp || s->closing || s->gen != gen) {
+        BMUTEX_UNLOCK(&_vfstr_mu);
+        return NULL;
+    }
+    s->active++;
+    BMUTEX_UNLOCK(&_vfstr_mu);
+    BMUTEX_LOCK(&s->op_mu);
+    return s;
+}
+
+static void _vfstr_release(BFileSlot *s) {
+    BMUTEX_UNLOCK(&s->op_mu);
+    FILE *to_close = NULL;
+    char *to_free = NULL;
+    BMUTEX_LOCK(&_vfstr_mu);
+    s->active--;
+    if (s->closing && s->active == 0) {
+        to_close = s->fp;
+        to_free = s->buf;
+        s->fp = NULL;
+        s->buf = NULL;
+        s->pos = 0;
+        s->len = 0;
+        s->closing = 0;
+        s->gen = 0;
+    }
+    BMUTEX_UNLOCK(&_vfstr_mu);
+    if (to_free) free(to_free);
+    if (to_close) fclose(to_close);
+}
+
+static Val _vok_line_opt(const char *data, size_t n, int is_eof) {
+    if (is_eof) {
+        Vec *o = vvec();
+        vec_push(o, vnil());
+        return vtagv("ok", o);
+    }
+    if (n > 0 && data[n - 1] == '\r') n--;
+    if (bsize_over_bint(n) || memchr(data, 0, n) != NULL || !utf8_valid(data, (bint)n))
+        return verr("invalid utf-8");
+    Vec *sm = vvec();
+    vec_push(sm, vstrn(data, (bint)n));
+    Vec *ok = vvec();
+    vec_push(ok, vtagv("some", sm));
+    return vtagv("ok", ok);
+}
+
+BFN Val vfs_open(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_open wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_open byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    int escaped = 0;
+    FILE *f = _vopen_confined_stream(rp, 0, 0, &escaped, NULL);
+    if (!f) {
+        if (escaped) return verr("path escaped during open");
+        return verr_os(rp);
+    }
+    char *rbuf = (char *)malloc(_VFSTR_BUF);
+    if (!rbuf) {
+        fclose(f);
+        vraise("out of memory");
+        return vunwind;
+    }
+    BMUTEX_LOCK(&_vfstr_mu);
+    int slot = -1;
+    for (int i = 1; i < _VFSTR_MAX; i++) {
+        if (!_vfstr_slots[i].fp && !_vfstr_slots[i].closing && _vfstr_slots[i].active == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        BMUTEX_UNLOCK(&_vfstr_mu);
+        free(rbuf);
+        fclose(f);
+        return verr("too many open file streams");
+    }
+    BFileSlot *s = &_vfstr_slots[slot];
+    if (!s->mu_inited) {
+#if !defined(_WIN32)
+        pthread_mutex_init(&s->op_mu, NULL);
+#else
+        s->op_mu = (bmutex_t)BMUTEX_INIT;
+#endif
+        s->mu_inited = 1;
+    }
+    uint64_t gen = _vfstr_next_gen++;
+    if (gen == 0 || (gen >> 55) != 0) {
+        _vfstr_next_gen = 2;
+        gen = 1;
+    }
+    s->fp = f;
+    s->buf = rbuf;
+    s->pos = 0;
+    s->len = 0;
+    s->gen = gen;
+    s->active = 0;
+    s->closing = 0;
+    bint handle = (bint)((gen << 8) | (uint64_t)slot);
+    BMUTEX_UNLOCK(&_vfstr_mu);
+    return _vok_int(handle);
+}
+
+BFN Val vfs_close(Val hv) {
+    if (hv.tag != V_INT) return verr("bad file handle");
+    bint handle = hv.as.ival;
+    if (handle <= 0) return verr("bad file handle");
+    int slot = (int)((uint64_t)handle & 0xFFu);
+    uint64_t gen = (uint64_t)handle >> 8;
+    if (slot <= 0 || slot >= _VFSTR_MAX || gen == 0) return verr("bad file handle");
+    FILE *to_close = NULL;
+    char *to_free = NULL;
+    BMUTEX_LOCK(&_vfstr_mu);
+    BFileSlot *s = &_vfstr_slots[slot];
+    if (!s->fp || s->closing || s->gen != gen) {
+        BMUTEX_UNLOCK(&_vfstr_mu);
+        return verr("bad file handle");
+    }
+    if (s->active == 0) {
+        to_close = s->fp;
+        to_free = s->buf;
+        s->fp = NULL;
+        s->buf = NULL;
+        s->pos = 0;
+        s->len = 0;
+        s->gen = 0;
+        s->closing = 0;
+    } else {
+        s->closing = 1;
+    }
+    BMUTEX_UNLOCK(&_vfstr_mu);
+    if (to_free) free(to_free);
+    if (to_close && fclose(to_close) != 0) return verr_os("close");
+    return _vok_int(0);
+}
+
+BFN Val vfs_read_line(Val hv) {
+    if (hv.tag != V_INT) return verr("bad file handle");
+    BFileSlot *s = _vfstr_acquire(hv.as.ival);
+    if (!s) return verr("bad file handle");
+
+    char stack_acc[4096];
+    char *acc = stack_acc;
+    size_t acc_len = 0;
+    size_t acc_cap = sizeof stack_acc;
+    int got_any = 0;
+
+    for (;;) {
+        if (s->pos < s->len) {
+            size_t avail = s->len - s->pos;
+            const char *nl = (const char *)memchr(s->buf + s->pos, '\n', avail);
+            if (nl) {
+                size_t chunk = (size_t)(nl - (s->buf + s->pos));
+                if (chunk > BRAT_MAX_LINE_BYTES || acc_len > BRAT_MAX_LINE_BYTES - chunk) {
+                    s->pos = (size_t)(nl - s->buf) + 1;
+                    if (acc != stack_acc) free(acc);
+                    _vfstr_release(s);
+                    return verr("line exceeds 16 MiB limit");
+                }
+                if (acc_len == 0) {
+                    const char *direct = s->buf + s->pos;
+                    s->pos += chunk + 1;
+                    Val r = _vok_line_opt(direct, chunk, 0);
+                    _vfstr_release(s);
+                    return r;
+                }
+                if (acc_len + chunk > acc_cap) {
+                    size_t ncap = acc_cap * 2;
+                    while (ncap < acc_len + chunk) ncap *= 2;
+                    char *nb = (acc == stack_acc) ? (char *)malloc(ncap) : (char *)realloc(acc, ncap);
+                    if (!nb) {
+                        if (acc != stack_acc) free(acc);
+                        _vfstr_release(s);
+                        vraise("out of memory");
+                        return vunwind;
+                    }
+                    if (acc == stack_acc) memcpy(nb, stack_acc, acc_len);
+                    acc = nb;
+                    acc_cap = ncap;
+                }
+                memcpy(acc + acc_len, s->buf + s->pos, chunk);
+                acc_len += chunk;
+                s->pos += chunk + 1;
+                Val r = _vok_line_opt(acc, acc_len, 0);
+                if (acc != stack_acc) free(acc);
+                _vfstr_release(s);
+                return r;
+            }
+            if (avail > BRAT_MAX_LINE_BYTES || acc_len > BRAT_MAX_LINE_BYTES - avail) {
+                s->pos = s->len;
+                /* Drain up to the terminating newline so subsequent reads stay aligned. */
+                for (;;) {
+                    size_t rn = fread(s->buf, 1, _VFSTR_BUF, s->fp);
+                    if (rn == 0) break;
+                    const char *end_nl = (const char *)memchr(s->buf, '\n', rn);
+                    if (end_nl) {
+                        s->pos = (size_t)(end_nl - s->buf) + 1;
+                        s->len = rn;
+                        break;
+                    }
+                }
+                if (acc != stack_acc) free(acc);
+                _vfstr_release(s);
+                return verr("line exceeds 16 MiB limit");
+            }
+            if (acc_len + avail > acc_cap) {
+                size_t ncap = acc_cap * 2;
+                while (ncap < acc_len + avail) ncap *= 2;
+                char *nb = (acc == stack_acc) ? (char *)malloc(ncap) : (char *)realloc(acc, ncap);
+                if (!nb) {
+                    if (acc != stack_acc) free(acc);
+                    _vfstr_release(s);
+                    vraise("out of memory");
+                    return vunwind;
+                }
+                if (acc == stack_acc) memcpy(nb, stack_acc, acc_len);
+                acc = nb;
+                acc_cap = ncap;
+            }
+            memcpy(acc + acc_len, s->buf + s->pos, avail);
+            acc_len += avail;
+            got_any = 1;
+            s->pos = s->len = 0;
+        }
+        errno = 0;
+        size_t rn = fread(s->buf, 1, _VFSTR_BUF, s->fp);
+        if (rn == 0) {
+            int failed = ferror(s->fp);
+            int rerr = errno;
+            if (failed) {
+                clearerr(s->fp);
+                if (acc != stack_acc) free(acc);
+                _vfstr_release(s);
+                errno = rerr ? rerr : EIO;
+                return verr_os("read");
+            }
+            Val r = _vok_line_opt(acc, acc_len, !got_any && acc_len == 0);
+            if (acc != stack_acc) free(acc);
+            _vfstr_release(s);
+            return r;
+        }
+        s->pos = 0;
+        s->len = rn;
+    }
+}
+
+BFN Val vstdin_read_line(void) {
+    BMUTEX_LOCK(&_vstdin_mu);
+    char stack_acc[4096];
+    char *acc = stack_acc;
+    size_t len = 0;
+    size_t cap = sizeof stack_acc;
+    int got_any = 0;
+    int over_cap = 0;
+    errno = 0;
+    for (;;) {
+        int c = fgetc(stdin);
+        if (c == EOF) {
+            int failed = ferror(stdin);
+            int rerr = errno;
+            if (failed) {
+                clearerr(stdin);
+                if (acc != stack_acc) free(acc);
+                BMUTEX_UNLOCK(&_vstdin_mu);
+                errno = rerr ? rerr : EIO;
+                return verr_os("stdin");
+            }
+            break;
+        }
+        got_any = 1;
+        if (c == '\n') break;
+        if (over_cap) continue;
+        if (len >= BRAT_MAX_LINE_BYTES) {
+            over_cap = 1;
+            continue;
+        }
+        if (len == cap) {
+            size_t ncap = cap * 2;
+            char *nb = (acc == stack_acc) ? (char *)malloc(ncap) : (char *)realloc(acc, ncap);
+            if (!nb) {
+                if (acc != stack_acc) free(acc);
+                BMUTEX_UNLOCK(&_vstdin_mu);
+                vraise("out of memory");
+                return vunwind;
+            }
+            if (acc == stack_acc) memcpy(nb, stack_acc, len);
+            acc = nb;
+            cap = ncap;
+        }
+        acc[len++] = (char)c;
+    }
+    if (over_cap) {
+        if (acc != stack_acc) free(acc);
+        BMUTEX_UNLOCK(&_vstdin_mu);
+        return verr("line exceeds 16 MiB limit");
+    }
+    Val r = _vok_line_opt(acc, len, !got_any);
+    if (acc != stack_acc) free(acc);
+    BMUTEX_UNLOCK(&_vstdin_mu);
+    return r;
+}
+
 BFN Val vreadbytes(Val p) {
     char pbuf[8192];
     int pbad = 0;

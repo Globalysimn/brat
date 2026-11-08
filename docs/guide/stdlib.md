@@ -210,6 +210,9 @@ Wraps the runtime's `O_NOFOLLOW` confined file primitives. By default, paths are
 confined to the program's module root; set `BRAT_FILES=1` (`true`, `yes`, `on`)
 when running a trusted CLI tool that needs unrestricted host filesystem access.
 `write_atomic` writes a sibling temp file and renames it into place.
+`open_read` / `read_line` / `close` and `stdin_line` stream UTF-8 lines of up to
+16 MiB each without loading the whole file into memory (returning `Ok(None)` at
+EOF).
 
 ```brat
 fn exists(path: str) -> bool
@@ -219,6 +222,10 @@ fn write_lines(path: str, lines: vec[str]) -> Result[i64, str]
 fn append_text(path: str, extra: str) -> Result[i64, str]
 fn write_atomic(path: str, content: str) -> Result[i64, str]
 fn remove(path: str) -> Result[i64, str]
+fn open_read(path: str) -> Result[i64, str]
+fn read_line(handle: i64) -> Result[Option[str], str]
+fn close(handle: i64) -> Result[i64, str]
+fn stdin_line() -> Result[Option[str], str]
 ```
 
 ---
