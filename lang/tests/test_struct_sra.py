@@ -703,4 +703,61 @@ r_copy_o2 = run_brat("run", "-O2", copy_sra_src)
 check(r_copy_o0.returncode == 0 and r_copy_o0.stdout == r_copy_o2.stdout,
       f"copy_sra -O0/-O2 mismatch: {r_copy_o0.stdout!r} vs {r_copy_o2.stdout!r}")
 
+shadow_src = write_src("lexical_shadow.brat", """struct Boxed {
+  tag: str,
+}
+fn run_shadows(flag: bool) -> i64 {
+  let x = [10, 20, 30]
+  let mut acc = 0
+  if flag {
+    let x = Boxed { tag: "inner_struct_" + str(len(x)) }
+    acc = acc + len(x.tag)
+  } else {
+    let x = 99
+    acc = acc + x
+  }
+  acc = acc + len(x)
+  for elem in [4, 5] {
+    let x = elem
+    acc = acc + x
+  }
+  acc = acc + len(x)
+  let opt: Option[i64] = Some(7)
+  match opt {
+    Some(x) => { acc = acc + x },
+    None => {},
+  }
+  return acc + len(x)
+}
+fn main() -> i64 {
+  print(run_shadows(true))
+  print(run_shadows(false))
+  return 0
+}
+""")
+r_sh_o0 = run_brat("run", "-O0", shadow_src)
+r_sh_o2 = run_brat("run", "-O2", shadow_src)
+check(r_sh_o0.returncode == 0 and r_sh_o0.stdout == "39\n124\n",
+      f"lexical_shadow -O0 unexpected output: {r_sh_o0.stdout!r} {r_sh_o0.stderr!r}")
+check(r_sh_o2.returncode == 0 and r_sh_o2.stdout == r_sh_o0.stdout,
+      f"lexical_shadow -O0/-O2 mismatch: {r_sh_o0.stdout!r} vs {r_sh_o2.stdout!r}")
+
+shadow_bad_ty = write_src("shadow_bad_ty.brat", """struct Secret {
+  token: str,
+}
+fn leak_int(flag: bool) -> Secret {
+  let x = 999
+  if flag {
+    let x = Secret { token: "ok" }
+  }
+  return x
+}
+fn main() -> i64 {
+  return 0
+}
+""")
+chk_bad = run_cxx("check", shadow_bad_ty)
+check(chk_bad.returncode != 0 and "return: want Secret, got i64" in (chk_bad.stdout + chk_bad.stderr),
+      f"branch shadow leaked type into outer scope: {chk_bad.stdout!r} {chk_bad.stderr!r}")
+
 print(f"ok: {n} struct layout & SRA checks passed")

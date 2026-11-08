@@ -636,8 +636,10 @@ struct Walk {
             View else_body = else_of(s);
             State a = st;
             block(then_body, a);
+            for (const std::string &name : bound_in(then_body)) a.forget(name);
             State b = st;
             block(else_body, b);
+            for (const std::string &name : bound_in(else_body)) b.forget(name);
             if (!exits(then_body)) st.join_from(a);
             if (!exits(else_body)) st.join_from(b);
             return;
@@ -651,10 +653,15 @@ struct Walk {
             View else_body = else_of(s);
             State a = st;
             block(try_body, a);
+            for (const std::string &name : bound_in(try_body)) a.forget(name);
             State b = st;
+            if (s.opt1 && !s.opt1->empty()) b.forget(*s.opt1);
             block(catch_body, b);
+            for (const std::string &name : bound_in(catch_body)) b.forget(name);
+            if (s.opt1 && !s.opt1->empty()) b.forget(*s.opt1);
             State c = st;
             block(else_body, c);
+            for (const std::string &name : bound_in(else_body)) c.forget(name);
             if (!exits(try_body)) st.join_from(a);
             if (!exits(catch_body)) st.join_from(b);
             if (!exits(else_body)) st.join_from(c);
@@ -686,18 +693,19 @@ struct Walk {
 
     void loop(const Stmt &s, State &st) {
         expr(s.e1.get(), st, false, cur);
-        if (s.k == SK::ForRange) {
-            expr(s.e2.get(), st, false, cur);
-            st.copies.insert(s.a);          // a range variable is an i64
-        }
+        if (s.k == SK::ForRange) expr(s.e2.get(), st, false, cur);
         // A body runs zero or more times, so its effect joins with "not taken";
         // the lattice has height five, which two passes reach. The body's own
         // bindings are dropped from the seed: they are fresh every iteration.
-        const std::set<std::string> declared = bound_in(view(s.body));
+        std::set<std::string> declared = bound_in(view(s.body));
+        if ((s.k == SK::ForRange || s.k == SK::ForIter) && !s.a.empty())
+            declared.insert(s.a);
         for (int i = 0; i < 2; i++) {
             State once = st;
             for (const std::string &name : declared) once.forget(name);
+            if (s.k == SK::ForRange && !s.a.empty()) once.copies.insert(s.a);
             block(view(s.body), once);
+            for (const std::string &name : declared) once.forget(name);
             st.join_from(once);
         }
     }
@@ -735,19 +743,26 @@ struct Walk {
         const bool mut = s.mut;
         std::string ann = s.ann.value_or("");
         if (ann.empty()) ann = infer_ann(st, e);
-        if (!ann.empty()) st.anns[name] = ann;
-        if (mut) st.muts.insert(name);   // a mutable binding is a writer of its place
         expr(e, st, false, cur);
-        // `i64`, `f64`, `bool` and a binding that holds one are copies: no view,
-        // no borrow, no second place.
         bool copylike = kCopyAnns.count(ann) > 0 || copy_expr(e) ||
                         (e && e->k == EK::Var && st.copies.count(e->a)) ||
                         (e && e->k == EK::Idx && elem_copy(st, e->kids[0].get()));
+        auto place = place_of(e);
+        if (!place || !is_alias(e) || root_name(st.place(*place)) != name) {
+            st.forget(name);
+            st.anns.erase(name);
+            st.muts.erase(name);
+            st.copies.erase(name);
+            st.consts.erase(name);
+        }
+        if (!ann.empty()) st.anns[name] = ann;
+        if (mut) st.muts.insert(name);   // a mutable binding is a writer of its place
+        // `i64`, `f64`, `bool` and a binding that holds one are copies: no view,
+        // no borrow, no second place.
         if (copylike) {
             st.copies.insert(name);
             return;
         }
-        auto place = place_of(e);
         if (!place || !is_alias(e)) {
             if (s.konst) st.consts.insert(name);
             return;                            // a fresh value: `name` owns it

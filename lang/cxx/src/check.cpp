@@ -1025,6 +1025,7 @@ struct FnTyper {
     // `&x` is the out-parameter of a C function: legitimate in an extern's
     // `ptr[T]` slot, refused everywhere else.
     bool amp_ok = false;
+    std::set<std::string> *cur_block_lets = nullptr;
 
     FnTyper(const Sigs &sigs, Ty ret, std::vector<TypeErr> &errs)
         : sigs(sigs), ret(std::move(ret)), errs(errs) {}
@@ -1420,9 +1421,41 @@ struct FnTyper {
     }
 
     void block(const std::vector<StmtP> &body) {
+        auto saved_env = env;
+        auto saved_ann = annotated_vars;
+        auto saved_tags = active_tags;
+        auto saved_decl = decl_regions;
+        auto saved_reg = regions;
+        auto saved_aptrs = arena_ptrs;
+        auto saved_sinks = closure_sinks;
+        std::set<std::string> local_lets;
+        auto *saved_blets = cur_block_lets;
+        cur_block_lets = &local_lets;
         for (size_t i = 0; i < body.size(); i++) {
             stmt(*body[i]);
             check_match_exhaustive(body, i);
+        }
+        cur_block_lets = saved_blets;
+        for (const auto &v : local_lets) {
+            auto eit = saved_env.find(v);
+            if (eit != saved_env.end()) env[v] = eit->second;
+            else env.erase(v);
+            if (saved_ann.count(v)) annotated_vars.insert(v);
+            else annotated_vars.erase(v);
+            auto tit = saved_tags.find(v);
+            if (tit != saved_tags.end()) active_tags[v] = tit->second;
+            else active_tags.erase(v);
+            auto dit = saved_decl.find(v);
+            if (dit != saved_decl.end()) decl_regions[v] = dit->second;
+            else decl_regions.erase(v);
+            auto rit = saved_reg.find(v);
+            if (rit != saved_reg.end()) regions[v] = rit->second;
+            else regions.erase(v);
+            if (saved_aptrs.count(v)) arena_ptrs.insert(v);
+            else arena_ptrs.erase(v);
+            auto sit = saved_sinks.find(v);
+            if (sit != saved_sinks.end()) closure_sinks[v] = sit->second;
+            else closure_sinks.erase(v);
         }
     }
 
@@ -2521,6 +2554,7 @@ void FnTyper::stmt(const Stmt &s) {
             note("let `" + s.a + "`: annotated " + type_name(want) + ", got " + type_name(got));
         }
         Ty vty = want.k != Ty::Dyn ? want : got;
+        if (cur_block_lets && !s.a.empty()) cur_block_lets->insert(s.a);
         env[s.a] = vty;
         if (s.ann && want.k != Ty::Dyn) annotated_vars.insert(s.a);
         else annotated_vars.erase(s.a);

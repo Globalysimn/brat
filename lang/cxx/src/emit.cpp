@@ -741,6 +741,8 @@ struct Emitter {
     std::set<std::string> scalar_vars;
     std::map<std::string, std::string> var_structs;
     std::deque<FnDecl> sra_fns;
+    std::deque<StmtP> shadow_top_stmts;
+    bool shadows_done = false;
     bool sra_done = false;
     int sra_seq = 0;
     int clos_done = 0, clos_declared = 0, late_done = 0, late_declared = 0;
@@ -990,6 +992,7 @@ struct Emitter {
                                                            const std::string *self_struct) const;
     bool sra_round(const std::string &fn_name, FnDecl &decl);
     bool sra_rewrite_decl(const std::string &fn_name, FnDecl &decl);
+    void run_shadow_disambig();
     void run_sra();
     void emit_fn_by_key(const std::string &key);
     void emit_prelude_tables();
@@ -8144,6 +8147,291 @@ bool Emitter::sra_rewrite_decl(const std::string &fn_name, FnDecl &decl) {
     return any;
 }
 
+static void map_cloned_nested_expr(const Expr *oe, const Expr *ne,
+                                   std::map<const FnDecl *, const FnDecl *> &rep);
+
+static void map_cloned_nested_stmts(const std::vector<StmtP> &ob,
+                                    const std::vector<StmtP> &nb,
+                                    std::map<const FnDecl *, const FnDecl *> &rep) {
+    for (size_t i = 0; i < ob.size() && i < nb.size(); i++) {
+        if (!ob[i] || !nb[i]) continue;
+        const Stmt &os = *ob[i];
+        const Stmt &ns = *nb[i];
+        map_cloned_nested_expr(os.e1.get(), ns.e1.get(), rep);
+        map_cloned_nested_expr(os.e2.get(), ns.e2.get(), rep);
+        map_cloned_nested_expr(os.e3.get(), ns.e3.get(), rep);
+        map_cloned_nested_stmts(os.body, ns.body, rep);
+        map_cloned_nested_stmts(os.body2, ns.body2, rep);
+        if (os.els && ns.els) {
+            std::vector<StmtP> tmp_o, tmp_n;
+            for (const Stmt *co = os.els.get(), *cn = ns.els.get(); co && cn;
+                 co = co->els.get(), cn = cn->els.get()) {
+                map_cloned_nested_expr(co->e1.get(), cn->e1.get(), rep);
+                map_cloned_nested_expr(co->e2.get(), cn->e2.get(), rep);
+                map_cloned_nested_expr(co->e3.get(), cn->e3.get(), rep);
+                map_cloned_nested_stmts(co->body, cn->body, rep);
+                map_cloned_nested_stmts(co->body2, cn->body2, rep);
+            }
+        }
+        for (size_t j = 0; j < os.fns.size() && j < ns.fns.size(); j++) {
+            rep[&os.fns[j]] = &ns.fns[j];
+            map_cloned_nested_stmts(os.fns[j].body, ns.fns[j].body, rep);
+        }
+    }
+}
+
+static void map_cloned_nested_expr(const Expr *oe, const Expr *ne,
+                                   std::map<const FnDecl *, const FnDecl *> &rep) {
+    if (!oe || !ne) return;
+    for (size_t i = 0; i < oe->kids.size() && i < ne->kids.size(); i++)
+        map_cloned_nested_expr(oe->kids[i].get(), ne->kids[i].get(), rep);
+    if (oe->fn && ne->fn)
+        map_cloned_nested_stmts(oe->fn->body, ne->fn->body, rep);
+}
+
+namespace {
+
+struct ShadowRenamer {
+    int seq = 0;
+    bool changed = false;
+
+    void walk_expr(Expr *e, const std::map<std::string, std::string> &renames,
+                   std::set<std::string> &seen) {
+        if (!e) return;
+        if (e->k == EK::Var || e->k == EK::Call) {
+            auto it = renames.find(e->a);
+            if (it != renames.end()) {
+                e->a = it->second;
+                changed = true;
+            }
+        }
+        for (auto &k : e->kids) walk_expr(k.get(), renames, seen);
+        if (e->fn) {
+            auto sub_ren = renames;
+            auto sub_seen = seen;
+            for (auto &p : e->fn->params) {
+                if (p.def) walk_expr(p.def.get(), renames, seen);
+                sub_ren.erase(p.name);
+                if (!p.name.empty() && p.name != "_") sub_seen.insert(p.name);
+            }
+            walk_block(e->fn->body, sub_ren, sub_seen, false);
+        }
+    }
+
+    void walk_stmt(Stmt &s, std::map<std::string, std::string> &renames,
+                   std::map<std::string, std::string> &block_map,
+                   std::set<std::string> &seen, bool nested) {
+        switch (s.k) {
+        case SK::Let:
+        case SK::LetTmp: {
+            walk_expr(s.e1.get(), renames, seen);
+            if (!s.a.empty() && s.a != "_") {
+                if (nested) {
+                    auto bit = block_map.find(s.a);
+                    if (bit != block_map.end()) {
+                        renames[s.a] = bit->second;
+                        if (s.a != bit->second) {
+                            s.a = bit->second;
+                            changed = true;
+                        }
+                    } else if (seen.count(s.a)) {
+                        std::string fresh = s.a + "$sh" + std::to_string(++seq);
+                        block_map[s.a] = fresh;
+                        renames[s.a] = fresh;
+                        seen.insert(fresh);
+                        s.a = fresh;
+                        changed = true;
+                    } else {
+                        seen.insert(s.a);
+                        block_map[s.a] = s.a;
+                        renames.erase(s.a);
+                    }
+                } else {
+                    seen.insert(s.a);
+                }
+            }
+            break;
+        }
+        case SK::Set: {
+            walk_expr(s.e1.get(), renames, seen);
+            auto dot = s.a.find('.');
+            std::string head = dot == std::string::npos ? s.a : s.a.substr(0, dot);
+            auto it = renames.find(head);
+            if (it != renames.end()) {
+                s.a = it->second + (dot == std::string::npos ? "" : s.a.substr(dot));
+                changed = true;
+            }
+            break;
+        }
+        case SK::SetIdx:
+            walk_expr(s.e1.get(), renames, seen);
+            walk_expr(s.e2.get(), renames, seen);
+            walk_expr(s.e3.get(), renames, seen);
+            break;
+        case SK::SetField:
+            walk_expr(s.e1.get(), renames, seen);
+            walk_expr(s.e2.get(), renames, seen);
+            break;
+        case SK::Expr:
+        case SK::Return:
+        case SK::Defer:
+            walk_expr(s.e1.get(), renames, seen);
+            break;
+        case SK::Block:
+        case SK::Scope:
+        case SK::Unsafe:
+        case SK::Spawn: {
+            auto sub_ren = renames;
+            walk_block(s.body, sub_ren, seen, true);
+            break;
+        }
+        case SK::If: {
+            walk_expr(s.e1.get(), renames, seen);
+            {
+                auto sub_ren = renames;
+                walk_block(s.body, sub_ren, seen, true);
+            }
+            if (s.els) {
+                if (s.els->k == SK::Block) {
+                    auto sub_ren = renames;
+                    walk_block(s.els->body, sub_ren, seen, true);
+                } else {
+                    auto sub_ren = renames;
+                    std::map<std::string, std::string> sub_bmap;
+                    walk_stmt(*s.els, sub_ren, sub_bmap, seen, true);
+                }
+            }
+            break;
+        }
+        case SK::While: {
+            walk_expr(s.e1.get(), renames, seen);
+            auto sub_ren = renames;
+            walk_block(s.body, sub_ren, seen, true);
+            break;
+        }
+        case SK::ForRange:
+        case SK::ForIter: {
+            walk_expr(s.e1.get(), renames, seen);
+            walk_expr(s.e2.get(), renames, seen);
+            auto sub_ren = renames;
+            if (!s.a.empty() && s.a != "_") {
+                auto it = sub_ren.find(s.a);
+                if (it != sub_ren.end()) {
+                    s.a = it->second;
+                    changed = true;
+                } else {
+                    seen.insert(s.a);
+                }
+            }
+            walk_block(s.body, sub_ren, seen, true);
+            break;
+        }
+        case SK::Try: {
+            {
+                auto sub_ren = renames;
+                walk_block(s.body, sub_ren, seen, true);
+            }
+            {
+                auto catch_ren = renames;
+                if (s.opt1 && !s.opt1->empty() && *s.opt1 != "_") {
+                    if (seen.count(*s.opt1)) {
+                        std::string fresh = *s.opt1 + "$sh" + std::to_string(++seq);
+                        catch_ren[*s.opt1] = fresh;
+                        seen.insert(fresh);
+                        *s.opt1 = fresh;
+                        changed = true;
+                    } else {
+                        seen.insert(*s.opt1);
+                        catch_ren.erase(*s.opt1);
+                    }
+                }
+                walk_block(s.body2, catch_ren, seen, true);
+            }
+            if (s.els) {
+                auto sub_ren = renames;
+                if (s.els->k == SK::Block) walk_block(s.els->body, sub_ren, seen, true);
+                else {
+                    std::map<std::string, std::string> sub_bmap;
+                    walk_stmt(*s.els, sub_ren, sub_bmap, seen, true);
+                }
+            }
+            break;
+        }
+        case SK::Fn:
+        case SK::ExportFn:
+            for (auto &nf : s.fns) {
+                auto fn_ren = renames;
+                auto fn_seen = seen;
+                for (auto &p : nf.params) {
+                    if (p.def) walk_expr(p.def.get(), renames, seen);
+                    fn_ren.erase(p.name);
+                    if (!p.name.empty() && p.name != "_") fn_seen.insert(p.name);
+                }
+                walk_block(nf.body, fn_ren, fn_seen, false);
+            }
+            break;
+        case SK::Pub:
+            if (!s.body.empty() && s.body[0]) walk_stmt(*s.body[0], renames, block_map, seen, nested);
+            break;
+        default:
+            break;
+        }
+    }
+
+    void walk_block(std::vector<StmtP> &body, std::map<std::string, std::string> &renames,
+                    std::set<std::string> &seen, bool nested) {
+        std::map<std::string, std::string> block_map;
+        for (auto &sp : body) {
+            if (sp) walk_stmt(*sp, renames, block_map, seen, nested);
+        }
+    }
+};
+
+}  // namespace
+
+void Emitter::run_shadow_disambig() {
+    std::map<const FnDecl *, const FnDecl *> replaced;
+    for (auto &[name, entry] : fns) {
+        if (entry.ctor || !entry.decl) continue;
+        FnDecl copy = clone_fn(*entry.decl);
+        ShadowRenamer sr;
+        std::map<std::string, std::string> renames;
+        std::set<std::string> seen = global_lets;
+        for (auto &p : copy.params) {
+            if (p.def) sr.walk_expr(p.def.get(), renames, seen);
+            if (!p.name.empty() && p.name != "_") seen.insert(p.name);
+        }
+        sr.walk_block(copy.body, renames, seen, false);
+        if (sr.changed) {
+            const FnDecl *old_ptr = entry.decl;
+            map_cloned_nested_stmts(old_ptr->body, copy.body, replaced);
+            sra_fns.push_back(std::move(copy));
+            entry.decl = &sra_fns.back();
+            replaced[old_ptr] = entry.decl;
+        }
+    }
+    for (auto &l : late) {
+        auto it = replaced.find(l.decl);
+        if (it != replaced.end()) l.decl = it->second;
+    }
+    if (!top_exe.empty()) {
+        std::vector<StmtP> cloned_top;
+        cloned_top.reserve(top_exe.size());
+        for (const Stmt *s : top_exe) cloned_top.push_back(clone_stmt(*s));
+        ShadowRenamer sr;
+        std::map<std::string, std::string> renames;
+        std::set<std::string> seen = global_lets;
+        sr.walk_block(cloned_top, renames, seen, false);
+        if (sr.changed) {
+            top_exe.clear();
+            for (auto &sp : cloned_top) {
+                shadow_top_stmts.push_back(std::move(sp));
+                top_exe.push_back(shadow_top_stmts.back().get());
+            }
+        }
+    }
+}
+
 void Emitter::run_sra() {
     if (native_structs.empty()) return;
     std::map<const FnDecl *, const FnDecl *> replaced;
@@ -8152,6 +8440,7 @@ void Emitter::run_sra() {
         FnDecl copy = clone_fn(*entry.decl);
         if (sra_rewrite_decl(name, copy)) {
             const FnDecl *old_ptr = entry.decl;
+            map_cloned_nested_stmts(old_ptr->body, copy.body, replaced);
             sra_fns.push_back(std::move(copy));
             entry.decl = &sra_fns.back();
             replaced[old_ptr] = entry.decl;
@@ -8324,6 +8613,10 @@ void Emitter::run_pipeline() {
         if (o.meth) mtab[std::make_pair(o.a, o.b)] = fn_code("meth:" + o.a + "." + o.b);
     user_meths.clear();
     for (const auto &[k, v] : mtab) user_meths.insert(k.second);
+    if (!shadows_done) {
+        shadows_done = true;
+        run_shadow_disambig();
+    }
     if (opt >= 1 && !sra_done) {
         sra_done = true;
         run_sra();
@@ -9211,8 +9504,7 @@ std::string Emitter::emit_program() {
             if (!joined.empty()) joined += ", ";
             joined += p;
         }
-        const std::string cb_head =
-            cat("brat_cb_", cb.name, "(", joined.empty() ? "void" : joined, ")");
+        const std::string cb_head = cat("brat_cb_", cb.name, "(", joined, ")");
         ln("", cat(ffi_decl_named(cb.ret_ann, cb_head), ";"));
     }
     ln("", "");
@@ -9256,8 +9548,7 @@ std::string Emitter::emit_program() {
             if (!joined.empty()) joined += ", ";
             joined += p;
         }
-        const std::string cb_head =
-            cat("brat_cb_", cb.name, "(", joined.empty() ? "void" : joined, ")");
+        const std::string cb_head = cat("brat_cb_", cb.name, "(", joined, ")");
         ln("", cat(ffi_decl_named(cb.ret_ann, cb_head), " {"));
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
