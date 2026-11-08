@@ -3102,6 +3102,14 @@ V Emitter::ex(const Expr &e) {
     throw EmitError("node");
 }
 
+struct CleanupGuard {
+    std::vector<std::string> &vec;
+    size_t base;
+    ~CleanupGuard() {
+        if (vec.size() > base) vec.resize(base);
+    }
+};
+
 V Emitter::ex_str(const std::string &s) {
     auto parts = split_interp(s);
     if (parts.empty()) return {{}, "vlit(\"\")"};
@@ -3109,12 +3117,19 @@ V Emitter::ex_str(const std::string &s) {
         return {{}, cat("vlit(\"", clit(parts[0].second), "\")")};
     std::string t = new_tmp("s");
     std::vector<std::string> pre = {cat("Val ", t, " = vlit(\"\");")};
+    CleanupGuard guard{call_cleanup, call_cleanup.size()};
+    call_cleanup.push_back(t);
     for (const auto &[kind, val] : parts) {
         if (kind == "lit") {
-            pre.push_back(cat(t, " = vadd(", t, ", vlit(\"", clit(val), "\"));"));
+            pre.push_back(cat(t, " = vadd_self(", t, ", vlit(\"", clit(val), "\"));"));
         } else {
-            pre.push_back(cat(t, " = vadd(", t, ", vstr_of(", path_ref(val), "));"));
+            std::string sv = new_tmp("sv");
+            pre.push_back(cat("Val ", sv, " = vstr_of(", path_ref(val), ");"));
+            pre.push_back(err_check_line({sv}));
+            pre.push_back(cat(t, " = vadd_self(", t, ", ", sv, ");"));
+            pre.push_back(cat("vdrop_temp(", sv, ");"));
         }
+        pre.push_back(err_check_line());
     }
     return {pre, t};
 }
@@ -3357,7 +3372,6 @@ V Emitter::ex_bin(const Expr &e) {
         }
     }
     V a = ex(*e.kids[0]);
-    V b = ex(*e.kids[1]);
     // `n + f()` must not add the placeholder value `f` left behind when it
     // failed: the pending error travels to the enclosing try, not into `+`.
     std::vector<std::string> pre = a.pre;
@@ -3388,37 +3402,54 @@ V Emitter::ex_bin(const Expr &e) {
         }
         drops.push_back(val);
     };
+    auto is_lit_ctr = [](const Expr &node, const std::string &val) {
+        const auto k = node.k;
+        const bool is_ml = (k == EK::MapLit && val.rfind("_ml", 0) == 0);
+        return (container_tmp(val) || is_ml) &&
+               (k == EK::VecLit || k == EK::MapLit || k == EK::StructLit);
+    };
     hold(*e.kids[0], a.val);
-    if (!a.pre.empty() && may_raise(*e.kids[0])) pre.push_back(err_check_line(drops));
+    std::vector<std::string> lhs_err = drops;
+    if (is_lit_ctr(*e.kids[0], a.val)) lhs_err.push_back(a.val);
+    if (!a.pre.empty() && may_raise(*e.kids[0])) pre.push_back(err_check_line(lhs_err));
+    V b;
+    {
+        CleanupGuard guard{call_cleanup, call_cleanup.size()};
+        for (const auto &d : lhs_err) call_cleanup.push_back(d);
+        b = ex(*e.kids[1]);
+    }
     for (auto &p : b.pre) pre.push_back(p);
     hold(*e.kids[1], b.val);
-    if (!b.pre.empty() && may_raise(*e.kids[1])) pre.push_back(err_check_line(drops));
+    if (!b.pre.empty() && may_raise(*e.kids[1])) {
+        std::vector<std::string> rhs_err = drops;
+        if (is_lit_ctr(*e.kids[0], a.val)) rhs_err.push_back(a.val);
+        if (is_lit_ctr(*e.kids[1], b.val)) rhs_err.push_back(b.val);
+        pre.push_back(err_check_line(rhs_err));
+    }
     if (op == "+") {
         std::string t = new_tmp("v");
         pre.push_back(cat("Val ", t, " = vadd(", a.val, ", ", b.val, ");"));
+        bool has_ctr = false;
         const Expr *nodes[2] = {e.kids[0].get(), e.kids[1].get()};
         const std::string vals[2] = {a.val, b.val};
         for (int i = 0; i < 2; i++) {
-            auto k = nodes[i]->k;
-            bool is_ml = (k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
-            if ((container_tmp(vals[i]) || is_ml) && (k == EK::VecLit || k == EK::MapLit))
+            if (is_lit_ctr(*nodes[i], vals[i])) {
                 pre.push_back(cat("vrc_dec(", vals[i], ");"));
+                has_ctr = true;
+            }
         }
         for (auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
-        if (!drops.empty()) pre.push_back(err_check_line());
+        if (!drops.empty() || has_ctr) pre.push_back(err_check_line());
         return {pre, t};
     }
-    // A container built for a comparison is read, not consumed: `v == [1, 2, 3]`
+    // A container built for a binary op is read, not consumed: `v == [1, 2, 3]`
     // left the literal's vector behind on every evaluation.
     std::vector<std::string> cdrops;
-    if (op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" || op == "in") {
+    {
         const Expr *nodes[2] = {e.kids[0].get(), e.kids[1].get()};
         const std::string vals[2] = {a.val, b.val};
         for (int i = 0; i < 2; i++) {
-            auto k = nodes[i]->k;
-            bool is_ml = (k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
-            if (!container_tmp(vals[i]) && !is_ml) continue;
-            if (k == EK::VecLit || k == EK::MapLit || k == EK::StructLit)
+            if (is_lit_ctr(*nodes[i], vals[i]))
                 cdrops.push_back(cat("vrc_dec(", vals[i], ");"));
         }
     }
@@ -3714,10 +3745,13 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
 V Emitter::ex_vec(const ExprList &items) {
     std::string t = new_tmp("v");
     std::vector<std::string> pre = {cat("Vec *", t, " = vvec();")};
+    CleanupGuard guard{call_cleanup, call_cleanup.size()};
+    call_cleanup.push_back(cat("vvecv(", t, ")"));
     for (const Expr *x : items) {
         V xv = ex(*x);
         for (auto &p : xv.pre) pre.push_back(p);
         pre.push_back(cat("vec_push(", t, ", ", keep(*x, xv.val), ");"));
+        if (may_raise(*x)) pre.push_back(err_check_line());
     }
     return {pre, cat("vvecv(", t, ")")};
 }
@@ -3764,24 +3798,39 @@ V Emitter::ex_maplit(const ExprList &kids) {
             std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid,
                                                 "], \"\", _sk", sid, ", ",
                                                 static_cast<int>(npairs), ");")};
+            CleanupGuard guard{call_cleanup, call_cleanup.size()};
+            call_cleanup.push_back(cat("vstruct(", t, ")"));
             for (size_t k = 0; k < npairs; k++) {
                 const Expr &ve = *kids[k * 2 + 1];
                 V vv = ex(ve);
                 for (auto &p : vv.pre) pre.push_back(p);
                 pre.push_back(cat(t, "->vals[", static_cast<int>(k), "] = ", keep(ve, vv.val), ";"));
+                if (may_raise(ve)) pre.push_back(err_check_line());
             }
             return {pre, cat("vstruct(", t, ")")};
         }
     }
     std::string t = new_tmp("m");
     std::vector<std::string> pre = {cat("Map *", t, " = vmap(\"\");")};
+    CleanupGuard guard{call_cleanup, call_cleanup.size()};
+    call_cleanup.push_back(cat("vstruct(", t, ")"));
     for (size_t i = 0; i + 1 < kids.size(); i += 2) {
         const Expr &ke = *kids[i], &ve = *kids[i + 1];
         V kv = ex(ke);
-        V vv = ex(ve);
         for (auto &p : kv.pre) pre.push_back(p);
+        std::string kt = new_tmp("mk");
+        pre.push_back(cat("Val ", kt, " = ", keep(ke, kv.val), ";"));
+        const size_t kbase = call_cleanup.size();
+        call_cleanup.push_back(kt);
+        if (may_raise(ke)) pre.push_back(err_check_line());
+        V vv = ex(ve);
         for (auto &p : vv.pre) pre.push_back(p);
-        pre.push_back(cat("map_set_v(", t, ", ", keep(ke, kv.val), ", ", keep(ve, vv.val), ");"));
+        std::string vt = new_tmp("mv");
+        pre.push_back(cat("Val ", vt, " = ", keep(ve, vv.val), ";"));
+        call_cleanup.push_back(vt);
+        if (may_raise(ve)) pre.push_back(err_check_line());
+        call_cleanup.resize(kbase);
+        pre.push_back(cat("map_set_v(", t, ", ", kt, ", ", vt, ");"));
     }
     std::string r = new_tmp("ml");
     pre.push_back(cat("Val ", r, " = vmap_has_reserved(", t, ") ? vmapkey_err() :"
@@ -3809,11 +3858,14 @@ V Emitter::ex_struct(const Expr &e) {
             std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid, "], \"",
                                                 clit(e.a), "\", _sk", sid, ", ",
                                                 static_cast<int>(nit->second->size()), ");")};
+            CleanupGuard guard{call_cleanup, call_cleanup.size()};
+            call_cleanup.push_back(cat("vstruct(", t, ")"));
             for (size_t i = 0; i < e.names.size(); i++) {
                 const Expr &fv = *e.kids[i];
                 V f = ex(fv);
                 for (auto &p : f.pre) pre.push_back(p);
                 pre.push_back(cat(t, "->vals[", slots[i], "] = ", keep(fv, f.val), ";"));
+                if (may_raise(fv)) pre.push_back(err_check_line());
             }
             return {pre, cat("vstruct(", t, ")")};
         }
@@ -3823,20 +3875,28 @@ V Emitter::ex_struct(const Expr &e) {
         std::vector<std::string> pre = {cat("Map *", t, " = vmap_shaped(&_shp[", sid, "], \"",
                                             clit(e.a), "\", _sk", sid, ", ",
                                             static_cast<int>(e.names.size()), ");")};
+        CleanupGuard guard{call_cleanup, call_cleanup.size()};
+        call_cleanup.push_back(cat("vstruct(", t, ")"));
         for (size_t i = 0; i < e.names.size(); i++) {
             const Expr &fv = *e.kids[i];
             V f = ex(fv);
             for (auto &p : f.pre) pre.push_back(p);
             pre.push_back(cat(t, "->vals[", static_cast<int>(i), "] = ", keep(fv, f.val), ";"));
+            if (may_raise(fv)) pre.push_back(err_check_line());
         }
         return {pre, cat("vstruct(", t, ")")};
     }
     std::vector<std::string> pre = {cat("Map *", t, " = vmap(\"", clit(e.a), "\");")};
+    CleanupGuard guard{call_cleanup, call_cleanup.size()};
+    call_cleanup.push_back(cat("vstruct(", t, ")"));
     for (size_t i = 0; i < e.names.size(); i++) {
         const Expr &fv = *e.kids[i];
         V f = ex(fv);
         for (auto &p : f.pre) pre.push_back(p);
-        pre.push_back(cat("map_set(", t, ", \"", clit(e.names[i]), "\", ", keep(fv, f.val), ");"));
+        std::string ft = new_tmp("mf");
+        pre.push_back(cat("Val ", ft, " = ", keep(fv, f.val), ";"));
+        if (may_raise(fv)) pre.push_back(err_check_line({ft}));
+        pre.push_back(cat("map_set(", t, ", \"", clit(e.names[i]), "\", ", ft, ");"));
     }
     return {pre, cat("vstruct(", t, ")")};
 }
@@ -4294,10 +4354,13 @@ void Emitter::need_arity(const ExprList &args, size_t n, const std::string &name
 V Emitter::ex_tag(const std::string &tag, const ExprList &args) {
     std::string t = new_tmp("g");
     std::vector<std::string> pre = {cat("Vec *", t, " = vvec();")};
+    CleanupGuard guard{call_cleanup, call_cleanup.size()};
+    call_cleanup.push_back(cat("vvecv(", t, ")"));
     for (const Expr *a : args) {
         V v = ex(*a);
         for (auto &p : v.pre) pre.push_back(p);
         pre.push_back(cat("vec_push(", t, ", ", keep(*a, v.val), ");"));
+        if (may_raise(*a)) pre.push_back(err_check_line());
     }
     return {pre, cat("vtagv(\"", tag, "\", ", t, ")")};
 }

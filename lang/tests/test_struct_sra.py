@@ -437,6 +437,68 @@ fn cf_move_and_rebind() -> i64 {
   return sum
 }
 
+enum BoxPair {
+  PairBox(str, str),
+}
+
+fn quest_struct_unwind(k: i64) -> Result[Packet, str] {
+  let pkt = Packet {
+    tag: "quest_struct_payload_" + str(k),
+    items: [k, cf_maybe_err(true, k)?],
+    weight: k + 5,
+  }
+  return Ok(pkt)
+}
+
+fn quest_cmp_unwind(k: i64) -> Result[bool, str] {
+  let eq = [k, k + 1, k + 2] == [cf_maybe_err(true, k)?]
+  return Ok(eq)
+}
+
+fn unwind_partial_containers(k: i64) -> str {
+  let mut caught = 0
+  let mut tail_ran = 0
+  let bump_tail = fn() {
+    tail_ran = tail_ran + 1
+    return "tail"
+  }
+  try {
+    let v = ["vec_head_long_payload_" + str(k), cf_boom_str(true, k), bump_tail()]
+    caught = caught + len(v)
+  } catch _e {
+    caught = caught + 1
+  }
+  try {
+    let m1 = {"a": "shaped_map_long_payload_" + str(k), "b": cf_boom_str(true, k)}
+    caught = caught + len(m1)
+  } catch _e {
+    caught = caught + 1
+  }
+  try {
+    let m2 = {"dyn_k1_" + str(k): "dyn_v1_long_" + str(k), "dyn_k2_" + str(k): cf_boom_str(true, k)}
+    caught = caught + len(m2)
+  } catch _e {
+    caught = caught + 1
+  }
+  try {
+    let bx = PairBox("enum_long_payload_" + str(k), cf_boom_str(true, k))
+    match bx {
+      PairBox(a, b) => { caught = caught + len(a) + len(b) }
+    }
+  } catch _e {
+    caught = caught + 1
+  }
+  try {
+    let s = ("lhs_long_heap_prefix_exceeding_sso_" + str(k)) + cf_boom_str(true, k)
+    caught = caught + len(s)
+  } catch _e {
+    caught = caught + 1
+  }
+  if quest_struct_unwind(k).is_err() { caught = caught + 1 }
+  if quest_cmp_unwind(k).is_err() { caught = caught + 1 }
+  return "{caught}:{tail_ran}"
+}
+
 fn main() -> i64 {
   print(eval_order())
   print(nested_ray_loop(1000))
@@ -449,6 +511,7 @@ fn main() -> i64 {
   let mut p = Point { x: 4, y: 9 }.shifted(2, 3)
   print("{p.bump(5)}|{pure_dot(3, 4, 5, 6)}")
   print(cf_move_and_rebind())
+  print(unwind_partial_containers(99))
   print("struct-sra-all-ok")
   return 0
 }
@@ -474,7 +537,8 @@ check(lines[3] == "35:30|ok:888:999", f"normal Set broken: {lines[3]!r}")
 check(lines[4] == "59|105|5-9|true", f"match_and_interp broken: {lines[4]!r}")
 check(lines[5] == "77|55|20|11", f"escape_semantics broken: {lines[5]!r}")
 check(lines[6] == "17,42->117|caught", f"gradual_safety broken: {lines[6]!r}")
-check(lines[-2] == "536", f"cf_move_and_rebind broken: {lines[-2]!r}")
+check(lines[-3] == "536", f"cf_move_and_rebind broken: {lines[-3]!r}")
+check(lines[-2] == "7:0", f"unwind_partial_containers broken: {lines[-2]!r}")
 check(lines[-1] == "struct-sra-all-ok", f"missing final sentinel: {lines[-1]!r}")
 
 
@@ -524,24 +588,25 @@ check(w_o2.returncode == 0 and "sra: scalarized non-escaping struct `Pair` local
 check("_sra_" not in w_o2.stderr, f"--why-opt leaked synthetic _sra_ identifier: {w_o2.stderr!r}")
 
 
-# 4. ASan + UBSan + LSan verification on emitted `-O2` C (and `-Wunused` cleanliness!)
+# 4. ASan + UBSan + LSan verification on emitted `-O0` and `-O2` C (and `-Wunused` cleanliness!)
 if sys.platform.startswith("linux"):
-    c_file = write_src("e2e_o2.c", em_o2.stdout)
-    bin_out = os.path.join(TMP, "e2e_asan")
     cc_bin = os.environ.get("CC", "cc")
     eng_inc = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine"))
-    comp = subprocess.run(
-        [cc_bin, "-std=c11", "-O1", "-g1", "-Wall", "-Wno-unused-function",
-         "-Werror=unused-const-variable", "-fsanitize=address,undefined",
-         "-I", eng_inc, c_file, "-lm", "-lpthread", "-o", bin_out],
-        capture_output=True, text=True, timeout=120,
-    )
-    check(comp.returncode == 0, f"ASan/Wall compile failed:\n{comp.stdout}\n{comp.stderr}")
     asan_env = dict(ENV, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1",
                     UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1")
-    ar = subprocess.run([bin_out], capture_output=True, text=True, timeout=60, env=asan_env)
-    check(ar.returncode == 0 and ar.stdout == outs["-O2"],
-          f"ASan/LSan run failed: rc={ar.returncode}\nout={ar.stdout}\nerr={ar.stderr}")
+    for tag, emitted in (("o0", em_o0.stdout), ("o2", em_o2.stdout)):
+        c_file = write_src(f"e2e_{tag}.c", emitted)
+        bin_out = os.path.join(TMP, f"e2e_asan_{tag}")
+        comp = subprocess.run(
+            [cc_bin, "-std=c11", "-O1", "-g1", "-Wall", "-Wno-unused-function",
+             "-Werror=unused-const-variable", "-fsanitize=address,undefined",
+             "-I", eng_inc, c_file, "-lm", "-lpthread", "-o", bin_out],
+            capture_output=True, text=True, timeout=120,
+        )
+        check(comp.returncode == 0, f"ASan/Wall compile ({tag}) failed:\n{comp.stdout}\n{comp.stderr}")
+        ar = subprocess.run([bin_out], capture_output=True, text=True, timeout=60, env=asan_env)
+        check(ar.returncode == 0 and ar.stdout == outs["-O2"],
+              f"ASan/LSan ({tag}) run failed: rc={ar.returncode}\nout={ar.stdout}\nerr={ar.stderr}")
 
     # 5. C FFI (`extern struct` by-value + contiguous pointer memory with `--header` verification) alongside SRA
     ffi_h = write_src("ffi_vec.h", """#include <stdint.h>
