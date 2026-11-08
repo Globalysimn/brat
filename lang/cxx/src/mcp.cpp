@@ -22,6 +22,7 @@
 #include <thread>
 
 #if defined(_WIN32)
+#include <fcntl.h>
 #include <io.h>
 #include <windows.h>
 #else
@@ -850,6 +851,10 @@ int cmd_mcp(int argc, char **argv) {
         std::fprintf(stderr, "brat-cxx mcp: cannot resolve executable path\n");
         return 1;
     }
+#if defined(_WIN32)
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     bool initialized = false;
     bool jsonl_mode = false;
     while (true) {

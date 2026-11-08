@@ -28,6 +28,11 @@
 #include "module.h"
 #include "parser.h"
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 namespace {
 
 using lsp_wire::FrameStatus;
@@ -3902,4 +3907,10 @@ private:
 
 }  // namespace
 
-int run_lsp() { return Server().run(); }
+int run_lsp() {
+#if defined(_WIN32)
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    return Server().run();
+}

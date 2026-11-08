@@ -45,7 +45,7 @@ Build-time FFI flags accepted by `build` and `run`:
 | `brat bundle <file.brat> -o <out.tar.gz>` | Pack `<file.brat>`, all transitive local/vendored `.brat`/`.bri` imports, `crt.h`, and `crt/*.h` into a self-contained tarball buildable anywhere with a C11 compiler. |
 | `brat explain [--json] <code>` | Print a worked explanation and fix example for diagnostic code `<code>` (listed below). |
 | `brat lsp` | Start the JSON-RPC 2.0 Language Server on `stdio` (diagnostics, hover, go-to-definition, completions, formatting, code actions). |
-| `brat mcp [--root dir]` | Start the Model Context Protocol tool server on `stdio`, confined to `--root` (default `.`). |
+| `brat mcp` | Start the Model Context Protocol tool server on `stdio`. |
 
 ---
 

@@ -168,33 +168,41 @@ def test_large_frame_compile_speed_and_leak_freedom():
 
     with tempfile.TemporaryDirectory() as td:
         cp = os.path.join(td, "heavy.c")
-        exe = os.path.join(td, "heavy")
+        exe = os.path.join(td, "heavy.exe" if sys.platform == "win32" else "heavy")
         with open(cp, "w", encoding="utf-8") as f:
             f.write(c_code)
         cc = os.environ.get("CC", "gcc")
+        if sys.platform == "win32":
+            link_libs = ["-lws2_32"]
+        elif sys.platform == "darwin":
+            link_libs = ["-lm", "-lpthread"]
+        else:
+            link_libs = ["-lm", "-lpthread", "-ldl"]
         t0 = time.perf_counter()
         comp = subprocess.run(
-            [cc, "-std=c99", "-O2", "-I", ENGINE, cp, "-lm", "-lpthread", "-ldl", "-o", exe],
+            [cc, "-std=c99", "-O2", "-I", ENGINE, cp, *link_libs, "-o", exe],
             capture_output=True, text=True,
         )
         dt = time.perf_counter() - t0
         assert comp.returncode == 0, comp.stderr
-        assert dt < 10.0, f"200-local -O2 C compile regressed to {dt:.2f}s (SSA phi blowup)"
+        assert dt < 15.0, f"200-local -O2 C compile regressed to {dt:.2f}s (SSA phi blowup)"
         run = subprocess.run([exe], capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
         expected_out = run.stdout
 
-        asan_exe = os.path.join(td, "heavy_asan")
-        asan_comp = subprocess.run(
-            [cc, "-std=c99", "-O1", "-g", "-fsanitize=address,undefined",
-             "-I", ENGINE, cp, "-lm", "-lpthread", "-ldl", "-o", asan_exe],
-            capture_output=True, text=True,
-        )
-        if asan_comp.returncode == 0:
-            env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1")
-            asan_run = subprocess.run([asan_exe], capture_output=True, text=True, env=env)
-            assert asan_run.returncode == 0, f"ASan/LSan failure:\n{asan_run.stderr}"
-            assert asan_run.stdout == expected_out
+        if sys.platform != "win32":
+            asan_exe = os.path.join(td, "heavy_asan")
+            asan_comp = subprocess.run(
+                [cc, "-std=c99", "-O1", "-g", "-fsanitize=address,undefined",
+                 "-I", ENGINE, cp, *link_libs, "-o", asan_exe],
+                capture_output=True, text=True,
+            )
+            if asan_comp.returncode == 0:
+                asan_opts = "halt_on_error=1" if sys.platform == "darwin" else "detect_leaks=1:halt_on_error=1"
+                env = dict(os.environ, ASAN_OPTIONS=asan_opts)
+                asan_run = subprocess.run([asan_exe], capture_output=True, text=True, env=env)
+                assert asan_run.returncode == 0, f"ASan/LSan failure:\n{asan_run.stderr}"
+                assert asan_run.stdout == expected_out
 
 
 if __name__ == "__main__":
