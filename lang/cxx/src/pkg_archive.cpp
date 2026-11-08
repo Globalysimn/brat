@@ -490,17 +490,43 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
 #endif
 }
 
-bool find_c_compiler(std::string &cc_out, bool &is_zig, std::string &error) {
+bool find_c_compiler(std::vector<std::string> &cc_out, bool &is_zig, std::string &error) {
     if (const char *env_cc = std::getenv("BRAT_CC"); env_cc && *env_cc) {
-        cc_out = env_cc;
-        is_zig = std::filesystem::path(cc_out).filename().string().rfind("zig", 0) == 0;
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(env_cc, ec)) {
+            cc_out = {env_cc};
+        } else {
+            cc_out.clear();
+            std::string cur;
+            char q = 0;
+            for (size_t i = 0; env_cc[i]; ++i) {
+                char c = env_cc[i];
+                if (q) {
+                    if (c == q) q = 0;
+                    else cur.push_back(c);
+                } else if (c == '\'' || c == '"') {
+                    q = c;
+                } else if (c == ' ' || c == '\t') {
+                    if (!cur.empty()) { cc_out.push_back(std::move(cur)); cur.clear(); }
+                } else {
+                    cur.push_back(c);
+                }
+            }
+            if (!cur.empty()) cc_out.push_back(std::move(cur));
+        }
+        if (cc_out.empty()) {
+            error = "empty BRAT_CC";
+            return false;
+        }
+        is_zig = std::filesystem::path(cc_out[0]).filename().string().rfind("zig", 0) == 0 &&
+                 !(cc_out.size() >= 2 && cc_out[1] == "cc");
         return true;
     }
     for (const char *cand : {"cc", "gcc", "clang"}) {
         int rc = 0;
         std::string out;
         if (exec_capture({cand, "--version"}, rc, out) && rc == 0) {
-            cc_out = cand;
+            cc_out = {cand};
             is_zig = false;
             return true;
         }
@@ -745,14 +771,17 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
     }
 
     if (!c_sources.empty() && !pkg_name.empty()) {
-        std::string cc_exe;
+        std::vector<std::string> cc_cmd;
         bool is_zig = false;
-        if (!find_c_compiler(cc_exe, is_zig, error)) {
+        if (!find_c_compiler(cc_cmd, is_zig, error)) {
             if (eff_target.empty()) {
                 error = "cannot verify c_sources for " + pkg_name + ": " + error;
                 return false;
             }
-        } else if (eff_target.empty() || is_zig) {
+        } else if (eff_target.empty() || is_zig ||
+                   (!cc_cmd.empty() && std::filesystem::path(cc_cmd[0]).filename().string().rfind("zig", 0) == 0)) {
+            const bool zig_any = !cc_cmd.empty() &&
+                                 std::filesystem::path(cc_cmd[0]).filename().string().rfind("zig", 0) == 0;
             const std::filesystem::path pkg_td = td.path / pkg_name;
             std::error_code ec;
             std::filesystem::create_directories(pkg_td, ec);
@@ -792,11 +821,9 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
                 }
                 const std::filesystem::path cpath = td.path / std::filesystem::path(rel_cs);
                 const std::filesystem::path opath = td.path / ("__cs_" + std::to_string(cs_idx++) + ".o");
-                std::vector<std::string> cmd{cc_exe};
-                if (is_zig) {
-                    cmd.push_back("cc");
-                    if (!eff_target.empty()) cmd.push_back("--target=" + eff_target);
-                }
+                std::vector<std::string> cmd = cc_cmd;
+                if (is_zig) cmd.push_back("cc");
+                if (zig_any && !eff_target.empty()) cmd.push_back("--target=" + eff_target);
                 cmd.insert(cmd.end(), {"-c", "-g", cpath.string(), "-o", opath.string(),
                                        "-std=gnu11", "-O2", "-fwrapv", "-I", pkg_td.string()});
                 int rc = 0;

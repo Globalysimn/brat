@@ -1400,6 +1400,11 @@ int cmd_doc(int argc, char **argv) {
             return 1;
         }
         out.write(rendered.data(), static_cast<std::streamsize>(rendered.size()));
+        out.flush();
+        if (!out) {
+            std::fprintf(stderr, "brat doc: cannot write %s\n", out_path.c_str());
+            return 1;
+        }
     } else {
         std::fwrite(rendered.data(), 1, rendered.size(), stdout);
     }

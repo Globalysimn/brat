@@ -798,11 +798,66 @@ void body_check(const View &body, const std::map<std::string, Declared> &decls,
         case SK::Defer:
             expr_check(s->e1.get(), decls, fns, globals, out, st, line);
             break;
-        case SK::If:
+        case SK::If: {
             expr_check(s->e1.get(), decls, fns, globals, out, st, line);
-            body_check(view(s->body), decls, fns, globals, out, st, line);
-            body_check(else_of(*s), decls, fns, globals, out, st, line);
+            auto view_exits = [](const View &v) {
+                if (v.empty() || !v.back()) return false;
+                const SK k = v.back()->k;
+                return k == SK::Return || k == SK::Break || k == SK::Continue;
+            };
+            const View tv = view(s->body);
+            const View ev = else_of(*s);
+            State then_st = st;
+            body_check(tv, decls, fns, globals, out, then_st, line);
+            State else_st = st;
+            else_st.next_id = then_st.next_id;
+            body_check(ev, decls, fns, globals, out, else_st, line);
+            const bool t_exit = view_exits(tv);
+            const bool e_exit = !ev.empty() && view_exits(ev);
+            auto merge_into = [](State &dst, const State &a, const State &b) {
+                dst.next_id = std::max(a.next_id, b.next_id);
+                for (const auto &kv : a.closed) dst.closed.insert(kv);
+                for (const auto &kv : b.closed) dst.closed.insert(kv);
+                for (const auto &kv : a.moved) dst.moved.insert(kv);
+                for (const auto &kv : b.moved) dst.moved.insert(kv);
+                for (const auto &kv : a.owned_ptr) dst.owned_ptr.insert(kv);
+                for (const auto &kv : b.owned_ptr) dst.owned_ptr.insert(kv);
+                std::set<std::string> all_own;
+                for (const auto &kv : dst.owned_ptr) all_own.insert(kv.first);
+                dst.consumed.clear();
+                for (const std::string &nm : all_own) {
+                    const bool in_a = !a.owned_ptr.count(nm) || a.consumed.count(nm);
+                    const bool in_b = !b.owned_ptr.count(nm) || b.consumed.count(nm);
+                    if (in_a && in_b) dst.consumed.insert(nm);
+                }
+                for (const auto &kv : a.retained_cb) {
+                    auto &vec = dst.retained_cb[kv.first];
+                    for (const auto &it : kv.second)
+                        if (std::find(vec.begin(), vec.end(), it) == vec.end()) vec.push_back(it);
+                }
+                for (const auto &kv : b.retained_cb) {
+                    auto &vec = dst.retained_cb[kv.first];
+                    for (const auto &it : kv.second)
+                        if (std::find(vec.begin(), vec.end(), it) == vec.end()) vec.push_back(it);
+                }
+            };
+            if (t_exit && !e_exit) {
+                for (const auto &kv : then_st.owned_ptr) {
+                    if (!then_st.consumed.count(kv.first) && !st.owned_ptr.count(kv.first))
+                        out.push_back(BorrowDiag{kv.second, own_leak(kv.first, kv.second), std::nullopt});
+                }
+                st = std::move(else_st);
+            } else if (e_exit && !t_exit) {
+                for (const auto &kv : else_st.owned_ptr) {
+                    if (!else_st.consumed.count(kv.first) && !st.owned_ptr.count(kv.first))
+                        out.push_back(BorrowDiag{kv.second, own_leak(kv.first, kv.second), std::nullopt});
+                }
+                st = std::move(then_st);
+            } else {
+                merge_into(st, then_st, else_st);
+            }
             break;
+        }
         case SK::While:
             expr_check(s->e1.get(), decls, fns, globals, out, st, line);
             body_check(view(s->body), decls, fns, globals, out, st, line);
@@ -822,10 +877,65 @@ void body_check(const View &body, const std::map<std::string, Declared> &decls,
         case SK::Block:
             body_check(view(s->body), decls, fns, globals, out, st, line);
             break;
-        case SK::Try:
-            body_check(view(s->body), decls, fns, globals, out, st, line);
-            body_check(view(s->body2), decls, fns, globals, out, st, line);
+        case SK::Try: {
+            auto view_exits = [](const View &v) {
+                if (v.empty() || !v.back()) return false;
+                const SK k = v.back()->k;
+                return k == SK::Return || k == SK::Break || k == SK::Continue;
+            };
+            auto merge_into = [](State &dst, const State &a, const State &b) {
+                dst.next_id = std::max(a.next_id, b.next_id);
+                for (const auto &kv : a.closed) dst.closed.insert(kv);
+                for (const auto &kv : b.closed) dst.closed.insert(kv);
+                for (const auto &kv : a.moved) dst.moved.insert(kv);
+                for (const auto &kv : b.moved) dst.moved.insert(kv);
+                for (const auto &kv : a.owned_ptr) dst.owned_ptr.insert(kv);
+                for (const auto &kv : b.owned_ptr) dst.owned_ptr.insert(kv);
+                std::set<std::string> all_own;
+                for (const auto &kv : dst.owned_ptr) all_own.insert(kv.first);
+                dst.consumed.clear();
+                for (const std::string &nm : all_own) {
+                    const bool in_a = !a.owned_ptr.count(nm) || a.consumed.count(nm);
+                    const bool in_b = !b.owned_ptr.count(nm) || b.consumed.count(nm);
+                    if (in_a && in_b) dst.consumed.insert(nm);
+                }
+                for (const auto &kv : a.retained_cb) {
+                    auto &vec = dst.retained_cb[kv.first];
+                    for (const auto &it : kv.second)
+                        if (std::find(vec.begin(), vec.end(), it) == vec.end()) vec.push_back(it);
+                }
+                for (const auto &kv : b.retained_cb) {
+                    auto &vec = dst.retained_cb[kv.first];
+                    for (const auto &it : kv.second)
+                        if (std::find(vec.begin(), vec.end(), it) == vec.end()) vec.push_back(it);
+                }
+            };
+            const View tv = view(s->body);
+            const View cv = view(s->body2);
+            State try_st = st;
+            body_check(tv, decls, fns, globals, out, try_st, line);
+            State catch_st = st;
+            catch_st.next_id = try_st.next_id;
+            body_check(cv, decls, fns, globals, out, catch_st, line);
+            const bool t_exit = view_exits(tv);
+            const bool c_exit = view_exits(cv);
+            if (t_exit && !c_exit) {
+                for (const auto &kv : try_st.owned_ptr) {
+                    if (!try_st.consumed.count(kv.first) && !st.owned_ptr.count(kv.first))
+                        out.push_back(BorrowDiag{kv.second, own_leak(kv.first, kv.second), std::nullopt});
+                }
+                st = std::move(catch_st);
+            } else if (c_exit && !t_exit) {
+                for (const auto &kv : catch_st.owned_ptr) {
+                    if (!catch_st.consumed.count(kv.first) && !st.owned_ptr.count(kv.first))
+                        out.push_back(BorrowDiag{kv.second, own_leak(kv.first, kv.second), std::nullopt});
+                }
+                st = std::move(try_st);
+            } else {
+                merge_into(st, try_st, catch_st);
+            }
             break;
+        }
         default:
             break;
         }

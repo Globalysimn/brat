@@ -12,8 +12,8 @@ exact same subcommands and flags.
 | Command | Purpose |
 |---|---|
 | `brat check [--json] <file.brat>` | Parse, load modules, check ownership (`borrow.cpp`) and types (`check.cpp`) without invoking a C compiler. `--json` emits machine-readable diagnostics (`code`, `severity`, `line`, `col`, `message`, `hint`, `fix`). |
-| `brat run [-O0\|-O1\|-O2] [--trace-lines] [--mem MB] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
-| `brat build [-O0\|-O1\|-O2] [--shared] [--out-header out.h] [--trace-lines] [--mem MB] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). |
+| `brat run [-O0\|-O1\|-O2] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
+| `brat build [-O0\|-O1\|-O2] [--shared] [--out-header out.h] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). |
 | `brat emit-c [-O0\|-O1\|-O2] [--trace-lines] <file.brat> [-o out.c]` | Write the generated C11 translation unit to `stdout` or `-o out.c` so you can read it or feed a custom build system. |
 | `brat repl` | Interactive read-eval-print loop with persistent bindings, definitions, and `:help` / `:quit`. |
 
@@ -75,7 +75,7 @@ Build-time FFI flags accepted by `build` and `run`:
 | `BRAT_ENV_DENY_ALL` | unset | Set to `1` to make `env_get` / `std.env` return `None` for every variable. |
 | `BRAT_RECURSION_BUDGET` | `2000` | Maximum BRAT call depth (`1..1000000`) before raising catchable `recursion too deep`. |
 | `BRAT_PIN_BUDGET_BYTES` | `67108864` (64 MiB) | Maximum slab memory used to pin short SSO strings passed across C FFI (`ptr_of_str` / `str`); `0` disables the cap (unlimited, not recommended for untrusted inputs). |
-| `BRAT_MEM_BYTES` | unset (unlimited) | Hard process resident/heap cap (also settable via `--mem <MB>` on Linux `RLIMIT_AS`). |
+| `BRAT_MEM_BYTES` | unset (unlimited) | Hard process resident/heap cap in bytes (also settable via `--mem <SIZE>`, e.g. `16M` or `1G`). |
 | `BRAT_THREADS` | hardware concurrency | Worker thread count for `par for` and the runtime task pool. |
 | `BRAT_TRACE` | unset | Set to `1` to enable line-number trace updates when compiled with `--trace-lines`. |
 

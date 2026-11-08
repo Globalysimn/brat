@@ -984,42 +984,238 @@ pub fn get_ca(url: str, ca_file: str) -> Result[map, str] {
   return request_tls_ca("GET", url, {}, "", ca_file)
 }
 
-fn is_link_local_or_unspec_host(raw_host: str) -> bool {
-  let h = raw_host.lower()
-  if h == "0.0.0.0" || h == "[::]" || h == "[0:0:0:0:0:0:0:0]" {
+fn norm_host_dots(raw_host: str) -> str {
+  let mut h = raw_host.lower()
+  while len(h) > 0 && h.ends_with(".") {
+    h = h.slice(0, len(h) - 1)
+  }
+  return h
+}
+
+fn parse_hex_u16(s: str) -> i64 {
+  let bs = utf8_bytes(s)
+  if len(bs) == 0 || len(bs) > 4 {
+    return -1
+  }
+  let mut acc = 0
+  for b in bs {
+    let nib = hex_nib_byte(b)
+    if nib < 0 {
+      return -1
+    }
+    acc = acc * 16 + nib
+  }
+  return acc
+}
+
+fn parse_canon_v4(s: str) -> vec[i64] {
+  let parts = s.split(".")
+  if len(parts) != 4 {
+    return []
+  }
+  let mut out = []
+  for p in parts {
+    if len(p) == 0 || (len(p) > 1 && p.starts_with("0")) {
+      return []
+    }
+    let r = parse_uint(p)
+    if is_err(r) {
+      return []
+    }
+    let v = unwrap(r)
+    if v < 0 || v > 255 {
+      return []
+    }
+    out.push(v)
+  }
+  return out
+}
+
+fn is_numeric_ipv4_form(h: str) -> bool {
+  if len(h) == 0 || h.starts_with("[") {
+    return false
+  }
+  let parts = h.split(".")
+  if len(parts) < 1 || len(parts) > 4 {
+    return false
+  }
+  for p in parts {
+    let bs = utf8_bytes(p)
+    if len(bs) == 0 || bs[0] < 48 || bs[0] > 57 {
+      return false
+    }
+    let mut k = 0
+    if len(bs) > 2 && bs[0] == 48 && (bs[1] == 120 || bs[1] == 88) {
+      k = 2
+    }
+    while k < len(bs) {
+      if hex_nib_byte(bs[k]) < 0 {
+        return false
+      }
+      k = k + 1
+    }
+  }
+  return true
+}
+
+fn extract_mapped_v4(v6: str) -> vec[i64] {
+  let mut tail = ""
+  if v6.starts_with("::ffff:") {
+    tail = v6.slice(7, len(v6))
+  } else {
+    if v6.starts_with("0:0:0:0:0:ffff:") {
+      tail = v6.slice(15, len(v6))
+    } else {
+      if v6.starts_with("64:ff9b::") {
+        tail = v6.slice(9, len(v6))
+      }
+    }
+  }
+  if len(tail) == 0 {
+    return []
+  }
+  let v4 = parse_canon_v4(tail)
+  if len(v4) == 4 {
+    return v4
+  }
+  let hp = tail.split(":")
+  if len(hp) == 2 {
+    let hi = parse_hex_u16(hp[0])
+    let lo = parse_hex_u16(hp[1])
+    if hi >= 0 && lo >= 0 {
+      return [(hi / 256) % 256, hi % 256, (lo / 256) % 256, lo % 256]
+    }
+  }
+  return []
+}
+
+fn is_v6_all_zero_or_one(v6: str, want_last: i64) -> bool {
+  if want_last == 0 && (v6 == "::" || v6 == "::0") {
     return true
   }
-  if h.starts_with("169.254.") || h.starts_with("[fe8") || h.starts_with("[fe9") || h.starts_with("[fea") || h.starts_with("[feb") {
+  if want_last == 1 && v6 == "::1" {
+    return true
+  }
+  if v6.contains("::") {
+    let halves = v6.split("::")
+    if len(halves) != 2 {
+      return false
+    }
+    if len(halves[0]) > 0 {
+      for g in halves[0].split(":") {
+        if parse_hex_u16(g) != 0 {
+          return false
+        }
+      }
+    }
+    if len(halves[1]) == 0 {
+      return want_last == 0
+    }
+    let rhs = halves[1].split(":")
+    let mut i = 0
+    while i + 1 < len(rhs) {
+      if parse_hex_u16(rhs[i]) != 0 {
+        return false
+      }
+      i = i + 1
+    }
+    return parse_hex_u16(rhs[len(rhs) - 1]) == want_last
+  }
+  let gs = v6.split(":")
+  if len(gs) != 8 {
+    return false
+  }
+  let mut i = 0
+  while i < 7 {
+    if parse_hex_u16(gs[i]) != 0 {
+      return false
+    }
+    i = i + 1
+  }
+  return parse_hex_u16(gs[7]) == want_last
+}
+
+fn is_link_local_or_unspec_v4(v4: vec[i64]) -> bool {
+  if len(v4) != 4 {
+    return false
+  }
+  let o0 = v4[0]
+  let o1 = v4[1]
+  return o0 == 0 || (o0 == 169 && o1 == 254) || (o0 == 255 && o1 == 255 && v4[2] == 255 && v4[3] == 255)
+}
+
+fn is_internal_v4(v4: vec[i64]) -> bool {
+  if is_link_local_or_unspec_v4(v4) {
+    return true
+  }
+  if len(v4) != 4 {
+    return false
+  }
+  let o0 = v4[0]
+  let o1 = v4[1]
+  if o0 == 127 || o0 == 10 || (o0 == 192 && o1 == 168) || o0 >= 224 {
+    return true
+  }
+  if o0 == 172 && o1 >= 16 && o1 <= 31 {
+    return true
+  }
+  if o0 == 100 && o1 >= 64 && o1 <= 127 {
+    return true
+  }
+  return false
+}
+
+fn is_link_local_or_unspec_host(raw_host: str) -> bool {
+  let h = norm_host_dots(raw_host)
+  if h.starts_with("[") && h.ends_with("]") {
+    let v6 = h.slice(1, len(h) - 1)
+    if is_v6_all_zero_or_one(v6, 0) {
+      return true
+    }
+    if v6.starts_with("fe8") || v6.starts_with("fe9") || v6.starts_with("fea") || v6.starts_with("feb") {
+      return true
+    }
+    let mv4 = extract_mapped_v4(v6)
+    if len(mv4) == 4 {
+      return is_link_local_or_unspec_v4(mv4)
+    }
+    return false
+  }
+  let v4 = parse_canon_v4(h)
+  if len(v4) == 4 {
+    return is_link_local_or_unspec_v4(v4)
+  }
+  if is_numeric_ipv4_form(h) {
     return true
   }
   return false
 }
 
 fn is_internal_host(raw_host: str) -> bool {
-  let h = raw_host.lower()
+  let h = norm_host_dots(raw_host)
   if is_link_local_or_unspec_host(h) {
     return true
   }
-  if h == "localhost" || h.ends_with(".localhost") || h == "[::1]" || h == "[0:0:0:0:0:0:0:1]" {
+  if h == "localhost" || h.ends_with(".localhost") {
     return true
   }
-  if h.starts_with("127.") || h.starts_with("10.") || h.starts_with("192.168.") {
-    return true
-  }
-  if h.starts_with("[fc") || h.starts_with("[fd") || h.starts_with("[::ffff:127.") || h.starts_with("[::ffff:10.") || h.starts_with("[::ffff:192.168.") || h.starts_with("[::ffff:169.254.") {
-    return true
-  }
-  if h.starts_with("172.") {
-    let parts = h.split(".")
-    if len(parts) == 4 {
-      let r2 = parse_uint(parts[1])
-      if !is_err(r2) {
-        let oct2 = unwrap(r2)
-        if oct2 >= 16 && oct2 <= 31 {
-          return true
-        }
-      }
+  if h.starts_with("[") && h.ends_with("]") {
+    let v6 = h.slice(1, len(h) - 1)
+    if is_v6_all_zero_or_one(v6, 1) {
+      return true
     }
+    if v6.starts_with("fc") || v6.starts_with("fd") || v6.starts_with("ff") || v6.starts_with("2002:") || v6.starts_with("64:ff9b:") {
+      return true
+    }
+    let mv4 = extract_mapped_v4(v6)
+    if len(mv4) == 4 {
+      return is_internal_v4(mv4)
+    }
+    return false
+  }
+  let v4 = parse_canon_v4(h)
+  if len(v4) == 4 {
+    return is_internal_v4(v4)
   }
   return false
 }

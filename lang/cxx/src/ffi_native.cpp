@@ -125,8 +125,8 @@ static std::string find_bin_in_path(std::string_view bin) {
     return {};
 }
 
-// Collect `extern struct` / `extern union` / `extern packed struct` + `extern fn` + `pub` wrappers,
-// PLUS literal `lib_open("...")` / `lib_sym(h, "sym", "sig")` dynamic plugin declarations!
+// Collect `extern struct` / `extern union` / `extern packed struct`, `extern fn`, `pub` wrappers,
+// and literal `lib_open("...")` / `lib_sym(h, "sym", "sig")` dynamic plugin declarations.
 struct BratFfiSurface {
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> structs;
     std::set<std::string> packed;
@@ -1347,7 +1347,7 @@ static CompilerProbeResult compile_probe(const BratFfiSurface &surf,
     return res;
 }
 
-// Binary object (`.o`, `.so`, `.a`, `.dylib`, `.dll`) symbol + DWARF ABI verifier!
+// Binary object (`.o`, `.so`, `.a`, `.dylib`, `.dll`) symbol and DWARF ABI verifier.
 static DwarfSlot brat_to_expected_dwarf(std::string_view bt,
                                         const std::map<std::string, RecordLayout> &b_layouts,
                                         const std::set<std::string> &b_unions,
@@ -1397,7 +1397,7 @@ static DwarfSlot brat_to_expected_dwarf(std::string_view bt,
 
 static bool dwarf_slot_matches(const DwarfSlot &want, const DwarfSlot &got, std::string &why) {
     if (want.category == "unknown" || got.category == "unknown") return true;
-    // Only erased `ptr` accepts an opaque/variadic C function pointer; typed `ptr[T]` or `str` must not!
+    // Only erased `ptr` accepts an opaque or variadic C function pointer; typed `ptr[T]` and `str` do not.
     if (want.category == "pointer" && got.category == "fn" && want.name == "ptr") return true;
     if (want.category == "fn" && got.category == "fn") {
         if (want.fn && got.fn) {
@@ -3141,8 +3141,17 @@ int cmd_bindgen(int argc, char **argv) {
         }
         std::string text = bindgen_rust_source(rsrc, path, make_target_model(target));
         if (!out_path.empty()) {
-            std::ofstream out(out_path, std::ios::binary);
-            out << text;
+            std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                std::fprintf(stderr, "bindgen: cannot write %s\n", out_path.c_str());
+                return 1;
+            }
+            out.write(text.data(), static_cast<std::streamsize>(text.size()));
+            out.flush();
+            if (!out) {
+                std::fprintf(stderr, "bindgen: cannot write %s\n", out_path.c_str());
+                return 1;
+            }
             std::printf("bindgen ok %s\n", out_path.c_str());
         } else {
             std::fwrite(text.data(), 1, text.size(), stdout);
@@ -3184,8 +3193,19 @@ int cmd_bindgen(int argc, char **argv) {
             for (const auto &[cn, _] : root_cd.consts) keep_consts.insert(cn);
             for (const auto &[sn, _] : root_cd.structs) keep_structs.insert(sn);
 
+            std::set<std::string> seen_types;
             std::function<void(std::string_view)> mark_type_structs = [&](std::string_view ctype) {
+                if (!seen_types.insert(std::string(ctype)).second) return;
                 auto r = resolve_c_type(&cd, ctype, tm);
+                if (r.kind == "fn") {
+                    std::string cb_ret;
+                    std::vector<std::string> cb_ps;
+                    if (parse_c_callback(ctype, &cd, cb_ret, cb_ps)) {
+                        mark_type_structs(cb_ret);
+                        for (const auto &cp : cb_ps) mark_type_structs(cp);
+                    }
+                    return;
+                }
                 std::string cand;
                 if (r.kind == "struct" || r.kind == "ptr") cand = r.extra;
                 else if (r.kind == "array" && r.arr_elem_k == "struct") cand = r.arr_elem_e;
@@ -3296,8 +3316,17 @@ int cmd_bindgen(int argc, char **argv) {
     }
 
     if (!out_path.empty()) {
-        std::ofstream out(out_path, std::ios::binary);
-        out << text;
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::fprintf(stderr, "bindgen: cannot write %s\n", out_path.c_str());
+            return 1;
+        }
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.flush();
+        if (!out) {
+            std::fprintf(stderr, "bindgen: cannot write %s\n", out_path.c_str());
+            return 1;
+        }
         size_t n_decls = cd.fns.size() + cd.structs.size();
         std::printf("bindgen ok %s (%zu decl(s))\n", out_path.c_str(), n_decls);
     } else {

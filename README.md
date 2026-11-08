@@ -206,7 +206,7 @@ Additional material: [Quickstart Examples](examples/README.md),
 
 ```text
 examples/        curated quickstart programs (JSON+arena, SQLite, parallel fold, C FFI)
-lang/cxx/src/    C++20 compiler, checker, C11 emitter and CLI tools (27 .cpp files)
+lang/cxx/src/    C++20 compiler, checker, C11 emitter and CLI tools (26 .cpp files)
 lang/engine/     crt.h and crt/*.h modular C11 runtime headers
 lang/std/        12 standard-library modules and .bri interfaces
 lang/examples/   64 runnable language-feature programs

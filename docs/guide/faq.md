@@ -206,7 +206,7 @@ caught: div by zero
 ## Why does BRAT have *both* `Result`/`?` and `try`/`catch`?
 
 Because pretending division by zero or out-of-bounds indexing must either
-return `Result` on every `+`/`[]` or Tear Down The Entire Process is a false
+return `Result` on every `+`/`[]` or tear down the entire process is a false
 dichotomy in CLI and service glue code:
 
 - **Expected domain failures** (`json.parse`, `sqlite.query`, `"abc".parse_int()`,

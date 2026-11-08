@@ -77,6 +77,30 @@ static std::set<std::string> *g_unions = nullptr;
 static std::set<std::string> *g_native_structs = nullptr;
 static std::map<std::string, EnumInfo> *g_enums = nullptr;
 
+struct ScopedTypeTables {
+    std::map<std::string, std::map<std::string, Ty>> *prev_structs;
+    std::set<std::string> *prev_unions;
+    std::set<std::string> *prev_native;
+    std::map<std::string, EnumInfo> *prev_enums;
+    ScopedTypeTables(std::map<std::string, std::map<std::string, Ty>> *s,
+                     std::set<std::string> *u,
+                     std::set<std::string> *n,
+                     std::map<std::string, EnumInfo> *e)
+        : prev_structs(g_structs), prev_unions(g_unions),
+          prev_native(g_native_structs), prev_enums(g_enums) {
+        g_structs = s;
+        g_unions = u;
+        g_native_structs = n;
+        g_enums = e;
+    }
+    ~ScopedTypeTables() {
+        g_structs = prev_structs;
+        g_unions = prev_unions;
+        g_native_structs = prev_native;
+        g_enums = prev_enums;
+    }
+};
+
 std::string type_name(const Ty &t) {
     switch (t.k) {
     case Ty::Cb: return t.text;
@@ -2337,11 +2361,13 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
         return Ty::dyn();
     }
     if (name == "str_from_ptr") {
-        if (!type_ok(Ty::of(Ty::Int), expr(at(0)))) {
-            note("str_from_ptr: want ptr, got " + type_name(expr(at(0))));
+        Ty got0 = expr(at(0));
+        if (!type_ok(Ty::of(Ty::Int), got0)) {
+            note("str_from_ptr: want ptr, got " + type_name(got0));
         }
-        if (!type_ok(Ty::of(Ty::Int), expr(at(1)))) {
-            note("str_from_ptr: n wants i64, got " + type_name(expr(at(1))));
+        Ty got1 = expr(at(1));
+        if (!type_ok(Ty::of(Ty::Int), got1)) {
+            note("str_from_ptr: n wants i64, got " + type_name(got1));
         }
         return Ty::of(Ty::Str);
     }
@@ -2411,14 +2437,16 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
         if (!type_ok(want_t, got)) {
             note("slice_of_ptr: want ptr[" + kind.a + "], got " + type_name(got));
         }
-        if (!type_ok(Ty::of(Ty::Int), expr(at(1)))) {
-            note("slice_of_ptr: n wants i64, got " + type_name(expr(at(1))));
+        Ty got_n = expr(at(1));
+        if (!type_ok(Ty::of(Ty::Int), got_n)) {
+            note("slice_of_ptr: n wants i64, got " + type_name(got_n));
         }
         return Ty::wrap(Ty::Slice, word_type(kind.a));
     }
     Ty e = elem(at(0));
-    if (!type_ok(Ty::of(Ty::Int), expr(at(1)))) {
-        note(name + ": index wants i64, got " + type_name(expr(at(1))));
+    Ty got_idx = expr(at(1));
+    if (!type_ok(Ty::of(Ty::Int), got_idx)) {
+        note(name + ": index wants i64, got " + type_name(got_idx));
     }
     if (name == "slice_get") return e;
     Ty got = expr(at(2));
@@ -2806,14 +2834,23 @@ void FnTyper::stmt(const Stmt &s) {
     case SK::PubUse: break;
     case SK::Try: {
         block(s.body);
-        bool had = s.opt1 && !s.opt1->empty();
-        Ty old = had ? env_get(*s.opt1) : Ty::dyn();
-        if (had) {
+        const bool has_bind = s.opt1 && !s.opt1->empty();
+        bool had_outer = false;
+        Ty old = Ty::dyn();
+        if (has_bind) {
+            auto it = env.find(*s.opt1);
+            if (it != env.end()) {
+                had_outer = true;
+                old = it->second;
+            }
             declare(*s.opt1);
             env[*s.opt1] = Ty::dyn();
         }
         block(s.body2);
-        if (had) env[*s.opt1] = old;
+        if (has_bind) {
+            if (had_outer) env[*s.opt1] = old;
+            else env.erase(*s.opt1);
+        }
         break;
     }
     case SK::Spawn: {
@@ -2887,19 +2924,18 @@ static void register_enum_ctors(const std::map<std::string, EnumInfo> &enums, Si
 void collect_exports(const std::vector<StmtP> &prog,
                      std::map<std::string, Ty> &consts,
                      std::map<std::string, std::map<std::string, Ty>> &structs) {
+    std::set<std::string> union_names;
     std::set<std::string> native_names;
     std::map<std::string, EnumInfo> pub_enums;
-    auto *saved = g_structs;
-    auto *saved_native = g_native_structs;
-    auto *saved_enums = g_enums;
-    g_structs = &structs;
-    g_native_structs = &native_names;
-    g_enums = &pub_enums;
+    ScopedTypeTables tables_guard(&structs, &union_names, &native_names, &pub_enums);
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
             structs[node.a];
-            if (node.opt1 && *node.opt1 == "union") structs["__unions__"][node.a] = Ty::dyn();
+            if (node.opt1 && *node.opt1 == "union") {
+                union_names.insert(node.a);
+                structs["__unions__"][node.a] = Ty::dyn();
+            }
         } else if (node.k == SK::Struct && sp->k == SK::Pub) {
             structs[node.a];
             native_names.insert(node.a);
@@ -2957,9 +2993,6 @@ void collect_exports(const std::vector<StmtP> &prog,
             probe.env[in.a] = cty;
         }
     }
-    g_structs = saved;
-    g_native_structs = saved_native;
-    g_enums = saved_enums;
 }
 
 std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extra,
@@ -3013,14 +3046,7 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
             ++it;
         }
     }
-    auto *saved_structs = g_structs;
-    auto *saved_unions = g_unions;
-    auto *saved_native = g_native_structs;
-    auto *saved_enums = g_enums;
-    g_structs = &structs;
-    g_unions = &unions;
-    g_native_structs = &native_structs;
-    g_enums = &enums;
+    ScopedTypeTables tables_guard(&structs, &unions, &native_structs, &enums);
     for (const auto &sp : prog) {
         const Stmt &node = unpub(*sp);
         if (node.k == SK::ExternStruct) {
@@ -3101,43 +3127,28 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
             }
         }
     }
-    auto walk_union_expr = [&](auto &self, const ExprP &ep, FnTyper &tp) -> void {
+    auto walk_union_expr = [&](auto &self, auto &walk_s, const ExprP &ep, FnTyper &tp) -> void {
         if (!ep) return;
         if (ep->k == EK::StructLit && unions.count(ep->a)) {
             tp.expr(*ep);
             return;
         }
-        for (const auto &k : ep->kids) self(self, k, tp);
-        if (ep->fn) {
-            for (const auto &st : ep->fn->body) {
-                if (st && st->line) tp.line = st->line;
-                if (st) {
-                    self(self, st->e1, tp);
-                    self(self, st->e2, tp);
-                    self(self, st->e3, tp);
-                }
-            }
-        }
+        for (const auto &k : ep->kids) self(self, walk_s, k, tp);
+        if (ep->fn) walk_s(walk_s, ep->fn->body, tp);
+    };
+    auto walk_union_stmt = [&](auto &self_st, auto &walk_s, const Stmt &st, FnTyper &tp) -> void {
+        if (st.line) tp.line = st.line;
+        walk_union_expr(walk_union_expr, walk_s, st.e1, tp);
+        walk_union_expr(walk_union_expr, walk_s, st.e2, tp);
+        walk_union_expr(walk_union_expr, walk_s, st.e3, tp);
+        walk_s(walk_s, st.body, tp);
+        walk_s(walk_s, st.body2, tp);
+        if (st.els) self_st(self_st, walk_s, *st.els, tp);
+        for (const auto &fd : st.fns) walk_s(walk_s, fd.body, tp);
     };
     auto walk_union_stmts = [&](auto &self, const std::vector<StmtP> &stmts, FnTyper &tp) -> void {
         for (const auto &st : stmts) {
-            if (!st) continue;
-            if (st->line) tp.line = st->line;
-            walk_union_expr(walk_union_expr, st->e1, tp);
-            walk_union_expr(walk_union_expr, st->e2, tp);
-            walk_union_expr(walk_union_expr, st->e3, tp);
-            self(self, st->body, tp);
-            self(self, st->body2, tp);
-            if (st->els) {
-                std::vector<StmtP> tmp;
-                if (st->els->line) tp.line = st->els->line;
-                walk_union_expr(walk_union_expr, st->els->e1, tp);
-                walk_union_expr(walk_union_expr, st->els->e2, tp);
-                walk_union_expr(walk_union_expr, st->els->e3, tp);
-                self(self, st->els->body, tp);
-                self(self, st->els->body2, tp);
-            }
-            for (const auto &fd : st->fns) self(self, fd.body, tp);
+            if (st) walk_union_stmt(walk_union_stmt, self, *st, tp);
         }
     };
     for (const auto &sp : prog) {
@@ -3213,10 +3224,6 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         top.stmt(*sp);
         top.check_match_exhaustive(prog, idx);
     }
-    g_structs = saved_structs;
-    g_unions = saved_unions;
-    g_native_structs = saved_native;
-    g_enums = saved_enums;
     std::vector<TypeErr> out;
     for (const auto &e : errs) {
         bool dup = false;

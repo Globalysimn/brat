@@ -2424,11 +2424,15 @@ BFN Val vsleep_ms(Val v) {
     bint ms = vlong(v);
     if (ms < 0) ms = 0;
 #if defined(_WIN32)
-    Sleep((DWORD)ms);
+    while (ms > 0) {
+        DWORD step = ms > (bint)0x7fffffff ? (DWORD)0x7fffffff : (DWORD)ms;
+        Sleep(step);
+        ms -= (bint)step;
+    }
 #else
     struct timespec ts;
     ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (ms % 1000) * 1000000L;
+    ts.tv_nsec = (ms % 1000) * 1000000;
     nanosleep(&ts, NULL);
 #endif
     return vint(0);
@@ -2467,8 +2471,8 @@ static int _venv_val_secret(const char *r) {
 }
 
 static Val _venv_err(Val v, const char *prefix) {
-    const char *key = vstr_c(&v);
-    char *o = (char *)malloc(strlen(key) * 2 + strlen(prefix) + 32);
+    size_t qlen = (size_t)vsprint_len_q(v, 1);
+    char *o = (char *)malloc(qlen + strlen(prefix) + 4);
     if (!o) vfatal_oom();
     bint n = vput(o, prefix);
     n += vsprint_q(v, o + n, 1);
@@ -2545,6 +2549,42 @@ BFN Val venv_get_bytes(Val v) { return _venv_lookup(v, 1); }
 #if (BRAT_CRT_MASK & BRAT_CRT_RE)
 typedef struct { char kind; char q; char ch; const char *body; } RTok;
 
+static int r_cls_shorthand(char esc, unsigned char uch) {
+    int is_d = (uch >= '0' && uch <= '9');
+    int is_w = is_d || (uch >= 'a' && uch <= 'z') || (uch >= 'A' && uch <= 'Z') || uch == '_';
+    int is_s = (uch == ' ' || uch == '\t' || uch == '\n' || uch == '\r');
+    if (esc == 'd') return is_d;
+    if (esc == 'D') return !is_d;
+    if (esc == 'w') return is_w;
+    if (esc == 'W') return !is_w;
+    if (esc == 's') return is_s;
+    if (esc == 'S') return !is_s;
+    return -1;
+}
+
+static int r_cls_next(const char **bp, unsigned char *out, char *shorthand) {
+    const char *b = *bp;
+    *shorthand = 0;
+    if (!*b) return 0;
+    if (*b == '\\' && b[1]) {
+        char e = b[1];
+        *bp = b + 2;
+        if (e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S') {
+            *shorthand = e;
+            *out = 0;
+            return 2;
+        }
+        if (e == 'n') *out = '\n';
+        else if (e == 't') *out = '\t';
+        else if (e == 'r') *out = '\r';
+        else *out = (unsigned char)e;
+        return 2;
+    }
+    *out = (unsigned char)*b;
+    *bp = b + 1;
+    return 1;
+}
+
 static int rtok_match(RTok *t, char ch) {
     unsigned char uch = (unsigned char)ch;
     if (t->kind == 'l') return uch == (unsigned char)t->ch;
@@ -2554,13 +2594,25 @@ static int rtok_match(RTok *t, char ch) {
         int neg = 0, found = 0;
         if (*body == '^') { neg = 1; body++; }
         while (*body) {
-            if (body[1] == '-' && body[2]) {
-                if (uch >= (unsigned char)body[0] && uch <= (unsigned char)body[2]) { found = 1; break; }
-                body += 3;
-            } else {
-                if ((unsigned char)*body == uch) { found = 1; break; }
-                body++;
+            unsigned char lo = 0;
+            char sh = 0;
+            r_cls_next(&body, &lo, &sh);
+            if (sh) {
+                if (r_cls_shorthand(sh, uch) == 1) { found = 1; break; }
+                continue;
             }
+            if (*body == '-' && body[1]) {
+                const char *peek = body + 1;
+                unsigned char hi = 0;
+                char sh2 = 0;
+                r_cls_next(&peek, &hi, &sh2);
+                if (!sh2) {
+                    body = peek;
+                    if (uch >= lo && uch <= hi) { found = 1; break; }
+                    continue;
+                }
+            }
+            if (uch == lo) { found = 1; break; }
         }
         return neg ? !found : found;
     }
@@ -2691,7 +2743,16 @@ static bint r_atom(RProg *g) {
     } else if (c == '[') {
         bint j = g->i + 1;
         bint m = j;
-        while (m < g->plen && g->pat[m] != ']') m++;
+        if (m < g->plen && g->pat[m] == '^') m++;
+        if (m < g->plen && g->pat[m] == ']') m++;
+        while (m < g->plen && g->pat[m] != ']') {
+            if (g->pat[m] == '\\') {
+                if (m + 1 >= g->plen) { g->err = 1; return -1; }
+                m += 2;
+            } else {
+                m++;
+            }
+        }
         if (m >= g->plen) { g->err = 1; return -1; }
         const char *buf = r_body_copy(g, g->pat + j, m - j);
         g->i = m + 1;
@@ -2709,7 +2770,8 @@ static bint r_atom(RProg *g) {
         g->i++;
         body = r_emit(g, 'e', 0, 0);
     } else if (c == '\\') {
-        char e = (g->i + 1 < g->plen) ? g->pat[g->i + 1] : '\\';
+        if (g->i + 1 >= g->plen) { g->err = 1; return -1; }
+        char e = g->pat[g->i + 1];
         g->i += 2;
         body = r_emit(g, 'c', 0, 0);
         if (e == 'd') { g->p[body].q = 's'; g->p[body].body = "0-9"; }
@@ -2872,10 +2934,10 @@ static void r_free(RProg *g) {
 
 typedef struct { bint pc; bint slot; bint prev; } REpsItem;
 
-static int r_compile_prog(RProg *g, const char *pat, bint *start_out) {
+static int r_compile_prog_n(RProg *g, const char *pat, bint plen, bint *start_out) {
     g->p = NULL; g->n = 0; g->cap = 0;
     g->bodies = NULL; g->nbodies = 0; g->bodies_cap = 0;
-    g->pat = pat; g->i = 0; g->plen = (bint)strlen(pat);
+    g->pat = pat; g->i = 0; g->plen = plen;
     g->ngroups = 0; g->err = 0; g->empty_seq = 0;
     bint sv0 = r_emit(g, 'v', 0, 0);
     bint body = r_alt(g);
@@ -2890,7 +2952,7 @@ static int r_compile_prog(RProg *g, const char *pat, bint *start_out) {
     return 1;
 }
 
-static void re_pike_add(RInst *p, bint pc, const char *s, bint si,
+static void re_pike_add(RInst *p, bint pc, bint slen, bint si,
                         bint *out_pcs, bint *out_slots, bint *nout,
                         bint *seen, bint *work_slots, bint nslots,
                         REpsItem *stk, bint stk_cap) {
@@ -2917,7 +2979,7 @@ static void re_pike_add(RInst *p, bint pc, const char *s, bint si,
         } else if (in->op == 'b') {
             if (si == 0 && sp < stk_cap) { stk[sp].pc = q + 1; stk[sp].slot = 0; stk[sp].prev = 0; sp++; }
         } else if (in->op == 'e') {
-            if (s[si] == 0 && sp < stk_cap) { stk[sp].pc = q + 1; stk[sp].slot = 0; stk[sp].prev = 0; sp++; }
+            if (si == slen && sp < stk_cap) { stk[sp].pc = q + 1; stk[sp].slot = 0; stk[sp].prev = 0; sp++; }
         } else if (in->op == 'v') {
             if (sp + 2 <= stk_cap) {
                 bint sl = in->x;
@@ -2963,7 +3025,7 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
     for (bint si = min_from; si <= slen; si++) {
         if (!matched) {
             for (bint z = 0; z < nslots; z++) work_slots[z] = -1;
-            re_pike_add(g->p, start, s, si, list_pcs, list_slots, &nlist,
+            re_pike_add(g->p, start, slen, si, list_pcs, list_slots, &nlist,
                         seen, work_slots, nslots, stk, stk_cap);
         }
         bint nn = 0;
@@ -2986,7 +3048,7 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
             }
             if (nslots > 0)
                 memcpy(work_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
-            re_pike_add(g->p, pc + 1, s, si + 1, next_pcs, next_slots, &nn,
+            re_pike_add(g->p, pc + 1, slen, si + 1, next_pcs, next_slots, &nn,
                         next_seen, work_slots, nslots, stk, stk_cap);
         }
         if (si >= slen) break;
@@ -3006,9 +3068,9 @@ BFN int vre_match(Val sv, Val pv) {
     const char *s = vstr_c(&sv), *pat = vstr_c(&pv);
     RProg g;
     bint start = 0;
-    if (!r_compile_prog(&g, pat, &start)) { vraise("bad regex pattern"); return 0; }
+    if (!r_compile_prog_n(&g, pat, (bint)vstr_len_fast(&pv), &start)) { vraise("bad regex pattern"); return 0; }
     bint slots[2] = {-1, -1};
-    int ok = re_pike_search(&g, start, s, (bint)strlen(s), 0, slots, 2);
+    int ok = re_pike_search(&g, start, s, (bint)vstr_len_fast(&sv), 0, slots, 2);
     r_free(&g);
     return ok;
 }
@@ -3018,9 +3080,9 @@ BFN Val vre_find(Val sv, Val pv) {
     const char *s = vstr_c(&sv), *pat = vstr_c(&pv);
     RProg g;
     bint start = 0;
-    if (!r_compile_prog(&g, pat, &start)) { vraise("bad regex pattern"); return vnil(); }
+    if (!r_compile_prog_n(&g, pat, (bint)vstr_len_fast(&pv), &start)) { vraise("bad regex pattern"); return vnil(); }
     bint slots[2] = {-1, -1};
-    int ok = re_pike_search(&g, start, s, (bint)strlen(s), 0, slots, 2);
+    int ok = re_pike_search(&g, start, s, (bint)vstr_len_fast(&sv), 0, slots, 2);
     r_free(&g);
     if (!ok || slots[0] < 0 || slots[1] < slots[0]) return vnil();
     Vec *a = vvec();
@@ -3033,13 +3095,13 @@ BFN Val vre_captures(Val sv, Val pv) {
     const char *s = vstr_c(&sv), *pat = vstr_c(&pv);
     RProg g;
     bint start = 0;
-    if (!r_compile_prog(&g, pat, &start)) { vraise("bad regex pattern"); return vnil(); }
+    if (!r_compile_prog_n(&g, pat, (bint)vstr_len_fast(&pv), &start)) { vraise("bad regex pattern"); return vnil(); }
     bint ng = g.ngroups > BRAT_RE_MAX_GROUPS ? BRAT_RE_MAX_GROUPS : g.ngroups;
     bint nslots = 2 * (ng + 1);
     bint *slots = (bint *)malloc(sizeof(bint) * (size_t)nslots);
     if (!slots) { r_free(&g); vfatal_oom(); }
     for (bint z = 0; z < nslots; z++) slots[z] = -1;
-    int ok = re_pike_search(&g, start, s, (bint)strlen(s), 0, slots, nslots);
+    int ok = re_pike_search(&g, start, s, (bint)vstr_len_fast(&sv), 0, slots, nslots);
     r_free(&g);
     if (!ok || slots[0] < 0 || slots[1] < slots[0]) { free(slots); return vnil(); }
     Vec *groups = vvec();
@@ -3054,8 +3116,10 @@ BFN Val vre_captures(Val sv, Val pv) {
     return vtagv("some", wrap);
 }
 
-static void _vre_buf_append(char **buf, size_t *len, size_t *cap, const char *src, size_t n) {
-    if (n == 0) return;
+static int _vre_buf_append(char **buf, size_t *len, size_t *cap, const char *src, size_t n) {
+    if (n == 0) return 1;
+    size_t max_str = (size_t)1 << 30;
+    if (n > max_str || *len > max_str - n) return 0;
     if (*len + n + 1 > *cap) {
         size_t nc = *cap ? *cap * 2 : 64;
         while (nc < *len + n + 1) nc *= 2;
@@ -3067,6 +3131,7 @@ static void _vre_buf_append(char **buf, size_t *len, size_t *cap, const char *sr
     memcpy(*buf + *len, src, n);
     *len += n;
     (*buf)[*len] = 0;
+    return 1;
 }
 
 BFN Val vre_replace(Val sv, Val pv, Val rv) {
@@ -3077,33 +3142,34 @@ BFN Val vre_replace(Val sv, Val pv, Val rv) {
     const char *s = vstr_c(&sv), *pat = vstr_c(&pv), *repl = vstr_c(&rv);
     RProg g;
     bint start = 0;
-    if (!r_compile_prog(&g, pat, &start)) { vraise("bad regex pattern"); return vnil(); }
-    bint slen = (bint)strlen(s), rlen = (bint)strlen(repl);
+    if (!r_compile_prog_n(&g, pat, (bint)vstr_len_fast(&pv), &start)) { vraise("bad regex pattern"); return vnil(); }
+    bint slen = (bint)vstr_len_fast(&sv), rlen = (bint)vstr_len_fast(&rv);
     bint ng = g.ngroups > BRAT_RE_MAX_GROUPS ? BRAT_RE_MAX_GROUPS : g.ngroups;
     bint nslots = 2 * (ng + 1);
     bint *slots = (bint *)malloc(sizeof(bint) * (size_t)nslots);
     if (!slots) { r_free(&g); vfatal_oom(); }
     char *out = NULL;
     size_t olen = 0, ocap = 0;
+    int over = 0;
     bint cur = 0, search_from = 0;
-    while (search_from <= slen) {
+    while (search_from <= slen && !over) {
         for (bint z = 0; z < nslots; z++) slots[z] = -1;
         if (!re_pike_search(&g, start, s, slen, search_from, slots, nslots)) break;
         bint m0 = slots[0], m1 = slots[1];
-        if (m0 > cur) _vre_buf_append(&out, &olen, &ocap, s + cur, (size_t)(m0 - cur));
+        if (m0 > cur && !_vre_buf_append(&out, &olen, &ocap, s + cur, (size_t)(m0 - cur))) { over = 1; break; }
         for (bint ri = 0; ri < rlen; ri++) {
             if (repl[ri] == '$' && ri + 1 < rlen) {
                 char nxt = repl[ri + 1];
                 if (nxt == '$') {
-                    _vre_buf_append(&out, &olen, &ocap, "$", 1);
+                    if (!_vre_buf_append(&out, &olen, &ocap, "$", 1)) { over = 1; break; }
                     ri++;
                     continue;
                 }
                 if (nxt >= '0' && nxt <= '9') {
                     bint gi = nxt - '0';
                     if (gi <= ng && slots[2 * gi] >= 0 && slots[2 * gi + 1] >= slots[2 * gi]) {
-                        _vre_buf_append(&out, &olen, &ocap, s + slots[2 * gi],
-                                        (size_t)(slots[2 * gi + 1] - slots[2 * gi]));
+                        if (!_vre_buf_append(&out, &olen, &ocap, s + slots[2 * gi],
+                                             (size_t)(slots[2 * gi + 1] - slots[2 * gi]))) { over = 1; break; }
                     }
                     ri++;
                     continue;
@@ -3112,14 +3178,15 @@ BFN Val vre_replace(Val sv, Val pv, Val rv) {
             if (repl[ri] == '\\' && ri + 1 < rlen && repl[ri + 1] >= '1' && repl[ri + 1] <= '9') {
                 bint gi = repl[ri + 1] - '0';
                 if (gi <= ng && slots[2 * gi] >= 0 && slots[2 * gi + 1] >= slots[2 * gi]) {
-                    _vre_buf_append(&out, &olen, &ocap, s + slots[2 * gi],
-                                    (size_t)(slots[2 * gi + 1] - slots[2 * gi]));
+                    if (!_vre_buf_append(&out, &olen, &ocap, s + slots[2 * gi],
+                                         (size_t)(slots[2 * gi + 1] - slots[2 * gi]))) { over = 1; break; }
                 }
                 ri++;
                 continue;
             }
-            _vre_buf_append(&out, &olen, &ocap, repl + ri, 1);
+            if (!_vre_buf_append(&out, &olen, &ocap, repl + ri, 1)) { over = 1; break; }
         }
+        if (over) break;
         cur = m1;
         if (m1 == m0) {
             if (m1 >= slen) break;
@@ -3127,16 +3194,17 @@ BFN Val vre_replace(Val sv, Val pv, Val rv) {
             unsigned char lead = (unsigned char)s[m1];
             bint step = (lead < 0x80) ? 1 : ((lead & 0xE0) == 0xC0 ? 2 : ((lead & 0xF0) == 0xE0 ? 3 : 4));
             if (m1 + step > slen) step = 1;
-            _vre_buf_append(&out, &olen, &ocap, s + m1, (size_t)step);
+            if (!_vre_buf_append(&out, &olen, &ocap, s + m1, (size_t)step)) { over = 1; break; }
             cur = m1 + step;
             search_from = cur;
         } else {
             search_from = m1;
         }
     }
-    if (cur < slen) _vre_buf_append(&out, &olen, &ocap, s + cur, (size_t)(slen - cur));
+    if (!over && cur < slen && !_vre_buf_append(&out, &olen, &ocap, s + cur, (size_t)(slen - cur))) over = 1;
     free(slots);
     r_free(&g);
+    if (over) { free(out); vraise("out of memory"); return vnil(); }
     if (!out) return vstr("");
     Val res = vstrn(out, (bint)olen);
     free(out);

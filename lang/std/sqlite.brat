@@ -46,5 +46,9 @@ pub fn scalar_int(db: i64, sql: str, params) -> Result[i64, str] {
   if len(ks) == 0 {
     return Err("scalar_int query returned 0 columns")
   }
-  return Ok(row.get(ks[0]))
+  let val = row.get(ks[0])
+  if !is_int(val) {
+    return Err("scalar_int expected integer column")
+  }
+  return Ok(val)
 }

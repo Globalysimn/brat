@@ -112,6 +112,11 @@ inline uint32_t decode_utf8_cp(std::string_view s, size_t &i) {
         if ((cont & 0xc0u) != 0x80u) { ++i; return 0xfffd; }
         cp = (cp << 6) | (cont & 0x3fu);
     }
+    const uint32_t min_cp = (n == 2) ? 0x80u : (n == 3) ? 0x800u : 0x10000u;
+    if (cp < min_cp || cp > 0x10ffffu || (cp >= 0xd800u && cp <= 0xdfffu)) {
+        ++i;
+        return 0xfffd;
+    }
     i += n;
     return cp;
 }

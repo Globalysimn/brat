@@ -52,7 +52,8 @@ size_t str_end(std::string_view s, size_t start) {
             depth++;
         } else if (c == '}' && depth > 0) {
             depth--;
-        } else if (c == '(') {
+            if (depth == 0) paren = 0;
+        } else if (c == '(' && depth > 0) {
             paren++;
         } else if (c == ')' && paren > 0) {
             paren--;

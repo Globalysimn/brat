@@ -1350,6 +1350,10 @@ bool parse_pe_coff_bytes(std::string_view data, ObjectInfo &out, std::string &er
     }
 
     const size_t sec_off = coff_off + 20 + optsize;
+    if (uint64_t(nsects) * 40u > data.size() - sec_off) {
+        err = "truncated COFF/PE section table";
+        return false;
+    }
     std::vector<bool> sec_exec{false};
     struct PeSec { uint32_t va, vsz, rptr, rsz; };
     std::vector<PeSec> sects;

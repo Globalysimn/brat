@@ -714,7 +714,9 @@ int run_process(const std::vector<std::string> &args, int timeout_ms, bool *time
 
 
 static std::string compiler_cache_context(const std::string &compiler) {
-    const auto resolved = executable_path(compiler.c_str());
+    const auto parts = split_compiler_cmd(compiler);
+    if (parts.empty()) return {};
+    const auto resolved = executable_path(parts[0].c_str());
     std::string digest, error;
     uint64_t size = 0;
     if (!sha256_file(resolved, digest, size, error)) return {};
@@ -731,6 +733,8 @@ static std::string compiler_cache_context(const std::string &compiler) {
     std::sort(variables.begin(), variables.end());
     std::string material = resolved.string() + "|" + digest + "|" +
                            std::filesystem::current_path().string();
+    for (size_t i = 1; i < parts.size(); ++i)
+        material += "|arg=" + std::to_string(parts[i].size()) + ":" + parts[i];
     for (const auto &entry : variables)
         material += "|" + std::to_string(entry.size()) + ":" + entry;
     return sha256_hex(material);
@@ -1483,7 +1487,12 @@ static bool collect_vendored_c_objects(const std::vector<SourceFile> &files,
                                            "-I", inc_dir.string()};
             if (!target.empty()) flags.insert(flags.end(), {"-target", target});
             if (shared && pkind != "windows") flags.push_back("-fPIC");
-            std::vector<std::string> preprocess{compiler};
+            const auto cc_parts = split_compiler_cmd(compiler);
+            if (cc_parts.empty()) {
+                out_err = "empty compiler command";
+                return false;
+            }
+            std::vector<std::string> preprocess = cc_parts;
             if (zig) preprocess.push_back("cc");
             preprocess.insert(preprocess.end(), flags.begin(), flags.end());
             preprocess.insert(preprocess.end(), {"-E", cpath.string(), "-o", snapshot.string()});
@@ -1510,7 +1519,7 @@ static bool collect_vendored_c_objects(const std::vector<SourceFile> &files,
             const auto obj_path = obj_cache / (key + ".o");
             if (!reusable || !std::filesystem::is_regular_file(obj_path, ec)) {
                 const auto temporary = stage.path / "object.o";
-                std::vector<std::string> command{compiler};
+                std::vector<std::string> command = cc_parts;
                 if (zig) command.push_back("cc");
                 command.insert(command.end(), flags.begin(), flags.end());
                 // Assembler includes are not expanded by the C preprocessor.
@@ -1771,8 +1780,14 @@ static int build_one(const char *arg0, const std::string &file,
         std::fprintf(stderr, "brat-cxx build: no C compiler found (set BRAT_CC)\n");
         return 1;
     }
-    const bool zig = std::filesystem::path(compiler).filename().string().rfind("zig", 0) == 0;
-    if (target.size() && !zig) {
+    const auto cc_parts = split_compiler_cmd(compiler);
+    if (cc_parts.empty()) {
+        std::fprintf(stderr, "brat-cxx build: no C compiler found (set BRAT_CC)\n");
+        return 1;
+    }
+    const bool zig_any = std::filesystem::path(cc_parts[0]).filename().string().rfind("zig", 0) == 0;
+    const bool zig = zig_any && !(cc_parts.size() >= 2 && cc_parts[1] == "cc");
+    if (target.size() && !zig_any) {
         std::fprintf(stderr, "brat build: --target needs zig cc\n");
         return 1;
     }
@@ -1815,7 +1830,7 @@ static int build_one(const char *arg0, const std::string &file,
         return 1;
     }
 
-    std::vector<std::string> args{compiler};
+    std::vector<std::string> args = cc_parts;
     if (zig) args.push_back("cc");
     args.push_back(cfile.string());
     for (const std::string &vo : vendored_objs) args.push_back(vo);
@@ -1939,15 +1954,18 @@ static int run_one(const char *arg0, const std::string &file, int opt,
         std::fprintf(stderr, "brat run: needs a C compiler (set BRAT_CC, or precompile with brat build)\n");
         return 1;
     }
-    const auto compiler_resolved = executable_path(compiler.c_str());
+    const auto cc_parts = split_compiler_cmd(compiler);
+    const auto compiler_resolved = cc_parts.empty() ? std::filesystem::path{} : executable_path(cc_parts[0].c_str());
     if (compiler_resolved.empty() || !std::filesystem::is_regular_file(compiler_resolved)) {
         std::fprintf(stderr, "brat run: needs a C compiler ('%s' not found; set BRAT_CC or use brat build)\n",
                      compiler.c_str());
         return 1;
     }
+    const bool run_zig = std::filesystem::path(cc_parts[0]).filename().string().rfind("zig", 0) == 0 &&
+                         !(cc_parts.size() >= 2 && cc_parts[1] == "cc");
     std::vector<std::string> vendored_objs;
     std::string vendored_digest, vendored_err;
-    if (!collect_vendored_c_objects(set.files, compiler, false, "", false,
+    if (!collect_vendored_c_objects(set.files, compiler, run_zig, "", false,
                                     vendored_objs, vendored_digest, vendored_err)) {
         std::fprintf(stderr, "brat-cxx run: %s\n", vendored_err.c_str());
         return 1;
@@ -2018,6 +2036,11 @@ static int run_one(const char *arg0, const std::string &file, int opt,
             return 1;
         }
         out.write(source.data(), static_cast<std::streamsize>(source.size()));
+        out.flush();
+        if (!out) {
+            std::fprintf(stderr, "brat-cxx run: cannot write %s\n", cfile.string().c_str());
+            return 1;
+        }
     }
 #if defined(_WIN32)
     const auto temporary = dir / (key + "." + pid_tag + ".tmp.exe");
@@ -2025,7 +2048,9 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     const auto temporary = dir / (key + "." + pid_tag + ".tmp");
 #endif
     const std::string host_pkind = platform_kind("");
-    std::vector<std::string> args{compiler, cfile.string()};
+    std::vector<std::string> args = cc_parts;
+    if (run_zig) args.push_back("cc");
+    args.push_back(cfile.string());
     for (const std::string &vo : vendored_objs) args.push_back(vo);
     for (const std::string &fo : ffi_objects) {
         const std::string ext = std::filesystem::path(fo).extension().string();
@@ -2098,14 +2123,10 @@ bool parse_memory(const std::string &input, uint64_t &value) {
     return true;
 }
 
-// Parse diagnostics have one shape across the two front ends, the same one
-// Ownership and type diagnostic summary format:
+// Parse, ownership, and type diagnostics share one line format:
 //
 //     file:line: error: message at line N
 //       | <the source line, right-stripped>
-//
-// Everything a tool greps for -- `: error: ` and the line number -- is here, so
-// one summary line per file followed by `file:line: kind: msg`.
 void print_parse_error(const std::string &path, const ParseError &e) {
     std::fprintf(stderr, "%s:%u: error: %s at line %u\n", path.c_str(), e.line, e.what(), e.line);
     std::string src;
@@ -2426,6 +2447,12 @@ int brat_cli_main(int argc, char **argv) {
                     std::fprintf(stderr, "brat run: bad --mem '%s'\n", value.c_str());
                     return 2;
                 }
+            } else if (arg.rfind("--mem=", 0) == 0) {
+                const std::string value = arg.substr(6);
+                if (!parse_memory(value, memory_limit)) {
+                    std::fprintf(stderr, "brat run: bad --mem '%s'\n", value.c_str());
+                    return 2;
+                }
             } else if (!arg.empty() && arg[0] == '-') {
                 std::fprintf(stderr, "brat-cxx run: unknown flag %s\n", arg.c_str());
                 return 2;
@@ -2648,9 +2675,9 @@ int brat_cli_main(int argc, char **argv) {
         return bad ? 1 : 0;
     }
 
+    std::vector<std::string> input_files;
     if (cmd == "check") {
         bool want_json = false;
-        std::vector<std::string> check_files;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
             if (arg == "--json") { want_json = true; continue; }
@@ -2659,22 +2686,28 @@ int brat_cli_main(int argc, char **argv) {
                 std::fprintf(stderr, "brat-cxx check: unknown flag %s\n", arg.c_str());
                 return 2;
             }
-            check_files.push_back(arg);
+            input_files.push_back(arg);
         }
-        if (want_json) return cmd_check_json(check_files);
+        if (want_json) return cmd_check_json(input_files);
+        if (input_files.empty()) {
+            print_cli_usage();
+            return 2;
+        }
+    } else {
+        for (int i = 2; i < argc; ++i) input_files.push_back(argv[i]);
     }
 
     std::vector<SourceFile> progs;
-    for (int i = 2; i < argc; i++) {
+    for (const std::string &in_file : input_files) {
         try {
-            ModuleSet loaded = load_modules(argv[i]);
+            ModuleSet loaded = load_modules(in_file);
             mangle_modules(loaded);
             for (auto &f : loaded.files) progs.push_back(std::move(f));
         } catch (const ParseError &e) {
-            print_parse_error(argv[i], e);
+            print_parse_error(in_file, e);
             bad++;
         } catch (const std::exception &e) {
-            std::printf("%s: load error %s\n", argv[i], e.what());
+            std::printf("%s: load error %s\n", in_file.c_str(), e.what());
             return 2;
         }
     }

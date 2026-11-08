@@ -194,6 +194,10 @@ async function activate(context) {
       await startClient(context, true);
     }),
     vscode.commands.registerCommand("brat.runFile", async () => {
+      if (!vscode.workspace.isTrusted) {
+        await vscode.window.showWarningMessage("Trust this workspace before running BRAT files.");
+        return;
+      }
       const filePath = activeBratFilePath();
       if (!filePath) {
         return;
@@ -204,12 +208,16 @@ async function activate(context) {
         await vscode.window.showWarningMessage("BRAT binary not found. Build `brat-cxx` or set `brat.lsp.path`.");
         return;
       }
-      if (!runTerminal || runTerminal.exitStatus !== undefined) {
-        runTerminal = vscode.window.createTerminal("BRAT");
+      if (runTerminal) {
+        runTerminal.dispose();
       }
+      runTerminal = vscode.window.createTerminal({
+        name: `BRAT: ${path.basename(filePath)}`,
+        shellPath: bin,
+        shellArgs: ["run", filePath],
+        cwd: path.dirname(filePath),
+      });
       runTerminal.show(true);
-      const quote = (s) => (process.platform === "win32" ? `"${s}"` : `'${s.replace(/'/g, "'\\''")}'`);
-      runTerminal.sendText(`${quote(bin)} run ${quote(filePath)}`);
     }),
     vscode.commands.registerCommand("brat.checkFile", async () => {
       const filePath = activeBratFilePath();
@@ -223,7 +231,7 @@ async function activate(context) {
         return;
       }
       const out = getOutputChannel(context);
-      const { err, stdout, stderr } = await execBratTool(bin, ["check", filePath], path.dirname(filePath));
+      const { err, stdout, stderr } = await execBratTool(bin, ["check", "--", filePath], path.dirname(filePath));
       out.appendLine(`$ ${bin} check ${filePath}`);
       if (stdout.trim()) {
         out.appendLine(stdout.trimEnd());

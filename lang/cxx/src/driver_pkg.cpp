@@ -637,8 +637,15 @@ static bool verify_archive_c_sources(const std::string &archive,
         error = "no C compiler found (set BRAT_CC)";
         return false;
     }
-    zig = std::filesystem::path(compiler).filename().string().rfind("zig", 0) == 0;
-    if (!target.empty() && !zig) {
+    const auto cc_parts = split_compiler_cmd(compiler);
+    if (cc_parts.empty()) {
+        error = "no C compiler found (set BRAT_CC)";
+        return false;
+    }
+    zig = std::filesystem::path(cc_parts[0]).filename().string().rfind("zig", 0) == 0 &&
+          !(cc_parts.size() >= 2 && cc_parts[1] == "cc");
+    const bool zig_any = std::filesystem::path(cc_parts[0]).filename().string().rfind("zig", 0) == 0;
+    if (!target.empty() && !zig_any) {
         error = "--target needs zig cc";
         return false;
     }
@@ -657,7 +664,7 @@ static bool verify_archive_c_sources(const std::string &archive,
         }
         const auto source = stage.path / std::filesystem::path(local);
         const auto object = stage.path / ("__verify_cs_" + std::to_string(cs_idx++) + ".o");
-        std::vector<std::string> args{compiler};
+        std::vector<std::string> args = cc_parts;
         if (zig) args.push_back("cc");
         if (!target.empty()) {
             args.push_back("-target");

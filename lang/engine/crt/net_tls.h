@@ -309,7 +309,7 @@ static void _vsk_unlock(void) { BMUTEX_UNLOCK(&_vsk_mu); }
 #ifndef _VSK_TIMEOUT_S
 #define _VSK_TIMEOUT_S 30        /* connected sockets have a fixed lifetime */
 #endif
-#define _VRECV_MAX (1L << 20)    /* one tcp_recv returns at most 1 MiB */
+#define _VRECV_MAX ((bint)1 << 20)    /* one tcp_recv returns at most 1 MiB */
 
 typedef struct {
     bsock_t fd;

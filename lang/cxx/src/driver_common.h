@@ -32,9 +32,15 @@ struct BuildStage {
         std::filesystem::path parent = output.parent_path();
         if (parent.empty()) parent = ".";
 #if defined(_WIN32)
+        uint64_t seed = static_cast<uint64_t>(GetTickCount64()) ^
+                        (static_cast<uint64_t>(GetCurrentThreadId()) << 32) ^
+                        (reinterpret_cast<uintptr_t>(this) >> 4);
         for (unsigned attempt = 0; attempt < 100; ++attempt) {
-            path = parent / (".brat-build-" + std::to_string(_getpid()) + "-" +
-                             std::to_string(attempt));
+            seed = seed * 6364136223846793005ULL + 1442695040888963407ULL + attempt;
+            char hex_buf[17];
+            std::snprintf(hex_buf, sizeof(hex_buf), "%016llx",
+                          static_cast<unsigned long long>(seed));
+            path = parent / (".brat-build-" + std::to_string(_getpid()) + "-" + hex_buf);
             if (CreateDirectoryW(path.wstring().c_str(), nullptr)) return;
             const DWORD error = GetLastError();
             if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS)
@@ -86,6 +92,35 @@ bool executable_on_path(const std::string &name);
 std::string sha256_hex(const std::string &data);
 bool sha256_file(const std::filesystem::path &path, std::string &digest,
                  uint64_t &size, std::string &error);
+
+inline std::vector<std::string> split_compiler_cmd(std::string_view raw) {
+    while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t')) raw.remove_prefix(1);
+    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.remove_suffix(1);
+    if (raw.empty()) return {};
+    std::error_code ec;
+    const std::string whole(raw);
+    if (std::filesystem::is_regular_file(whole, ec)) return {whole};
+    std::vector<std::string> out;
+    std::string cur;
+    char quote = 0;
+    for (char c : raw) {
+        if (quote) {
+            if (c == quote) quote = 0;
+            else cur.push_back(c);
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == ' ' || c == '\t') {
+            if (!cur.empty()) {
+                out.push_back(std::move(cur));
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    return out;
+}
 
 std::filesystem::path cache_root();
 int main_cc_timeout_ms();

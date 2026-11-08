@@ -335,8 +335,40 @@ bool preprocess_header_cc(const std::string &path,
     if (argv.empty()) {
         for (const char *env_var : {"BRAT_CC", "CC"}) {
             if (const char *ov = std::getenv(env_var); ov && *ov) {
-                std::string p = fs::path(ov).has_parent_path() ? std::string(ov) : find_in_path(ov);
-                if (!p.empty()) { argv = {p}; break; }
+                std::vector<std::string> parts;
+                std::error_code ec;
+                if (fs::is_regular_file(ov, ec)) {
+                    parts = {ov};
+                } else {
+                    std::string cur;
+                    char q = 0;
+                    for (size_t i = 0; ov[i]; ++i) {
+                        char c = ov[i];
+                        if (q) {
+                            if (c == q) q = 0;
+                            else cur.push_back(c);
+                        } else if (c == '\'' || c == '"') {
+                            q = c;
+                        } else if (c == ' ' || c == '\t') {
+                            if (!cur.empty()) { parts.push_back(std::move(cur)); cur.clear(); }
+                        } else {
+                            cur.push_back(c);
+                        }
+                    }
+                    if (!cur.empty()) parts.push_back(std::move(cur));
+                }
+                if (!parts.empty()) {
+                    std::string p = fs::path(parts[0]).has_parent_path() ? parts[0] : find_in_path(parts[0]);
+                    if (!p.empty()) {
+                        argv = std::move(parts);
+                        argv[0] = std::move(p);
+                        if (fs::path(argv[0]).filename().string().rfind("zig", 0) == 0 &&
+                            !(argv.size() >= 2 && argv[1] == "cc")) {
+                            argv.insert(argv.begin() + 1, "cc");
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
@@ -738,9 +770,18 @@ public:
     }
 
 private:
+    static constexpr int kMaxConstDepth = 256;
     std::string_view s_;
     const std::map<std::string, CInt> &env_;
     size_t pos_ = 0;
+    int depth_ = 0;
+
+    struct DepthGuard {
+        int &d;
+        bool ok;
+        explicit DepthGuard(int &depth) : d(depth), ok(++d <= kMaxConstDepth) {}
+        ~DepthGuard() { --d; }
+    };
 
     void skip_ws() {
         while (pos_ < s_.size() && std::isspace(static_cast<unsigned char>(s_[pos_]))) ++pos_;
@@ -854,6 +895,8 @@ private:
     }
 
     std::optional<CInt> parse_unary() {
+        DepthGuard dg(depth_);
+        if (!dg.ok) return std::nullopt;
         skip_ws();
         if (pos_ >= s_.size()) return std::nullopt;
         if (s_[pos_] == '+') { ++pos_; return parse_unary(); }
@@ -1208,7 +1251,7 @@ static bool parse_fnptr_decl(std::string_view raw, std::string &norm_type, std::
     if (inner.find('[') != std::string::npos) return false;
     size_t k = 1;
     while (k < inner.size() && (inner[k] == '*' || std::isspace(static_cast<unsigned char>(inner[k])))) ++k;
-    // Count stars inside `(*...)`: more than 1 star is pointer-to-fnptr (`ptr`), not callback!
+    // More than one `*` inside `(*...)` is a pointer to a function pointer (`ptr`), not a callback.
     size_t nstars = 0;
     for (char ch : inner) if (ch == '*') ++nstars;
     if (nstars != 1) return false;
@@ -1865,7 +1908,7 @@ bool parse_c_header(std::string_view raw_text,
                 --dc;
                 if (dc == 0 && matching_brace == std::string::npos) {
                     matching_brace = pos;
-                    // Look ahead: if this was an inline C function body `static inline int f(...) { ... }`, stop right at `}`!
+                    // Stop at the closing `}` of an inline C function definition (`static inline int f(...) { ... }`).
                     std::string pre = trim_sv(std::string_view(flat_src).substr(start, first_brace - start));
                     if (pre.find('(') != std::string::npos && pre.rfind("typedef", 0) != 0 &&
                         pre.find("struct") == std::string::npos && pre.find("union") == std::string::npos &&
@@ -1900,7 +1943,7 @@ bool parse_c_header(std::string_view raw_text,
             std::string body_raw = item.substr(rel_ob + 1, rel_cb - rel_ob - 1);
             std::string tail_raw = (rel_cb + 1 < item.size()) ? trim_sv(std::string_view(item).substr(rel_cb + 1)) : "";
 
-            // Inline function definition (`static inline int foo(int x) { return x; }`) -> skip!
+            // Skip inline C function definitions.
             std::string head_clean = trim_sv(strip_c_attrs(head_raw));
             if (head_clean.find('(') != std::string::npos && head_clean.rfind("typedef", 0) != 0) {
                 continue;
@@ -2011,7 +2054,7 @@ bool parse_c_header(std::string_view raw_text,
             continue;
         }
 
-        // Unbraced statement: forward enum with `: base`, `typedef`, opaque `struct Foo;`, or function prototype!
+        // Unbraced statement: forward enum with `: base`, `typedef`, opaque `struct Foo;`, or function prototype.
         std::string abi_bad = detect_abi_attr(item);
         std::string clean_item = trim_sv(strip_c_attrs(item));
         if (clean_item.empty()) continue;
@@ -2204,7 +2247,8 @@ static ResolvedCType resolve_c_type_depth(const CDecl *cdecl, std::string_view r
         if (cdecl->enum_types.count(b.extra)) return {cdecl->enum_types.at(b.extra), {}, {}, {}, 0};
         if (cdecl->typedefs.count(b.extra)) {
             std::string target = cdecl->typedefs.at(b.extra);
-            // Preserve `const` on typedef alias of pointer (`const char_ptr_t` where `typedef char *char_ptr_t`? No: in C `const char_ptr_t` means `char *const`, NOT `const char *`! Whereas `typedef const char *cstr_t` already has `const` in `target`!)
+            // In C, `const ptr_alias_t` qualifies the pointer itself (`char *const`),
+            // whereas `typedef const char *cstr_t` already carries `const` in `target`.
             return resolve_c_type_depth(cdecl, target, tm, depth + 1);
         }
         if (cdecl->structs.count(b.extra)) return {"struct", b.extra, {}, {}, 0};
@@ -2311,14 +2355,10 @@ bool parse_brat_callback(std::string_view ann,
     return false;
 }
 
-bool is_const_pointee(std::string_view raw_ct, const CDecl *cdecl) {
+static bool is_const_pointee_depth(std::string_view raw_ct, const CDecl *cdecl, int depth) {
+    if (depth >= 32) return false;
     std::string ct = trim_sv(strip_c_attrs(raw_ct));
     if (ct.find('*') != std::string::npos) {
-        // Split at the LAST `*`: the immediate pointee `*p` is qualified by the segment right before the last `*`.
-        // - `const char *`   -> segment `"const char "` -> true
-        // - `char *const`    -> segment `"char "`       -> false
-        // - `const char **`  -> segment `""`            -> false (`*pp` is a writable `const char *`!)
-        // - `char *const *`  -> segment `"const "`      -> true
         size_t last_star = ct.rfind('*');
         size_t prev_star = (last_star == 0) ? std::string::npos : ct.rfind('*', last_star - 1);
         std::string_view seg = (prev_star == std::string::npos)
@@ -2337,9 +2377,13 @@ bool is_const_pointee(std::string_view raw_ct, const CDecl *cdecl) {
             cleaned += w;
         }
         auto it = cdecl->typedefs.find(cleaned);
-        if (it != cdecl->typedefs.end()) return is_const_pointee(it->second, cdecl);
+        if (it != cdecl->typedefs.end()) return is_const_pointee_depth(it->second, cdecl, depth + 1);
     }
     return false;
+}
+
+bool is_const_pointee(std::string_view raw_ct, const CDecl *cdecl) {
+    return is_const_pointee_depth(raw_ct, cdecl, 0);
 }
 
 std::optional<std::pair<std::string, int64_t>> parse_array_field_type(std::string_view t) {

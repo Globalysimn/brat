@@ -759,8 +759,8 @@ private:
                 for (;;) {
                     const Tok &x = peek();
                     if (x.kind == TK::Eof || (x.text == "=" && depth == 0)) break;
-                    if (x.text == "[") depth++;
-                    if (x.text == "]") depth--;
+                    if (x.text == "[" || x.text == "(") depth++;
+                    else if ((x.text == "]" || x.text == ")") && depth > 0) depth--;
                     toks.push_back(to_str(x.text));
                     step();
                 }
@@ -796,8 +796,8 @@ private:
             for (;;) {
                 const Tok &x = peek();
                 if (x.kind == TK::Eof || (x.text == "=" && depth == 0)) break;
-                if (x.text == "[") depth++;
-                if (x.text == "]") depth--;
+                if (x.text == "[" || x.text == "(") depth++;
+                else if ((x.text == "]" || x.text == ")") && depth > 0) depth--;
                 toks.push_back(to_str(x.text));
                 step();
             }
@@ -2210,13 +2210,9 @@ private:
     // levels is far past anything hand-written and far under the smallest stack.
     static constexpr int kMaxNest = 200;
 
-    // Depth of the tree, not of the nesting in the text. `kMaxNest` bounds the
-    // parser's own stack; it says nothing about `1+1+...+1`, which is one
-    // nesting level and ten thousand nodes. Every pass after the parser walks
-    // the tree recursively, so an unbounded depth is a stack overflow in
-    // whichever pass is deepest -- a SIGSEGV, which cannot be caught and so has
-    // to be refused here. Guard recursion depth (`MAX_TREE_DEPTH`):
-    // the two front ends must refuse the same input at the same depth.
+    // Every pass after the parser walks the AST recursively, so an unbounded
+    // left-deep chain (`1+1+...+1`) would overflow the call stack even though
+    // its delimiter nesting is 1. Bound expression tree height explicitly.
     static constexpr size_t kMaxTreeDepth = 1000;
     int nest_expr_ = 0;
     int nest_block_ = 0;
@@ -2226,8 +2222,6 @@ private:
         bool block;
         Depth(Parser &self, const char *what) : p(self), block(std::string(what) == "block") {
             int &n = block ? p.nest_block_ : p.nest_expr_;
-            // Include source line in parse depth errors;
-            // disagreed on a program `--json` could not attribute to a line.
             if (++n > kMaxNest) p.fail(std::string(what) + " nested too deeply", p.line());
         }
         ~Depth() {
@@ -2569,9 +2563,20 @@ private:
             int inner_depth;
         };
         std::vector<Opening> opening;
+        bool in_inner_str = false;
         for (size_t k = 0; k < raw.size();) {
             if (raw[k] == '\\' && k + 1 < raw.size()) {
                 k += 2;
+                continue;
+            }
+            if (in_inner_str) {
+                if (raw[k] == '"') in_inner_str = false;
+                k++;
+                continue;
+            }
+            if (raw[k] == '"' && !opening.empty()) {
+                in_inner_str = true;
+                k++;
                 continue;
             }
             if (raw[k] == '{') {

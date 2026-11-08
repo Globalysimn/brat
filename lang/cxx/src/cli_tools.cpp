@@ -259,7 +259,8 @@ bool write_output(const std::string &path, const std::string &text, std::string 
 #else
     fs::rename(temp, output, ec);
     if (ec) {
-        fs::remove(temp);
+        std::error_code rm_ec;
+        fs::remove(temp, rm_ec);
         error = "cannot install " + output.string() + ": " + ec.message();
         return false;
     }

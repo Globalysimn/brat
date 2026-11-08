@@ -69,8 +69,7 @@ int join(int a, int b) {
     if (a == kTop || b == kTop) return kTop;
     if (a == kNone) return b;
     if (b == kNone) return a;
-    // read with write is read (a reader still holds the place); read with moved
-    // is "read or gone", and neither a write nor a use may assume otherwise.
+    if (a == kMoved || b == kMoved) return kMoved;
     if ((a == kRead && b == kWrite) || (a == kWrite && b == kRead)) return kRead;
     return kWrite;
 }
@@ -191,8 +190,6 @@ struct State {
     }
 
     void join_from(const State &other) {
-        // How a value went survives the branch that took it: the hint and the
-        // "moved here" note are about the line that did it, not about this path.
         for (const auto &kv : other.verb) verb.insert({kv.first, kv.second});
         std::set<std::string> places;
         for (const auto &kv : caps) places.insert(kv.first);
@@ -205,10 +202,16 @@ struct State {
                 continue;
             }
             caps[p] = merged;
-            auto it = who.find(p);
-            if (it == who.end()) {
-                auto o = other.who.find(p);
-                if (o != other.who.end()) who[p] = o->second;
+            auto o = other.who.find(p);
+            if (o != other.who.end()) {
+                auto &vec = who[p];
+                for (const Holder &h : o->second) {
+                    bool dup = false;
+                    for (const Holder &cur_h : vec) {
+                        if (cur_h.name == h.name && cur_h.cap == h.cap) { dup = true; break; }
+                    }
+                    if (!dup) vec.push_back(h);
+                }
             }
         }
     }
@@ -277,7 +280,14 @@ bool elem_copy(const State &st, const Expr *base) {
         a = a.substr(4, a.size() - 5);
     } else if (a.rfind("map[", 0) == 0 && a.back() == ']') {
         std::string inner = a.substr(4, a.size() - 5);
-        auto comma = inner.rfind(',');
+        size_t comma = std::string::npos;
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); i++) {
+            char c = inner[i];
+            if (c == '[' || c == '(') depth++;
+            else if ((c == ']' || c == ')') && depth > 0) depth--;
+            else if (c == ',' && depth == 0) { comma = i; break; }
+        }
         a = comma == std::string::npos ? inner : inner.substr(comma + 1);
     } else {
         return false;
@@ -525,7 +535,14 @@ struct Walk {
                 a = a.substr(4, a.size() - 5);
             } else if (a.rfind("map[", 0) == 0 && a.back() == ']') {
                 std::string inner = a.substr(4, a.size() - 5);
-                auto comma = inner.rfind(',');
+                size_t comma = std::string::npos;
+                int depth = 0;
+                for (size_t i = 0; i < inner.size(); i++) {
+                    char c = inner[i];
+                    if (c == '[' || c == '(') depth++;
+                    else if ((c == ']' || c == ')') && depth > 0) depth--;
+                    else if (c == ',' && depth == 0) { comma = i; break; }
+                }
                 a = comma == std::string::npos ? inner : inner.substr(comma + 1);
             } else {
                 return "";
@@ -574,14 +591,16 @@ struct Walk {
                 if (h.cap != kRead || l > index) kept.push_back(h);
             }
             if (!kept.empty()) {
-                bool any_read = false;
+                bool any_read = false, any_moved = false;
                 int top = kNone;
                 for (const Holder &h : kept) {
                     if (h.cap == kRead) any_read = true;
+                    if (h.cap == kMoved) any_moved = true;
                     top = std::max(top, h.cap);
                 }
                 it->second = std::move(kept);
-                if (!any_read) st.caps[it->first] = top;
+                if (any_moved) st.caps[it->first] = kMoved;
+                else if (!any_read) st.caps[it->first] = top;
                 ++it;
                 continue;
             }
@@ -776,6 +795,10 @@ struct Walk {
         expr(value, st, false, line);
         if (!place) return;
         const std::string p = st.place(*place);
+        auto holder = live_reader(st, p, root_name(p));
+        if (holder)
+            note(line, assign_while_read(p, holder->name),
+                 std::make_pair(holder->line, "borrowed by `" + holder->name + "` here"));
         if (p.find('.') != std::string::npos) {
             // Writing *into* a value is a use of it, unless the write lands on
             // exactly what was moved out: that is how a moved field comes back
@@ -786,15 +809,15 @@ struct Walk {
                 note(line, msg, rel);
                 return;
             }
+            if (st.cap(p) == kMoved) {
+                st.caps[p] = kNone;
+                st.who.erase(p);
+            }
         } else if (st.cap(p) == kMoved) {
             // `v = ...` on a moved binding rebinds it: the move is over.
             st.caps[p] = kNone;
             st.who.erase(p);
         }
-        auto holder = live_reader(st, p, root_name(p));
-        if (holder)
-            note(line, assign_while_read(p, holder->name),
-                 std::make_pair(holder->line, "borrowed by `" + holder->name + "` here"));
         st.claim(p, kWrite, root_name(p), line);
     }
 

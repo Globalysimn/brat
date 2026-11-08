@@ -8,22 +8,19 @@ BFN bint vaffix(Val s, Val p, int pre, int suf) {
     if (s.tag != V_STR) { vraisef("no method %s", mname); return 0; }
     if (p.tag != V_STR) { vraisef("method `%s`: bad argument", mname); return 0; }
     const char *sc = vstr_c(&s), *pc = vstr_c(&p);
-    size_t lp = vstr_len_fast(&p);
-    if (pre) return !strncmp(sc, pc, lp);
-    size_t ls = vstr_len_fast(&s);
-    if (suf) return lp <= ls && !strcmp(sc + ls - lp, pc);
-    return strstr(sc, pc) != 0;
+    size_t ls = vstr_len_fast(&s), lp = vstr_len_fast(&p);
+    if (pre) return lp <= ls && memcmp(sc, pc, lp) == 0;
+    if (suf) return lp <= ls && memcmp(sc + ls - lp, pc, lp) == 0;
+    return _bmemmem(sc, ls, pc, lp) != NULL;
 }
 BFN Val vreplace(Val s, Val a, Val b) {
     if (s.tag != V_STR) { vraise("no method replace"); return vunwind; }
     if (a.tag != V_STR || b.tag != V_STR) { vraise("method `replace`: bad argument"); return vunwind; }
     const char *p = vstr_c(&s), *pat = vstr_c(&a), *rep = vstr_c(&b);
-    size_t pl = strlen(pat), rl = strlen(rep);
+    size_t sl = vstr_len_fast(&s), pl = vstr_len_fast(&a), rl = vstr_len_fast(&b);
     if (!pl) {
-        /* Output is (sl+1)*rl + sl chars. Check the size before malloc:
-           the old (sl+1)*(rl+1)+1 could overflow and under-allocate. */
-        size_t sl = strlen(p);
-        size_t gaps = 1;   /* one before every code point, and one at the end */
+        /* Output is (gaps)*rl + sl bytes. Check bounds before allocation. */
+        size_t gaps = 1;
         for (size_t i = 0; i < sl; i++) if (((unsigned char)p[i] & 0xC0) != 0x80) gaps++;
         size_t cap = (size_t)1 << 30;   /* BRAT_MAX_STR */
         if (sl >= cap - 1 || rl > (cap - 1 - sl) / gaps) { vraise("out of memory"); return vunwind; }
@@ -34,18 +31,20 @@ BFN Val vreplace(Val s, Val a, Val b) {
         memcpy(w, rep, rl); w += rl;
         for (size_t i = 0; i < sl;) {
             size_t n = (size_t)utf8_cplen(p + i);
+            if (i + n > sl) n = 1;
             memcpy(w, p + i, n); w += n; i += n;
             memcpy(w, rep, rl); w += rl;
         }
         *w = 0;
         return vstr_buf(o, (bint)olen);
     }
-    size_t total = strlen(p) + 1;
+    const char *end = p + sl;
+    size_t total = sl + 1;
     char *o = (char *)balloc(total);
     if (!o) vfatal_oom();
     size_t n = 0;
     const char *q;
-    while ((q = strstr(p, pat)) != 0) {
+    while ((q = _bmemmem(p, (size_t)(end - p), pat, pl)) != NULL) {
         size_t chunk = (size_t)(q - p);
         if (chunk > BRAT_MAX_STR - n || rl > BRAT_MAX_STR - n - chunk) {
             vrc_dec((Val){ .tag = V_STR, .as = { .str = o } });
@@ -61,7 +60,7 @@ BFN Val vreplace(Val s, Val a, Val b) {
         memcpy(o + n, rep, rl); n += rl;
         p = q + pl;
     }
-    size_t rest_len = strlen(p);
+    size_t rest_len = (size_t)(end - p);
     if (rest_len > BRAT_MAX_STR - n) {
         vrc_dec((Val){ .tag = V_STR, .as = { .str = o } });
         vraise("out of memory");
@@ -69,16 +68,18 @@ BFN Val vreplace(Val s, Val a, Val b) {
     }
     size_t rest = rest_len + 1;
     if (n + rest > total) { total = n + rest; o = (char *)bgrow_rc(o, total); }
-    memcpy(o + n, p, rest); n += rest - 1;
+    memcpy(o + n, p, rest_len);
+    n += rest_len;
+    o[n] = 0;
     return vstr_buf(o, (bint)n);
 }
 BFN Val vindex_of(Val s, Val sub) {
     if (s.tag != V_STR) { vraise("no method index_of"); return vunwind; }
     if (sub.tag != V_STR) { vraise("method `index_of`: bad argument"); return vunwind; }
     const char *sc = vstr_c(&s);
-    char *p = strstr(sc, vstr_c(&sub));
+    const char *p = _bmemmem(sc, vstr_len_fast(&s), vstr_c(&sub), vstr_len_fast(&sub));
     if (!p) return vnil();
-    
+
     bint cps = 0;
     for (const char *q = sc; q < p; ) {
         unsigned cp = 0;
@@ -150,12 +151,13 @@ BFN Val vsplit_once(Val s, Val sep) {
     if (s.tag != V_STR) { vraise("no method split_once"); return vunwind; }
     if (sep.tag != V_STR) { vraise("method `split_once`: bad argument"); return vunwind; }
     const char *sc = vstr_c(&s), *sepc = vstr_c(&sep);
-    if (!sepc[0]) { vraise("empty separator"); return vunwind; }
-    char *p = strstr(sc, sepc);
+    size_t sl = vstr_len_fast(&s), dl = vstr_len_fast(&sep);
+    if (!dl) { vraise("empty separator"); return vunwind; }
+    const char *p = _bmemmem(sc, sl, sepc, dl);
     if (!p) return vnil();
     Vec *o = vvec();
     vec_push(o, vstrn(sc, (bint)(p - sc)));
-    vec_push(o, vstr(p + vstr_len_fast(&sep)));
+    vec_push(o, vstrn(p + dl, (bint)((sc + sl) - (p + dl))));
     return vvecv(o);
 }
 BFN Val vparse_int(Val s) {
@@ -298,15 +300,11 @@ BFN int vis_some(Val v) {
     return v.tag == V_TAG && !strcmp(v.as.tv->tag, "some");
 }
 BFN int vis_none(Val v) {
-    return v.tag == V_NIL;
+    return v.tag == V_NIL || (v.tag == V_TAG && !strcmp(v.as.tv->tag, "none"));
 }
 
-/* A closure is a runtime object, not a value a program can write down: the tag
-   is "closure" and the payload is (code, captured frame). Printing that payload
-   was an internal view, and the runtime printed a *different* internal view
-   (its AST), so `print(f)` was the last known spot where two backends disagreed
-   about the bytes of a value. SPEC says printing a value is part of the
-   contract, so both say `fn`. */
+/* Closures carry an internal ("closure", (code, env)) tag; format them as `fn`
+   rather than exposing the internal representation. */
 BFN bint vtag_closure(Val v) {
     return v.tag == V_TAG && v.as.tv && v.as.tv->tag && !strcmp(v.as.tv->tag, "closure");
 }
@@ -349,13 +347,17 @@ BFN Val vunwrap(Val v) {
     vraisef("unwrap of %s (want Ok/Err/Some)", vtypename(v));
     return vnil();
 }
-BFN int vunwrap_or_state(Val v) {
+BFN int vopt_res_state(Val v) {
     if (v.tag == V_TAG && (!strcmp(v.as.tv->tag, "ok") || !strcmp(v.as.tv->tag, "some")))
         return 1;
     if (v.tag == V_NIL || (v.tag == V_TAG && (!strcmp(v.as.tv->tag, "err") || !strcmp(v.as.tv->tag, "none"))))
         return 0;
-    vraisef("unwrap_or of %s (want Ok/Err/Some/None)", vtypename(v));
     return -1;
+}
+BFN int vunwrap_or_state(Val v) {
+    int s = vopt_res_state(v);
+    if (s < 0) vraisef("unwrap_or of %s (want Ok/Err/Some/None)", vtypename(v));
+    return s;
 }
 BFN int vor_fb(Val v) {
     return v.tag == V_NIL;
@@ -591,14 +593,17 @@ BFN Val vmap_get_or(Val m, Val k, Val d) {
     if (m.tag != V_STRUCT) { vraise("get_or of non-map"); return vunwind; }
     if (vmapkey_reserved(k)) { return vmapkey_err(); }
     if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
-    return o ? *o : d;
+    Val r = o ? vrc_inc(*o) : vrc_inc(d);
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
+    return r;
 }
 BFN_HOT Val vmap_get_or_ic(Val m, const char *k, Val d, BFieldIC *ic) {
     if (m.tag != V_STRUCT) { vraise("get_or of non-map"); return vunwind; }
     BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_ic(m.as.map, k, ic);
-    Val r = o ? *o : d;
+    Val r = o ? vrc_inc(*o) : vrc_inc(d);
     BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return r;
 }

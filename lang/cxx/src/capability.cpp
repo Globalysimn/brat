@@ -523,9 +523,13 @@ std::optional<std::string> infer_cap_type(const Expr *e,
             int depth = 0;
             size_t split = std::string::npos;
             for (size_t i = 0; i < inner.size(); i++) {
-                if (inner[i] == '[') depth++;
-                else if (inner[i] == ']') depth--;
-                else if (inner[i] == ',' && depth == 0) split = i;
+                if (inner[i] == '[' || inner[i] == '(') depth++;
+                else if (inner[i] == ']' || inner[i] == ')') {
+                    if (depth > 0) depth--;
+                } else if (inner[i] == ',' && depth == 0) {
+                    split = i;
+                    break;
+                }
             }
             return trim_type(split == std::string::npos ? inner : inner.substr(split + 1));
         }

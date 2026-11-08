@@ -698,6 +698,104 @@ def test_security_and_soundness_hardening(cxx, env):
         assert "-32600" in r_m1.stdout and "-32600" in r_m2.stdout, (r_m1.stdout, r_m2.stdout)
 
 
+def test_batch_1_2_3_regressions(cxx, env):
+    d = os.path.join(TMP, "b123_regress")
+    os.makedirs(d, exist_ok=True)
+
+    # 1. Runtime/stdlib/parser/checker/emitter end-to-end execution at -O0 and -O2:
+    #    - `move` parameter inside closure & SRA struct
+    #    - `std.bytes.from_base64` rejecting non-ASCII UTF-8 bytes
+    #    - `std.http` SSRF classifier blocking CGNAT/decimal/hex IPv4 & NAT64 IPv6
+    #    - Pike-VM regex escaped `\]` inside `[...]` and rejecting trailing `\`
+    #    - String interpolation with nested quotes `"{m.get("{")}"`
+    #    - Nested `fn` inside `else` / `else if` blocks
+    prog = os.path.join(d, "b123_rt.brat")
+    with open(prog, "w", encoding="utf-8") as f:
+        f.write(
+            'import std.bytes\n'
+            'import std.http\n'
+            'struct Pair { a: str, b: i64 }\n'
+            'fn sink(s: move str) -> i64 { return len(s) }\n'
+            'fn main() -> i64 {\n'
+            '  let clo = fn(s: move str) { return sink(move s) }\n'
+            '  assert(clo(move ("hello-" + "world-long-heap-string")) == 10 + 18)\n'
+            '  let p = Pair { a: "alpha-beta-gamma-long", b: 21 }\n'
+            '  assert(len(p.a) + p.b == 42)\n'
+            '  assert(is_err(std.bytes.from_base64("é===")))\n'
+            '  assert(is_err(std.http.get("http://100.64.0.1/x")))\n'
+            '  assert(is_err(std.http.get("http://2130706433/x")))\n'
+            '  assert(is_err(std.http.get("http://0x7f000001/x")))\n'
+            '  assert(is_err(std.http.get("http://[64:ff9b::7f00:1]/x")))\n'
+            '  assert(re_match("a]b", "^[a\\\\]b]+$"))\n'
+            '  let mut trailing_err = false\n'
+            '  try { let _m = re_match("abc", "abc\\\\") } catch _e { trailing_err = true }\n'
+            '  assert(trailing_err)\n'
+            '  let m = {"{": "brace-ok"}\n'
+            '  assert("{m.get("{")}" == "brace-ok")\n'
+            '  if false { return 1 }\n'
+            '  else {\n'
+            '    fn inner_inc(v: i64) -> i64 { return v + 1 }\n'
+            '    assert(inner_inc(41) == 42)\n'
+            '  }\n'
+            '  return 0\n'
+            '}\n'
+        )
+    assert subprocess.run([cxx, "check", "--", prog], env=env, capture_output=True, text=True).returncode == 0
+    for opt_lvl in ("-O0", "-O2"):
+        r = subprocess.run([cxx, "run", opt_lvl, "--mem=64M", prog], env=env, capture_output=True, text=True)
+        assert r.returncode == 0, (opt_lvl, r.stdout, r.stderr)
+
+    # 2. Multi-field `extern union` literal rejected inside `else if` chains and closures.
+    u_bad = os.path.join(d, "union_bad.brat")
+    with open(u_bad, "w", encoding="utf-8") as f:
+        f.write(
+            'extern union U { a: i32, b: f32 }\n'
+            'fn untyped(k) {\n'
+            '  if k == 0 { return 0 }\n'
+            '  else if k == 1 { return 1 }\n'
+            '  else if k == 2 { let u = U { a: 1, b: 2.0 }; return 2 }\n'
+            '  let f = fn() { if true { let u2 = U { a: 1, b: 2.0 }; return u2 } return 0 }\n'
+            '  return f()\n'
+            '}\n'
+            'fn main() -> i64 { return 0 }\n'
+        )
+    ru = subprocess.run([cxx, "check", u_bad], env=env, capture_output=True, text=True)
+    assert ru.returncode != 0 and ru.stdout.count("initializes 2 arms") == 2, ru.stdout
+
+    # 3. Go untagged typedef struct alias, Rust repr(isize) + INT64_MAX enum, cyclic typedef,
+    #    deep ConstExpr, bindgen -o error check, and --header-only callback struct retention.
+    go_h = os.path.join(d, "only_alias.h")
+    with open(go_h, "w", encoding="utf-8") as f:
+        f.write("typedef struct { int a; } OnlyAlias;\nOnlyAlias id_a(OnlyAlias x);\n")
+    r_go = subprocess.run([cxx, "bindgen", "--lang", "go", go_h], env=env, capture_output=True, text=True, check=True)
+    assert "\tOnlyAlias = C.OnlyAlias" in r_go.stdout, r_go.stdout
+
+    rs_f = os.path.join(d, "mode.rs")
+    with open(rs_f, "w", encoding="utf-8") as f:
+        f.write('#[repr(isize)]\npub enum Mode { Fast = 0, Max = 9223372036854775807 }\n'
+                '#[no_mangle]\npub extern "C" fn set_mode(m: Mode) -> i32 { 0 }\n')
+    r_rs = subprocess.run([cxx, "bindgen", rs_f], env=env, capture_output=True, text=True, check=True)
+    assert "const Fast: i64 = 0" in r_rs.stdout and "extern fn set_mode(m: i64) -> i32;" in r_rs.stdout
+
+    cyc_h = os.path.join(d, "cyc.h")
+    with open(cyc_h, "w", encoding="utf-8") as f:
+        f.write("typedef b a;\ntypedef a b;\n#define DEEP " + ("(" * 4000) + "1" + (")" * 4000) +
+                "\nstruct S { int x[DEEP]; };\nvoid f(const a *p);\n")
+    assert subprocess.run([cxx, "bindgen", "--inline-arrays", cyc_h], env=env, capture_output=True, text=True).returncode == 0
+
+    r_bad_o = subprocess.run([cxx, "bindgen", go_h, "-o", os.path.join(d, "missing_dir", "out.bri")],
+                             env=env, capture_output=True, text=True)
+    assert r_bad_o.returncode != 0 and "cannot write" in r_bad_o.stderr
+
+    with open(os.path.join(d, "cb_sub.h"), "w", encoding="utf-8") as f:
+        f.write("struct CbData { int v; };\n")
+    cb_root = os.path.join(d, "cb_root.h")
+    with open(cb_root, "w", encoding="utf-8") as f:
+        f.write('#include "cb_sub.h"\nvoid on_ev(void (*cb)(struct CbData));\n')
+    r_cb = subprocess.run([cxx, "bindgen", "--header-only", cb_root], env=env, capture_output=True, text=True, check=True)
+    assert "extern struct CbData { v: i32 }" in r_cb.stdout and "extern fn on_ev(cb: fn(CbData)) -> none;" in r_cb.stdout
+
+
 def main():
     cxx = _cxx.build()
     env = zero_python_env()
@@ -733,6 +831,7 @@ def main():
     test_13_1c_native_pkg_http_targz_and_c_sources(cxx, env)
     test_13_2b2_and_compiler_leaks_under_asan(cxx)
     test_security_and_soundness_hardening(cxx, env)
+    test_batch_1_2_3_regressions(cxx, env)
     print("(v0.7) CLOSURE SUITE ALL GREEN")
 
 

@@ -690,6 +690,7 @@ bool extract_targz_raw(std::string_view gz_bytes,
     const auto *buf = reinterpret_cast<const uint8_t *>(tar.data());
     const size_t n = tar.size();
     size_t pos = 0;
+    size_t header_count = 0;
     size_t entry_count = 0;
     size_t total_payload = 0;
     std::set<std::string> seen_paths;
@@ -709,6 +710,10 @@ bool extract_targz_raw(std::string_view gz_bytes,
         if (all_zero) {
             pos += 512;
             continue;
+        }
+        if (++header_count > max_entries * 4u) {
+            err = "archive has too many entries (>512)";
+            return false;
         }
         uint64_t want_sum = 0;
         if (!parse_tar_uint(hdr + 148, 8, want_sum)) {
@@ -1039,6 +1044,31 @@ void classify_sockaddr(const struct sockaddr *sa, bool &non_public, bool &always
         bool z0_14 = z0_9 && b[10] == 0 && b[11] == 0 && b[12] == 0 && b[13] == 0 && b[14] == 0;
         if (z0_14 && b[15] == 0) {
             always_blocked = true;
+            non_public = true;
+            return;
+        }
+        if (z0_9 && b[10] == 0 && b[11] == 0 && !(b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1)) {
+            uint32_t v4 = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16) |
+                          (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+            classify_ipv4_host_order(v4, non_public, always_blocked);
+            return;
+        }
+        if (b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b) {
+            bool nat64_wk = true;
+            for (int i = 4; i < 12; ++i) if (b[i] != 0) nat64_wk = false;
+            const bool nat64_loc = (b[4] == 0x00 && b[5] == 0x01);
+            if (nat64_wk || nat64_loc) {
+                uint32_t v4 = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16) |
+                              (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+                classify_ipv4_host_order(v4, non_public, always_blocked);
+                non_public = true;
+                return;
+            }
+        }
+        if (b[0] == 0x20 && b[1] == 0x02) {
+            uint32_t v4 = (uint32_t(b[2]) << 24) | (uint32_t(b[3]) << 16) |
+                          (uint32_t(b[4]) << 8) | uint32_t(b[5]);
+            classify_ipv4_host_order(v4, non_public, always_blocked);
             non_public = true;
             return;
         }

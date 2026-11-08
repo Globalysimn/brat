@@ -655,13 +655,18 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
     if (name == "brat_build") {
         uint32_t out_node = tape.get(args, "out");
         std::string out_path;
-        if (out_node != 0 && !tape.is_null(out_node)) {
+        const bool explicit_out = (out_node != 0 && !tape.is_null(out_node));
+        if (explicit_out) {
             if (!tape.is_string(out_node)) return {"`out` must be a non-empty string", true};
             const std::string raw(tape.str_view(out_node));
             if (raw.empty()) return {"`out` must be a non-empty string", true};
             if (raw.front() == '-') return {"`out` must not start with '-'", true};
             out_path = absolute_path(raw);
             if (out_path.empty()) return {"invalid output path", true};
+        } else {
+            out_path = std::filesystem::path(path).replace_extension(".exe").string();
+        }
+        {
             std::error_code ec;
             const std::filesystem::path out_fs(out_path);
             if (std::filesystem::is_symlink(out_fs, ec))
@@ -672,9 +677,9 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
             const auto out_canon = std::filesystem::weakly_canonical(out_fs, ec);
             if (!ec && out_canon == src_canon)
                 return {"`out` must not overwrite input source file", true};
-            if (is_protected_source_ext(out_fs.extension().string()))
+            if (explicit_out && is_protected_source_ext(out_fs.extension().string()))
                 return {"refusing to overwrite source or config file extension: " + out_path, true};
-            if (!mcp_unconfined_enabled()) {
+            if (explicit_out && !mcp_unconfined_enabled()) {
                 auto src_dir = std::filesystem::weakly_canonical(std::filesystem::path(path).parent_path(), ec);
                 auto cwd_dir = std::filesystem::weakly_canonical(std::filesystem::current_path(ec), ec);
                 // Walk up from src_dir to nearest ancestor with brat.lock if any.
@@ -691,8 +696,6 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
                     return {"refusing `out` path outside source project or working directory: " + out_path, true};
                 }
             }
-        } else {
-            out_path = std::filesystem::path(path).replace_extension(".exe").string();
         }
         CommandResult r = call({"build", path, "-o", out_path}, 600000);
         if (!r.launch_error.empty() || r.timed_out || r.too_large) {

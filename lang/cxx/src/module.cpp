@@ -218,7 +218,8 @@ ModuleInterface parse_interface(const fs::path &path) {
     uint32_t bad_line = 1;
     if (!utf8_valid(src, bad_line, 1))
         throw ModuleError(path.string() + ":" + std::to_string(bad_line) +
-                          ": bad interface line: source is not valid UTF-8 at line 1");
+                          ": bad interface line: source is not valid UTF-8 at line " +
+                          std::to_string(bad_line));
     std::vector<std::string> lines;
     std::string cur;
     for (char c : src) {

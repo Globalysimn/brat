@@ -201,24 +201,31 @@ pub fn to_base64(data: vec[i64]) -> Result[str, str] {
   return Ok(parts.join(""))
 }
 
-fn b64_val(ch: str) -> i64 {
-  let idx = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".index_of(ch)
-  if is_none(idx) {
-    return -1
+fn b64_byte_val(b: i64) -> i64 {
+  if b >= 65 && b <= 90 {
+    return b - 65
   }
-  return idx
+  if b >= 97 && b <= 122 {
+    return b - 71
+  }
+  if b >= 48 && b <= 57 {
+    return b + 4
+  }
+  if b == 43 {
+    return 62
+  }
+  if b == 47 {
+    return 63
+  }
+  return -1
 }
 
 pub fn from_base64(text: str) -> Result[vec[i64], str] {
   let mut clean = []
-  let mut i = 0
-  let raw_n = len(text)
-  while i < raw_n {
-    let ch = text[i]
-    if ch != " " && ch != "\n" && ch != "\r" && ch != "\t" {
-      clean.push(ch)
+  for b in utf8_bytes(text) {
+    if b != 32 && b != 10 && b != 13 && b != 9 {
+      clean.push(b)
     }
-    i = i + 1
   }
   let n = len(clean)
   if n == 0 {
@@ -234,13 +241,13 @@ pub fn from_base64(text: str) -> Result[vec[i64], str] {
     let c1 = clean[k + 1]
     let c2 = clean[k + 2]
     let c3 = clean[k + 3]
-    let v0 = b64_val(c0)
-    let v1 = b64_val(c1)
+    let v0 = b64_byte_val(c0)
+    let v1 = b64_byte_val(c1)
     if v0 < 0 || v1 < 0 {
       return Err("invalid base64 character")
     }
-    if c2 == "=" {
-      if c3 != "=" || k + 4 != n {
+    if c2 == 61 {
+      if c3 != 61 || k + 4 != n {
         return Err("invalid base64 padding")
       }
       if v1 % 16 != 0 {
@@ -249,11 +256,11 @@ pub fn from_base64(text: str) -> Result[vec[i64], str] {
       let triple = v0 * 262144 + v1 * 4096
       out.push((triple / 65536) % 256)
     } else {
-      let v2 = b64_val(c2)
+      let v2 = b64_byte_val(c2)
       if v2 < 0 {
         return Err("invalid base64 character")
       }
-      if c3 == "=" {
+      if c3 == 61 {
         if k + 4 != n {
           return Err("invalid base64 padding")
         }
@@ -264,7 +271,7 @@ pub fn from_base64(text: str) -> Result[vec[i64], str] {
         out.push((triple / 65536) % 256)
         out.push((triple / 256) % 256)
       } else {
-        let v3 = b64_val(c3)
+        let v3 = b64_byte_val(c3)
         if v3 < 0 {
           return Err("invalid base64 character")
         }

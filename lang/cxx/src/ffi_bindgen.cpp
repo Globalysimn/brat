@@ -673,9 +673,7 @@ std::pair<std::string, std::vector<std::string>> emit_lang_bindings(
     for (const auto &st : structs) {
         std::string c_sp = (cdecl.tags.count(st.name) && !cdecl.aliases.count(st.name))
             ? ("C.struct_" + st.name) : ("C." + st.name);
-        // Cgo spells struct tags as `C.struct_<tag>`.
-        out.push_back("\t" + st.name + " = C.struct_" + st.name);
-        (void)c_sp;
+        out.push_back("\t" + st.name + " = " + c_sp);
     }
     out.push_back(")");
     out.emplace_back();
@@ -806,12 +804,12 @@ std::string bindgen_rust_source(std::string_view raw_src, std::string_view path,
             base.erase(p, 6);
         }
         base = trim_s(base);
-        // Fat pointers (`&str`, `&[T]`, `*const str`, `*const [T]`, `&dyn T`) are 2 words in Rust: never thin `ptr`!
+        // Fat pointers (`&str`, `&[T]`, `*const str`, `*const [T]`, `&dyn T`) are two words in Rust, not a thin `ptr`.
         if (base == "&str" || base == "&mut str" || base.rfind("&[", 0) == 0 || base.rfind("&mut [", 0) == 0 ||
             base == "*str" || base == "*mut str" || base.rfind("*[", 0) == 0 || base.rfind("*mut [", 0) == 0 ||
             base.find("dyn ") != std::string::npos)
             return {"ptr", false};
-        // Inline Rust arrays `[T; N]` passed by value are not pointers!
+        // Inline Rust arrays `[T; N]` passed by value are not pointers.
         if (!base.empty() && base[0] == '[') return {"ptr", false};
         if (!base.empty() && (base[0] == '&' || base[0] == '*')) return {"ptr", true};
         if (kRustPrim.count(base)) return {kRustPrim.at(base), true};
@@ -902,7 +900,7 @@ std::string bindgen_rust_source(std::string_view raw_src, std::string_view path,
             for (const char *rt : {"u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "isize"}) {
                 if (a.find(std::string("repr(") + rt + ")") != std::string::npos ||
                     a.find(std::string("repr(") + rt + ",") != std::string::npos) {
-                    enum_repr = rt;
+                    enum_repr = (std::string_view(rt) == "isize") ? isize_brat : std::string(rt);
                 }
             }
         }
@@ -937,7 +935,7 @@ std::string bindgen_rust_source(std::string_view raw_src, std::string_view path,
                 nxt = v;
             }
             if (bindgen_name_ok(vnm)) vars.emplace_back(vnm, nxt);
-            ++nxt;
+            nxt = static_cast<int64_t>(static_cast<uint64_t>(nxt) + 1ULL);
         }
         enum_reprs[name] = enum_repr;
         enums.emplace_back(name, std::move(vars));
@@ -949,8 +947,8 @@ std::string bindgen_rust_source(std::string_view raw_src, std::string_view path,
     for (const auto &[nm, _] : structs) known_structs.insert(nm);
     for (const auto &[nm, _] : enums) known_enums[nm] = enum_reprs.count(nm) ? enum_reprs[nm] : "i32";
 
-    // Validate all struct fields BEFORE function mapping; never drop an unrepresentable
-    // field inside a `#[repr(C)]` struct, as that shifts every subsequent member's offset!
+    // Validate all struct fields before function mapping; dropping an unrepresentable
+    // field inside a `#[repr(C)]` struct would shift subsequent member offsets.
     std::vector<std::pair<std::string, std::vector<std::string>>> valid_structs;
     for (;;) {
         bool dropped_any = false;
@@ -1071,10 +1069,11 @@ std::string bindgen_rust_source(std::string_view raw_src, std::string_view path,
         for (size_t i = 0; i < fl.size(); ++i) { if (i) fj += ", "; fj += fl[i]; }
         lines.push_back("extern struct " + name + " { " + fj + " }");
     }
-    for (const auto &[_, vars] : enums) {
+    for (const auto &[ename, vars] : enums) {
+        const std::string er = enum_reprs.count(ename) ? enum_reprs.at(ename) : "i32";
         lines.emplace_back();
         for (const auto &[vnm, vval] : vars)
-            lines.push_back("const " + vnm + ": i32 = " + std::to_string(vval));
+            lines.push_back("const " + vnm + ": " + er + " = " + std::to_string(vval));
     }
     lines.emplace_back();
     lines.push_back("extern {");

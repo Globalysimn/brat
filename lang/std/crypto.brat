@@ -18,9 +18,7 @@ fn bit_xor_byte(a: i64, b: i64) -> i64 {
   while k < 8 {
     let ba = x % 2
     let bb = y % 2
-    if ba != bb {
-      res = res + bit
-    }
+    res = res + (ba + bb - 2 * ba * bb) * bit
     x = x / 2
     y = y / 2
     bit = bit * 2

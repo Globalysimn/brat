@@ -684,12 +684,14 @@ struct Emitter {
     std::set<std::string> cur_params;  // parameters of the function being emitted
     bool cur_ret_result = false;       // true when current fn declares `-> Result[...]`
     std::vector<std::string> scopes;
+    std::vector<std::string> iter_cleanups;
     // Lexical boundaries for each loop body: early exits must drain every
     // defer frame and task scope entered since the loop began.
     std::vector<std::pair<size_t, size_t>> loop_exit_depths;
     std::string fin = "__fin_top";
-    std::optional<std::string> err_goto, err_base;
+    std::optional<std::string> err_goto;
     size_t err_scope_depth = 0;
+    size_t err_iter_depth = 0;
     std::map<std::string, FnEntry> fast;
     std::map<std::string, std::string> fastc, fastkinds;
     std::set<std::string> rec_fast;
@@ -909,8 +911,6 @@ struct Emitter {
     V read_only(const Expr &arg, const std::string &fn);
     V read_only_call(const Expr &arg, const std::function<std::string(const std::string &)> &mk);
     V borrow_builtin(const std::string &c_name, const ExprList &args);
-    V release_lit_args(const std::vector<std::string> &pre, const ExprList &nodes,
-                       const std::vector<std::string> &vals, const std::string &call);
     V part_of_temp(const V &a, const Expr &src, const std::string &open,
                    const std::string &close);
     void need_arity(const ExprList &args, size_t n, const std::string &name);
@@ -955,6 +955,7 @@ struct Emitter {
     void emit_loop_exit(const std::string &k, const std::string &ind);
     std::string var_ref(const std::string &name);
     std::optional<std::string> place_root(const Expr &e);
+    bool moves_owned_local(const Expr &e) const;
     std::string keep(const Expr &e, const std::string &val);
     std::string own_operand(const Expr &e, const std::string &val);
     std::string truth(const Expr &e, const std::string &val, std::vector<std::string> &lines);
@@ -2645,8 +2646,8 @@ const std::set<std::string> FRESH_RESULT = {
     "split", "split_once", "join", "upper", "lower", "trim", "replace", "repeat",
     "chars", "lines", "zip", "chunks", "enumerate", "copy", "keys", "items",
     "vals", "sum", "index_of", "starts_with", "ends_with", "contains", "has",
-    "parse_int", "parse_float", "rev", "fold", "any", "all", "map", "filter",
-    "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
+    "get_or", "parse_int", "parse_float", "rev", "fold", "any", "all", "map",
+    "filter", "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
     "is_some", "is_none"};
 // True when evaluating `e` can raise: it calls something, or it divides. The
 // emitter uses this to check between a failing operand and the operator that
@@ -2663,7 +2664,7 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
     switch (e.k) {
     case EK::Str: case EK::RStr: case EK::Num: case EK::Bool: case EK::None:
     case EK::Bin: case EK::VecLit: case EK::MapLit: case EK::StructLit: case EK::Closure:
-    case EK::Or:
+    case EK::Or: case EK::ParFor:
         return true;
     case EK::Call:
         // `unwrap`/`unwrap_or` return a reference the caller owns (see vtag_payload), and
@@ -2688,6 +2689,8 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
         // missing from both was treated as an alias and never released (`rev`
         // was). Asked of the union, so a name only has to be in one of them.
         return heap.count(e.b) || HEAP_METHODS.count(e.b) || FRESH_RESULT.count(e.b);
+    case EK::Field:
+        return !e.kids.empty() && dec_able(*e.kids[0], heap);
     case EK::Idx:
         // `a[i]` hands back a reference the holder owns (see vat_owned).
         return true;
@@ -2769,17 +2772,17 @@ V Emitter::ex(const Expr &e) {
         return ex_bin(e);
     case EK::Or: {
         V a = ex(*e.kids[0]);
+        auto saved_moved = moved;
         V b = ex(*e.kids[1]);
+        moved = saved_moved;
         std::string t = new_tmp();
         std::vector<std::string> pre = a.pre;
-        // `pick_first([]) or 99` answers with the tag the call built or with the
-        // fallback. Whichever it is, the binding that receives it owns one
-        // reference: a left side that is a variable is retained, and the left side is
-        // released when the fallback wins.
         pre.push_back(cat("Val ", t, " = (", own_operand(*e.kids[0], a.val), ");"));
-        for (auto &p : b.pre) pre.push_back(p);
-        const std::string fb = keep(*e.kids[1], b.val);
-        pre.push_back(cat("if (vor_fb(", t, ")) { vdrop_temp(", t, "); ", t, " = (", fb, "); }"));
+        pre.push_back(cat("if (vor_fb(", t, ")) {"));
+        pre.push_back(cat("  vdrop_temp(", t, "); ", t, " = vnil();"));
+        for (auto &p : b.pre) pre.push_back("  " + p);
+        pre.push_back(cat("  ", t, " = (", own_operand(*e.kids[1], b.val), ");"));
+        pre.push_back("}");
         return {pre, t};
     }
     case EK::Quest: {
@@ -2806,17 +2809,18 @@ V Emitter::ex(const Expr &e) {
         }
         std::string st = infer_expr_struct(e.kids[0].get(), var_structs);
         int slot = !st.empty() ? struct_field_slot(st, e.b) : -1;
+        std::string drop_recv = owned ? cat("vdrop_temp(", recv, "); ") : std::string();
         if (slot >= 0) {
             int sid = canonical_struct_shape(st);
             a.pre.push_back(cat("Val *", t, " = vstruct_slot_ptr(", recv, ", &_shp[", sid, "], ",
                                 slot, ", \"", fname, "\");"));
-            a.pre.push_back(cat("if (!", t, ") { ", bail, " }"));
+            a.pre.push_back(cat("if (!", t, ") { ", drop_recv, bail, " }"));
         } else {
-            a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { vraise(\"no field ",
+            a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { ", drop_recv, "vraise(\"no field ",
                                 fname, "\"); ", bail, " }"));
             a.pre.push_back(cat("Val *", t, " = map_get_ic((", recv, ").as.map, \"", fname, "\", ",
                                 next_fic(), ");"));
-            a.pre.push_back(cat("if (!", t, ") { vraise(\"no field ", fname, "\"); ", bail, " }"));
+            a.pre.push_back(cat("if (!", t, ") { ", drop_recv, "vraise(\"no field ", fname, "\"); ", bail, " }"));
         }
         if (owned) {
             std::string v = new_tmp("v");
@@ -3044,14 +3048,19 @@ V Emitter::ex_bin(const Expr &e) {
         // either way: a variable is retained, and a fresh left value is released when the
         // right one replaces it. Taking the operand as an alias freed it with the result.
         V a = ex(*e.kids[0]);
+        auto saved_moved = moved;
         V b = ex(*e.kids[1]);
+        moved = saved_moved;
         std::string t = new_tmp();
         std::vector<std::string> pre = a.pre;
         pre.push_back(cat("Val ", t, " = (", own_operand(*e.kids[0], a.val), ");"));
         pre.push_back(op == "&&" ? cat("if (vis_true(", t, ")) {")
                                  : cat("if (!vis_true(", t, ")) {"));
+        if (!is_imm_expr(*e.kids[0])) {
+            pre.push_back(cat("  vdrop_temp(", t, ");"));
+            pre.push_back(cat("  ", t, " = vnil();"));
+        }
         for (auto &p : b.pre) pre.push_back("  " + p);
-        if (!is_imm_expr(*e.kids[0])) pre.push_back(cat("  vdrop_temp(", t, ");"));
         pre.push_back(cat("  ", t, " = (", own_operand(*e.kids[1], b.val), ");"));
         pre.push_back("}");
         return {pre, t};
@@ -3622,27 +3631,36 @@ V Emitter::args_vec(const ExprList &args) {
         std::string sv = new_tmp("sv");
         return {{cat("BStackVec ", sv, "; VSTACK_VEC_INIT(", sv, ", NULL, 0); Vec *", t, " = &", sv, ".vec;")}, t};
     }
-    if (n <= 8) {
-        std::string sv = new_tmp("sv");
-        std::string ab = new_tmp("ab");
-        std::vector<std::string> pre = {cat("Val ", ab, "[", n, "]; BStackVec ", sv, "; VSTACK_VEC_INIT(", sv,
-                                            ", ", ab, ", ", n, "); Vec *", t, " = &", sv, ".vec;")};
+    const size_t start = call_cleanup.size();
+    call_cleanup.push_back("@args:" + t);
+    try {
+        if (n <= 8) {
+            std::string sv = new_tmp("sv");
+            std::string ab = new_tmp("ab");
+            std::vector<std::string> pre = {cat("Val ", ab, "[", n, "]; BStackVec ", sv, "; VSTACK_VEC_INIT(", sv,
+                                                ", ", ab, ", ", n, "); Vec *", t, " = &", sv, ".vec;")};
+            for (const Expr *a : args) {
+                V v = ex(*a);
+                for (auto &p : v.pre) pre.push_back(p);
+                pre.push_back(cat(ab, "[", t, "->len++] = ", keep(*a, v.val), ";"));
+                pre.push_back(err_check_line());
+            }
+            call_cleanup.resize(start);
+            return {pre, t};
+        }
+        std::vector<std::string> pre = {cat("Vec *", t, " = vvec();")};
         for (const Expr *a : args) {
             V v = ex(*a);
             for (auto &p : v.pre) pre.push_back(p);
-            pre.push_back(cat(ab, "[", t, "->len++] = ", keep(*a, v.val), ";"));
+            pre.push_back(cat("vec_push(", t, ", ", keep(*a, v.val), ");"));
             pre.push_back(err_check_line());
         }
+        call_cleanup.resize(start);
         return {pre, t};
+    } catch (...) {
+        call_cleanup.resize(start);
+        throw;
     }
-    std::vector<std::string> pre = {cat("Vec *", t, " = vvec();")};
-    for (const Expr *a : args) {
-        V v = ex(*a);
-        for (auto &p : v.pre) pre.push_back(p);
-        pre.push_back(cat("vec_push(", t, ", ", keep(*a, v.val), ");"));
-        pre.push_back(err_check_line());
-    }
-    return {pre, t};
 }
 
 void Emitter::emit_loop_drops(const StmtList &body, const std::string &ind) {
@@ -3669,6 +3687,8 @@ void Emitter::emit_loop_drops(const StmtList &body, const std::string &ind) {
             } else if (st->k == SK::Try) {
                 walk(view(st->body));
                 walk(view(st->body2));
+            } else if (st->k == SK::Block || st->k == SK::Scope || st->k == SK::Unsafe) {
+                walk(view(st->body));
             }
         }
     };
@@ -3723,6 +3743,7 @@ static bool stmt_returns_owned(const Stmt &s, const std::set<std::string> &heap,
                         ((self_a && s.e1->a == *self_a) || (self_b && s.e1->a == *self_b)));
         if (!is_self) saw = true;
         if (s.e1->k == EK::Var) return true;
+        if (s.e1->k == EK::Move && !s.e1->kids.empty() && s.e1->kids[0]->k == EK::Var) return true;
         return dec_able(*s.e1, heap);
     }
     case SK::Block: return block_returns_owned(view(s.body), heap, saw, in_try, self_a, self_b);
@@ -3944,8 +3965,7 @@ V Emitter::direct_call_result(
             V value = ex(node);
             for (const auto &line : value.pre) pre.push_back(line);
             bool owned = dec_able(node, heap);
-            if (!owned && node.k == EK::Move && !node.kids.empty() &&
-                node.kids[0]->k == EK::Var && sym.count(node.kids[0]->a))
+            if (!owned && moves_owned_local(node))
                 owned = true;
 
             bool stable = false;
@@ -4216,26 +4236,55 @@ V Emitter::ex_mcall(const Expr &e) {
          (meth == "fold" && args.size() == 2 && fusible_fnlit(args[1], 2)))) {
         return ex_fused_stream(*obj, meth, args);
     }
-    if (meth == "unwrap_or" && args.size() == 1 && !user_meths.count(meth)) {
+    if (meth == "unwrap_or" && args.size() == 1) {
         V a = ex(*obj);
+        auto saved_moved = moved;
         V b = ex(*args[0]);
+        moved = saved_moved;
         std::string ta = new_tmp("uo");
         std::string tr = new_tmp("ur");
         std::string st = new_tmp("us");
         std::vector<std::string> pre = a.pre;
         pre.push_back(cat("Val ", ta, " = (", a.val, ");"));
-        pre.push_back(cat("int ", st, " = vunwrap_or_state(", ta, ");"));
         const bool drop_a = dec_able(*obj, heap_returns());
-        if (drop_a)
-            pre.push_back(cat("if (", st, " < 0) { vdrop_temp(", ta, "); ", err_bail(), " }"));
-        else
-            pre.push_back(cat("if (", st, " < 0) { ", err_bail(), " }"));
+        if (!user_meths.count(meth)) {
+            pre.push_back(cat("int ", st, " = vunwrap_or_state(", ta, ");"));
+            if (drop_a)
+                pre.push_back(cat("if (", st, " < 0) { vdrop_temp(", ta, "); ", err_bail(), " }"));
+            else
+                pre.push_back(cat("if (", st, " < 0) { ", err_bail(), " }"));
+            pre.push_back(cat("Val ", tr, " = vnil();"));
+            pre.push_back(cat("if (", st, ") { ", tr, " = vtag_payload(", ta, ");",
+                              drop_a ? cat(" vdrop_temp(", ta, ");") : "", " } else {"));
+            if (drop_a) pre.push_back(cat("    vdrop_temp(", ta, ");"));
+            for (auto &p : b.pre) pre.push_back(cat("    ", p));
+            pre.push_back(cat("    ", tr, " = (", own_operand(*args[0], b.val), ");"));
+            pre.push_back("}");
+            return {pre, tr};
+        }
+        pre.push_back(cat("int ", st, " = vopt_res_state(", ta, ");"));
         pre.push_back(cat("Val ", tr, " = vnil();"));
-        pre.push_back(cat("if (", st, ") { ", tr, " = vtag_payload(", ta, ");",
-                          drop_a ? cat(" vdrop_temp(", ta, ");") : "", " } else {"));
+        pre.push_back(cat("if (", st, " > 0) { ", tr, " = vtag_payload(", ta, ");",
+                          drop_a ? cat(" vdrop_temp(", ta, ");") : "", " } else if (", st, " == 0) {"));
         if (drop_a) pre.push_back(cat("    vdrop_temp(", ta, ");"));
         for (auto &p : b.pre) pre.push_back(cat("    ", p));
         pre.push_back(cat("    ", tr, " = (", own_operand(*args[0], b.val), ");"));
+        pre.push_back("} else {");
+        const size_t cstart = call_cleanup.size();
+        if (drop_a) call_cleanup.push_back(ta);
+        V av;
+        try {
+            moved = saved_moved;
+            av = args_vec(args);
+            call_cleanup.resize(cstart);
+        } catch (...) {
+            call_cleanup.resize(cstart);
+            throw;
+        }
+        for (auto &p : av.pre) pre.push_back(cat("    ", p));
+        pre.push_back(cat("    ", tr, " = vcall_method_ic(", ta, ", \"unwrap_or\", ", av.val, ", ", next_ic(), ");"));
+        pre.push_back(cat("    vargs_drop(", av.val, ");"));
+        if (drop_a) pre.push_back(cat("    vdrop_recv(", ta, ", ", tr, ");"));
         pre.push_back("}");
         return {pre, tr};
     }
@@ -4258,32 +4307,62 @@ V Emitter::ex_mcall(const Expr &e) {
         res.val = t;
         return res;
     };
-    if ((meth == "map" || meth == "filter") && args.size() == 1)
-        return done(ex_mapfilter(*obj, meth, args[0], &o));
-    if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1)
-        return done(ex_hof(*obj, meth, args[0], nullptr, &o));
-    if (meth == "fold" && args.size() == 2)
-        return done(ex_hof(*obj, meth, args[1], args[0], &o));
-    bool direct = (VBUILTIN_DIRECT.count(meth) || (STRVEC_METH.count(meth) && MAP_METH.count(meth))) &&
-                  !user_meths.count(meth);
-    if (direct) {
+    const size_t recv_cstart = call_cleanup.size();
+    if (!recv.empty()) call_cleanup.push_back(recv);
+    auto pop_recv = [&]() { call_cleanup.resize(recv_cstart); };
+    try {
+        if ((meth == "map" || meth == "filter") && args.size() == 1) {
+            V r = ex_mapfilter(*obj, meth, args[0], &o);
+            pop_recv();
+            return done(std::move(r));
+        }
+        if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1) {
+            V r = ex_hof(*obj, meth, args[0], nullptr, &o);
+            pop_recv();
+            return done(std::move(r));
+        }
+        if (meth == "fold" && args.size() == 2) {
+            V r = ex_hof(*obj, meth, args[1], args[0], &o);
+            pop_recv();
+            return done(std::move(r));
+        }
+        bool direct = (VBUILTIN_DIRECT.count(meth) || (STRVEC_METH.count(meth) && MAP_METH.count(meth))) &&
+                      !user_meths.count(meth);
+        if (direct) {
+            V a = args_vec(args);
+            pop_recv();
+            std::vector<std::string> pre = o.pre;
+            for (auto &p : a.pre) pre.push_back(p);
+            return done(call_result(pre, a.val, cat("vbuiltin(", o.val, ", \"", clit(meth), "\", ", a.val, ")")));
+        }
+        if (STRVEC_METH.count(meth) && !user_meths.count(meth)) {
+            V r = ex_strvec_meth(o.val, o.pre, meth, args);
+            pop_recv();
+            return done(std::move(r));
+        }
+        if (MAP_METH.count(meth) && !user_meths.count(meth)) {
+            V r = ex_map_meth(o.val, o.pre, meth, args);
+            pop_recv();
+            return done(std::move(r));
+        }
         V a = args_vec(args);
+        pop_recv();
         std::vector<std::string> pre = o.pre;
         for (auto &p : a.pre) pre.push_back(p);
-        return done(call_result(pre, a.val, cat("vbuiltin(", o.val, ", \"", clit(meth), "\", ", a.val, ")")));
+        return done(call_result(pre, a.val, cat("vcall_method_ic(", o.val, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")")));
+    } catch (...) {
+        pop_recv();
+        throw;
     }
-    if (STRVEC_METH.count(meth) && !user_meths.count(meth))
-        return done(ex_strvec_meth(o.val, o.pre, meth, args));
-    if (MAP_METH.count(meth) && !user_meths.count(meth))
-        return done(ex_map_meth(o.val, o.pre, meth, args));
-    V a = args_vec(args);
-    std::vector<std::string> pre = o.pre;
-    for (auto &p : a.pre) pre.push_back(p);
-    return done(call_result(pre, a.val, cat("vcall_method_ic(", o.val, ", \"", clit(meth), "\", ", a.val, ", ", next_ic(), ")")));
 }
 
 V Emitter::ex_map_meth(const std::string &so, const std::vector<std::string> &po, const std::string &meth,
                        const ExprList &args) {
+    auto with_po = [&](V r) -> V {
+        std::vector<std::string> pre = po;
+        for (auto &p : r.pre) pre.push_back(p);
+        return {pre, r.val};
+    };
     if (meth == "keys") {
         need_arity(args, 0, meth);
         return {po, cat("vmap_keys(", so, ")")};
@@ -4304,17 +4383,14 @@ V Emitter::ex_map_meth(const std::string &so, const std::vector<std::string> &po
         need_arity(args, 2, meth);
         std::string klit;
         if (plain_cstr_key(*args[0], klit)) {
-            V b = ex(*args[1]);
-            std::vector<std::string> pre = po;
-            for (auto &p : b.pre) pre.push_back(p);
-            return {pre, cat("vmap_get_or_ic(", so, ", \"", clit(klit), "\", ", b.val, ", ", next_fic(), ")")};
+            std::string fic = next_fic();
+            return with_po(direct_call_result({args[1]}, [&](const auto &vals) {
+                return cat("vmap_get_or_ic(", so, ", \"", clit(klit), "\", ", vals[0], ", ", fic, ")");
+            }));
         }
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
-        for (auto &p : b.pre) pre.push_back(p);
-        return {pre, cat("vmap_get_or(", so, ", ", a.val, ", ", b.val, ")")};
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat("vmap_get_or(", so, ", ", vals[0], ", ", vals[1], ")");
+        }));
     }
     if (meth == "get" || meth == "has" || meth == "del") {
         need_arity(args, 1, meth);
@@ -4323,71 +4399,83 @@ V Emitter::ex_map_meth(const std::string &so, const std::vector<std::string> &po
             std::string fn = meth == "get" ? "vmap_get_ic" : "vmap_has_ic";
             return {po, cat(fn, "(", so, ", \"", clit(klit), "\", ", next_fic(), ")")};
         }
-        V a = ex(*args[0]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
         std::string fn = meth == "get" ? "vmap_getv" : meth == "has" ? "vmap_has" : "vmap_del";
-        return {pre, cat(fn, "(", so, ", ", a.val, ")")};
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat(fn, "(", so, ", ", vals[0], ")");
+        }));
     }
     need_arity(args, 2, meth);
     V a = ex(*args[0]);
-    V b = ex(*args[1]);
     std::vector<std::string> pre = po;
     for (auto &p : a.pre) pre.push_back(p);
-    for (auto &p : b.pre) pre.push_back(p);
-    return {pre, cat("vmap_setv(", so, ", ", keep(*args[0], a.val), ", ", keep(*args[1], b.val), ")")};
-}
-
-/* `vzip(recv, ["a", "b"])`: a container literal built for an argument has nobody
- * to release it once the call has read it. Bound to a temp that holds the answer,
- * so the literal goes right after the call, never before it. */
-V Emitter::release_lit_args(const std::vector<std::string> &pre, const ExprList &nodes,
-                            const std::vector<std::string> &vals, const std::string &call) {
-    std::vector<std::string> lits;
-    for (size_t i = 0; i < nodes.size() && i < vals.size(); i++) {
-        const Expr *n = nodes[i];
-        if (n->k != EK::VecLit && n->k != EK::MapLit && n->k != EK::StructLit) continue;
-        bool is_ml = (n->k == EK::MapLit && vals[i].rfind("_ml", 0) == 0);
-        if (container_tmp(vals[i]) || is_ml) lits.push_back(vals[i]);
+    std::string kv = new_tmp("mk");
+    pre.push_back(cat("Val ", kv, " = (", keep(*args[0], a.val), ");"));
+    const size_t cstart = call_cleanup.size();
+    call_cleanup.push_back(kv);
+    V b;
+    try {
+        b = ex(*args[1]);
+        call_cleanup.resize(cstart);
+    } catch (...) {
+        call_cleanup.resize(cstart);
+        throw;
     }
-    if (lits.empty()) return {pre, call};
-    V out;
-    out.pre = pre;
-    std::string t = new_tmp("v");
-    out.pre.push_back(cat("Val ", t, " = (", call, ");"));
-    for (auto &l : lits) out.pre.push_back(cat("vrc_dec(", l, ");"));
-    out.val = t;
-    return out;
+    for (auto &p : b.pre) pre.push_back(p);
+    return {pre, cat("vmap_setv(", so, ", ", kv, ", ", keep(*args[1], b.val), ")")};
 }
 
 V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> &po, const std::string &meth,
                           const ExprList &args) {
+    auto with_po = [&](V r) -> V {
+        std::vector<std::string> pre = po;
+        for (auto &p : r.pre) pre.push_back(p);
+        return {pre, r.val};
+    };
     auto simple = SV_SIMPLE.find(meth);
     if (simple != SV_SIMPLE.end()) {
         const std::string &fn = simple->second.first;
         need_arity(args, static_cast<size_t>(simple->second.second), meth);
-        std::vector<std::string> pre = po;
-        std::vector<std::string> cargs;
-        for (const Expr *a : args) {
-            V v = ex(*a);
-            for (auto &p : v.pre) pre.push_back(p);
-            cargs.push_back(v.val);
+        if (args.empty()) return {po, cat(fn, "(", so, ")")};
+        if (meth == "ins") {
+            V a0 = ex(*args[0]);
+            std::vector<std::string> pre = po;
+            for (auto &p : a0.pre) pre.push_back(p);
+            const bool drop0 = dec_able(*args[0], heap_returns());
+            std::string idxv = a0.val;
+            const size_t cstart = call_cleanup.size();
+            if (drop0) {
+                idxv = new_tmp("mi");
+                pre.push_back(cat("Val ", idxv, " = (", a0.val, ");"));
+                call_cleanup.push_back(idxv);
+            }
+            V a1;
+            try {
+                a1 = ex(*args[1]);
+                call_cleanup.resize(cstart);
+            } catch (...) {
+                call_cleanup.resize(cstart);
+                throw;
+            }
+            for (auto &p : a1.pre) pre.push_back(p);
+            std::string call = cat(fn, "(", so, ", ", idxv, ", ", keep(*args[1], a1.val), ")");
+            if (!drop0) return {pre, call};
+            std::string rv = new_tmp("c");
+            pre.push_back(cat("Val ", rv, " = (", call, ");"));
+            pre.push_back(cat("vdrop_temp(", idxv, ");"));
+            return {pre, rv};
         }
-        if (meth == "ins") cargs[1] = keep(*args[1], cargs[1]);
-        std::string joined;
-        for (auto &c : cargs) joined += ", " + c;
-        if (meth == "ins") return {pre, cat(fn, "(", so, joined, ")")};
-        return release_lit_args(pre, args, cargs, cat(fn, "(", so, joined, ")"));
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            std::string joined;
+            for (const auto &c : vals) joined += ", " + c;
+            return cat(fn, "(", so, joined, ")");
+        }));
     }
     if (meth == "split") {
         if (args.size() > 1) throw EmitError("split arity");
         if (args.empty()) return {po, cat("vsplit_ws(", so, ")")};
-        V a = ex(*args[0]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
-        pre.push_back(cat("if ((", a.val, ").tag == V_STR && vstr_empty(", a.val,
-                          ")) { vraise(\"empty separator\"); ", err_bail(), " }"));
-        return {pre, cat("vsplit(", so, ", ", a.val, ")")};
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat("vsplit(", so, ", ", vals[0], ")");
+        }));
     }
     if (meth == "lines") {
         need_arity(args, 0, meth);
@@ -4400,12 +4488,10 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
     }
     if (meth == "starts_with" || meth == "ends_with" || meth == "contains") {
         need_arity(args, 1, meth);
-        V a = ex(*args[0]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
         const std::string flags = meth == "starts_with" ? "1, 0" : meth == "ends_with" ? "0, 1" : "0, 0";
-        return release_lit_args(pre, {args[0]}, {a.val},
-                                cat("vbool(vaffix(", so, ", ", a.val, ", ", flags, "))"));
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat("vbool(vaffix(", so, ", ", vals[0], ", ", flags, "))");
+        }));
     }
     if (meth == "parse_int") {
         need_arity(args, 0, meth);
@@ -4413,12 +4499,9 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
     }
     if (meth == "replace") {
         need_arity(args, 2, meth);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
-        for (auto &p : b.pre) pre.push_back(p);
-        return {pre, cat("vreplace(", so, ", ", a.val, ", ", b.val, ")")};
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat("vreplace(", so, ", ", vals[0], ", ", vals[1], ")");
+        }));
     }
     if (meth == "first" || meth == "last" || meth == "sort" || meth == "rev") {
         need_arity(args, 0, meth);
@@ -4427,10 +4510,9 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
     }
     if (meth == "join") {
         need_arity(args, 1, meth);
-        V a = ex(*args[0]);
-        std::vector<std::string> pre = po;
-        for (auto &p : a.pre) pre.push_back(p);
-        return {pre, cat("vjoin(", so, ", ", a.val, ")")};
+        return with_po(direct_call_result(args, [&](const auto &vals) {
+            return cat("vjoin(", so, ", ", vals[0], ")");
+        }));
     }
     if (meth == "push") {
         need_arity(args, 1, meth);
@@ -4622,11 +4704,11 @@ V Emitter::ex_fused_stream(const Expr &obj, const std::string &meth, const ExprL
     loop_lines.push_back(cat("  ", cur_var, " = vrc_inc(", w_var, "->items[", idx_var, "]);"));
 
     auto saved_goto = err_goto;
-    auto saved_base = err_base;
     size_t saved_scope_depth = err_scope_depth;
+    size_t saved_iter_depth = err_iter_depth;
     err_goto = err_lbl;
-    err_base.reset();
     err_scope_depth = scopes.size();
+    err_iter_depth = iter_cleanups.size();
 
     for (const auto &[smeth, sfn] : stages) {
         const std::string &pname = sfn->fn->params[0].name;
@@ -4691,8 +4773,8 @@ V Emitter::ex_fused_stream(const Expr &obj, const std::string &meth, const ExprL
     }
     loop_lines.push_back("}");
     err_goto = saved_goto;
-    err_base = saved_base;
     err_scope_depth = saved_scope_depth;
+    err_iter_depth = saved_iter_depth;
 
     bool used_err = false;
     for (const auto &l : loop_lines) {
@@ -5058,17 +5140,15 @@ std::optional<std::string> Emitter::place_root(const Expr &e) {
     }
 }
 
+bool Emitter::moves_owned_local(const Expr &e) const {
+    if (e.k != EK::Move || e.kids.empty() || e.kids[0]->k != EK::Var) return false;
+    auto it = sym.find(e.kids[0]->a);
+    return it != sym.end() && it->second.own == Own::Owned;
+}
+
 std::string Emitter::keep(const Expr &e, const std::string &val) {
     if (dec_able(e, heap_returns())) return val;
-    // `move x` of a live local transferred the binding's reference already:
-    // ex() emitted `vmove(&x)`, which emptied it, so the scope drop will not
-    // release it and the container that receives `val` is its only owner from
-    // here. Retaining here left one reference with no owner, one per call with a
-    // moved argument, unbounded inside a loop.
-    if (e.k == EK::Move && !e.kids.empty() && e.kids[0]->k == EK::Var) {
-        auto src = place_root(e);
-        if (src && sym.count(*src)) return val;
-    }
+    if (moves_owned_local(e)) return val;
     return cat("vrc_inc(", val, ")");
 }
 
@@ -5155,12 +5235,6 @@ Own Emitter::own_of(const Expr &e) {
 
 // True when `e` reads a part (element, field) of the binding `root` rather than
 // the binding itself.
-// `a[i]` and its desugared `__at(a, i)` form: both yield an owned reference.
-static bool is_index_read(const Expr &e) {
-    if (e.k == EK::Idx) return true;
-    return e.k == EK::Call && e.a == "__at" && e.kids.size() == 2;
-}
-
 bool Emitter::part_of_local(const Expr &e, const std::string &root) {
     auto it = sym.find(root);
     if (it == sym.end() || it->second.own != Own::Owned) return false;
@@ -5538,44 +5612,65 @@ std::set<std::string> Emitter::compute_ub_floats(const StmtList &body, const std
                                                  const std::set<std::string> &param_names) {
     return compute_ub_vars(body, vars_, param_names, true);
 }
-void try_let_names(const StmtList &body, std::set<std::string> &acc) {
+void collect_nested_lets(const StmtList &body, std::vector<std::string> &out, bool include_for_vars) {
     for (const Stmt *st : body) {
         if (!st) continue;
         switch (st->k) {
-        case SK::Let: acc.insert(st->a.substr(0, st->a.find('.'))); break;
+        case SK::Let:
+        case SK::LetTmp:
+            out.push_back(st->a.substr(0, st->a.find('.')));
+            break;
         case SK::If:
-            try_let_names(view(st->body), acc);
+            collect_nested_lets(view(st->body), out, include_for_vars);
             if (st->els) {
-                try_let_names({st->els.get()}, acc);
+                if (st->els->k == SK::Block) collect_nested_lets(view(st->els->body), out, include_for_vars);
+                else collect_nested_lets({st->els.get()}, out, include_for_vars);
             } else {
-                try_let_names(view(st->body2), acc);
+                collect_nested_lets(view(st->body2), out, include_for_vars);
             }
             break;
-        case SK::While: try_let_names(view(st->body), acc); break;
-        case SK::ForIter: case SK::ForRange:
-            acc.insert(st->a);
-            try_let_names(view(st->body), acc);
+        case SK::While:
+        case SK::Block:
+        case SK::Scope:
+        case SK::Unsafe:
+            collect_nested_lets(view(st->body), out, include_for_vars);
+            break;
+        case SK::ForIter:
+        case SK::ForRange:
+            if (include_for_vars) out.push_back(st->a);
+            collect_nested_lets(view(st->body), out, include_for_vars);
             break;
         case SK::Try:
-            try_let_names(view(st->body), acc);
-            try_let_names(view(st->body2), acc);
+            collect_nested_lets(view(st->body), out, include_for_vars);
+            collect_nested_lets(view(st->body2), out, include_for_vars);
             break;
-        default: break;
+        default:
+            break;
         }
     }
 }
 
 std::set<std::string> try_let_names(const StmtList &body) {
-    std::set<std::string> acc;
-    try_let_names(body, acc);
-    return acc;
+    std::vector<std::string> vec;
+    collect_nested_lets(body, vec, true);
+    return std::set<std::string>(vec.begin(), vec.end());
+}
+
+std::vector<std::string> nested_owned_let_names(const StmtList &body) {
+    std::vector<std::string> vec, dedup;
+    collect_nested_lets(body, vec, false);
+    std::set<std::string> seen;
+    for (const auto &nm : vec)
+        if (seen.insert(nm).second) dedup.push_back(nm);
+    return dedup;
 }
 
 void Emitter::drop_alias_temps(const StmtList &body, const std::string &ind) {
     for (const auto &name : block_let_names(body)) {
         if (alias_temps.count(name)) {
-            alias_temps.erase(name);
-            ln(ind, cat("vrc_dec(", slot_cn(name), ");"));
+            std::string scn = slot_cn(name);
+            ln(ind, cat("vrc_dec(", scn, ");"));
+            ln(ind, cat(scn, " = vnil();"));
         }
     }
 }
@@ -5593,7 +5688,7 @@ void Emitter::emit_block(const StmtList &body, const std::string &ind) {
     ln(ind, "vdfpush();");
     dfb.push_back(b);
     auto bnames = block_let_names(body);
-    dfb_vars.emplace_back(bnames.begin(), bnames.end());
+    dfb_vars.push_back(nested_owned_let_names(body));
     for (const Stmt *t : body) st(*t, ind);
     dfb_vars.pop_back();
     dfb.pop_back();
@@ -5616,7 +5711,7 @@ void Emitter::emit_loop_exit(const std::string &k, const std::string &ind) {
         if (move_rt && i - 1 < dfb_vars.size()) {
             for (const auto &vname : dfb_vars[i - 1]) {
                 auto sit = sym.find(vname);
-                if (sit != sym.end() && sit->second.own == Own::Owned &&
+                if (sit != sym.end() && (sit->second.own == Own::Owned || alias_temps.count(vname)) &&
                     !moved.count(vname) && !shared.count(vname)) {
                     ln(ind, cat("vrelease(", sit->second.cn, ");"));
                     ln(ind, cat(sit->second.cn, " = vnil();"));
@@ -5729,9 +5824,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         }
         Own own = own_of(e);
         bool fresh = dec_able(e, heap_returns());
-        auto root = place_root(e);
-        if (!fresh && e.k != EK::Call) v.val = cat("vrc_inc(", v.val, ")");
-        if ((name.empty() || name[0] != '@') && e.k == EK::Field) own = Own::Owned;
+        if (!fresh && e.k != EK::Call && !moves_owned_local(e)) {
+            v.val = cat("vrc_inc(", v.val, ")");
+            own = Own::Owned;
+        }
         bool lit = v.val.rfind("vlit(", 0) == 0;
         if ((reclaim.count(name) || relet.count(name)) && lit) {
             v.val = "vstr(" + v.val.substr(5);
@@ -5746,7 +5842,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         }
         auto d = sym.find(name);
         bool is_relet = relet.count(name) && d != sym.end() && !moved.count(name) &&
-                        !dropped.count(name) && place_root(e) != std::optional<std::string>(name);
+                        !dropped.count(name);
         // `let p: ptr[T]` -- the element is part of the declaration, and it is
         // what `p[i]` reads through later. Without an annotation, a call that
         // returns `ptr[T]` is the declaration: `let p = node_new(...)` is the
@@ -5847,9 +5943,11 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             own = Own::Owned;
         }
         bool release = (reclaim.count(tgt) || global_binding) && d != sym.end() &&
-                       !moved.count(tgt) && !dropped.count(tgt) &&
-                       (self_concat || place_root(e) != std::optional<std::string>(tgt));
-        if (!dec_able(e, heap_returns())) v.val = cat("vrc_inc(", v.val, ")");
+                       !moved.count(tgt) && !dropped.count(tgt);
+        if (!dec_able(e, heap_returns()) && !moves_owned_local(e)) {
+            v.val = cat("vrc_inc(", v.val, ")");
+            if (e.k != EK::Call) own = Own::Owned;
+        }
         if (global_binding) own = Own::Copy;
         std::string cn = var_def(tgt, own);
         assigned.insert(tgt);
@@ -5949,7 +6047,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         // `a[i]` already hands back a reference the holder owns (vat_owned), so
         // the container can just be dropped at the exit like any other local;
         // lifting the part out and stealing it was the pre-vat_owned shape.
-        const bool owned_part = is_index_read(*s.e1);
+        const bool owned_part = dec_able(*s.e1, heap_returns());
         // `r.sort()` is `r` itself and `r.first()` is a part of it, so the value belongs to the
         // root `r` belongs to.
         const Expr *alias = s.e1.get();
@@ -5985,33 +6083,34 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             } else if (sym[*root].own == Own::Owned) {
                 steal_cn = sym[*root].cn;
             } else {
+                v.val = cat("vrc_inc(", v.val, ")");
                 shared.insert(*root);
             }
-        }
-        if (root && cur_params.count(*root) && !reclaim.count(*root) && !owned_part) {
-            // `return x` and `return v[0]` hand back storage owned by the
-            // argument vector, which the caller releases: the value needs a
-            // reference of its own or the caller holds freed memory.
+        } else if (root && !owned_part && cap && cap->second.count(*root)) {
             v.val = cat("vrc_inc(", v.val, ")");
         }
         std::string handed = (root && !owned_part && !is_part) ? *root : "";
         if (fin == "__fin_top") {
             Names keep;
             refs_in_expr(s.e1.get(), keep);
+            for (size_t i = iter_cleanups.size(); i > 0; --i) ln(ind, iter_cleanups[i - 1]);
             emit_fn_drops(ind, handed, true, keep);
             ln(ind, cat("{ fprintf(stderr, \"unhandled: \"); vprint_err(", v.val,
                         "); fprintf(stderr, \"\\n\"); return 1; }"));
         } else {
-            if (!shared.empty() && move_rt) {
+            if ((!shared.empty() && move_rt) || !iter_cleanups.empty()) {
                 std::string rv = new_tmp("rv");
                 ln(ind, cat("Val ", rv, " = (", v.val, ");"));
                 v.val = rv;
-                for (const auto &sname : shared) {
-                    auto sit = sym.find(sname);
-                    if (sit == sym.end() || sit->second.own != Own::Owned) continue;
-                    if (moved.count(sname) || sname == handed) continue;
-                    ln(ind, cat("vrelease(", sit->second.cn, ");"));
-                    ln(ind, cat(sit->second.cn, " = vnil();"));
+                for (size_t i = iter_cleanups.size(); i > 0; --i) ln(ind, iter_cleanups[i - 1]);
+                if (!shared.empty() && move_rt) {
+                    for (const auto &sname : shared) {
+                        auto sit = sym.find(sname);
+                        if (sit == sym.end() || sit->second.own != Own::Owned) continue;
+                        if (moved.count(sname) || sname == handed) continue;
+                        ln(ind, cat("vrelease(", sit->second.cn, ");"));
+                        ln(ind, cat(sit->second.cn, " = vnil();"));
+                    }
                 }
             }
             if (!steal_cn.empty()) {
@@ -6146,6 +6245,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         emit_block(view(s.body), ind + "  ");
         loop_exit_depths.pop_back();
         ln(ind, "}");
+        emit_loop_drops(view(s.body), ind);
         return;
     }
     case SK::ForIter: {
@@ -6153,21 +6253,25 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         for (auto &p : v.pre) ln(ind, p);
         emit_err_check(ind);
         std::string vv = new_tmp("v"), kk = new_tmp("k"), src = new_tmp("v");
+        const bool drop_src = dec_able(*s.e1, heap_returns());
         ln(ind, cat("Val ", src, " = (", v.val, ");"));
         ln(ind, cat("Vec *", vv, " = viter_vec(", src, ");"));
-        emit_err_check(ind);
+        emit_err_check(ind, drop_src ? std::vector<std::string>{src} : std::vector<std::string>{});
+        std::string iclean = cat("viter_done(", src, ", ", vv, "); ",
+                                 drop_src ? cat("vdrop_temp(", src, "); ") : std::string());
         ln(ind, cat("for (int64_t ", kk, " = 0; ", kk, " < ", vv, "->len; ++", kk, ") {"));
         std::string cn = var_def(s.a, Own::Copy);
         ln(ind + "  ", cat(cn, " = ", vv, "->items[", kk, "];"));
         assigned.insert(s.a);
         loop_exit_depths.emplace_back(scopes.size(), dfb.size());
+        iter_cleanups.push_back(iclean);
         emit_block(view(s.body), ind + "  ");
+        iter_cleanups.pop_back();
         loop_exit_depths.pop_back();
         ln(ind, "}");
         ln(ind, cat("viter_done(", src, ", ", vv, ");"));
-        // `for x in [10, 20, 30]` builds a vector nobody else holds; the loop
-        // borrowed it, so the reference that built it is released here.
-        if (dec_able(*s.e1, heap_returns())) ln(ind, cat("vdrop_temp(", src, ");"));
+        if (drop_src) ln(ind, cat("vdrop_temp(", src, ");"));
+        emit_loop_drops(view(s.body), ind);
         return;
     }
     case SK::Break:
@@ -6181,30 +6285,31 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         int n = try_n;
         std::string catch_lbl = cat("__catch", n), after_lbl = cat("__after_try", n);
         auto saved_goto = err_goto;
-        auto saved_base = err_base;
         size_t saved_scope_depth = err_scope_depth;
+        size_t saved_iter_depth = err_iter_depth;
         std::string b = new_tmp("dfb");
         ln(ind, "{");
         ln(ind + "  ", cat("int64_t ", b, " = vdfsp;"));
         err_goto = catch_lbl;
-        err_base = b;
         err_scope_depth = scopes.size();
+        err_iter_depth = iter_cleanups.size();
         emit_block(view(s.body), ind + "  ");
         err_goto = saved_goto;
-        err_base = saved_base;
         err_scope_depth = saved_scope_depth;
+        err_iter_depth = saved_iter_depth;
         ln(ind + "  ", cat("goto ", after_lbl, ";"));
         ln(ind, cat(catch_lbl, ":;"));
-        for (const auto &nm : try_let_names(view(s.body))) {
+        for (const auto &nm : nested_owned_let_names(view(s.body))) {
             if (ub_ints.count(nm) || ub_floats.count(nm)) continue;
-            // The body's own bindings cannot be live here and their drop at the
-            // end of the block is unreachable from this path. Released through
-            // `vrelease`: it leaves the error value alone, which the channel is
-            // about to free.
-            std::string scn = slot_cn(nm);
+            auto sit = sym.find(nm);
+            if (sit == sym.end()) continue;
+            if ((sit->second.own != Own::Owned && !alias_temps.count(nm)) || shared.count(nm))
+                continue;
+            std::string scn = sit->second.cn;
             ln(ind + "  ", cat("vrelease(", scn, ");"));
             ln(ind + "  ", cat(scn, " = vnil();"));
         }
+        ln(ind + "  ", cat("vdfreset(", b, ");"));
         bool had_prev = false;
         Sym prev_sym;
         bool had_prev_assigned = false;
@@ -6334,21 +6439,13 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
             case SK::Let:
             case SK::LetTmp: {
                 std::string n = head_of(st->a);
-                if (!n.empty() && n[0] == '@') {
-                    ok[n] = false;
-                } else {
-                    ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
-                }
+                ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
                 if (loop) loop_let.insert(n);
                 break;
             }
             case SK::Set: {
                 std::string n = head_of(st->a);
-                if (!n.empty() && n[0] == '@') {
-                    ok[n] = false;
-                } else {
-                    ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
-                }
+                ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
                 has_set.insert(n);
                 break;
             }
@@ -6372,6 +6469,11 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
                 break;
             case SK::While:
                 walk(view(st->body), true);
+                break;
+            case SK::Block:
+            case SK::Scope:
+            case SK::Unsafe:
+                walk(view(st->body), loop);
                 break;
             case SK::Try:
                 walk(view(st->body), loop);
@@ -6426,7 +6528,9 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     auto saved_dfb_vars = dfb_vars;
     auto saved_fin = fin;
     auto saved_scopes = scopes;
+    auto saved_iter_cleanups = iter_cleanups;
     size_t saved_err_scope_depth = err_scope_depth;
+    size_t saved_err_iter_depth = err_iter_depth;
     // A top-level `let` is a file-scope Val; a function that reads it resolves
     // the name through the same table as its own locals. A name this closure
     // captured is the exception: it resolves through the capture map, because
@@ -6448,7 +6552,9 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     dfb.clear();
     dfb_vars.clear();
     scopes.clear();
+    iter_cleanups.clear();
     err_scope_depth = 0;
+    err_iter_depth = 0;
     fin = cat("__fin_", cn);
     if (positional) {
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
@@ -6583,10 +6689,14 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         reclaim.erase(c);
         relet.erase(c);
     }
+    auto saved_moved = moved;
+    auto saved_alias_temps = alias_temps;
     auto saved_shared = shared;
     auto saved_captured = captured;
     auto saved_dropped = dropped;
     auto saved_catch_cns = catch_cns;
+    moved.clear();
+    alias_temps.clear();
     shared.clear();
     // Per function: a name dropped in one function must still be released in
     // the next one that happens to use the same identifier.
@@ -6674,6 +6784,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
             auto it = sym.find(name);
             if (it == sym.end() || dropped.count(name)) continue;
             ln("  ", cat("vrc_dec(", it->second.cn, ");"));
+            ln("  ", cat(it->second.cn, " = vnil();"));
             alias_temps.erase(name);
         }
         for (const auto &ccn : catch_cns) {
@@ -6695,13 +6806,17 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     dfb_vars = std::move(saved_dfb_vars);
     fin = saved_fin;
     scopes = saved_scopes;
+    iter_cleanups = std::move(saved_iter_cleanups);
     err_scope_depth = saved_err_scope_depth;
+    err_iter_depth = saved_err_iter_depth;
     dfb_locals = saved_locals;
     ub_ints = saved_ub;
     ub_floats = saved_ubf;
     assigned = saved_assigned;
     reclaim = saved_reclaim;
     relet = saved_relet;
+    moved = std::move(saved_moved);
+    alias_temps = std::move(saved_alias_temps);
     shared = saved_shared;
     captured = saved_captured;
     dropped = saved_dropped;
@@ -7189,7 +7304,7 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
         if (e->k == EK::Move && !e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Field &&
             !e->kids[0]->kids.empty() && e->kids[0]->kids[0] &&
             e->kids[0]->kids[0]->k == EK::Var && approved.count(e->kids[0]->kids[0]->a)) {
-            return mk_var(sra_names[e->kids[0]->kids[0]->a][e->kids[0]->b]);
+            return mk_move(mk_var(sra_names[e->kids[0]->kids[0]->a][e->kids[0]->b]));
         }
         if (e->k == EK::Call && (e->a == "__stag_is" || e->a == "__shas") &&
             e->kids.size() == 2 && e->kids[0] && e->kids[0]->k == EK::Var &&
@@ -7672,7 +7787,9 @@ void Emitter::emit_main_open() {
     cap_slots.clear();
     dfb.clear();
     scopes.clear();
+    iter_cleanups.clear();
     err_scope_depth = 0;
+    err_iter_depth = 0;
     fin = "__fin_top";
     if (codes.count("fn:main")) {
         ln("", "static const char *__brat_tagname(Val v) {");
@@ -8713,6 +8830,9 @@ bool Emitter::booly(const Expr &e) {
 
 std::string Emitter::err_scope_unwind() {
     std::string out;
+    const size_t it_base = err_goto ? err_iter_depth : 0;
+    for (size_t i = iter_cleanups.size(); i > it_base; --i)
+        out += iter_cleanups[i - 1];
     for (size_t i = scopes.size(); i > err_scope_depth; --i)
         out += cat("vscope_end(vint(", scopes[i - 1], ")); ");
     return out;
@@ -8720,12 +8840,15 @@ std::string Emitter::err_scope_unwind() {
 
 std::string Emitter::err_bail() {
     std::string rel;
-    for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it)
-        rel += cat("vdrop_temp(", *it, "); ");
+    for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it) {
+        if (it->rfind("@args:", 0) == 0)
+            rel += cat("vargs_drop(", it->substr(6), "); ");
+        else
+            rel += cat("vdrop_temp(", *it, "); ");
+    }
     std::string unwind = err_scope_unwind();
     if (err_goto)
-        return cat("{ ", rel, err_base ? cat("vdfreset(", *err_base, "); ") : std::string(), unwind,
-                   "goto ", *err_goto, "; }");
+        return cat("{ ", rel, unwind, "goto ", *err_goto, "; }");
     if (fin == "__fin_top")
         return cat("{ ", rel, unwind, "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
                    "fprintf(stderr, \"\\n\"); return 1; }");
@@ -8741,15 +8864,15 @@ std::string Emitter::err_check_line(const std::vector<std::string> &drops) {
         if (seen.insert(d).second) rel += cat("vdrop_temp(", d, "); ");
     }
     for (auto it = call_cleanup.rbegin(); it != call_cleanup.rend(); ++it) {
-        if (seen.insert(*it).second) rel += cat("vdrop_temp(", *it, "); ");
+        if (!seen.insert(*it).second) continue;
+        if (it->rfind("@args:", 0) == 0)
+            rel += cat("vargs_drop(", it->substr(6), "); ");
+        else
+            rel += cat("vdrop_temp(", *it, "); ");
     }
     std::string unwind = err_scope_unwind();
-    if (err_goto) {
-        if (err_base)
-            return cat("if (verr_pending()) { ", rel, "vdfreset(", *err_base, "); ", unwind, "goto ",
-                       *err_goto, "; }");
+    if (err_goto)
         return cat("if (verr_pending()) { ", rel, unwind, "goto ", *err_goto, "; }");
-    }
     if (fin == "__fin_top")
         return cat("if (verr_pending()) { ", rel, unwind,
                    "fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "

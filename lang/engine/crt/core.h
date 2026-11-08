@@ -157,6 +157,20 @@ _Static_assert(CHAR_BIT == 8, "BRAT assumes 8-bit bytes");
 
 #define BINT_FMT "%" PRId64
 
+static inline const char *_bmemmem(const char *hay, size_t hlen, const char *ndl, size_t nlen) {
+    if (nlen == 0) return hay;
+    if (hlen < nlen) return NULL;
+    const unsigned char first = (unsigned char)ndl[0];
+    size_t i = 0, limit = hlen - nlen;
+    while (i <= limit) {
+        const char *hit = (const char *)memchr(hay + i, first, limit - i + 1);
+        if (!hit) return NULL;
+        if (nlen == 1 || memcmp(hit + 1, ndl + 1, nlen - 1) == 0) return hit;
+        i = (size_t)(hit - hay) + 1;
+    }
+    return NULL;
+}
+
 
 typedef enum { V_NIL, V_BOOL, V_INT, V_FLOAT, V_STR, V_VEC, V_STRUCT, V_TAG, V_MOVED } VTag;
 typedef struct Val Val;

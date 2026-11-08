@@ -556,13 +556,15 @@ bool elem_copy(const Decls &decl, const Expr *base) {
         a = (bb == std::string::npos) ? std::string() : a.substr(bb, zz - bb + 1);
     } else if (starts_with(a, "map[") && ends_with(a, "]")) {
         std::string inner = a.substr(4, a.size() - 5);
-        size_t comma = inner.rfind(',');
-        if (comma == std::string::npos) {
-            a = inner;
-        } else {
-            a = inner.substr(comma + 1);
+        size_t comma = std::string::npos;
+        int depth = 0;
+        for (size_t i = 0; i < inner.size(); i++) {
+            char c = inner[i];
+            if (c == '[' || c == '(') depth++;
+            else if ((c == ']' || c == ')') && depth > 0) depth--;
+            else if (c == ',' && depth == 0) { comma = i; break; }
         }
-        // Extract trailing parameter segment after last comma.
+        a = (comma == std::string::npos) ? inner : inner.substr(comma + 1);
         size_t bb = a.find_first_not_of(" \t\r\n");
         size_t zz = a.find_last_not_of(" \t\r\n");
         a = (bb == std::string::npos) ? std::string() : a.substr(bb, zz - bb + 1);
@@ -2448,15 +2450,22 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
 
 // A `fn` inside a body is callable from that body. The pass above only sees
 // top-level declarations, so a nested `fn` used to read as undeclared.
+static void register_nested(const std::vector<StmtP> &body, FnTable &funcs);
+
+static void register_nested_stmt(const Stmt &s, FnTable &funcs) {
+    if (s.k == SK::Fn || s.k == SK::ExportFn) {
+        const FnDecl &f = s.fns[0];
+        funcs.sigs[f.name.value_or("")] = fn_modes(f.params);
+    }
+    register_nested(s.body, funcs);
+    register_nested(s.body2, funcs);
+    if (s.els) register_nested_stmt(*s.els, funcs);
+    for (const FnDecl &f : s.fns) register_nested(f.body, funcs);
+}
+
 static void register_nested(const std::vector<StmtP> &body, FnTable &funcs) {
     for (const auto &sp : body) {
-        if (sp->k == SK::Fn || sp->k == SK::ExportFn) {
-            const FnDecl &f = sp->fns[0];
-            funcs.sigs[f.name.value_or("")] = fn_modes(f.params);
-        }
-        register_nested(sp->body, funcs);
-        register_nested(sp->body2, funcs);
-        for (const FnDecl &f : sp->fns) register_nested(f.body, funcs);
+        if (sp) register_nested_stmt(*sp, funcs);
     }
 }
 

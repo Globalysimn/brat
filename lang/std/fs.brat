@@ -28,8 +28,19 @@ pub fn write_lines(path: str, lines: vec[str]) -> Result[i64, str] {
 }
 
 pub fn append_text(path: str, extra: str) -> Result[i64, str] {
-  let prev = read_or(path, "")
-  return write_file(path, prev + extra)
+  let r = read_file(path)
+  if is_err(r) {
+    match r {
+      Err(msg) => {
+        if !msg.starts_with("[Errno 2]") {
+          return Err(msg)
+        }
+      }
+      Ok(_) => {}
+    }
+    return write_file(path, extra)
+  }
+  return write_file(path, unwrap(r) + extra)
 }
 
 pub fn write_atomic(path: str, content: str) -> Result[i64, str] {

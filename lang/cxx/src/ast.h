@@ -169,7 +169,7 @@ StmtP mk_block(std::vector<StmtP> v);
 StmtP mk_if(ExprP cond, std::vector<StmtP> then_body, std::optional<StmtP> els);
 StmtP mk_while(ExprP cond, std::vector<StmtP> body);
 
-// Printing: the s-expression the old implementation produces, byte for byte.
+// AST s-expression printer.
 std::string dump(const std::vector<StmtP> &prog);
 void print_expr(const Expr &e, std::string &out);
 void print_stmt(const Stmt &s, std::string &out);

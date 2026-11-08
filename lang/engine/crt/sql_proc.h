@@ -1009,25 +1009,27 @@ BFN Val vsplit_ws(Val s) {
 BFN Val vsplit(Val s, Val sep) {
     if (s.tag != V_STR) { vraise("no method split"); return vunwind; }
     if (sep.tag != V_STR) { vraise("method `split`: bad argument"); return vunwind; }
+    size_t sl = vstr_len_fast(&s), dl = vstr_len_fast(&sep);
+    if (!dl) { vraise("empty separator"); return vunwind; }
     Vec *out = vvec();
     const char *p = vstr_c(&s);
+    const char *end = p + sl;
     const char *seps = vstr_c(&sep);
-    size_t dl = vstr_len_fast(&sep);
-    if (!dl) { vec_push(out, vstr(p)); return vvecv(out); }
     const char *q;
-    while ((q = strstr(p, seps)) != 0) {
+    while ((q = _bmemmem(p, (size_t)(end - p), seps, dl)) != NULL) {
         vec_push(out, vstrn(p, q - p));
         p = q + dl;
     }
-    vec_push(out, vstr(p));
+    vec_push(out, vstrn(p, end - p));
     return vvecv(out);
 }
 BFN Val vtrim(Val s) {
     if (s.tag != V_STR) { vraise("no method trim"); return vunwind; }
     const char *p = vstr_c(&s);
-    while (vis_space(*p)) p++;
-    bint n = strlen(p);
-    while (n > 0 && vis_space(p[n-1])) n--;
+    const char *end = p + vstr_len_fast(&s);
+    while (p < end && vis_space(*p)) p++;
+    bint n = (bint)(end - p);
+    while (n > 0 && vis_space(p[n - 1])) n--;
     return vstrn(p, n);
 }
 
@@ -1048,6 +1050,7 @@ BFN bint vcp_next(const char *p, unsigned *out) {
 
 
 BFN bint vcp_put(unsigned cp, char *out) {
+    if (cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) cp = 0xFFFDu;
     if (cp < 0x80) { out[0] = (char)cp; return 1; }
     if (cp < 0x800) {
         out[0] = (char)(0xC0 | (cp >> 6));
