@@ -45,6 +45,8 @@ struct ModuleSet {
     // The root's body with every `import` spliced in place and every name
     // mangled: exactly what the native emitter consumes.
     std::vector<StmtP> flat;
+    std::map<const Stmt *, std::string> stmt_files;
+    std::map<std::string, std::string> fn_files;
     bool mangled = false;
 };
 

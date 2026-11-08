@@ -1614,10 +1614,11 @@ int cmd_emit_c(int argc, char **argv) {
     bool bundle = false;
     const char *tev = std::getenv("BRAT_TRACE");
     bool trace_lines = (tev && tev[0] && tev[0] != '0');
+    bool debug_lines = false;
     bool unsafe_ffi = false;
     uint64_t mem = 0;
     bool has_mem = false;
-    std::string target, ffi_header;
+    std::string target, ffi_header, out_path;
     std::vector<std::string> ffi_objects;
     int opt = 0;
     std::vector<std::string> files;
@@ -1627,6 +1628,9 @@ int cmd_emit_c(int argc, char **argv) {
         if (a == "--no-check") { no_check = true; continue; }
         if (a == "--bundle") { bundle = true; continue; }
         if (a == "--trace-lines") { trace_lines = true; continue; }
+        if (a == "-g" || a == "--debug") { debug_lines = true; continue; }
+        if (a == "-o" && i + 1 < argc) { out_path = argv[++i]; continue; }
+        if (a.rfind("-o=", 0) == 0) { out_path = a.substr(3); continue; }
         if (a == "--unsafe-ffi") { unsafe_ffi = true; continue; }
         if (a == "--header" && i + 1 < argc) { ffi_header = argv[++i]; continue; }
         if (a.rfind("--header=", 0) == 0) { ffi_header = a.substr(9); continue; }
@@ -1722,7 +1726,10 @@ int cmd_emit_c(int argc, char **argv) {
             return 1;
         }
         flatten(set, true);
-        std::string out = codegen::emit_program(set.flat, dir_of(path), opt, nullptr, target, trace_lines);
+        const std::string root_path = set.files.empty() ? path : set.files[0].path;
+        std::string out = codegen::emit_program(set.flat, dir_of(path), opt, nullptr, target,
+                                                trace_lines, debug_lines, root_path,
+                                                &set.stmt_files, &set.fn_files);
         if (bundle) {
             const auto engine_dir = locate_lang_dir(argv[0]) / "engine";
             std::string crt_text;
@@ -1743,6 +1750,19 @@ int cmd_emit_c(int argc, char **argv) {
         if (no_check) out = "/* BRAT: UNVERIFIED -- ownership not checked */\n" + out;
         if (has_mem) out = "#define BRAT_MEM_BYTES " + std::to_string(mem) + "\n" + out;
         if (!out.empty() && out.back() != '\n') out.push_back('\n');
+        if (!out_path.empty()) {
+            std::ofstream fout(out_path, std::ios::binary | std::ios::trunc);
+            if (!fout) {
+                std::fprintf(stderr, "brat emit-c: cannot write %s\n", out_path.c_str());
+                return 1;
+            }
+            fout.write(out.data(), static_cast<std::streamsize>(out.size()));
+            if (!fout) {
+                std::fprintf(stderr, "brat emit-c: cannot write %s\n", out_path.c_str());
+                return 1;
+            }
+            return 0;
+        }
         std::fwrite(out.data(), 1, out.size(), stdout);
         return 0;
     } catch (const ParseError &e) {

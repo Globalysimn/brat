@@ -12,9 +12,9 @@ exact same subcommands and flags.
 | Command | Purpose |
 |---|---|
 | `brat check [--json] <file.brat>` | Parse, load modules, check ownership (`borrow.cpp`) and types (`check.cpp`) without invoking a C compiler. `--json` emits machine-readable diagnostics (`code`, `severity`, `line`, `col`, `message`, `hint`, `fix`). |
-| `brat run [-O0\|-O1\|-O2] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
-| `brat build [-O0\|-O1\|-O2] [--shared] [--out-header out.h] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). |
-| `brat emit-c [-O0\|-O1\|-O2] [--trace-lines] <file.brat> [-o out.c]` | Write the generated C11 translation unit to `stdout` or `-o out.c` so you can read it or feed a custom build system. |
+| `brat run [-O0\|-O1\|-O2] [-g\|--debug] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
+| `brat build [-O0\|-O1\|-O2] [-g\|--debug] [--shared] [--out-header out.h] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). `-g` / `--debug` emits C11 `#line` source maps and compiles with DWARF debug info pointing back to `.brat` files. |
+| `brat emit-c [-O0\|-O1\|-O2] [-g\|--debug] [--trace-lines] <file.brat> [-o out.c]` | Write the generated C11 translation unit to `stdout` or `-o out.c` so you can read it or feed a custom build system. |
 | `brat repl` | Interactive read-eval-print loop with persistent bindings, definitions, and `:help` / `:quit`. |
 
 ### C FFI verification and binding generation

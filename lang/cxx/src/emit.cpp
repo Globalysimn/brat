@@ -580,6 +580,7 @@ struct Closure {
     StmtList body;
     std::set<std::string> caps;
     bool ret_result = false;
+    std::string src_file;
 };
 
 static bool is_result_ret_ann(const std::optional<std::string> &ret) {
@@ -593,6 +594,7 @@ static bool is_result_ret_ann(const std::optional<std::string> &ret) {
 struct Late {
     std::string name;
     const FnDecl *decl = nullptr;
+    std::string src_file;
 };
 
 struct Cb {
@@ -705,6 +707,14 @@ struct Emitter {
     int opt = 0;
     std::string target_triple;
     bool trace_lines = false;
+    bool debug_lines = false;
+    std::string root_src_file;
+    std::string cur_src_file;
+    const std::map<const Stmt *, std::string> *stmt_files = nullptr;
+    const std::map<std::string, std::string> *fn_files = nullptr;
+    std::string last_dbg_file;
+    int last_dbg_line = -1;
+    size_t last_dbg_next_idx = 0;
     bool opt_done = false;
     std::set<const Expr *> unchecked;
     std::set<const Expr *> nonzero_div;
@@ -762,6 +772,43 @@ struct Emitter {
        cost a fifth of the time in a dynamic loop. */
     std::string new_tmp(const char *p = "t") { tmp++; return cat("_", p, tmp); }
     void ln(const std::string &ind, const std::string &s) { out.push_back(ind + s); }
+    std::string lookup_stmt_file(const Stmt *s) const {
+        if (s && stmt_files) {
+            auto it = stmt_files->find(s);
+            if (it != stmt_files->end() && !it->second.empty()) return it->second;
+        }
+        return !cur_src_file.empty() ? cur_src_file : root_src_file;
+    }
+    std::string lookup_fn_file(const std::string &name, const FnDecl *f = nullptr) const {
+        if (fn_files) {
+            auto it = fn_files->find(name);
+            if (it != fn_files->end() && !it->second.empty()) return it->second;
+        }
+        if (f && !f->body.empty() && f->body[0]) {
+            std::string sf = lookup_stmt_file(f->body[0].get());
+            if (!sf.empty()) return sf;
+        }
+        return !cur_src_file.empty() ? cur_src_file : root_src_file;
+    }
+    void emit_dbg_loc(int line, const std::string &file) {
+        if (!debug_lines || line <= 0 || file.empty()) return;
+        if (last_dbg_file == file && last_dbg_line >= 0 && out.size() >= last_dbg_next_idx) {
+            int expected = last_dbg_line + static_cast<int>(out.size() - last_dbg_next_idx);
+            if (expected == line) return;
+            out.push_back(cat("#line ", line));
+            last_dbg_line = line;
+            last_dbg_next_idx = out.size();
+            return;
+        }
+        out.push_back(cat("#line ", line, " \"", clit(file), "\""));
+        last_dbg_file = file;
+        last_dbg_line = line;
+        last_dbg_next_idx = out.size();
+    }
+    void emit_dbg_stmt(const Stmt &s) {
+        if (!debug_lines || s.line <= 0) return;
+        emit_dbg_loc(s.line, lookup_stmt_file(&s));
+    }
     int fn_code(const std::string &key) {
         auto it = codes.find(key);
         if (it != codes.end()) return it->second;
@@ -2221,6 +2268,7 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
 }
 
 void Emitter::fst(const Stmt &s, const std::string &ind) {
+    emit_dbg_stmt(s);
     if (trace_lines && s.line > 0) {
         ln(ind, cat("btrace_line(", s.line, ");"));
     }
@@ -2381,6 +2429,8 @@ std::set<std::string> Emitter::drop_recursive_fast(const std::map<std::string, F
 
 void Emitter::emit_fast_fn(const std::string &name) {
     const FnDecl &decl = *fast[name].decl;
+    std::string saved_src_file = cur_src_file;
+    cur_src_file = lookup_fn_file(name, &decl);
     const std::string &rk = fastkinds[name];
     fkind = (rk == "f64" || rk == "f64_dyn" || rk == "f64v") ? "f64"
                                                               : ((rk == "i64v" || rk == "i64v_dyn") ? "i64v" : rk);
@@ -2416,6 +2466,8 @@ void Emitter::emit_fast_fn(const std::string &name) {
         }
         if (only_self) fself_rec = name;
     }
+    const int fn_line = (!decl.body.empty() && decl.body[0]->line > 0) ? decl.body[0]->line : 1;
+    emit_dbg_loc(fn_line, cur_src_file);
     if (!fself_rec.empty()) {
         std::string rargs = args.empty() ? "bint _rem" : cat(args, ", bint _rem");
         ln("", cat("static ", ct, " ", fastc[name], "_r(", rargs, ") {"));
@@ -2453,12 +2505,14 @@ void Emitter::emit_fast_fn(const std::string &name) {
             const Stmt &ret_st = *st.body[0];
             if (ret_st.k != SK::Return || !st.e1 || !ret_st.e1) break;
             if (!pure_int_leaf(*st.e1) || !pure_int_leaf(*ret_st.e1)) break;
+            emit_dbg_stmt(st);
             ln("  ", cat("if (", fx(*st.e1), ") {"));
             if (!fself_rec.empty()) {
                 ln("    ", "if (bdepth_rem_leaf(_rem)) { vraise(\"recursion too deep\"); return 0; }");
             } else {
                 ln("    ", "if (bdepth_leaf_overflow()) { vraise(\"recursion too deep\"); return 0; }");
             }
+            emit_dbg_stmt(ret_st);
             ln("    ", cat("return ", fchk(*ret_st.e1, "    "), ";"));
             ln("  ", "}");
             body_start++;
@@ -2499,6 +2553,7 @@ void Emitter::emit_fast_fn(const std::string &name) {
     fintvars.clear();
     fself_rec.clear();
     frec = false;
+    cur_src_file = saved_src_file;
 }
 
 
@@ -2687,7 +2742,7 @@ void Emitter::collect_nested(const Stmt &s) {
         std::string mangled = cat(name, "@", nested_seq);
         fns[mangled].decl = &f;
         fn_alias[name] = mangled;
-        late.push_back({mangled, &f});
+        late.push_back({mangled, &f, lookup_fn_file(name, &f)});
         collect_nested_fn(f);
         return;
     }
@@ -5261,7 +5316,8 @@ V Emitter::ex_parfor(const Expr &e) {
     std::set<std::string> capnames;
     for (const auto &n : avail)
         if (free.count(n)) capnames.insert(n);
-    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret)});
+    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret),
+                    lookup_fn_file("", &decl)});
     std::string m = new_tmp("m");
     const int body_cb = tmp;
     std::string opc = new_tmp("c");
@@ -5306,7 +5362,8 @@ V Emitter::ex_closure(const Expr &e) {
         if (free.count(n) && (!named || n != *decl.name)) others.insert(n);
     std::set<std::string> capnames = others;
     if (self_used) capnames.insert(*decl.name);
-    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret)});
+    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret),
+                    lookup_fn_file("", &decl)});
     std::string t = new_tmp("m");
     if (capnames.empty()) {
         return {{cat("Val ", t, " = vclosure0(", code, ");")}, t};
@@ -6048,7 +6105,8 @@ void Emitter::emit_defer(const Expr &e, const std::string &ind) {
     Stmt &syn = synth.emplace_back();
     syn.k = SK::Expr;
     syn.e1 = clone(e);
-    clos.push_back({&no_params(), StmtList{&syn}, capnames});
+    clos.push_back({&no_params(), StmtList{&syn}, capnames, false,
+                    !cur_src_file.empty() ? cur_src_file : root_src_file});
     std::string cm = new_tmp("m");
     std::string cb = new_tmp("cb");
     std::vector<std::string> pre = {cat("Map *", cm, " = vclosure_env_new(", capnames.size(), ");")};
@@ -6159,13 +6217,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
     default:
         break;
     }
-    if (trace_lines && s.line > 0) {
+    if ((debug_lines || trace_lines) && s.line > 0) {
         switch (s.k) {
         case SK::Let: case SK::LetTmp: case SK::Set: case SK::SetIdx: case SK::SetField:
         case SK::Expr: case SK::If: case SK::While: case SK::ForRange: case SK::ForIter:
         case SK::Return: case SK::Break: case SK::Continue: case SK::Spawn: case SK::Scope:
         case SK::Defer: case SK::Try:
-            ln(ind, cat("btrace_line(", s.line, ");"));
+            emit_dbg_stmt(s);
+            if (trace_lines) ln(ind, cat("btrace_line(", s.line, ");"));
             break;
         default:
             break;
@@ -6903,7 +6962,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             if (mentioned.count(nm)) capnames.insert(nm);
         if (cap)
             for (const auto &nm : cap->second) capnames.insert(nm);
-        clos.push_back({&no_params(), view(s.body), capnames});
+        clos.push_back({&no_params(), view(s.body), capnames, false, lookup_stmt_file(&s)});
         new_tmp("m");
         int n = tmp;
         ln(ind, cat("Map *_cm", n, " = vclosure_env_new(", capnames.size(), ");"));
@@ -6932,7 +6991,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             for (const auto &o : order)
                 if (!o.meth && o.a == name) have = true;
             if (!have) order.push_back({false, name, ""});
-            late.push_back({name, &f});
+            late.push_back({name, &f, lookup_fn_file(name, &f)});
         } else {
             std::string mangled;
             auto it = fn_alias.find(name);
@@ -6941,14 +7000,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
                 mangled = cat(name, "@", nested_seq);
                 fns[mangled].decl = &f;
                 fn_alias[name] = mangled;
-                late.push_back({mangled, &f});
+                late.push_back({mangled, &f, lookup_fn_file(name, &f)});
             } else {
                 mangled = it->second;
             }
             bool have = false;
             for (const auto &l : late)
                 if (l.name == mangled) have = true;
-            if (!have) late.push_back({mangled, &f});
+            if (!have) late.push_back({mangled, &f, lookup_fn_file(name, &f)});
         }
         return;
     }
@@ -7098,6 +7157,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     err_scope_depth = 0;
     err_iter_depth = 0;
     fin = cat("__fin_", cn);
+    const int fn_line = (!body.empty() && body[0]->line > 0) ? body[0]->line : 1;
     if (positional) {
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
         ln("  ", "(void)cap;");
@@ -7108,8 +7168,10 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         ln("", "}");
         std::string sig = cat("static Val ", impl, "(Map *cap");
         for (size_t i = 0; i < names.size(); i++) sig += cat(", Val bf_arg_", i);
+        emit_dbg_loc(fn_line, cur_src_file);
         ln("", cat(sig, ") {"));
     } else {
+        emit_dbg_loc(fn_line, cur_src_file);
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
         ln("  ", "(void)cap;");
         ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
@@ -8468,9 +8530,11 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         }
         return r;
     };
+    std::string saved_src_file = cur_src_file;
     if (key.rfind("fn:", 0) == 0) {
         std::string name = key.substr(3);
         const FnDecl &f = *fns[name].decl;
+        cur_src_file = lookup_fn_file(name, &f);
         const std::string *raw = nullptr, *kind = nullptr, *fname = nullptr;
         if (fastc.count(name)) {
             raw = &fastc[name];
@@ -8485,6 +8549,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         auto dot = rest.rfind('.');
         std::string tname = rest.substr(0, dot), mname = rest.substr(dot + 1);
         const FnDecl &f = *fns[tname + "." + mname].decl;
+        cur_src_file = lookup_fn_file(tname + "." + mname, &f);
         const std::string *self_st = native_structs.count(tname) ? &tname : nullptr;
         ln("", cat("/* meth ", safe_comment(tname + "." + mname), " */"));
         define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true,
@@ -8492,6 +8557,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
     } else {
         throw EmitError("bad fn key " + key);
     }
+    cur_src_file = saved_src_file;
 }
 
 void Emitter::emit_prelude_tables() {
@@ -8736,13 +8802,17 @@ void Emitter::emit_late() {
             }
             late_declared++;
         }
+        std::string saved_src_file = cur_src_file;
+        if (!late[late_done].src_file.empty()) cur_src_file = late[late_done].src_file;
         emit_fn_by_key("fn:" + late[late_done].name);
+        cur_src_file = saved_src_file;
         late_done++;
     }
     emit_closures_queue();
 }
 
 void Emitter::emit_main_open() {
+    cur_src_file = root_src_file;
     sym.clear();
     cap.reset();
     cap_slots.clear();
@@ -9083,8 +9153,11 @@ void Emitter::emit_closures_queue() {
     while (clos_done < static_cast<int>(clos.size())) {
         emit_closure_protos();
         const Closure &c = clos[clos_done];
+        std::string saved_src_file = cur_src_file;
+        cur_src_file = !c.src_file.empty() ? c.src_file : root_src_file;
         define_fn(cfn(cat("clo:", clos_done)), *c.params, c.body, &c.caps, nullptr, nullptr, nullptr,
                   false, c.ret_result);
+        cur_src_file = saved_src_file;
         clos_done++;
         emit_closure_protos();
     }
@@ -9110,6 +9183,9 @@ std::string Emitter::emit_program() {
     // the real text with every prototype up front. `codes` survives, so both
     // passes number the functions identically.
     out.clear();
+    last_dbg_file.clear();
+    last_dbg_line = -1;
+    last_dbg_next_idx = 0;
     run_pipeline();
     cb_wrappers.clear();
     auto ffi_decl_impl = [&](auto &&self, const std::string &ann,
@@ -9190,6 +9266,9 @@ std::string Emitter::emit_program() {
         cb_wrappers.push_back(Cb{cbname, cret, ret_s, cparams});
     }
     out.clear();
+    last_dbg_file.clear();
+    last_dbg_line = -1;
+    last_dbg_next_idx = 0;
     ic_n = 0;
     mic_slot = -1;
     nested_seq = 0;
@@ -9764,6 +9843,10 @@ std::string Emitter::emit_program() {
                 mask_idx = i;
                 continue;
             }
+            if (line.rfind("#line ", 0) == 0 ||
+                line.rfind("/* fn ", 0) == 0 ||
+                line.rfind("/* meth ", 0) == 0)
+                continue;
             if (line.find("vlib_") != std::string::npos ||
                 line.find("vplugin_") != std::string::npos ||
                 line.find("BPluginAbiEntry") != std::string::npos)
@@ -10600,13 +10683,20 @@ V Emitter::ex_call(const Expr &e) {
 
 std::string emit_program(const std::vector<StmtP> &prog, const std::string &base_, int opt,
                          std::vector<ir::Proof> *proofs, const std::string &target,
-                         bool trace_lines) {
+                         bool trace_lines, bool debug_lines, const std::string &root_file,
+                         const std::map<const Stmt *, std::string> *stmt_files,
+                         const std::map<std::string, std::string> *fn_files) {
     Emitter em;
     em.base = base_;
     em.opt = opt;
     em.proofs = proofs;
     em.target_triple = target;
     em.trace_lines = trace_lines;
+    em.debug_lines = debug_lines;
+    em.root_src_file = root_file;
+    em.cur_src_file = root_file;
+    em.stmt_files = stmt_files;
+    em.fn_files = fn_files;
     em.collect_prog(prog);
     return em.emit_program();
 }

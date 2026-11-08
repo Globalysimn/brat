@@ -751,9 +751,95 @@ fn main() -> i64 {
     print("ok: exact C enum widths/signedness + recursive DWARF callback verification")
 
 
+def test_debug_line_directives_and_dwarf() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        helper = os.path.join(td, "helper.brat")
+        with open(helper, "w", encoding="utf-8") as f:
+            f.write("""pub struct Boxed {
+  val: i64,
+}
+
+impl Boxed {
+  fn scaled(self, k: i64) -> i64 {
+    return self.val * k
+  }
+}
+
+pub fn make_boxed(v: i64) -> Boxed {
+  return Boxed { val: v }
+}
+
+pub fn add_bias(x: i64) -> i64 {
+  let b = 7
+  return x + b
+}
+""")
+        app = os.path.join(td, "vsql_app.brat")
+        with open(app, "w", encoding="utf-8") as f:
+            f.write("""import helper
+
+fn fast_fib(n: i64) -> i64 {
+  if n < 2 {
+    return n
+  }
+  return fast_fib(n - 1) + fast_fib(n - 2)
+}
+
+fn main() -> i64 {
+  let bx = helper.make_boxed(fast_fib(10))
+  let f = fn(d) { return helper.add_bias(bx.scaled(2) + d) }
+  print(f(3))
+  return 0
+}
+""")
+        r_plain = run_cli(["emit-c", "-O2", app])
+        check(r_plain.returncode == 0, f"plain emit-c failed: {r_plain.stderr}")
+        check("\n#line " not in r_plain.stdout and not r_plain.stdout.startswith("#line "),
+              "plain emit-c without -g emitted #line directives")
+
+        out_c = os.path.join(td, "emitted_dbg.c")
+        r_dbg_c = run_cli(["emit-c", "-O2", "-g", app, "-o", out_c])
+        check(r_dbg_c.returncode == 0 and os.path.isfile(out_c),
+              f"emit-c -g -o failed: rc={r_dbg_c.returncode}, err={r_dbg_c.stderr}")
+        with open(out_c, "r", encoding="utf-8") as f:
+            c_src = f.read()
+        check("helper.brat\"" in c_src and "vsql_app.brat\"" in c_src,
+              "emit-c -g missing per-module #line file mappings")
+        check("#line 12" in c_src and "#line 4" in c_src,
+              "emit-c -g missing expected statement #line numbers")
+        # Root filename contains `vsql_`, which must not trip the CRT SQLite mask (0x10).
+        for ln in c_src.splitlines():
+            if ln.startswith("#define BRAT_CRT_MASK "):
+                mask_val = int(ln.split()[-1].rstrip("u"))
+                check((mask_val & 0x10) == 0,
+                      f"#line path falsely enabled SQLite CRT mask: {ln}")
+                break
+
+        exe_ext = ".exe" if os.name == "nt" else ""
+        dbg_exe = os.path.join(td, "app_dbg" + exe_ext)
+        for flag in ("-O0", "-O1", "-O2"):
+            rb = run_cli(["build", flag, "-g", app, "-o", dbg_exe])
+            check(rb.returncode == 0, f"build {flag} -g failed:\n{rb.stdout}\n{rb.stderr}")
+            rr = subprocess.run([dbg_exe], capture_output=True, text=True, check=True)
+            check(rr.stdout.strip() == "120",
+                  f"build {flag} -g wrong output: {rr.stdout!r}")
+
+        r_run = run_cli(["run", "-O2", "--debug", app])
+        check(r_run.returncode == 0 and r_run.stdout.strip() == "120",
+              f"run --debug failed: rc={r_run.returncode}, out={r_run.stdout!r}, err={r_run.stderr!r}")
+
+        if sys.platform.startswith("linux") and shutil.which("readelf"):
+            rdw = subprocess.run(["readelf", "--debug-dump=decodedline", dbg_exe],
+                                 capture_output=True, text=True, check=True)
+            check("vsql_app.brat" in rdw.stdout and "helper.brat" in rdw.stdout,
+                  f"DWARF .debug_line missing .brat filenames:\n{rdw.stdout[:1200]}")
+    print("ok: -g/--debug #line source maps across modules + DWARF .debug_line")
+
+
 if __name__ == "__main__":
     test_fail_loud_and_gnu11()
     test_steps_11_2_and_11_3_crt_speed_and_tsan()
     test_o2_descending_and_foriter()
     test_exact_enums_and_dwarf_callbacks()
+    test_debug_line_directives_and_dwarf()
     print("ALL (v0.5) TESTS GREEN!")

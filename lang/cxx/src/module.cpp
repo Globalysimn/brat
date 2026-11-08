@@ -987,6 +987,43 @@ void flatten(ModuleSet &set, bool prune_imports) {
     const bool do_prune = prune_imports && set.files.size() > 1;
     const std::set<std::string> live_fns = do_prune ? live_imported_functions(set)
                                                     : std::set<std::string>{};
+    set.stmt_files.clear();
+    set.fn_files.clear();
+    struct Tag {
+        ModuleSet &set;
+        const std::string &path;
+        void expr(const Expr *e) {
+            if (!e) return;
+            for (const auto &k : e->kids) expr(k.get());
+            if (e->fn) {
+                for (const auto &p : e->fn->params) expr(p.def.get());
+                for (const auto &st : e->fn->body) stmt(st.get());
+            }
+        }
+        void stmt(const Stmt *s) {
+            if (!s) return;
+            set.stmt_files[s] = path;
+            if ((s->k == SK::Fn || s->k == SK::ExportFn) && !s->fns.empty() && s->fns[0].name) {
+                set.fn_files[*s->fns[0].name] = path;
+            } else if (s->k == SK::Impl) {
+                for (const auto &f : s->fns) {
+                    if (f.name) set.fn_files[s->a + "." + *f.name] = path;
+                }
+            }
+            expr(s->e1.get());
+            expr(s->e2.get());
+            expr(s->e3.get());
+            for (const auto &p : s->params) expr(p.def.get());
+            for (const auto &p : s->ext.params) expr(p.def.get());
+            for (const auto &f : s->fns) {
+                for (const auto &p : f.params) expr(p.def.get());
+                for (const auto &st : f.body) stmt(st.get());
+            }
+            for (const auto &st : s->body) stmt(st.get());
+            for (const auto &st : s->body2) stmt(st.get());
+            if (s->els) stmt(s->els.get());
+        }
+    };
     std::set<std::string> expanded;
     std::vector<StmtP> flat;
     // A module's statements land where its `import` sits in the importer, not
@@ -1002,6 +1039,7 @@ void flatten(ModuleSet &set, bool prune_imports) {
             const std::string &path = set.files[idx].path;
             if (expanded.count(path)) return;
             expanded.insert(path);
+            Tag tag{set, path};
             for (auto &sp : set.files[idx].body) {
                 if (sp->k == SK::Import) {
                     for (const auto &[name, target] : set.files[idx].imports) {
@@ -1018,6 +1056,7 @@ void flatten(ModuleSet &set, bool prune_imports) {
                         if (!live_fns.count(*nm)) continue;
                     }
                 }
+                tag.stmt(sp.get());
                 out.push_back(std::move(sp));
             }
         }

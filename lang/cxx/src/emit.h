@@ -2,6 +2,7 @@
 // `brat build` hands it to cc.
 #pragma once
 
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,7 +23,11 @@ struct EmitError : std::runtime_error {
 std::string emit_program(const std::vector<StmtP> &prog, const std::string &base, int opt = 0,
                          std::vector<ir::Proof> *proofs = nullptr,
                          const std::string &target = "",
-                         bool trace_lines = false);
+                         bool trace_lines = false,
+                         bool debug_lines = false,
+                         const std::string &root_file = "",
+                         const std::map<const Stmt *, std::string> *stmt_files = nullptr,
+                         const std::map<std::string, std::string> *fn_files = nullptr);
 
 // Sorted, unique library names the program's `extern` blocks ask to link.
 std::vector<std::string> extern_libs(const std::vector<StmtP> &prog);

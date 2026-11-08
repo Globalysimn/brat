@@ -1770,7 +1770,8 @@ static int build_one(const char *arg0, const std::string &file,
                      bool trace_lines = false,
                      const std::string &ffi_header = {},
                      const std::vector<std::string> &ffi_objects = {},
-                     bool no_check = false) {
+                     bool no_check = false,
+                     bool debug_info = false) {
     ModuleSet set = load_modules(file);
     mangle_modules(set);
     if (no_check) {
@@ -1830,7 +1831,10 @@ static int build_one(const char *arg0, const std::string &file,
     const auto engine = locate_lang_dir(arg0) / "engine";
     std::string emitted_c;
     try {
-        std::string c = codegen::emit_program(set.flat, dir_of(file), opt, nullptr, target, trace_lines);
+        const std::string root_path = set.files.empty() ? file : set.files[0].path;
+        std::string c = codegen::emit_program(set.flat, dir_of(file), opt, nullptr, target,
+                                              trace_lines, debug_info, root_path,
+                                              &set.stmt_files, &set.fn_files);
         if (static_link && !static_explicit &&
             (!link_flags.empty() ||
              c.find("vlib_open(") != std::string::npos ||
@@ -1887,7 +1891,8 @@ static int build_one(const char *arg0, const std::string &file,
     // answer is the optimizer's, and an i64 sum that wraps is only "correct"
     // until the next compiler version notices the loop bound cannot overflow.
     args.insert(args.end(), {"-std=gnu11", "-O2", "-fwrapv", "-I", engine.string()});
-    if (!zig && target.empty() && link_flags.empty()) {
+    if (debug_info) args.push_back("-g");
+    if (!debug_info && !zig && target.empty() && link_flags.empty()) {
         maybe_append_crt_pch(compiler, engine, emitted_c,
                              static_link && !shared,
                              shared && pkind != "windows",
@@ -1941,7 +1946,8 @@ static int run_one(const char *arg0, const std::string &file, int opt,
                    bool trace_lines = false,
                    const std::string &ffi_header = {},
                    const std::vector<std::string> &ffi_objects = {},
-                   bool no_check = false) {
+                   bool no_check = false,
+                   bool debug_info = false) {
     ModuleSet set = load_modules(file);
     mangle_modules(set);
     if (no_check) {
@@ -1973,7 +1979,10 @@ static int run_one(const char *arg0, const std::string &file, int opt,
         return 1;
     }
     const auto libs = codegen::extern_libs(set.flat);
-    std::string source = codegen::emit_program(set.flat, dir_of(file), opt, nullptr, "", trace_lines);
+    const std::string root_path = set.files.empty() ? file : set.files[0].path;
+    std::string source = codegen::emit_program(set.flat, dir_of(file), opt, nullptr, "",
+                                               trace_lines, debug_info, root_path,
+                                               &set.stmt_files, &set.fn_files);
     std::string compiler;
     if (const char *override = std::getenv("BRAT_CC"); override && *override) compiler = override;
     else if (const char *cc_env = std::getenv("CC"); cc_env && *cc_env) compiler = cc_env;
@@ -2005,6 +2014,7 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     std::string key_material = "native-run-v2|" + compiler_context + "|" +
                                sha256_hex(source) + sha256_hex(header) +
                                "|opt=" + std::to_string(opt) +
+                               "|dbg=" + std::to_string(debug_info ? 1 : 0) +
                                "|nc=" + std::to_string(no_check ? 1 : 0) +
                                "|mem=" + std::to_string(memory_limit) +
                                "|cobj=" + vendored_digest + "|libs=";
@@ -2088,7 +2098,10 @@ static int run_one(const char *arg0, const std::string &file, int opt,
             args.push_back(fo);
     }
     args.insert(args.end(), {"-o", temporary.string(), "-std=gnu11", "-O2", "-fwrapv", "-I", engine.string()});
-    maybe_append_crt_pch(compiler, engine, source, false, false, memory_limit, args);
+    if (debug_info) args.push_back("-g");
+    if (!debug_info) {
+        maybe_append_crt_pch(compiler, engine, source, false, false, memory_limit, args);
+    }
     if (host_pkind == "windows") args.push_back("-lws2_32");
     else args.push_back("-lm");
     if (memory_limit) args.push_back("-DBRAT_MEM_BYTES=" + std::to_string(memory_limit));
@@ -2221,6 +2234,7 @@ struct CcFlags {
     bool why = false;
     bool no_check = false;
     bool trace_lines = false;
+    bool debug_lines = false;
     std::vector<std::string> files;
 };
 
@@ -2246,6 +2260,8 @@ static bool parse_cc(int argc, char **argv, CcFlags &f) {
             f.no_check = true;
         } else if (a == "--trace-lines") {
             f.trace_lines = true;
+        } else if (a == "-g" || a == "--debug") {
+            f.debug_lines = true;
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "brat-cxx: unknown flag %s\n", a.c_str());
             return false;
@@ -2338,18 +2354,18 @@ void print_cli_usage() {
     std::fprintf(stderr,
                  "usage: brat --version\n"
                  "       brat run|build|dist|check|deps|api|fmt|test|doc|new|emit-c|ffi|bindgen|pkg|explain|lsp|mcp|bundle ...\n"
-                 "       brat run FILE [-- args...] [-O0|-O1|-O2] [--mem N]\n"
+                 "       brat run FILE [-- args...] [-g|--debug] [-O0|-O1|-O2] [--mem N]\n"
                  "       brat deps FILE [--json|--dot] [-o OUT]\n"
                  "       brat api FILE [--json]\n"
                  "       brat api --diff OLD.bri NEW.bri [--json]\n"
-                 "       brat build FILE -o OUT [--link FLAG] [--mem N] [--header H]\n"
+                 "       brat build FILE -o OUT [-g|--debug] [--link FLAG] [--mem N] [--header H]\n"
                  "       brat dist FILE [-o DIR] [--target TRIPLE[,TRIPLE...]] [--shared]\n"
                  "       brat check [--json] FILE...\n"
                  "       brat fmt [--check] [--stdout] FILE...\n"
                  "       brat test [-j N] [--filter SUBSTR] FILE_OR_DIR...\n"
                  "       brat doc FILE_OR_DIR [--json] [-o OUT]\n"
                  "       brat new NAME [--kind service|tool]\n"
-                 "       brat emit-c FILE [--bundle] [--no-check] [--trace-lines] [-O0|-O1|-O2]\n"
+                 "       brat emit-c FILE [-o OUT] [-g|--debug] [--bundle] [--no-check] [--trace-lines] [-O0|-O1|-O2]\n"
                  "       brat ffi FILE --header H --abi-matrix [--json]\n"
                  "       brat bindgen <HEADER.h | LIB.rs> [-o OUT] [--lib NAME] [--preprocess] [--header-only] [-I DIR] [-D DEF] [--inline-arrays] [--lang LANG] [--target TRIPLE]\n"
                  "       brat pkg add|publish|update|install|verify|list|remove ...\n"
@@ -2454,6 +2470,7 @@ int brat_cli_main(int argc, char **argv) {
         bool no_check = false;
         const char *tev = std::getenv("BRAT_TRACE");
         bool trace_lines = (tev && tev[0] && tev[0] != '0');
+        bool debug_info = false;
         std::vector<std::string> program_args;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -2464,6 +2481,7 @@ int brat_cli_main(int argc, char **argv) {
             if (arg == "-O0") opt = 0;
             else if (arg == "-O1") opt = 1;
             else if (arg == "-O2") opt = 2;
+            else if (arg == "-g" || arg == "--debug") debug_info = true;
             else if (arg == "--unsafe-ffi") unsafe_ffi = true;
             else if (arg == "--header" && i + 1 < argc) ffi_header = argv[++i];
             else if (arg.rfind("--header=", 0) == 0) ffi_header = arg.substr(9);
@@ -2500,7 +2518,8 @@ int brat_cli_main(int argc, char **argv) {
         for (auto &k : keep) pass.push_back(const_cast<char *>(k.c_str()));
         pass.push_back(nullptr);
         try {
-            return run_one(argv[0], file, opt, memory_limit, pass.data(), unsafe_ffi, trace_lines, ffi_header, ffi_objects, no_check);
+            return run_one(argv[0], file, opt, memory_limit, pass.data(), unsafe_ffi,
+                           trace_lines, ffi_header, ffi_objects, no_check, debug_info);
         } catch (const ParseError &e) {
             print_parse_error(file, e);
             return 1;
@@ -2523,6 +2542,7 @@ int brat_cli_main(int argc, char **argv) {
         bool no_check = false;
         const char *btev = std::getenv("BRAT_TRACE");
         bool trace_lines = (btev && btev[0] && btev[0] != '0');
+        bool debug_info = false;
         std::vector<std::string> link_flags;
         for (int i = 2; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -2559,6 +2579,7 @@ int brat_cli_main(int argc, char **argv) {
             else if (arg == "-O0") opt = 0;
             else if (arg == "-O1") opt = 1;
             else if (arg == "-O2") opt = 2;
+            else if (arg == "-g" || arg == "--debug") debug_info = true;
             else if (arg == "--unsafe-ffi") unsafe_ffi = true;
             else if (arg == "--header" && i + 1 < argc) ffi_header = argv[++i];
             else if (arg.rfind("--header=", 0) == 0) ffi_header = arg.substr(9);
@@ -2589,7 +2610,8 @@ int brat_cli_main(int argc, char **argv) {
         try {
             return build_one(argv[0], file, output, target, static_link,
                              static_explicit, shared, opt, memory_limit, link_flags,
-                             unsafe_ffi, trace_lines, ffi_header, ffi_objects, no_check);
+                             unsafe_ffi, trace_lines, ffi_header, ffi_objects, no_check,
+                             debug_info);
         } catch (const ParseError &e) {
             print_parse_error(file, e);
             return 1;
@@ -2684,8 +2706,11 @@ int brat_cli_main(int argc, char **argv) {
                         continue;
                     }
                     std::vector<ir::Proof> proofs;
+                    const std::string root_path = set.files.empty() ? file : set.files[0].path;
                     std::string text =
-                        codegen::emit_program(set.flat, dir_of(file), flags.opt, &proofs, "", flags.trace_lines);
+                        codegen::emit_program(set.flat, dir_of(file), flags.opt, &proofs, "",
+                                              flags.trace_lines, flags.debug_lines, root_path,
+                                              &set.stmt_files, &set.fn_files);
                     if (flags.no_check)
                         text = "/* BRAT: UNVERIFIED -- ownership not checked */\n" + text;
                     std::fwrite(text.data(), 1, text.size(), stdout);
