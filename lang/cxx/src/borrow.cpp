@@ -30,7 +30,8 @@ const std::set<std::string> BUILTINS = {
     "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
     "str", "read_file", "write_file", "append_file", "read_bytes", "write_bytes", "proc_run",
     "utf8_bytes", "utf8_str", "json_parse", "json_stringify",
-    "fs_exists", "fs_open", "fs_read_line", "fs_close", "stdin_read_line",
+    "fs_exists", "fs_is_dir", "fs_file_size", "fs_mkdir_all", "fs_list_dir", "fs_remove_dir",
+    "fs_open", "fs_read_line", "fs_close", "stdin_read_line",
     "fs_rename", "fs_remove", "assert",
     "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
@@ -420,12 +421,14 @@ std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
             }
             return infer_expr_ann(e->kids[1].get(), decl, funcs);
         }
-        if (e->a == "fs_exists") return std::string("bool");
+        if (e->a == "fs_exists" || e->a == "fs_is_dir") return std::string("bool");
         if (e->a == "read_file") return std::string("Result[str, str]");
+        if (e->a == "fs_list_dir") return std::string("Result[vec[str], str]");
         if (e->a == "fs_read_line" || e->a == "stdin_read_line")
             return std::string("Result[Option[str], str]");
         if (e->a == "append_file" || e->a == "write_file" ||
-            e->a == "fs_open" || e->a == "fs_close")
+            e->a == "fs_open" || e->a == "fs_close" ||
+            e->a == "fs_file_size" || e->a == "fs_mkdir_all" || e->a == "fs_remove_dir")
             return std::string("Result[i64, str]");
         if (e->a == "re_find") return std::string("Option[str]");
         if (!funcs) return std::nullopt;

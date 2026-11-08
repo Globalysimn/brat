@@ -1663,6 +1663,595 @@ BFN Val vfs_remove(Val p) {
     return vtagv("ok", a);
 }
 
+#ifndef BRAT_MAX_DIR_ENTRIES
+#define BRAT_MAX_DIR_ENTRIES ((size_t)1 << 20)
+#endif
+#if defined(_WIN32) && !defined(WC_ERR_INVALID_CHARS)
+#define WC_ERR_INVALID_CHARS 0x00000080
+#endif
+
+static int _vfs_cstr_cmp(const void *pa, const void *pb) {
+    const char *a = *(const char *const *)pa;
+    const char *b = *(const char *const *)pb;
+    return strcmp(a, b);
+}
+
+#if !defined(_WIN32)
+static int _vopen_dir_confined(const char *rp, int *escaped) {
+    if (escaped) *escaped = 0;
+    if (strcmp(rp, vbase_g) == 0) {
+        int dfd = open(vbase_g, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dfd < 0) {
+            if ((errno == ELOOP || errno == EMLINK) && escaped) *escaped = 1;
+            return -1;
+        }
+        if (!_vfd_confined(dfd)) {
+            close(dfd);
+            if (escaped) *escaped = 1;
+            errno = EACCES;
+            return -1;
+        }
+        return dfd;
+    }
+    char leaf[1024];
+    int pfd = _vopen_parent_confined(rp, leaf, sizeof leaf, escaped);
+    if (pfd < 0) return -1;
+    struct stat lst;
+    if (!_vfd_confined(pfd) ||
+        (fstatat(pfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode))) {
+        close(pfd);
+        if (escaped) *escaped = 1;
+        errno = ELOOP;
+        return -1;
+    }
+    int dfd = openat(pfd, leaf, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int e = errno;
+    close(pfd);
+    if (dfd < 0) {
+        if ((e == ELOOP || e == EMLINK) && escaped) *escaped = 1;
+        errno = e;
+        return -1;
+    }
+    if (!_vfd_confined(dfd)) {
+        close(dfd);
+        if (escaped) *escaped = 1;
+        errno = EACCES;
+        return -1;
+    }
+    return dfd;
+}
+#endif
+
+BFN Val vfs_is_dir(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad != 0 || !rp) return vbool(0);
+#if defined(_WIN32)
+    wchar_t wp[4096];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0)
+        return vbool(0);
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           &sa, OPEN_EXISTING, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) return vbool(0);
+    BY_HANDLE_FILE_INFORMATION fi;
+    int ok = GetFileType(h) == FILE_TYPE_DISK &&
+             GetFileInformationByHandle(h, &fi) &&
+             ((fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) &&
+             (_vfiles_free() ||
+              (!(fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && _vhandle_confined(h)));
+    CloseHandle(h);
+    return vbool(ok);
+#else
+    if (_vfiles_free()) {
+        struct stat st;
+        return vbool(stat(rp, &st) == 0 && S_ISDIR(st.st_mode));
+    }
+    int esc = 0;
+    int dfd = _vopen_dir_confined(rp, &esc);
+    if (dfd < 0) return vbool(0);
+    close(dfd);
+    return vbool(1);
+#endif
+}
+
+BFN Val vfs_file_size(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_file_size wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_file_size byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    errno = 0;
+#if defined(_WIN32)
+    wchar_t wp[4096];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0) {
+        errno = EINVAL;
+        return verr_os(rp);
+    }
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL;
+    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           &sa, OPEN_EXISTING, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD le = GetLastError();
+        if (!_vfiles_free()) {
+            DWORD attr = GetFileAttributesW(wp);
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+                return verr("path escaped during open");
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                errno = EISDIR;
+                return verr_os(rp);
+            }
+        }
+        errno = (le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+        return verr_os(rp);
+    }
+    BY_HANDLE_FILE_INFORMATION fi;
+    if (GetFileType(h) != FILE_TYPE_DISK || !GetFileInformationByHandle(h, &fi)) {
+        CloseHandle(h);
+        errno = EINVAL;
+        return verr_os(rp);
+    }
+    if (!_vfiles_free() &&
+        ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !_vhandle_confined(h))) {
+        CloseHandle(h);
+        return verr("path escaped during open");
+    }
+    if (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        CloseHandle(h);
+        errno = EISDIR;
+        return verr_os(rp);
+    }
+    uint64_t sz = ((uint64_t)fi.nFileSizeHigh << 32) | (uint64_t)fi.nFileSizeLow;
+    CloseHandle(h);
+    if (sz > (uint64_t)INT64_MAX) return verr("fs_file_size exceeds i64");
+    Vec *a = vvec();
+    vec_push(a, vint((bint)sz));
+    return vtagv("ok", a);
+#else
+    struct stat st;
+    if (_vfiles_free()) {
+        if (stat(rp, &st) != 0) return verr_os(rp);
+    } else {
+        if (strcmp(rp, vbase_g) == 0) {
+            errno = EISDIR;
+            return verr_os(rp);
+        }
+        char leaf[1024];
+        int esc = 0;
+        int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
+        if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
+        if (!_vfd_confined(dfd)) {
+            close(dfd);
+            return verr("path escaped during open");
+        }
+        int rc = fstatat(dfd, leaf, &st, AT_SYMLINK_NOFOLLOW);
+        int e = errno;
+        close(dfd);
+        if (rc != 0) { errno = e; return verr_os(rp); }
+        if (S_ISLNK(st.st_mode)) return verr("path escaped during open");
+    }
+    if (S_ISDIR(st.st_mode)) { errno = EISDIR; return verr_os(rp); }
+    if (!S_ISREG(st.st_mode)) { errno = EINVAL; return verr_os(rp); }
+    if ((uint64_t)st.st_size > (uint64_t)INT64_MAX) return verr("fs_file_size exceeds i64");
+    Vec *a = vvec();
+    vec_push(a, vint((bint)st.st_size));
+    return vtagv("ok", a);
+#endif
+}
+
+BFN Val vfs_mkdir_all(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_mkdir_all wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_mkdir_all byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    errno = 0;
+#if defined(_WIN32)
+    wchar_t wbuf[4096];
+    int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wbuf, 4096);
+    if (wn <= 0) { errno = EINVAL; return verr_os(rp); }
+    for (int i = 0; wbuf[i]; i++) {
+        if (wbuf[i] == L'/') wbuf[i] = L'\\';
+    }
+    int start = 0;
+    if (((wbuf[0] >= L'A' && wbuf[0] <= L'Z') || (wbuf[0] >= L'a' && wbuf[0] <= L'z')) &&
+        wbuf[1] == L':') {
+        start = 2;
+        if (wbuf[start] == L'\\') start++;
+    } else if (wbuf[0] == L'\\' && wbuf[1] == L'\\') {
+        start = 2;
+        while (wbuf[start] && wbuf[start] != L'\\') start++;
+        if (wbuf[start] == L'\\') start++;
+        while (wbuf[start] && wbuf[start] != L'\\') start++;
+        if (wbuf[start] == L'\\') start++;
+    } else if (wbuf[0] == L'\\') {
+        start = 1;
+    }
+    for (int i = start;; i++) {
+        wchar_t ch = wbuf[i];
+        if (ch == L'\\' || ch == 0) {
+            if (i > start && wbuf[i - 1] != L'\\') {
+                wbuf[i] = 0;
+                if (!_vfiles_free()) {
+                    DWORD attr = GetFileAttributesW(wbuf);
+                    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+                        return verr("path escaped during open");
+                }
+                if (!CreateDirectoryW(wbuf, NULL)) {
+                    DWORD le = GetLastError();
+                    if (le != ERROR_ALREADY_EXISTS && le != ERROR_ACCESS_DENIED) {
+                        errno = (le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+                        return verr_os(rp);
+                    }
+                }
+                wbuf[i] = ch;
+            }
+            if (ch == 0) break;
+        }
+    }
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE h = CreateFileW(wbuf, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           &sa, OPEN_EXISTING, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) { errno = EACCES; return verr_os(rp); }
+    BY_HANDLE_FILE_INFORMATION fi;
+    int ok = GetFileType(h) == FILE_TYPE_DISK &&
+             GetFileInformationByHandle(h, &fi) &&
+             ((fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    int esc = !_vfiles_free() &&
+              ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !_vhandle_confined(h));
+    CloseHandle(h);
+    if (esc) return verr("path escaped during open");
+    if (!ok) { errno = ENOTDIR; return verr_os(rp); }
+#else
+    if (_vfiles_free()) {
+        struct stat st;
+        if (stat(rp, &st) == 0 && S_ISDIR(st.st_mode)) {
+            Vec *a0 = vvec();
+            vec_push(a0, vint(0));
+            return vtagv("ok", a0);
+        }
+        char buf[8192];
+        size_t len = strlen(rp);
+        if (len == 0 || len >= sizeof buf) { errno = EINVAL; return verr_os(rp); }
+        memcpy(buf, rp, len + 1);
+        for (size_t i = (buf[0] == '/' ? 1u : 0u); i <= len; i++) {
+            char ch = buf[i];
+            if (ch == '/' || ch == 0) {
+                if (i > 0 && buf[i - 1] != '/') {
+                    buf[i] = 0;
+                    if (mkdir(buf, 0777) != 0 && errno != EEXIST && errno != EISDIR) {
+                        struct stat cst;
+                        if (!(stat(buf, &cst) == 0 && S_ISDIR(cst.st_mode))) {
+                            int e = errno;
+                            buf[i] = ch;
+                            errno = e;
+                            return verr_os(rp);
+                        }
+                    }
+                    buf[i] = ch;
+                }
+            }
+        }
+        if (stat(rp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            if (!errno) errno = ENOTDIR;
+            return verr_os(rp);
+        }
+    } else {
+        size_t bl = strlen(vbase_g);
+        if (strncmp(rp, vbase_g, bl) != 0 || (rp[bl] != '/' && rp[bl] != 0))
+            return verr("path outside the program directory");
+        int dfd = open(vbase_g, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dfd < 0) return (errno == ELOOP || errno == EMLINK) ? verr("path escaped during open") : verr_os(rp);
+        if (!_vfd_confined(dfd)) {
+            close(dfd);
+            return verr("path escaped during open");
+        }
+        const char *cur = rp[bl] ? (rp + bl + 1) : "";
+        while (*cur) {
+            while (*cur == '/') cur++;
+            if (!*cur) break;
+            const char *sl = strchr(cur, '/');
+            size_t slen = sl ? (size_t)(sl - cur) : strlen(cur);
+            if (slen == 0 || slen >= 1024 || (slen == 1 && cur[0] == '.') ||
+                (slen == 2 && cur[0] == '.' && cur[1] == '.')) {
+                close(dfd);
+                return verr("path outside the program directory");
+            }
+            char seg[1024];
+            memcpy(seg, cur, slen);
+            seg[slen] = 0;
+            errno = 0;
+            int mrc = mkdirat(dfd, seg, 0777);
+            int merr = errno;
+            struct stat lst;
+            if (fstatat(dfd, seg, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode)) {
+                close(dfd);
+                return verr("path escaped during open");
+            }
+            int nfd = openat(dfd, seg, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            int oerr = errno;
+            close(dfd);
+            if (nfd < 0) {
+                if (oerr == ELOOP || oerr == EMLINK) return verr("path escaped during open");
+                errno = (mrc != 0 && merr != EEXIST) ? merr : oerr;
+                return verr_os(rp);
+            }
+            if (!_vfd_confined(nfd)) {
+                close(nfd);
+                return verr("path escaped during open");
+            }
+            dfd = nfd;
+            cur += slen;
+        }
+        close(dfd);
+    }
+#endif
+    Vec *a = vvec();
+    vec_push(a, vint(0));
+    return vtagv("ok", a);
+}
+
+BFN Val vfs_list_dir(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_list_dir wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_list_dir byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    char **names = NULL;
+    size_t count = 0, cap = 0;
+    errno = 0;
+#if defined(_WIN32)
+    wchar_t wp[4096];
+    int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096);
+    if (wn <= 0) { errno = EINVAL; return verr_os(rp); }
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE dh = CreateFileW(wp, FILE_READ_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            &sa, OPEN_EXISTING, flags, NULL);
+    if (dh == INVALID_HANDLE_VALUE) {
+        DWORD le = GetLastError();
+        if (!_vfiles_free()) {
+            DWORD attr = GetFileAttributesW(wp);
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+                return verr("path escaped during open");
+        }
+        errno = (le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+        return verr_os(rp);
+    }
+    BY_HANDLE_FILE_INFORMATION fi;
+    if (GetFileType(dh) != FILE_TYPE_DISK || !GetFileInformationByHandle(dh, &fi)) {
+        CloseHandle(dh);
+        errno = EINVAL;
+        return verr_os(rp);
+    }
+    if (!_vfiles_free() &&
+        ((fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !_vhandle_confined(dh))) {
+        CloseHandle(dh);
+        return verr("path escaped during open");
+    }
+    if (!(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        CloseHandle(dh);
+        errno = ENOTDIR;
+        return verr_os(rp);
+    }
+    wchar_t wpat[4100];
+    size_t wlen = 0;
+    while (wp[wlen]) wlen++;
+    while (wlen > 0 && (wp[wlen - 1] == L'\\' || wp[wlen - 1] == L'/')) {
+        if (wlen == 3 && wp[1] == L':') break;
+        if (wlen == 1) break;
+        wp[--wlen] = 0;
+    }
+    memcpy(wpat, wp, wlen * sizeof(wchar_t));
+    if (wlen > 0 && (wp[wlen - 1] == L'\\' || wp[wlen - 1] == L'/')) {
+        wpat[wlen] = L'*';
+        wpat[wlen + 1] = 0;
+    } else {
+        wpat[wlen] = L'\\';
+        wpat[wlen + 1] = L'*';
+        wpat[wlen + 2] = 0;
+    }
+    WIN32_FIND_DATAW ffd;
+    HANDLE fh = FindFirstFileW(wpat, &ffd);
+    if (fh == INVALID_HANDLE_VALUE) {
+        DWORD le = GetLastError();
+        CloseHandle(dh);
+        if (le == ERROR_FILE_NOT_FOUND || le == ERROR_NO_MORE_FILES) {
+            Vec *empty = vvec();
+            Vec *okv = vvec();
+            vec_push(okv, vvecv(empty));
+            return vtagv("ok", okv);
+        }
+        errno = EIO;
+        return verr_os(rp);
+    }
+    const char *bad_msg = NULL;
+    do {
+        const wchar_t *en = ffd.cFileName;
+        if ((en[0] == L'.' && en[1] == 0) || (en[0] == L'.' && en[1] == L'.' && en[2] == 0))
+            continue;
+        if (count >= BRAT_MAX_DIR_ENTRIES) { bad_msg = "fs_list_dir exceeds maximum entry count"; break; }
+        char u8[4096];
+        int nb = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, en, -1, u8, (int)sizeof u8, NULL, NULL);
+        if (nb <= 0 || !utf8_valid(u8, (bint)(nb - 1))) {
+            bad_msg = "fs_list_dir entry is not valid UTF-8";
+            break;
+        }
+        size_t sl = (size_t)(nb - 1);
+        char *copy = (char *)malloc(sl + 1);
+        if (!copy) { bad_msg = "out of memory"; break; }
+        memcpy(copy, u8, sl + 1);
+        if (count == cap) {
+            size_t ncap = cap ? cap * 2u : 16u;
+            char **grown = (char **)realloc(names, ncap * sizeof(char *));
+            if (!grown) { free(copy); bad_msg = "out of memory"; break; }
+            names = grown;
+            cap = ncap;
+        }
+        names[count++] = copy;
+    } while (FindNextFileW(fh, &ffd));
+    DWORD fle = GetLastError();
+    FindClose(fh);
+    CloseHandle(dh);
+    if (!bad_msg && fle != ERROR_NO_MORE_FILES) bad_msg = "fs_list_dir read error";
+    if (bad_msg) {
+        for (size_t i = 0; i < count; i++) free(names[i]);
+        free(names);
+        return verr(bad_msg);
+    }
+#else
+    int dfd = -1;
+    if (_vfiles_free()) {
+        dfd = open(rp, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dfd < 0) return verr_os(rp);
+    } else {
+        int esc = 0;
+        dfd = _vopen_dir_confined(rp, &esc);
+        if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
+    }
+    DIR *dir = fdopendir(dfd);
+    if (!dir) {
+        int e = errno;
+        close(dfd);
+        errno = e;
+        return verr_os(rp);
+    }
+    const char *bad_msg = NULL;
+    int rerr = 0;
+    for (;;) {
+        errno = 0;
+        struct dirent *de = readdir(dir);
+        if (!de) {
+            rerr = errno;
+            break;
+        }
+        const char *en = de->d_name;
+        if ((en[0] == '.' && en[1] == 0) || (en[0] == '.' && en[1] == '.' && en[2] == 0))
+            continue;
+        if (count >= BRAT_MAX_DIR_ENTRIES) { bad_msg = "fs_list_dir exceeds maximum entry count"; break; }
+        size_t sl = strlen(en);
+        if (bsize_over_bint(sl) || !utf8_valid(en, (bint)sl)) {
+            bad_msg = "fs_list_dir entry is not valid UTF-8";
+            break;
+        }
+        char *copy = (char *)malloc(sl + 1);
+        if (!copy) { bad_msg = "out of memory"; break; }
+        memcpy(copy, en, sl + 1);
+        if (count == cap) {
+            size_t ncap = cap ? cap * 2u : 16u;
+            char **grown = (char **)realloc(names, ncap * sizeof(char *));
+            if (!grown) { free(copy); bad_msg = "out of memory"; break; }
+            names = grown;
+            cap = ncap;
+        }
+        names[count++] = copy;
+    }
+    closedir(dir);
+    if (bad_msg || rerr != 0) {
+        for (size_t i = 0; i < count; i++) free(names[i]);
+        free(names);
+        if (bad_msg) return verr(bad_msg);
+        errno = rerr;
+        return verr_os(rp);
+    }
+#endif
+    if (count > 1) qsort(names, count, sizeof(char *), _vfs_cstr_cmp);
+    Vec *items = vvec();
+    for (size_t i = 0; i < count; i++) {
+        vec_push(items, vstrn(names[i], strlen(names[i])));
+        free(names[i]);
+    }
+    free(names);
+    Vec *a = vvec();
+    vec_push(a, vvecv(items));
+    return vtagv("ok", a);
+}
+
+BFN Val vfs_remove_dir(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("fs_remove_dir wants a string path");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("fs_remove_dir byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    errno = 0;
+#if defined(_WIN32)
+    if (!_vfiles_free() && strlen(rp) == strlen(vbase_g) &&
+        _strnicmp(rp, vbase_g, strlen(vbase_g)) == 0)
+        return verr("cannot remove program base directory");
+    wchar_t wp[4096];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0) {
+        errno = EINVAL;
+        return verr_os(rp);
+    }
+    if (!_vfiles_free()) {
+        DWORD attr = GetFileAttributesW(wp);
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+            return verr("path escaped during open");
+    }
+    if (!RemoveDirectoryW(wp)) {
+        DWORD le = GetLastError();
+        errno = (le == ERROR_DIR_NOT_EMPTY) ? ENOTEMPTY
+              : ((le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES);
+        return verr_os(rp);
+    }
+#else
+    if (_vfiles_free()) {
+        if (rmdir(rp) != 0) return verr_os(rp);
+    } else {
+        if (strcmp(rp, vbase_g) == 0) return verr("cannot remove program base directory");
+        char leaf[1024];
+        int esc = 0;
+        int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
+        if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
+        struct stat lst;
+        if (!_vfd_confined(dfd) ||
+            (fstatat(dfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode))) {
+            close(dfd);
+            return verr("path escaped during open");
+        }
+        int rc = unlinkat(dfd, leaf, AT_REMOVEDIR);
+        int e = errno;
+        close(dfd);
+        if (rc != 0) { errno = e; return verr_os(rp); }
+    }
+#endif
+    Vec *a = vvec();
+    vec_push(a, vint(0));
+    return vtagv("ok", a);
+}
+
 #if (BRAT_CRT_MASK & BRAT_CRT_TLS)
 /* FIPS 180-4 SHA-256, CSPRNG, lazily loaded TLS and SQLite3 */
 static void _bsha256_block(uint32_t st[8], const unsigned char blk[64]) {

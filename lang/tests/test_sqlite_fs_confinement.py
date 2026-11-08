@@ -336,4 +336,96 @@ if cc:
                        env={**os.environ, "ASAN_OPTIONS": "detect_leaks=1:exitcode=99"})
     assert r.returncode == 0 and r.stdout.strip() == "40000", (r.returncode, r.stdout, r.stderr)
 
+# 8. Confined directory & metadata primitives (`mkdir_all`, `list_dir`, `is_dir`, `file_size`, `remove_dir`)
+import tempfile
+ext_dir = tempfile.mkdtemp(prefix="brat_ext_dir_")
+try:
+    with open(os.path.join(ext_dir, "secret.txt"), "w", encoding="utf-8") as f:
+        f.write("secret")
+    sym_dir = os.path.join(td, "sym_outside_dir")
+    has_dir_symlink = False
+    try:
+        os.symlink(ext_dir, sym_dir)
+        has_dir_symlink = True
+    except OSError:
+        pass
+
+    dir_ops_out = run_prog(
+        td,
+        "dir_ops_suite",
+        '''import std.fs
+
+fn main() -> i64 {
+    assert(fs.is_dir("."))
+    assert(!fs.is_file("."))
+    assert(is_err(fs.file_size(".")))
+    assert(is_err(fs.remove_dir(".")))
+    assert(is_err(fs.mkdir_all("../escaped_dir")))
+    assert(is_err(fs.list_dir("..")))
+
+    unwrap(fs.mkdir_all("tree/sub/leaf"))
+    unwrap(fs.mkdir_all("tree/sub/leaf"))
+    assert(fs.is_dir("tree/sub/leaf"))
+    assert(!fs.is_file("tree/sub/leaf"))
+
+    unwrap(write_file("tree/sub/zeta.txt", "12345"))
+    unwrap(write_file("tree/sub/alpha.txt", "ab"))
+    unwrap(write_file("tree/sub/tmp.txt", "xyz"))
+    unwrap(fs.rename("tree/sub/tmp.txt", "tree/sub/mid.txt"))
+
+    assert(fs.is_file("tree/sub/zeta.txt"))
+    assert(!fs.is_dir("tree/sub/zeta.txt"))
+    assert(unwrap(fs.file_size("tree/sub/zeta.txt")) == 5)
+    assert(unwrap(fs.file_size("tree/sub/alpha.txt")) == 2)
+
+    let mut joined = ""
+    arena {
+        let names = unwrap(fs.list_dir("tree/sub"))
+        joined = own(names.join(","))
+    }
+    print(joined)
+
+    assert(is_err(fs.remove_dir("tree/sub")))
+    unwrap(fs.remove_dir("tree/sub/leaf"))
+    assert(!fs.is_dir("tree/sub/leaf"))
+    return 0
+}
+''',
+    )
+    assert dir_ops_out.strip() == "alpha.txt,leaf,mid.txt,zeta.txt", dir_ops_out
+
+    if has_dir_symlink:
+        sym_out = run_prog(
+            td,
+            "dir_sym_confine",
+            '''import std.fs
+
+fn main() -> i64 {
+    assert(!fs.is_dir("sym_outside_dir"))
+    assert(is_err(fs.list_dir("sym_outside_dir")))
+    assert(is_err(fs.mkdir_all("sym_outside_dir/inner")))
+    print("sym_ok")
+    return 0
+}
+''',
+        )
+        assert sym_out.strip() == "sym_ok", sym_out
+
+    bad_arena_dir = os.path.join(td, "bad_arena_listdir.brat")
+    with open(bad_arena_dir, "w", encoding="utf-8") as f:
+        f.write('''fn leak_dir() -> vec[str] {
+    arena {
+        return unwrap(fs_list_dir("."))
+    }
+}
+fn main() -> i64 {
+    let _x = leak_dir()
+    return 0
+}
+''')
+    chk_bad = subprocess.run([NATIVE, "check", bad_arena_dir], capture_output=True, text=True, timeout=30)
+    assert chk_bad.returncode != 0, "fs_list_dir result must not escape arena without own()"
+finally:
+    shutil.rmtree(ext_dir, ignore_errors=True)
+
 print("SQLITE & FS CONFINEMENT + PIN LIFETIME ALL GREEN")

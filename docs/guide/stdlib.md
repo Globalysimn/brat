@@ -206,16 +206,25 @@ fn flag(name: str) -> bool
 
 ## `std.fs` — Confined filesystem helpers
 
-Wraps the runtime's `O_NOFOLLOW` confined file primitives. By default, paths are
-confined to the program's module root; set `BRAT_FILES=1` (`true`, `yes`, `on`)
-when running a trusted CLI tool that needs unrestricted host filesystem access.
-`write_atomic` writes a sibling temp file and renames it into place.
-`open_read` / `read_line` / `close` and `stdin_line` stream UTF-8 lines of up to
-16 MiB each without loading the whole file into memory (returning `Ok(None)` at
-EOF).
+Wraps the runtime's `O_NOFOLLOW` confined file and directory primitives. By
+default, paths are confined to the program's module root; set `BRAT_FILES=1`
+(`true`, `yes`, `on`) when running a trusted program that needs unrestricted host
+filesystem access. `mkdir_all` creates intermediate directories without following
+symlinks under confinement, `list_dir` returns entry names in deterministic
+byte-sorted order (excluding `"."` and `".."`), and `write_atomic` writes a
+sibling temp file and renames it into place. `open_read` / `read_line` / `close`
+and `stdin_line` stream UTF-8 lines of up to 16 MiB each without loading the
+whole file into memory (returning `Ok(None)` at EOF).
 
 ```brat
 fn exists(path: str) -> bool
+fn is_file(path: str) -> bool
+fn is_dir(path: str) -> bool
+fn file_size(path: str) -> Result[i64, str]
+fn mkdir_all(path: str) -> Result[i64, str]
+fn list_dir(path: str) -> Result[vec[str], str]
+fn rename(src: str, dst: str) -> Result[i64, str]
+fn remove_dir(path: str) -> Result[i64, str]
 fn read_or(path: str, fallback: str) -> str
 fn read_lines(path: str) -> Result[vec[str], str]
 fn write_lines(path: str, lines: vec[str]) -> Result[i64, str]

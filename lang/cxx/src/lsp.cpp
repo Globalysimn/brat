@@ -1424,6 +1424,11 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"utf8_bytes", "fn utf8_bytes(s: str) -> vec[i64]: UTF-8 octets 0..255"},
         {"utf8_str", "fn utf8_str(data: vec[i64]) -> Result[str, str]: decode validated UTF-8"},
         {"fs_exists", "fn fs_exists(path: str|vec[i64]) -> bool (confined regular-file probe)"},
+        {"fs_is_dir", "fn fs_is_dir(path: str|vec[i64]) -> bool (confined directory probe)"},
+        {"fs_file_size", "fn fs_file_size(path: str|vec[i64]) -> Result[i64, str] (confined regular-file byte size)"},
+        {"fs_mkdir_all", "fn fs_mkdir_all(path: str|vec[i64]) -> Result[i64, str] (confined recursive directory creation)"},
+        {"fs_list_dir", "fn fs_list_dir(path: str|vec[i64]) -> Result[vec[str], str] (confined sorted directory entries)"},
+        {"fs_remove_dir", "fn fs_remove_dir(path: str|vec[i64]) -> Result[i64, str] (confined empty-directory removal)"},
         {"fs_open", "fn fs_open(path: str|vec[i64]) -> Result[i64, str] (confined streaming reader)"},
         {"fs_read_line", "fn fs_read_line(handle: i64) -> Result[Option[str], str] (read one UTF-8 line up to 16 MiB)"},
         {"fs_close", "fn fs_close(handle: i64) -> Result[i64, str] (close streaming reader)"},
@@ -1612,12 +1617,14 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
         if (e.a == "len" || e.a == "time_ms" || e.a == "mono_ns") return "i64";
         if (e.a == "str") return "str";
         if (e.a == "is_ok" || e.a == "is_err" || e.a == "is_some" || e.a == "is_none" ||
-            e.a == "re_match" || e.a == "fs_exists") return "bool";
+            e.a == "re_match" || e.a == "fs_exists" || e.a == "fs_is_dir") return "bool";
         if (e.a == "read_file") return "Result[str, str]";
+        if (e.a == "fs_list_dir") return "Result[vec[str], str]";
         if (e.a == "fs_read_line" || e.a == "stdin_read_line")
             return "Result[Option[str], str]";
         if (e.a == "write_file" || e.a == "append_file" ||
-            e.a == "fs_open" || e.a == "fs_close")
+            e.a == "fs_open" || e.a == "fs_close" ||
+            e.a == "fs_file_size" || e.a == "fs_mkdir_all" || e.a == "fs_remove_dir")
             return "Result[i64, str]";
         if (e.a == "re_find") return "Option[str]";
         if (e.a == "Some" && e.kids.size() == 1) {

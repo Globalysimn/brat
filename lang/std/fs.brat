@@ -2,6 +2,34 @@ pub fn exists(path: str) -> bool {
   return fs_exists(path)
 }
 
+pub fn is_file(path: str) -> bool {
+  return fs_exists(path)
+}
+
+pub fn is_dir(path: str) -> bool {
+  return fs_is_dir(path)
+}
+
+pub fn file_size(path: str) -> Result[i64, str] {
+  return fs_file_size(path)
+}
+
+pub fn mkdir_all(path: str) -> Result[i64, str] {
+  return fs_mkdir_all(path)
+}
+
+pub fn list_dir(path: str) -> Result[vec[str], str] {
+  return fs_list_dir(path)
+}
+
+pub fn rename(src: str, dst: str) -> Result[i64, str] {
+  return fs_rename(src, dst)
+}
+
+pub fn remove_dir(path: str) -> Result[i64, str] {
+  return fs_remove_dir(path)
+}
+
 pub fn read_or(path: str, fallback: str) -> str {
   let r = read_file(path)
   if is_err(r) {

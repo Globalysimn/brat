@@ -554,6 +554,7 @@ with open(os.path.join(win_inc, "fcntl.h"), "w", encoding="utf-8") as f:
 #pragma once
 #define _O_RDONLY 0x0000
 #define _O_WRONLY 0x0001
+#define _O_APPEND 0x0008
 #define _O_BINARY 0x8000
 #define _O_NOINHERIT 0x0080
 ''')
@@ -610,6 +611,8 @@ typedef struct {
 #define MB_ERR_INVALID_CHARS 0x00000008
 #define GENERIC_READ 0x80000000UL
 #define GENERIC_WRITE 0x40000000UL
+#define FILE_APPEND_DATA 0x00000004
+#define FILE_READ_ATTRIBUTES 0x00000080
 #define FILE_SHARE_READ 0x00000001
 #define FILE_SHARE_WRITE 0x00000002
 #define FILE_SHARE_DELETE 0x00000004
@@ -624,6 +627,15 @@ typedef struct {
 #define FILE_BEGIN 0
 #define ERROR_FILE_NOT_FOUND 2UL
 #define ERROR_PATH_NOT_FOUND 3UL
+#define ERROR_ACCESS_DENIED 5UL
+#define ERROR_NO_MORE_FILES 18UL
+#define ERROR_DIR_NOT_EMPTY 145UL
+#define ERROR_ALREADY_EXISTS 183UL
+#define WC_ERR_INVALID_CHARS 0x00000080
+typedef struct {
+    DWORD dwFileAttributes;
+    wchar_t cFileName[260];
+} WIN32_FIND_DATAW;
 #define HANDLE_FLAG_INHERIT 0x00000001
 #define SEM_FAILCRITICALERRORS 0x0001
 #define SEM_NOOPENFILEERRORBOX 0x8000
@@ -668,6 +680,11 @@ char *_strdup(const char *);
 BOOL MoveFileExA(const char *, const char *, DWORD);
 BOOL MoveFileExW(const wchar_t *, const wchar_t *, DWORD);
 BOOL DeleteFileW(const wchar_t *);
+BOOL CreateDirectoryW(const wchar_t *, SECURITY_ATTRIBUTES *);
+BOOL RemoveDirectoryW(const wchar_t *);
+HANDLE FindFirstFileW(const wchar_t *, WIN32_FIND_DATAW *);
+BOOL FindNextFileW(HANDLE, WIN32_FIND_DATAW *);
+BOOL FindClose(HANDLE);
 int _unlink(const char *);
 BOOL SetHandleInformation(HANDLE, DWORD, DWORD);
 DWORD GetFinalPathNameByHandleA(HANDLE, char *, DWORD, DWORD);

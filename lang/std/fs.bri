@@ -1,4 +1,11 @@
 fn exists(path: str) -> bool
+fn is_file(path: str) -> bool
+fn is_dir(path: str) -> bool
+fn file_size(path: str) -> Result[i64, str]
+fn mkdir_all(path: str) -> Result[i64, str]
+fn list_dir(path: str) -> Result[vec[str], str]
+fn rename(src: str, dst: str) -> Result[i64, str]
+fn remove_dir(path: str) -> Result[i64, str]
 fn read_or(path: str, fallback: str) -> str
 fn read_lines(path: str) -> Result[vec[str], str]
 fn write_lines(path: str, lines: vec[str]) -> Result[i64, str]

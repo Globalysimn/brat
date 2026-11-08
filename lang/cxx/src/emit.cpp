@@ -629,6 +629,7 @@ const std::set<std::string> HEAP_CALLS = {
     "str", "own", "str_from_ptr", "args", "args_bytes", "read_file", "write_file",
     "append_file", "read_bytes", "write_bytes", "proc_run", "env_get", "env_get_bytes",
     "utf8_bytes", "utf8_str", "json_parse", "json_stringify",
+    "fs_file_size", "fs_mkdir_all", "fs_list_dir", "fs_remove_dir",
     "fs_open", "fs_read_line", "fs_close", "stdin_read_line",
     "fs_rename", "fs_remove",
     "sha256_bytes", "random_bytes", "https_request_raw",
@@ -10186,7 +10187,9 @@ V Emitter::ex_call(const Expr &e) {
         name == "read_bytes" || name == "write_bytes" ||
         name == "proc_run" || name == "utf8_bytes" || name == "utf8_str" ||
         name == "json_parse" || name == "json_stringify" ||
-        name == "fs_exists" || name == "fs_open" || name == "fs_read_line" ||
+        name == "fs_exists" || name == "fs_is_dir" || name == "fs_file_size" ||
+        name == "fs_mkdir_all" || name == "fs_list_dir" || name == "fs_remove_dir" ||
+        name == "fs_open" || name == "fs_read_line" ||
         name == "fs_close" || name == "stdin_read_line" ||
         name == "fs_rename" || name == "fs_remove" ||
         name == "sha256_bytes" || name == "random_bytes" || name == "https_request_raw" ||
@@ -10201,7 +10204,10 @@ V Emitter::ex_call(const Expr &e) {
             {"read_file", "vreadfile"}, {"read_bytes", "vreadbytes"},
             {"utf8_bytes", "vutf8_bytes"}, {"utf8_str", "vutf8_str"},
             {"json_parse", "vjson_parse"},
-            {"fs_exists", "vfs_exists"}, {"fs_open", "vfs_open"},
+            {"fs_exists", "vfs_exists"}, {"fs_is_dir", "vfs_is_dir"},
+            {"fs_file_size", "vfs_file_size"}, {"fs_mkdir_all", "vfs_mkdir_all"},
+            {"fs_list_dir", "vfs_list_dir"}, {"fs_remove_dir", "vfs_remove_dir"},
+            {"fs_open", "vfs_open"},
             {"fs_read_line", "vfs_read_line"}, {"fs_close", "vfs_close"},
             {"fs_remove", "vfs_remove"},
             {"sha256_bytes", "vsha256_bytes"},

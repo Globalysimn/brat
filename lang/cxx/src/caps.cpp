@@ -496,12 +496,14 @@ struct Walk {
                 if (!u.empty() && u != in && u != "dyn") return u;
                 return infer_ann(st, e->kids[1].get());
             }
-            if (e->a == "fs_exists") return "bool";
+            if (e->a == "fs_exists" || e->a == "fs_is_dir") return "bool";
             if (e->a == "read_file") return "Result[str, str]";
+            if (e->a == "fs_list_dir") return "Result[vec[str], str]";
             if (e->a == "fs_read_line" || e->a == "stdin_read_line")
                 return "Result[Option[str], str]";
             if (e->a == "append_file" || e->a == "write_file" ||
-                e->a == "fs_open" || e->a == "fs_close")
+                e->a == "fs_open" || e->a == "fs_close" ||
+                e->a == "fs_file_size" || e->a == "fs_mkdir_all" || e->a == "fs_remove_dir")
                 return "Result[i64, str]";
             if (e->a == "re_find") return "Option[str]";
             auto it = fn_rets.find(e->a);

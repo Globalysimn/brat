@@ -65,6 +65,7 @@
 #include <unistd.h>
 #include <sys/resource.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
