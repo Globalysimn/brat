@@ -8551,13 +8551,23 @@ void Emitter::emit_main_close() {
         ln("      ", "vrelease(__r);");
         ln("      ", "return 1;");
         ln("    ", "}");
+        ln("    ", "if (__r.as.tv && __r.as.tv->tag && strcmp(__r.as.tv->tag, \"ok\") == 0) {");
+        ln("      ", "Val __p = (__r.as.tv->len > 0) ? __r.as.tv->items[0] : vnil();");
+        ln("      ", "if (__p.tag == V_INT) { int __code = (int)__p.as.ival; vrelease(__r); return __code; }");
+        ln("      ", "if (__p.tag == V_NIL) { vrelease(__r); return 0; }");
+        ln("      ", "fprintf(stderr, \"TypeError: main must return i64, got Ok(%s)\\n\", __brat_tagname(__p));");
+        ln("      ", "vrelease(__r);");
+        ln("      ", "return 1;");
+        ln("    ", "}");
         ln("    ", "fprintf(stderr, \"TypeError: main must return i64, got %s\\n\", __r.as.tv && __r.as.tv->tag ? __r.as.tv->tag : \"tag\");");
+        ln("    ", "vrelease(__r);");
         ln("    ", "return 1;");
         ln("  ", "}");
         // `main` may hand back a container or a string; the process is about to
         // exit, but a leak check still sees it. Read the code first.
         ln("  ", "if (__r.tag == V_INT) { int __code = (int)__r.as.ival; vrelease(__r); return __code; }");
         ln("  ", "fprintf(stderr, \"TypeError: main must return i64, got %s\\n\", __brat_tagname(__r));");
+        ln("  ", "vrelease(__r);");
         ln("  ", "return 1;");
     }
     ln("  ", "return 0;");

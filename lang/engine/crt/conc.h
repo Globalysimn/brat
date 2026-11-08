@@ -1543,12 +1543,15 @@ static void BRAT_UNUSED _bpool_atexit(void);
 
 static int bpool_start_locked(void) {
     if (g_pool_started) return 1;
+    _btls_pool_drain();
     g_pool_stop = 0;
     int n = bpool_ncpu();
     if (n > BPOOL_MAX) n = BPOOL_MAX;
     if (n < 1) n = 1;
 #if defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(&g_pool_n, n, __ATOMIC_RELEASE);
+#elif defined(_MSC_VER)
+    InterlockedExchange((volatile LONG *)&g_pool_n, (LONG)n);
 #else
     g_pool_n = n;
 #endif
@@ -1559,7 +1562,16 @@ static int bpool_start_locked(void) {
     for (int i = 0; i < n; i++) {
 #if defined(_WIN32)
         g_pool[i] = CreateThread(NULL, 0, bpool_worker, NULL, 0, NULL);
-        if (!g_pool[i]) { g_pool_n = i; break; }
+        if (!g_pool[i]) {
+#if defined(__GNUC__) || defined(__clang__)
+            __atomic_store_n(&g_pool_n, i, __ATOMIC_RELEASE);
+#elif defined(_MSC_VER)
+            InterlockedExchange((volatile LONG *)&g_pool_n, (LONG)i);
+#else
+            g_pool_n = i;
+#endif
+            break;
+        }
 #else
         if (pthread_create(&g_pool[i], NULL, bpool_worker, NULL) != 0) {
 #if defined(__GNUC__) || defined(__clang__)
@@ -2017,11 +2029,14 @@ static void BRAT_UNUSED _bpool_atexit(void) {
     btask_lock();
 #if defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(&g_pool_n, 0, __ATOMIC_RELEASE);
+#elif defined(_MSC_VER)
+    InterlockedExchange((volatile LONG *)&g_pool_n, 0);
 #else
     g_pool_n = 0;
 #endif
     g_pool_stop = 0;
     btask_unlock();
+    _btls_pool_drain();
 }
 #else
 BFN void vjoin_all(void) { _btls_pool_drain(); }

@@ -230,5 +230,34 @@ interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=T
 assert interp.returncode == 0 and interp.stdout == "50\n", \
     "caught interp rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr)
 
+# `fn main() -> Result[i64, str]` exits with the Ok(code) status or prints unhandled Err(...) without leaks
+MAIN_OK = '''fn step(x: i64) -> Result[i64, str] {
+  if x < 0 {
+    return Err("neg")
+  }
+  return Ok(x)
+}
+
+fn main() -> Result[i64, str] {
+  let v = step(0)?
+  return Ok(v)
+}
+'''
+_, exe_ok = build(MAIN_OK, "main_result_ok")
+run_ok = subprocess.run([exe_ok], capture_output=True, text=True, timeout=120,
+                        env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:exitcode=42"))
+assert run_ok.returncode == 0 and run_ok.stderr == "", \
+    "main_result_ok rc=%d stderr=%r" % (run_ok.returncode, run_ok.stderr)
+
+MAIN_BAD_RET = '''fn main() {
+  return ["not_an_exit_code"]
+}
+'''
+_, exe_bad = build(MAIN_BAD_RET, "main_bad_ret")
+run_bad = subprocess.run([exe_bad], capture_output=True, text=True, timeout=120,
+                         env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:exitcode=42"))
+assert run_bad.returncode == 1 and "TypeError: main must return i64" in run_bad.stderr, \
+    "main_bad_ret rc=%d stderr=%r" % (run_bad.returncode, run_bad.stderr)
+
 print("ERR REPORT ALL GREEN (2 uncaught shapes print the message and exit 1 under ASan, "
       "a caught error still frees)")

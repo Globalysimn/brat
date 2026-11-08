@@ -272,6 +272,8 @@ static BStripeLock BRAT_UNUSED _brat_stripes[64] = { BSTRIPE_16_, BSTRIPE_16_, B
 #define _BRAT_MT() 0
 #elif defined(__GNUC__) || defined(__clang__)
 #define _BRAT_MT() (__builtin_expect(__atomic_load_n(&g_pool_n, __ATOMIC_ACQUIRE) != 0, 0))
+#elif defined(_MSC_VER)
+#define _BRAT_MT() (InterlockedOr((volatile LONG *)&g_pool_n, 0) != 0)
 #else
 #define _BRAT_MT() (g_pool_n != 0)
 #endif
@@ -670,6 +672,10 @@ static void vfatal_oom(void) {
 #define BRC_LOAD(h) (_BRAT_MT() ? __atomic_load_n(&(h)->rc, __ATOMIC_ACQUIRE) : (h)->rc)
 #define BRC_ADD(h)  (_BRAT_MT() ? __atomic_add_fetch(&(h)->rc, 1, __ATOMIC_ACQ_REL) : (++(h)->rc))
 #define BRC_SUB(h)  (_BRAT_MT() ? __atomic_sub_fetch(&(h)->rc, 1, __ATOMIC_ACQ_REL) : (--(h)->rc))
+#elif defined(_MSC_VER)
+#define BRC_LOAD(h) (_BRAT_MT() ? (bint)InterlockedOr64((volatile LONG64 *)&(h)->rc, 0) : (h)->rc)
+#define BRC_ADD(h)  (_BRAT_MT() ? (bint)InterlockedIncrement64((volatile LONG64 *)&(h)->rc) : (++(h)->rc))
+#define BRC_SUB(h)  (_BRAT_MT() ? (bint)InterlockedDecrement64((volatile LONG64 *)&(h)->rc) : (--(h)->rc))
 #else
 #define BRC_LOAD(h) ((h)->rc)
 #define BRC_ADD(h) ((h)->rc += 1)
