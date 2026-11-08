@@ -139,29 +139,36 @@ since ALGOL 60. The parts of BRAT worth inspecting are the trade-offs:
 ## Benchmarks
 
 Microbenchmarks mostly measure how hard the author stared at `perf stat`, so
-[`scripts/bench.py`](scripts/bench.py) is ~200 lines of plain Python you can
+[`scripts/bench.py`](scripts/bench.py) is a single plain-Python script you can
 read and re-run locally with `make bench`.
 
-Median of 3 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, CPython 3.14.2):
+Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CPython 3.14.2):
 
-| Workload | C (`gcc -O2`) | BRAT (`brat-cxx build -O2`) | CPython 3.14 |
-|---|---:|---:|---:|
-| `int_loop(100M)` (wrapping `i64` loop) | 0.126 s | 0.126 s | 17.075 s |
-| `fib(35)` (29.9M recursive `i64` calls) | 0.025 s | 0.081 s | 1.155 s |
-| `dyn_records(100k)` (`map` + `str` concat + RC drops) | n/a | 0.020 s | 0.047 s |
-| `json_roundtrip(5k)` (`std.json` parse + stringify) | n/a | 0.010 s | 0.067 s |
+| Workload | C (`gcc -O2`) | Go 1.27 (`go build`) | BRAT (`brat-cxx build -O2`) | CPython 3.14 |
+|---|---:|---:|---:|---:|
+| `int_loop(100M)` (wrapping `i64` loop) | 0.126 s | 0.129 s | 0.126 s | 16.795 s |
+| `vec3_sra(50M)` (nested `struct` step) | 0.134 s | 0.155 s | 0.141 s | 90.569 s |
+| `fib(35)` (29.9M recursive `i64` calls) | 0.024 s | 0.055 s | 0.050 s | 1.167 s |
+| `str_append(200k)` (chained `+` vs `Builder`) | 0.014 s | 0.015 s | 0.031 s | 0.057 s |
+| `dyn_records(100k)` (`map` + `str` + drops) | n/a | 0.017 s | 0.020 s | 0.047 s |
+| `json_roundtrip(5k)` (`std.json` vs stdlib) | n/a | 0.039 s | 0.010 s | 0.067 s |
 
 Where BRAT wins and where it pays tax:
 
-- **`int_loop(100M)` ties `-O2` C (`0.126 s` vs `0.126 s`)** because typed `i64`
-  and `f64` loops lower to unboxed `int64_t` / `double` C scalars.
-- **`fib(35)` is ~3x slower than unchecked C (`0.081 s` median / `0.061 s` best vs `0.025 s`)**
-  because BRAT enforces a catchable 2,000-frame recursion budget and probes the
-  pthread stack floor every 64 frames instead of segfaulting on stack overflow.
-- **`dyn_records(100k)` (`0.020 s`) and `json_roundtrip(5k)` (`0.010 s`)** stay
-  fast because `Val` fits in 16 bytes with 14-byte inline short strings (SSO),
-  constant-key maps use pre-shaped layouts + 4-way inline caches (`BFieldIC`),
-  and `std.json` runs directly in C (`crt/sql_proc.h`).
+- **`int_loop(100M)` (`0.126 s`) and `vec3_sra(50M)` (`0.141 s`) track `-O2` C**
+  because typed `i64`, `f64`, `bool`, and `vec[i64]`/`vec[f64]` kernels lower to
+  unboxed C scalars, and scalar replacement of aggregates (SRA) decomposes
+  non-escaping local `struct` values across nested fields and `.copy()`.
+- **`fib(35)` (`0.050 s` vs unchecked C's `0.024 s`, Go's `0.055 s`)** pays ~2x
+  over raw C because BRAT enforces a catchable 2,000-frame recursion budget and
+  probes the thread stack floor every 64 frames instead of segfaulting on stack
+  overflow.
+- **`str_append(200k)` (`0.031 s`) and `dyn_records(100k)` (`0.020 s`)** trail
+  Go's `strings.Builder` (`0.015 s`) and typed allocator (`0.017 s`), while
+  staying linear without a separate builder type: `rc == 1` strings grow in
+  place across chained `s = s + ...` assignments, `Val` fits in 16 bytes with
+  14-byte inline SSO, and `std.json` runs directly in C (`0.010 s` vs Go
+  `encoding/json`'s `0.039 s`).
 
 ## Anti-features and who should use something else
 

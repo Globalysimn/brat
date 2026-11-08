@@ -7,7 +7,7 @@ import _cxx
 import _scratch
 
 NATIVE = _cxx.build()
-CXX = os.path.join(os.path.dirname(NATIVE), "brat-cxx")
+CXX = NATIVE
 TMP = _scratch.mkdtemp(prefix="brat-struct-sra-")
 ENV = dict(os.environ, BRAT_FILES="1", BRAT_NO_NATIVE_CLI="1")
 
@@ -467,5 +467,35 @@ fn main() -> i64 {
         r_res = subprocess.run([ffi_exe], capture_output=True, text=True, timeout=30, env=ENV)
         check(r_res.returncode == 0 and r_res.stdout.strip() == "30,41|3041|30,41",
               f"FFI run {fl} mismatch: rc={r_res.returncode} out={r_res.stdout!r} err={r_res.stderr!r}")
+
+copy_sra_src = write_src("copy_sra.brat", """struct Pair {
+  x: i64,
+  y: i64,
+}
+fn copy_loop(n: i64) -> i64 {
+  let mut p = Pair { x: 1, y: 2 }
+  let mut acc = 0
+  for i in 0..n {
+    let mut q = p.copy()
+    q.x = q.x + i
+    p = q.copy()
+    acc = acc + p.x + p.y
+  }
+  return acc
+}
+fn main() -> i64 {
+  print(copy_loop(10))
+  return 0
+}
+""")
+em_copy = run_cxx("cc", "-O2", copy_sra_src)
+check(em_copy.returncode == 0, f"copy_sra emit failed: {em_copy.stderr}")
+cb_copy = fn_body(em_copy.stdout, "copy_loop")
+check("bmap_alloc" not in cb_copy and "vmap" not in cb_copy,
+      f"copy_loop failed to scalarize .copy() structs:\n{cb_copy}")
+r_copy_o0 = run_brat("run", "-O0", copy_sra_src)
+r_copy_o2 = run_brat("run", "-O2", copy_sra_src)
+check(r_copy_o0.returncode == 0 and r_copy_o0.stdout == r_copy_o2.stdout,
+      f"copy_sra -O0/-O2 mismatch: {r_copy_o0.stdout!r} vs {r_copy_o2.stdout!r}")
 
 print(f"ok: {n} struct layout & SRA checks passed")

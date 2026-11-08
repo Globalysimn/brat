@@ -12,22 +12,36 @@ import _skip
 import _scratch
 
 import os
-import resource
 import subprocess
+
+if os.name != "nt":
+    import resource
+else:
+    resource = None
 
 NATIVE = _cxx.build()
 TMP = _scratch.mkdtemp(prefix="brat-stack-depth-")
 EIGHT_MIB = 8 << 20
 
-hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
-if hard != resource.RLIM_INFINITY and hard < EIGHT_MIB:
-    _skip.skip("the hard stack limit is below 8 MiB")
+if resource is not None:
+    hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
+    if hard != resource.RLIM_INFINITY and hard < EIGHT_MIB:
+        _skip.skip("the hard stack limit is below 8 MiB")
+else:
+    hard = None
 
 DEPTH = """fn depth(n) {
   if n == 0 {
     return 0
   }
   return 1 + depth(n - 1)
+}
+
+fn depth_typed(n: i64) -> i64 {
+  if n == 0 {
+    return 0
+  }
+  return 1 + depth_typed(n - 1)
 }
 
 """
@@ -38,22 +52,34 @@ PROGRAMS = {
   } catch e {
     print(e)
   }
+  try {
+    print(depth_typed(900000))
+  } catch e {
+    print(e)
+  }
   print(depth(1000))
+  print(depth_typed(1000))
   return 0
 }
-""", "recursion too deep\n1000\n"),
-    "spawned thread": (DEPTH + """let ch = chan(2)
+""", "recursion too deep\nrecursion too deep\n1000\n1000\n"),
+    "spawned thread": (DEPTH + """let ch = chan(3)
 spawn {
   try {
     ch.send(depth(900000))
   } catch e {
     ch.send(e)
   }
+  try {
+    ch.send(depth_typed(900000))
+  } catch e2 {
+    ch.send(e2)
+  }
 }
 join_all()
 print(ch.recv())
+print(ch.recv())
 print(depth(500))
-""", "recursion too deep\n500\n"),
+""", "recursion too deep\nrecursion too deep\n500\n"),
 }
 
 
@@ -66,8 +92,11 @@ for label, (source, want) in PROGRAMS.items():
     path = os.path.join(TMP, label.replace(" ", "_") + ".brat")
     with open(path, "w") as f:
         f.write(source)
-    done = subprocess.run([NATIVE, "run", path], capture_output=True, text=True, timeout=120,
-                          preexec_fn=small_stack, env=dict(os.environ, BRAT_RECURSION_BUDGET="1000000"))
+    run_kw = dict(capture_output=True, text=True, timeout=120,
+                  env=dict(os.environ, BRAT_RECURSION_BUDGET="1000000"))
+    if resource is not None:
+        run_kw["preexec_fn"] = small_stack
+    done = subprocess.run([NATIVE, "run", path], **run_kw)
     assert done.returncode == 0, "%s: exit %d (%s): %r" % (label, done.returncode,
                                                           "SIGSEGV" if done.returncode in (-11, 139) else "?",
                                                           done.stderr[-200:])

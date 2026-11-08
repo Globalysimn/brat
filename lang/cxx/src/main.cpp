@@ -1605,9 +1605,21 @@ static void maybe_append_crt_pch(const std::string &compiler,
                                  uint64_t memory_limit,
                                  std::vector<std::string> &args) {
     if (const char *ev = std::getenv("BRAT_NO_PCH"); ev && std::strcmp(ev, "1") == 0) return;
-    if (!default_compile_environment(compiler)) return;
+    if (const char *nc = std::getenv("BRAT_NATIVE_CACHE_DISABLE"); nc && std::strcmp(nc, "1") == 0)
+        return;
 
-    const auto resolved = executable_path(compiler.c_str());
+    const auto cc_parts = split_compiler_cmd(compiler);
+    if (cc_parts.empty()) return;
+
+    const auto resolved = executable_path(cc_parts[0].c_str());
+    if (resolved.empty()) return;
+    {
+        std::ifstream exe_in(resolved, std::ios::binary);
+        char prefix[2]{};
+        exe_in.read(prefix, sizeof(prefix));
+        if (!exe_in || (prefix[0] == '#' && prefix[1] == '!')) return;
+    }
+
     std::string fname = resolved.filename().string();
     for (char &ch : fname) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     bool is_clang = fname.find("clang") != std::string::npos;
@@ -1616,6 +1628,15 @@ static void maybe_append_crt_pch(const std::string &compiler,
     if (!is_clang && !is_gcc && fname == "cc") is_clang = true;
 #endif
     if (!is_gcc && !is_clang) return;
+
+    std::vector<std::string> extra_cc_flags;
+    for (size_t i = 1; i < cc_parts.size(); ++i) {
+        const std::string &fl = cc_parts[i];
+        if (fl == "cc") return;
+        if (fl.rfind("-Wl,", 0) == 0 || fl.rfind("-l", 0) == 0 || fl.rfind("-L", 0) == 0)
+            continue;
+        extra_cc_flags.push_back(fl);
+    }
 
     const std::string needle = "#include \"crt.h\"";
     const size_t inc_pos = emitted_c.find(needle);
@@ -1629,7 +1650,7 @@ static void maybe_append_crt_pch(const std::string &compiler,
     if (!read_crt_bundle(engine, crt_bundle)) return;
     const std::string crt_digest = sha256_hex(crt_bundle);
 
-    std::vector<std::string> pch_flags;
+    std::vector<std::string> pch_flags = extra_cc_flags;
     if (is_gcc) {
         if (static_mode) pch_flags.push_back("-static");
         if (shared_pic) {
@@ -1643,8 +1664,17 @@ static void maybe_append_crt_pch(const std::string &compiler,
     if (memory_limit)
         pch_flags.push_back("-DBRAT_MEM_BYTES=" + std::to_string(memory_limit));
 
-    std::string mat = "pch1|" + resolved.string() + "|" + cc_digest + "|" + crt_digest + "|" + prelude;
+    std::string mat = "pch2|" + resolved.string() + "|" + cc_digest + "|" + crt_digest + "|" + prelude;
     for (const auto &fl : pch_flags) mat += "|" + fl;
+    for (const char *ev_name : {"CPATH", "C_INCLUDE_PATH", "COMPILER_PATH",
+                                "GCC_EXEC_PREFIX", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"}) {
+        if (const char *val = std::getenv(ev_name)) {
+            mat += "|env:";
+            mat += ev_name;
+            mat += '=';
+            mat += val;
+        }
+    }
     const std::string key = sha256_hex(mat).substr(0, 24);
 
     std::error_code ec;
@@ -1690,7 +1720,7 @@ static void maybe_append_crt_pch(const std::string &compiler,
 
     if (!std::filesystem::is_regular_file(pch_path, ec)) {
         const auto pch_tmp = pch_dir / ("crt_" + key + "." + pid_tag + ".pch.tmp");
-        std::vector<std::string> build_args{compiler};
+        std::vector<std::string> build_args{cc_parts[0]};
         build_args.insert(build_args.end(), pch_flags.begin(), pch_flags.end());
         build_args.insert(build_args.end(), {"-w", "-x", "c-header", hdr_path.string(), "-o", pch_tmp.string()});
         bool timed_out = false;
@@ -2316,7 +2346,7 @@ void print_cli_usage() {
                  "       brat dist FILE [-o DIR] [--target TRIPLE[,TRIPLE...]] [--shared]\n"
                  "       brat check [--json] FILE...\n"
                  "       brat fmt [--check] [--stdout] FILE...\n"
-                 "       brat test FILE_OR_DIR...\n"
+                 "       brat test [-j N] [--filter SUBSTR] FILE_OR_DIR...\n"
                  "       brat doc FILE_OR_DIR [--json] [-o OUT]\n"
                  "       brat new NAME [--kind service|tool]\n"
                  "       brat emit-c FILE [--bundle] [--no-check] [--trace-lines] [-O0|-O1|-O2]\n"

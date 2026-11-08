@@ -36,7 +36,7 @@ Build-time FFI flags accepted by `build` and `run`:
 | Command | Purpose |
 |---|---|
 | `brat fmt [--check\|--write] <file.brat...>` | Canonical formatter. Prints formatted source by default, checks formatting in CI with `--check` (exit `1` on diff), or rewrites in place with `--write`. |
-| `brat test [--filter substr] [--json] [path...]` | Discover `*_test.brat` files (or explicit paths) and run every zero-arg `test_*` function, reporting pass/fail counts. |
+| `brat test [-j N] [--filter substr] <file_or_dir...>` | Discover `test_*.brat` files recursively in directories (or run explicit paths) in parallel and report pass/fail counts. |
 | `brat pkg <add\|install\|verify\|list\|update\|publish>` | Vendored `.tar.gz` package manager backed by `brat.lock` and `./vendor/`. See [Modules & `pkg`](modules.md). |
 | `brat deps [--dot\|--json] [-o out] <file.brat>` | Inspect the transitive import graph as text, Graphviz DOT, or JSON. |
 | `brat api [--json] <file.brat>` | Extract the public `.bri` interface signature of a module. |

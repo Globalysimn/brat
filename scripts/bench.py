@@ -5,8 +5,12 @@ Measures wall-clock execution time (median and best of N runs) across:
   1. fib(35)              -- recursive i64 calls (29.86M calls)
   2. int_loop(100M)       -- tight 64-bit wrapping integer loop
   3. vec3_sra(50M)        -- loop-carried nested struct (Body { pos: Vec3, vel: Vec3 })
-  4. dyn_records(100k)    -- map allocation + string concat + RC drops
-  5. json_roundtrip(5k)   -- std.json.parse + std.json.stringify on nested objects
+  4. str_append(200k)     -- chained string concatenation in a loop
+  5. dyn_records(100k)    -- map allocation + string concat + RC drops
+  6. json_roundtrip(5k)   -- std.json.parse + std.json.stringify on nested objects
+
+When `go` is on PATH (unless `--no-go` is passed), Go equivalents are compiled
+and timed alongside C, BRAT, and CPython.
 
 Also measures single-function `-O2` compile-time scaling across 50..400 managed
 string locals with the compilation cache disabled.
@@ -25,6 +29,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CXX = os.environ.get("BRAT_CXX") or os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
 CC = os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or shutil.which("cc") or "cc"
+GO = os.environ.get("GO") or shutil.which("go")
 
 
 def cpu_model() -> str:
@@ -71,6 +76,21 @@ int main(void) {
 }
 """
 
+FIB_GO = """\
+package main
+import "fmt"
+//go:noinline
+func fib(n int64) int64 {
+\tif n < 2 {
+\t\treturn n
+\t}
+\treturn fib(n-1) + fib(n-2)
+}
+func main() {
+\tfmt.Println(fib(35))
+}
+"""
+
 FIB_BRAT = """\
 fn fib(n: i64) -> i64 {
   if n < 2 { return n }
@@ -107,6 +127,22 @@ __attribute__((noinline)) static int64_t run_loop(int64_t n) {
 int main(void) {
     printf("%lld\n", (long long)run_loop(100000000LL));
     return 0;
+}
+"""
+
+LOOP_GO = """\
+package main
+import "fmt"
+//go:noinline
+func runLoop(n int64) int64 {
+\tvar acc uint64 = 1
+\tfor i := int64(1); i <= n; i++ {
+\t\tacc = acc*6364136223846793005 + uint64(i)
+\t}
+\treturn int64(acc)
+}
+func main() {
+\tfmt.Println(runLoop(100000000))
 }
 """
 
@@ -163,6 +199,29 @@ __attribute__((noinline)) static int64_t run_vec3(int64_t n) {
 int main(void) {
     printf("%lld\n", (long long)run_vec3(50000000LL));
     return 0;
+}
+"""
+
+VEC3_GO = """\
+package main
+import "fmt"
+type Vec3 struct{ x, y, z uint64 }
+type Body struct{ pos, vel Vec3 }
+//go:noinline
+func runVec3(n int64) int64 {
+\tvar acc uint64 = 1
+\tfor i := int64(0); i < n; i++ {
+\t\tu := uint64(i ^ (int64(acc) >> 32))
+\t\tb := Body{Vec3{u, u + 1, u + 2}, Vec3{3, 5, 7}}
+\t\tb.pos.x += b.vel.x
+\t\tb.pos.y += b.vel.y
+\t\tb.pos.z += b.vel.z
+\t\tacc = acc*2862933555777941757 + b.pos.x*3 + b.pos.y*5 + b.pos.z*7
+\t}
+\treturn int64(acc)
+}
+func main() {
+\tfmt.Println(runVec3(50000000))
 }
 """
 
@@ -227,6 +286,110 @@ def run_vec3(n):
 print(run_vec3(50000000))
 """
 
+STR_C = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+__attribute__((noinline)) static size_t run_str(int64_t n) {
+    size_t cap = 64, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) abort();
+    char num[32];
+    for (int64_t i = 0; i < n; ++i) {
+        int k = snprintf(num, sizeof num, "%lld", (long long)i);
+        size_t need = len + 3 + (size_t)k + 1;
+        if (need > cap) {
+            while (cap < need) cap *= 2;
+            buf = (char *)realloc(buf, cap);
+            if (!buf) abort();
+        }
+        buf[len++] = 'k';
+        buf[len++] = '=';
+        memcpy(buf + len, num, (size_t)k);
+        len += (size_t)k;
+        buf[len++] = ';';
+    }
+    buf[len] = '\0';
+    free(buf);
+    return len;
+}
+int main(void) {
+    printf("%zu\n", run_str(200000));
+    return 0;
+}
+"""
+
+STR_GO = """\
+package main
+import (
+\t"fmt"
+\t"strconv"
+\t"strings"
+)
+//go:noinline
+func runStr(n int64) int {
+\tvar b strings.Builder
+\tfor i := int64(0); i < n; i++ {
+\t\tb.WriteString("k")
+\t\tb.WriteString("=")
+\t\tb.WriteString(strconv.FormatInt(i, 10))
+\t\tb.WriteString(";")
+\t}
+\treturn len(b.String())
+}
+func main() {
+\tfmt.Println(runStr(200000))
+}
+"""
+
+STR_BRAT = """\
+fn run_str(n: i64) -> i64 {
+  let mut s = ""
+  let mut i = 0
+  while i < n {
+    s = s + "k" + "=" + str(i) + ";"
+    i = i + 1
+  }
+  return len(s)
+}
+fn main() -> i64 {
+  print(run_str(200000))
+  return 0
+}
+"""
+
+STR_PY = """\
+def run_str(n):
+    s = ""
+    for i in range(n):
+        s += "k=" + str(i) + ";"
+    return len(s)
+
+print(run_str(200000))
+"""
+
+DYN_GO = """\
+package main
+import (
+\t"fmt"
+\t"strconv"
+)
+//go:noinline
+func runDyn(n int64) int64 {
+\tvar total int64
+\tfor i := int64(0); i < n; i++ {
+\t\tlabel := "item_" + strconv.FormatInt(i, 10)
+\t\trec := map[string]any{"id": i, "label": label}
+\t\ttotal += rec["id"].(int64) + int64(len(rec["label"].(string)))
+\t}
+\treturn total
+}
+func main() {
+\tfmt.Println(runDyn(100000))
+}
+"""
+
 DYN_BRAT = """\
 fn run_dyn(n: i64) -> i64 {
   let mut total = 0
@@ -255,6 +418,34 @@ def run_dyn(n):
     return total
 
 print(run_dyn(100000))
+"""
+
+JSON_GO = """\
+package main
+import (
+\t"encoding/json"
+\t"fmt"
+)
+//go:noinline
+func runJSON(n int) int64 {
+\traw := []byte(`{"service":"edge-gw","port":8443,"tls":true,"tags":["eu","prod","v2"],"limits":{"rps":1200,"burst":250}}`)
+\tvar total int64
+\tfor i := 0; i < n; i++ {
+\t\tvar doc map[string]any
+\t\tif err := json.Unmarshal(raw, &doc); err != nil {
+\t\t\tpanic(err)
+\t\t}
+\t\tout, err := json.Marshal(doc)
+\t\tif err != nil {
+\t\t\tpanic(err)
+\t\t}
+\t\ttotal += int64(doc["port"].(float64)) + int64(len(out))
+\t}
+\treturn total
+}
+func main() {
+\tfmt.Println(runJSON(5000))
+}
 """
 
 JSON_BRAT = """\
@@ -292,20 +483,39 @@ print(run_json(5000))
 """
 
 
+def fmt_cell(pair) -> str:
+    m, b = pair
+    return f"{m:.3f}s ({b:.3f}s)"
+
+
+def build_go(td: str, name: str, src: str) -> str:
+    p_src = os.path.join(td, f"{name}.go")
+    p_exe = os.path.join(td, f"{name}_go")
+    with open(p_src, "w", encoding="utf-8") as f:
+        f.write(src)
+    subprocess.run([GO, "build", "-o", p_exe, p_src], check=True)
+    return p_exe
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--runs", type=int, default=3, help="repetitions per runtime benchmark (default: 3)")
-    ap.add_argument("--skip-python-slow", action="store_true", help="skip slow 100M-step Python loop")
+    ap.add_argument("--skip-python-slow", action="store_true", help="skip slow 50M/100M-step Python loops")
+    ap.add_argument("--no-go", action="store_true", help="omit Go comparison even when `go` is installed")
     args = ap.parse_args()
 
     if not os.path.isfile(CXX):
         sys.stderr.write(f"error: {CXX} not built; run `make -j4` first\n")
         return 1
 
+    use_go = bool(GO) and not args.no_go
+
     print("## Environment")
     print(f"- CPU: {cpu_model()} ({os.cpu_count() or 1} logical cores)")
     print(f"- OS: {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"- C compiler: {one_line_ver([CC, '--version'])}")
+    if use_go:
+        print(f"- Go compiler: {one_line_ver([GO, 'version'])}")
     print(f"- BRAT compiler: {CXX}")
     print(f"- Python: {sys.version.split()[0]}")
     print()
@@ -322,6 +532,7 @@ def main():
         subprocess.run([CC, "-std=c99", "-O2", fib_c, "-o", fib_c_exe], check=True)
         subprocess.run([CXX, "build", "-O2", fib_b, "-o", fib_b_exe], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fib_go_exe = build_go(td, "fib", FIB_GO) if use_go else None
 
         loop_c = os.path.join(td, "loop.c")
         loop_c_exe = os.path.join(td, "loop_c")
@@ -335,6 +546,7 @@ def main():
         subprocess.run([CXX, "build", "-O2", loop_b, "-o", loop_b_exe], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         loop_expect = subprocess.run([loop_c_exe], capture_output=True, text=True, check=True).stdout.strip()
+        loop_go_exe = build_go(td, "loop", LOOP_GO) if use_go else None
 
         vec3_c = os.path.join(td, "vec3.c")
         vec3_c_exe = os.path.join(td, "vec3_c")
@@ -348,6 +560,21 @@ def main():
         subprocess.run([CXX, "build", "-O2", vec3_b, "-o", vec3_b_exe], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         vec3_expect = subprocess.run([vec3_c_exe], capture_output=True, text=True, check=True).stdout.strip()
+        vec3_go_exe = build_go(td, "vec3", VEC3_GO) if use_go else None
+
+        str_c = os.path.join(td, "str_app.c")
+        str_c_exe = os.path.join(td, "str_c")
+        str_b = os.path.join(td, "str_app.brat")
+        str_b_exe = os.path.join(td, "str_brat")
+        str_py = os.path.join(td, "str_app.py")
+        open(str_c, "w", encoding="utf-8").write(STR_C)
+        open(str_b, "w", encoding="utf-8").write(STR_BRAT)
+        open(str_py, "w", encoding="utf-8").write(STR_PY)
+        subprocess.run([CC, "-std=c99", "-O2", str_c, "-o", str_c_exe], check=True)
+        subprocess.run([CXX, "build", "-O2", str_b, "-o", str_b_exe], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        str_expect = subprocess.run([str_c_exe], capture_output=True, text=True, check=True).stdout.strip()
+        str_go_exe = build_go(td, "str_app", STR_GO) if use_go else None
 
         dyn_b = os.path.join(td, "dyn.brat")
         dyn_b_exe = os.path.join(td, "dyn_brat")
@@ -357,6 +584,7 @@ def main():
         subprocess.run([CXX, "build", "-O2", dyn_b, "-o", dyn_b_exe], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         dyn_expect = subprocess.run([sys.executable, dyn_py], capture_output=True, text=True, check=True).stdout.strip()
+        dyn_go_exe = build_go(td, "dyn", DYN_GO) if use_go else None
 
         json_b = os.path.join(td, "json_rt.brat")
         json_b_exe = os.path.join(td, "json_brat")
@@ -366,41 +594,79 @@ def main():
         subprocess.run([CXX, "build", "-O2", json_b, "-o", json_b_exe], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         json_expect = subprocess.run([sys.executable, json_py], capture_output=True, text=True, check=True).stdout.strip()
+        json_go_exe = build_go(td, "json_rt", JSON_GO) if use_go else None
 
         print(f"## Runtime (median / best of {args.runs} runs)")
-        print("| Workload | C (`-O2`) | BRAT (`build -O2`) | CPython |")
-        print("|---|---:|---:|---:|")
+        if use_go:
+            print("| Workload | C (`-O2`) | Go (`go build`) | BRAT (`build -O2`) | CPython |")
+            print("|---|---:|---:|---:|---:|")
+        else:
+            print("| Workload | C (`-O2`) | BRAT (`build -O2`) | CPython |")
+            print("|---|---:|---:|---:|")
 
-        fc_m, fc_b = bench_cmd([fib_c_exe], args.runs, "9227465")
-        fb_m, fb_b = bench_cmd([fib_b_exe], args.runs, "9227465")
-        fp_m, fp_b = bench_cmd([sys.executable, fib_py], args.runs, "9227465")
-        print(f"| `fib(35)` (29.9M calls) | {fc_m:.3f}s ({fc_b:.3f}s) | {fb_m:.3f}s ({fb_b:.3f}s) | {fp_m:.3f}s ({fp_b:.3f}s) |")
+        def emit_row(label: str, c_cell: str, go_cell: str, brat_cell: str, py_cell: str):
+            if use_go:
+                print(f"| {label} | {c_cell} | {go_cell} | {brat_cell} | {py_cell} |")
+            else:
+                print(f"| {label} | {c_cell} | {brat_cell} | {py_cell} |")
 
-        lc_m, lc_b = bench_cmd([loop_c_exe], args.runs, loop_expect)
-        lb_m, lb_b = bench_cmd([loop_b_exe], args.runs, loop_expect)
+        emit_row(
+            "`fib(35)` (29.9M calls)",
+            fmt_cell(bench_cmd([fib_c_exe], args.runs, "9227465")),
+            fmt_cell(bench_cmd([fib_go_exe], args.runs, "9227465")) if use_go else "",
+            fmt_cell(bench_cmd([fib_b_exe], args.runs, "9227465")),
+            fmt_cell(bench_cmd([sys.executable, fib_py], args.runs, "9227465")),
+        )
+
         if args.skip_python_slow:
             lp_str = "skipped"
         else:
             lp_m, _ = bench_cmd([sys.executable, loop_py], 1, loop_expect)
             lp_str = f"{lp_m:.3f}s"
-        print(f"| `int_loop(100M)` (wrapping `i64`) | {lc_m:.3f}s ({lc_b:.3f}s) | {lb_m:.3f}s ({lb_b:.3f}s) | {lp_str} |")
+        emit_row(
+            "`int_loop(100M)` (wrapping `i64`)",
+            fmt_cell(bench_cmd([loop_c_exe], args.runs, loop_expect)),
+            fmt_cell(bench_cmd([loop_go_exe], args.runs, loop_expect)) if use_go else "",
+            fmt_cell(bench_cmd([loop_b_exe], args.runs, loop_expect)),
+            lp_str,
+        )
 
-        vc_m, vc_b = bench_cmd([vec3_c_exe], args.runs, vec3_expect)
-        vb_m, vb_b = bench_cmd([vec3_b_exe], args.runs, vec3_expect)
         if args.skip_python_slow:
             vp_str = "skipped"
         else:
             vp_m, _ = bench_cmd([sys.executable, vec3_py], 1, vec3_expect)
             vp_str = f"{vp_m:.3f}s"
-        print(f"| `vec3_sra(50M)` (nested `struct`) | {vc_m:.3f}s ({vc_b:.3f}s) | {vb_m:.3f}s ({vb_b:.3f}s) | {vp_str} |")
+        emit_row(
+            "`vec3_sra(50M)` (nested `struct`)",
+            fmt_cell(bench_cmd([vec3_c_exe], args.runs, vec3_expect)),
+            fmt_cell(bench_cmd([vec3_go_exe], args.runs, vec3_expect)) if use_go else "",
+            fmt_cell(bench_cmd([vec3_b_exe], args.runs, vec3_expect)),
+            vp_str,
+        )
 
-        db_m, db_b = bench_cmd([dyn_b_exe], args.runs, dyn_expect)
-        dp_m, dp_b = bench_cmd([sys.executable, dyn_py], args.runs, dyn_expect)
-        print(f"| `dyn_records(100k)` (`map` + `str`) | n/a | {db_m:.3f}s ({db_b:.3f}s) | {dp_m:.3f}s ({dp_b:.3f}s) |")
+        emit_row(
+            "`str_append(200k)` (chained `+`)",
+            fmt_cell(bench_cmd([str_c_exe], args.runs, str_expect)),
+            fmt_cell(bench_cmd([str_go_exe], args.runs, str_expect)) if use_go else "",
+            fmt_cell(bench_cmd([str_b_exe], args.runs, str_expect)),
+            fmt_cell(bench_cmd([sys.executable, str_py], args.runs, str_expect)),
+        )
 
-        jb_m, jb_b = bench_cmd([json_b_exe], args.runs, json_expect)
-        jp_m, jp_b = bench_cmd([sys.executable, json_py], args.runs, json_expect)
-        print(f"| `json_roundtrip(5k)` (`std.json` vs `json`) | n/a | {jb_m:.3f}s ({jb_b:.3f}s) | {jp_m:.3f}s ({jp_b:.3f}s) |")
+        emit_row(
+            "`dyn_records(100k)` (`map` + `str`)",
+            "n/a",
+            fmt_cell(bench_cmd([dyn_go_exe], args.runs, dyn_expect)) if use_go else "",
+            fmt_cell(bench_cmd([dyn_b_exe], args.runs, dyn_expect)),
+            fmt_cell(bench_cmd([sys.executable, dyn_py], args.runs, dyn_expect)),
+        )
+
+        emit_row(
+            "`json_roundtrip(5k)` (`std.json` vs stdlib)",
+            "n/a",
+            fmt_cell(bench_cmd([json_go_exe], args.runs, json_expect)) if use_go else "",
+            fmt_cell(bench_cmd([json_b_exe], args.runs, json_expect)),
+            fmt_cell(bench_cmd([sys.executable, json_py], args.runs, json_expect)),
+        )
         print()
 
         print("## Compile-time scaling (`brat-cxx build -O2`, single function with N heap string locals)")

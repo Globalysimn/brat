@@ -39,6 +39,10 @@
 #define BARENA_UNPOISON(p, n) ((void)0)
 #endif
 #if defined(_WIN32)
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -1399,6 +1403,13 @@ BFN Val vmove(volatile Val *src) {
 BFN bint vvec_all_int(Vec *v) {
     for (bint i = 0; i < v->len; i++)
         if (v->items[i].tag != V_INT) return 0;
+    return 1;
+}
+BFN bint vvec_all_float(Vec *v) {
+    for (bint i = 0; i < v->len; i++) {
+        unsigned char t = v->items[i].tag;
+        if (t != V_FLOAT && t != V_INT) return 0;
+    }
     return 1;
 }
 

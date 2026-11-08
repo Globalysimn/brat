@@ -1269,8 +1269,7 @@ static Val vadd_self_slow(Val a, Val b) {
         }
         if (la > BRAT_MAX_STR || lb > BRAT_MAX_STR - la) { vraise("out of memory"); return vunwind; }
         size_t need = la + lb + 1;
-        size_t cap = need < 32 ? 32 : need * 2;
-        if (cap < need) cap = need;
+        size_t cap = need < 32 ? 32 : (need <= SIZE_MAX / 2 ? need * 2 : need);
         char *out = (char *)balloc(cap);
         if (la) memcpy(out, vstr_c(&a), la);
         if (lb) memcpy(out + la, sb, lb);
@@ -1281,7 +1280,7 @@ static Val vadd_self_slow(Val a, Val b) {
         if (verr_pending()) return vunwind;
         if (sb) {
             BHead *h = (BHead *)a.as.str - 1;
-            if (!BIS_ARENA(h)) {
+            if (!BIS_ARENA(h) && !BIS_IMMORTAL(h)) {
                 bint rc = BRC_VAL(h);
                 if (rc == 1) {
                     size_t la = (size_t)h->len;
@@ -1295,7 +1294,11 @@ static Val vadd_self_slow(Val a, Val b) {
                     size_t need = la + lb + 1;
                     if ((size_t)h->cap < need) {
                         size_t nc = h->cap > 0 ? (size_t)h->cap : 32;
-                        while (nc < need) nc *= 2;
+                        while (nc < need) {
+                            if (nc > SIZE_MAX / 2) { nc = need; break; }
+                            nc *= 2;
+                        }
+                        if (nc > SIZE_MAX - sizeof(BHead) || bsize_over_bint(nc)) vfatal_oom();
                         BHead *nh = (BHead *)realloc(h, sizeof(BHead) + nc);
                         if (!nh) vfatal_oom();
                         nh->cap = (bint)nc;
@@ -1426,10 +1429,15 @@ BFN_HOT bint bshl64(bint a, bint b) {
     return (bint)((uint64_t)a << ((uint64_t)b & 63u));
 }
 BFN_HOT bint bshr64(bint a, bint b) {
+#if (-1LL >> 1) == -1LL
+    return (bint)(a >> ((unsigned)b & 63u));
+#else
     uint64_t s = (uint64_t)b & 63u;
     if (s == 0) return a;
     uint64_t ua = (uint64_t)a;
-    return a < 0 ? (bint)((ua >> s) | (~0ULL << (64u - s))) : (bint)(ua >> s);
+    uint64_t sign = (uint64_t)0 - (ua >> 63u);
+    return (bint)((ua >> s) | (sign & (~0ULL << (64u - s))));
+#endif
 }
 BFN_HOT Val vbnot(Val a) {
     if (a.tag == V_INT) return vint((bint)(~(uint64_t)a.as.ival));
@@ -1653,6 +1661,13 @@ static BTLS int _verr_exc;
    of longjmp, which is UB through non-volatile frames at -O2. */
 
 BFN_HOT int verr_pending(void) { return _verr_pending; }
+BFN_HOT int bverr_unlikely(void) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_expect(_verr_pending, 0);
+#else
+    return _verr_pending;
+#endif
+}
 BFN Val verr_take(void) {
     Val e = vunwind;
     vunwind = vnil();
@@ -1816,7 +1831,7 @@ BFN_HOT int bdepth_push(void) {
 #if defined(BSTACK_HAS_PROBE)
     if ((d & 63) == 0) {
         if (!_bstack_probed) bstack_probe();
-        if (_bstack_floor && (char *)__builtin_frame_address(0) < _bstack_floor) return 1;
+        if (_bstack_floor && (char *)&d < _bstack_floor) return 1;
     }
 #endif
 #endif
@@ -1829,6 +1844,33 @@ BFN_HOT int bdepth_leaf_overflow(void) {
     return __builtin_expect(_bdepth >= _bbudget, 0);
 #else
     return _bdepth >= _bbudget;
+#endif
+}
+BFN_HOT bint bdepth_rem(void) { return _bbudget - _bdepth; }
+BFN_HOT int bdepth_rem_leaf(bint rem) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_expect(rem <= 0, 0);
+#else
+    return rem <= 0;
+#endif
+}
+BFN_HOT int bdepth_probe_rem(bint rem) {
+#if defined(__GNUC__) || defined(__clang__)
+    if (__builtin_expect(rem <= 0, 0)) return 1;
+#if defined(BSTACK_HAS_PROBE)
+    if (__builtin_expect((rem & 63) == 0 && bdepth_stack_exceeded(), 0))
+        return 1;
+#endif
+    return 0;
+#else
+    if (rem <= 0) return 1;
+#if defined(BSTACK_HAS_PROBE)
+    if ((rem & 63) == 0) {
+        if (!_bstack_probed) bstack_probe();
+        if (_bstack_floor && (char *)&rem < _bstack_floor) return 1;
+    }
+#endif
+    return 0;
 #endif
 }
 static bint vargc_g;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cctype>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
@@ -1444,10 +1446,54 @@ static int run_captured(const std::vector<std::string> &args, std::string &combi
 
 int cmd_test(int argc, char **argv) {
     std::vector<std::string> inputs;
+    std::string filter;
+    size_t jobs = 0;
+    auto parse_jobs = [](const std::string &s, size_t &out) -> bool {
+        if (s.empty()) return false;
+        char *end = nullptr;
+        errno = 0;
+        const unsigned long v = std::strtoul(s.c_str(), &end, 10);
+        if (errno != 0 || !end || *end != '\0' || v == 0 || v > 256) return false;
+        out = static_cast<size_t>(v);
+        return true;
+    };
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--") continue;
         if (a == "--help" || a == "-h") { print_cli_usage(); return 0; }
+        if (a == "-j" || a == "--jobs") {
+            if (i + 1 >= argc || !parse_jobs(argv[++i], jobs)) {
+                std::fprintf(stderr, "brat test: invalid job count (want 1..256)\n");
+                return 2;
+            }
+            continue;
+        }
+        if (a.rfind("-j", 0) == 0 && a.size() > 2) {
+            if (!parse_jobs(a.substr(2), jobs)) {
+                std::fprintf(stderr, "brat test: invalid job count '%s' (want 1..256)\n", a.c_str());
+                return 2;
+            }
+            continue;
+        }
+        if (a.rfind("--jobs=", 0) == 0) {
+            if (!parse_jobs(a.substr(7), jobs)) {
+                std::fprintf(stderr, "brat test: invalid job count '%s' (want 1..256)\n", a.c_str());
+                return 2;
+            }
+            continue;
+        }
+        if (a == "--filter") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "brat test: --filter requires an argument\n");
+                return 2;
+            }
+            filter = argv[++i];
+            continue;
+        }
+        if (a.rfind("--filter=", 0) == 0) {
+            filter = a.substr(9);
+            continue;
+        }
         if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "brat test: unknown flag '%s'\n", a.c_str());
             return 2;
@@ -1483,15 +1529,54 @@ int cmd_test(int argc, char **argv) {
             files.push_back(in);
         }
     }
+    if (!filter.empty()) {
+        files.erase(std::remove_if(files.begin(), files.end(), [&](const std::string &p) {
+                        return p.find(filter) == std::string::npos;
+                    }),
+                    files.end());
+    }
     if (files.empty()) {
         std::printf("0 passed, 0 failed\n");
         return 0;
     }
     const std::string self_exe = self_executable_path(argv[0]).string();
-    int failed = 0;
-    for (const std::string &path : files) {
+    if (jobs == 0) {
+        const unsigned hw = std::thread::hardware_concurrency();
+        jobs = std::max<size_t>(1, hw ? static_cast<size_t>(hw) : 1);
+    }
+    jobs = std::min(jobs, files.size());
+
+    struct TestOutcome {
+        int rc = -1;
         std::string combined;
-        const int rc = run_captured({self_exe, "run", path}, combined);
+    };
+    std::vector<TestOutcome> outcomes(files.size());
+    if (jobs <= 1) {
+        for (size_t idx = 0; idx < files.size(); ++idx) {
+            outcomes[idx].rc = run_captured({self_exe, "run", files[idx]}, outcomes[idx].combined);
+        }
+    } else {
+        std::atomic<size_t> next_idx{0};
+        std::vector<std::thread> pool;
+        pool.reserve(jobs);
+        for (size_t w = 0; w < jobs; ++w) {
+            pool.emplace_back([&]() {
+                for (;;) {
+                    const size_t idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+                    if (idx >= files.size()) break;
+                    outcomes[idx].rc =
+                        run_captured({self_exe, "run", files[idx]}, outcomes[idx].combined);
+                }
+            });
+        }
+        for (auto &th : pool) th.join();
+    }
+
+    int failed = 0;
+    for (size_t idx = 0; idx < files.size(); ++idx) {
+        const std::string &path = files[idx];
+        const int rc = outcomes[idx].rc;
+        const std::string &combined = outcomes[idx].combined;
         if (rc == 0) {
             std::printf("ok %s\n", path.c_str());
         } else {

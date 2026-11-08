@@ -710,12 +710,16 @@ struct Emitter {
     std::set<const Stmt *> unchecked_setidx;
     std::vector<ir::Proof> *proofs = nullptr;
     std::map<std::string, std::set<std::string>> fastvec;
+    std::map<std::string, std::set<std::string>> fastbool;
     std::string fkind = "int64_t";
     std::map<std::string, std::string> fsym;
     bool need_idiv = false, need_imod = false, need_idiv_nz = false, need_imod_nz = false;
     bool need_fdiv = false, need_fmod = false;
     bool need_viat = false, need_viat_nb = false, need_vset = false;
+    bool need_vfat = false, need_vset_f = false;
     std::set<std::string> fvecvars;
+    std::set<std::string> fboolvars;
+    std::string fself_rec;
     int ic_n = 0, fic_n = 0, mic_slot = -1;
     std::map<std::pair<std::string, std::vector<std::string>>, int> shapes;
     std::vector<std::pair<std::string, std::vector<std::string>>> shape_defs;
@@ -1014,34 +1018,35 @@ static bool may_raise(const Expr &e);
 bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand,
                        const std::string &kind, const std::set<std::string> &intvars,
                        const std::set<std::string> &vecvars) {
+    const bool fk_float = (kind == "f64" || kind == "f64_dyn" || kind == "f64v");
+    const bool fk_vec = (kind == "i64v" || kind == "i64v_dyn" || kind == "f64v");
     switch (e.k) {
     case EK::Num:
         if (!e.is_float) return true;
-        return kind == "f64" || kind == "f64_dyn";
+        return fk_float;
     case EK::Bool:
         return true;
     case EK::Var:
         return !vecvars.count(e.a);
     case EK::Un:
-        if (e.a == "~" && (kind == "f64" || kind == "f64_dyn")) return false;
+        if (e.a == "~" && fk_float) return false;
         return (e.a == "!" || e.a == "-" || e.a == "~") &&
                int_expr(*e.kids[0], cand, kind, intvars, vecvars);
     case EK::Move:
         return int_expr(*e.kids[0], cand, kind, intvars, vecvars);
     case EK::Idx:
-        return (kind == "i64v" || kind == "i64v_dyn") && e.kids[0]->k == EK::Var &&
+        return fk_vec && e.kids[0]->k == EK::Var &&
                vecvars.count(e.kids[0]->a) && intish(*e.kids[1], kind, intvars);
     case EK::Bin: {
         static const std::set<std::string> ops = {"+", "-", "*", "/", "%", "&", "|", "^",
                                                   "<<", ">>", "==", "!=", "<", ">", "<=",
                                                   ">=", "&&", "||"};
         if (!ops.count(e.a)) return false;
-        if ((e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") &&
-            (kind == "f64" || kind == "f64_dyn"))
+        if ((e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") && fk_float)
             return false;
         if (!int_expr(*e.kids[0], cand, kind, intvars, vecvars)) return false;
         if (!int_expr(*e.kids[1], cand, kind, intvars, vecvars)) return false;
-        if ((e.a == "/" || e.a == "%") && (kind == "f64" || kind == "f64_dyn") &&
+        if ((e.a == "/" || e.a == "%") && fk_float &&
             intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars))
             return false;
         if (e.a == "&&" || e.a == "||") {
@@ -1053,24 +1058,30 @@ bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand
         return true;
     }
     case EK::Call:
-        if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn") && e.kids.size() == 1) {
+        if (e.a == "len" && fk_vec && e.kids.size() == 1) {
             const Expr &a = *e.kids[0];
             if (a.k == EK::Var && vecvars.count(a.a)) return true;
         }
         {
             auto it = cand.find(e.a);
             if (it == cand.end()) return false;
+            if (fastvec.count(e.a) && !fastvec[e.a].empty()) return false;
             const std::string &ck = fastkinds[e.a];
             auto ri = fn_ret.find(e.a);
             bool not_bool = (ri == fn_ret.end() || !ri->second || *ri->second != "bool");
-            bool same_k = (ck == kind) ||
-                          ((kind == "i64" || kind == "i64_dyn") &&
+            bool same_k = ((ck == kind) && not_bool) ||
+                          ((kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") &&
                            (ck == "i64" || ck == "i64_dyn") && not_bool) ||
-                          ((kind == "f64" || kind == "f64_dyn") &&
-                           (ck == "f64" || ck == "f64_dyn") && not_bool) ||
-                          ((kind == "i64v" || kind == "i64v_dyn") &&
-                           (ck == "i64" || ck == "i64_dyn") && not_bool);
+                          (fk_float && (ck == "f64" || ck == "f64_dyn") && not_bool);
             if (!same_k) return false;
+            if (fastbool.count(e.a)) {
+                const auto &callee_params = it->second.decl->params;
+                if (e.kids.size() != callee_params.size()) return false;
+                for (size_t i = 0; i < e.kids.size(); i++) {
+                    if (fastbool[e.a].count(callee_params[i].name) && !all_bool(*e.kids[i]))
+                        return false;
+                }
+            }
             for (const auto &a : e.kids)
                 if (!int_expr(*a, cand, kind, intvars, vecvars)) return false;
             return true;
@@ -1100,7 +1111,7 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
             return true;
         return intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars);
     case EK::Call: {
-        if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn") && e.kids.size() == 1)
+        if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn" || kind == "f64v") && e.kids.size() == 1)
             return true;
         auto it = fastkinds.find(e.a);
         return (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") &&
@@ -1113,6 +1124,11 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
 
 bool Emitter::all_bool(const Expr &e) {
     if (e.k == EK::Bool || (e.k == EK::Un && e.a == "!")) return true;
+    if (e.k == EK::Var && fboolvars.count(e.a)) return true;
+    if (e.k == EK::Call) {
+        auto ri = fn_ret.find(e.a);
+        if (ri != fn_ret.end() && ri->second && *ri->second == "bool") return true;
+    }
     if (e.k == EK::Bin) {
         if (e.a == "==" || e.a == "!=" || e.a == "<" || e.a == ">" || e.a == "<=" || e.a == ">=")
             return true;
@@ -1126,7 +1142,7 @@ bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand
                        const std::string &kind, const std::set<std::string> &intvars,
                        const std::set<std::string> &vecvars) {
     if (e.k != EK::Call || e.a != "print") return false;
-    bool dbl = (kind == "f64" || kind == "f64_dyn");
+    bool dbl = (kind == "f64" || kind == "f64_dyn" || kind == "f64v");
     int fslots = 0;
     for (const auto &ap : e.kids) {
         const Expr &a = *ap;
@@ -1134,14 +1150,14 @@ bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand
             for (const auto &p : split_interp(a.a)) {
                 if (p.first == "var") {
                     if (p.second.find('.') != std::string::npos || vecvars.count(p.second) ||
-                        global_lets.count(p.second))
+                        fboolvars.count(p.second) || global_lets.count(p.second))
                         return false;
                     if (dbl) fslots++;
                 }
             }
             continue;
         }
-        if (booly(a)) return false;
+        if (booly(a) || (a.k == EK::Var && fboolvars.count(a.a))) return false;
         if (!int_expr(a, cand, kind, intvars, vecvars)) return false;
         if (a.k == EK::Num && a.is_float) fslots++;
         else if (dbl && !(a.k == EK::Num && !a.is_float)) fslots++;
@@ -1175,9 +1191,14 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             }
             break;
         case SK::SetIdx:
-            if (kind != "i64v" && kind != "i64v_dyn") return false;
+            if (kind != "i64v" && kind != "i64v_dyn" && kind != "f64v") return false;
             if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) return false;
-            if (!intish(*s.e2, kind, intvars) || !intish(*s.e3, kind, intvars)) return false;
+            if (!intish(*s.e2, kind, intvars)) return false;
+            if (kind == "f64v") {
+                if (!int_expr(*s.e3, cand, kind, intvars, vecvars)) return false;
+            } else {
+                if (!intish(*s.e3, kind, intvars)) return false;
+            }
             break;
         case SK::Return:
             if (!int_expr(*s.e1, cand, kind, intvars, vecvars)) return false;
@@ -1211,10 +1232,11 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             break;
         }
         case SK::ForIter: {
-            if (kind != "i64v" && kind != "i64v_dyn") return false;
+            if (kind != "i64v" && kind != "i64v_dyn" && kind != "f64v") return false;
             if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) return false;
             std::set<std::string> sub = intvars;
-            sub.insert(s.a);
+            if (kind != "f64v") sub.insert(s.a);
+            else sub.erase(s.a);
             if (!int_body(view(s.body), cand, kind, sub, vecvars, returned)) return false;
             break;
         }
@@ -1477,6 +1499,7 @@ std::set<std::string> Emitter::vec_params_in(const StmtList &body,
 void Emitter::compute_fast() {
     std::map<std::string, std::string> kinds;
     fastvec.clear();
+    fastbool.clear();
     for (const auto &[name, entry] : fns) {
         if (entry.ctor || entry.decl == nullptr) continue;
         const std::vector<Param> &params = entry.decl->params;
@@ -1492,7 +1515,8 @@ void Emitter::compute_fast() {
         for (const auto &p : params) {
             if (!p.ann) unann_pnames.insert(p.name);
             if (p.def) dfl_pnames.insert(p.name);
-            if (p.ann && (*p.ann == "i64" || *p.ann == "f64" || *p.ann == "vec[i64]")) {
+            if (p.ann && (*p.ann == "i64" || *p.ann == "bool" || *p.ann == "f64" ||
+                          *p.ann == "vec[i64]" || *p.ann == "vec[f64]")) {
                 anns.push_back(*p.ann);
                 if (*p.ann != "i64") dyn_ok = false;
                 if (*p.ann != "f64") fdyn_ok = false;
@@ -1513,18 +1537,37 @@ void Emitter::compute_fast() {
         for (const auto &n : body_names)
             if (global_lets.count(n) && !own_names.count(n)) names_global = true;
         if (names_global) continue;
-        bool all_i64 = true;
-        for (const auto &a : anns)
-            if (a != "i64" && a != "vec[i64]") all_i64 = false;
-        bool has_vec = std::find(anns.begin(), anns.end(), "vec[i64]") != anns.end();
-        if (ok && !anns.empty() && has_vec && all_i64) {
+        bool all_i64_family = true;
+        bool all_f64_family = true;
+        for (const auto &a : anns) {
+            if (a != "i64" && a != "bool" && a != "vec[i64]") all_i64_family = false;
+            if (a != "f64" && a != "vec[f64]") all_f64_family = false;
+        }
+        bool has_ivec = std::find(anns.begin(), anns.end(), "vec[i64]") != anns.end();
+        bool has_fvec = std::find(anns.begin(), anns.end(), "vec[f64]") != anns.end();
+        bool has_bool = std::find(anns.begin(), anns.end(), "bool") != anns.end();
+        if (ok && has_bool) {
+            std::set<std::string> bs;
+            for (const auto &p : params)
+                if (p.ann && *p.ann == "bool") bs.insert(p.name);
+            fastbool[name] = std::move(bs);
+        }
+        if (ok && !anns.empty() && has_ivec && all_i64_family) {
             kinds[name] = "i64v";
             std::set<std::string> vs;
             for (const auto &p : params)
                 if (p.ann && *p.ann == "vec[i64]") vs.insert(p.name);
             fastvec[name] = vs;
-        } else if (ok && (anns.empty() || std::set<std::string>(anns.begin(), anns.end()).size() == 1)) {
-            kinds[name] = anns.empty() ? "i64" : anns[0];
+        } else if (ok && !anns.empty() && has_fvec && all_f64_family) {
+            kinds[name] = "f64v";
+            std::set<std::string> vs;
+            for (const auto &p : params)
+                if (p.ann && *p.ann == "vec[f64]") vs.insert(p.name);
+            fastvec[name] = vs;
+        } else if (ok && all_i64_family) {
+            kinds[name] = "i64";
+        } else if (ok && all_f64_family) {
+            kinds[name] = "f64";
         } else if (!ok && !params.empty() && must_return(view(entry.decl->body))) {
             std::set<std::string> vparams =
                 dyn_ok ? vec_params_in(view(entry.decl->body), unann_pnames) : std::set<std::string>();
@@ -1572,6 +1615,7 @@ void Emitter::compute_fast() {
             std::set<std::string> pnames;
             for (const auto &p : params) pnames.insert(p.name);
             const std::set<std::string> &vvars = fastvec[name];
+            fboolvars = fastbool.count(name) ? fastbool[name] : std::set<std::string>();
             std::set<std::string> intvars;
             if (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") {
                 for (const auto &pn : pnames)
@@ -1586,11 +1630,20 @@ void Emitter::compute_fast() {
             auto ri = fn_ret.find(name);
             std::string ret_ann = (ri != fn_ret.end() && ri->second) ? *ri->second : "";
             bool has_ret_ann = (ret_ann == "i64" || ret_ann == "bool");
+            bool bad_bool_ret = !fboolvars.empty() && !has_ret_ann;
+            if (bad_bool_ret) {
+                std::set<std::string> non_bool_pnames;
+                for (const auto &pn : pnames)
+                    if (!fboolvars.count(pn)) non_bool_pnames.insert(pn);
+                if (pure_int_returns(view(fns[name].decl->body), snapshot, non_bool_pnames, vvars))
+                    bad_bool_ret = false;
+            }
             bool bad_fdyn = (kind == "f64_dyn") &&
                             ((ret_ann != "bool" && any_int) ||
                              (ret_ann != "f64" && ret_ann != "bool" &&
                               !pure_float_returns(view(fns[name].decl->body), snapshot, pnames)));
-            if (!ok || (kind == "f64" && any_int) || bad_fdyn ||
+            if (!ok || ((kind == "f64" || kind == "f64v") && ret_ann != "bool" && any_int) ||
+                bad_bool_ret || bad_fdyn ||
                 ((kind == "i64_dyn" || kind == "i64v_dyn") && !has_ret_ann &&
                  !pure_int_returns(view(fns[name].decl->body), snapshot, pnames, vvars))) {
                 it = cand.erase(it);
@@ -1600,6 +1653,7 @@ void Emitter::compute_fast() {
             }
         }
     }
+    fboolvars.clear();
     rec_fast = drop_recursive_fast(cand);
     for (const auto &n : rec_fast) fails.insert(n);
     fast = cand;
@@ -1628,6 +1682,9 @@ void Emitter::compute_fast() {
         if (kind == "i64v" || kind == "i64v_dyn") {
             need_viat = true;
             if (has_setidx(view(entry.decl->body))) need_vset = true;
+        } else if (kind == "f64v") {
+            need_vfat = true;
+            if (has_setidx(view(entry.decl->body))) need_vset_f = true;
         }
     }
 }
@@ -1762,6 +1819,8 @@ std::string Emitter::fx(const Expr &e) {
     case EK::Move:
         return fx(*e.kids[0]);
     case EK::Idx:
+        if (fkind == "f64")
+            return cat("bf_vfat(", fsym[e.kids[0]->a], ", (int64_t)(", fx(*e.kids[1]), "))");
         if (opt >= 2 && unchecked_idx.count(&e))
             return cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
         return cat("bf_viat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
@@ -1792,12 +1851,19 @@ std::string Emitter::fx(const Expr &e) {
         return cat("(", a, " ", op, " ", b, ")");
     }
     case EK::Call:
-        if (e.a == "len") return cat("((", fsym[e.kids[0]->a], ")->len)");
+        if (e.a == "len")
+            return fkind == "f64" ? cat("((double)((", fsym[e.kids[0]->a], ")->len))")
+                                  : cat("((", fsym[e.kids[0]->a], ")->len)");
         {
             std::string args;
             for (size_t i = 0; i < e.kids.size(); i++) {
                 if (i) args += ", ";
                 args += fx(*e.kids[i]);
+            }
+            if (!fself_rec.empty() && e.a == fself_rec) {
+                if (!args.empty()) args += ", ";
+                args += "_rem - 1";
+                return cat(fastc[e.a], "_r(", args, ")");
             }
             return cat(fastc[e.a], "(", args, ")");
         }
@@ -1887,7 +1953,8 @@ std::set<std::string> Emitter::may_fail() {
 
 std::string Emitter::fret_bail() const {
     const char *z = (fkind == "f64") ? "0.0" : "0";
-    return frec ? cat("{ bdepth_pop(); return ", z, "; }") : cat("return ", z, ";");
+    return (frec && fself_rec.empty()) ? cat("{ bdepth_pop(); return ", z, "; }")
+                                       : cat("return ", z, ";");
 }
 
 bool Emitter::fraise(const Expr &e) {
@@ -1921,7 +1988,7 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
     if (!has_rec_call(e)) {
         std::string t = new_tmp("t");
         ln(ind, cat(ct, " ", t, " = ", fx(e), ";"));
-        ln(ind, cat("if (verr_pending()) ", fret_bail()));
+        ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
     switch (e.k) {
@@ -1935,12 +2002,13 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
         return fchk(*e.kids[0], ind);
     case EK::Idx: {
         std::string idx = fchk(*e.kids[1], ind);
-        std::string call = (opt >= 2 && unchecked_idx.count(&e))
-            ? cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", idx, ")")
-            : cat("bf_viat(", fsym[e.kids[0]->a], ", ", idx, ")");
+        std::string call = dbl ? cat("bf_vfat(", fsym[e.kids[0]->a], ", (int64_t)(", idx, "))")
+                               : ((opt >= 2 && unchecked_idx.count(&e))
+                                      ? cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", idx, ")")
+                                      : cat("bf_viat(", fsym[e.kids[0]->a], ", ", idx, ")"));
         std::string t = new_tmp("t");
         ln(ind, cat(ct, " ", t, " = ", call, ";"));
-        ln(ind, cat("if (verr_pending()) ", fret_bail()));
+        ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
     case EK::Call: {
@@ -1952,9 +2020,15 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
             args += ai;
         }
         std::string t = new_tmp("t");
-        ln(ind, cat(ct, " ", t, " = ", fastc[e.a], "(", args, ");"));
+        if (!fself_rec.empty() && e.a == fself_rec) {
+            if (!args.empty()) args += ", ";
+            args += "_rem - 1";
+            ln(ind, cat(ct, " ", t, " = ", fastc[e.a], "_r(", args, ");"));
+        } else {
+            ln(ind, cat(ct, " ", t, " = ", fastc[e.a], "(", args, ");"));
+        }
         if (!fastc.count(e.a) || fails.count(e.a))
-            ln(ind, cat("if (verr_pending()) ", fret_bail()));
+            ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
     case EK::Bin: {
@@ -2062,7 +2136,7 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         break;
     case SK::Return: {
         std::string rv = fchk(*s.e1, ind);
-        if (frec) ln(ind, "bdepth_pop();");
+        if (frec && fself_rec.empty()) ln(ind, "bdepth_pop();");
         ln(ind, cat("return ", rv, ";"));
         break;
     }
@@ -2091,9 +2165,9 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         break;
     case SK::ForRange: {
         std::string kk = new_tmp("k"), lo = new_tmp("lo"), hi = new_tmp("hi");
-        ln(ind, cat("int64_t ", lo, " = ", fx(*s.e1), ", ", hi, " = ", fx(*s.e2), ";"));
+        ln(ind, cat("int64_t ", lo, " = (int64_t)(", fx(*s.e1), "), ", hi, " = (int64_t)(", fx(*s.e2), ");"));
         ln(ind, cat("for (int64_t ", kk, " = ", lo, "; ", kk, " < ", hi, "; ++", kk, ") {"));
-        ln(ind + "  ", cat(fsym[s.a], " = ", kk, ";"));
+        ln(ind + "  ", cat(fsym[s.a], " = ", fkind == "f64" ? cat("(double)", kk) : kk, ";"));
         for (const Stmt *t : view(s.body)) fst(*t, ind + "  ");
         ln(ind, "}");
         break;
@@ -2102,14 +2176,19 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         std::string vv = fsym[s.e1->a];
         std::string kk = new_tmp("k");
         ln(ind, cat("for (int64_t ", kk, " = 0; ", kk, " < ", vv, "->len; ++", kk, ") {"));
-        ln(ind + "  ", cat(fsym[s.a], " = bf_viat(", vv, ", ", kk, ");"));
-        ln(ind + "  ", cat("if (verr_pending()) ", fret_bail()));
+        ln(ind + "  ", cat(fsym[s.a], " = ", fkind == "f64" ? "bf_vfat(" : "bf_viat(", vv, ", ", kk, ");"));
+        ln(ind + "  ", cat("if (bverr_unlikely()) ", fret_bail()));
         for (const Stmt *t : view(s.body)) fst(*t, ind + "  ");
         ln(ind, "}");
         break;
     }
     case SK::SetIdx:
-        if (opt >= 2 && unchecked_setidx.count(&s)) {
+        if (fkind == "f64") {
+            std::string idx_s = fchk(*s.e2, ind);
+            std::string val_s = fchk(*s.e3, ind);
+            ln(ind, cat("bf_vset_f(", fsym[s.e1->a], ", (int64_t)(", idx_s, "), ", val_s, ");"));
+            ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
+        } else if (opt >= 2 && unchecked_setidx.count(&s)) {
             std::string idx_s = fchk(*s.e2, ind);
             std::string val_s = fchk(*s.e3, ind);
             ln(ind, cat(fsym[s.e1->a], "->items[", idx_s, "] = vint(", val_s, ");"));
@@ -2117,7 +2196,7 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
             std::string idx_s = fchk(*s.e2, ind);
             std::string val_s = fchk(*s.e3, ind);
             ln(ind, cat("bf_vset(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
-            ln(ind, cat("if (verr_pending()) ", fret_bail()));
+            ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         }
         break;
     case SK::Break:
@@ -2204,21 +2283,45 @@ std::set<std::string> Emitter::drop_recursive_fast(const std::map<std::string, F
 void Emitter::emit_fast_fn(const std::string &name) {
     const FnDecl &decl = *fast[name].decl;
     const std::string &rk = fastkinds[name];
-    fkind = (rk == "f64" || rk == "f64_dyn") ? "f64" : ((rk == "i64v" || rk == "i64v_dyn") ? "i64v" : rk);
+    fkind = (rk == "f64" || rk == "f64_dyn" || rk == "f64v") ? "f64"
+                                                              : ((rk == "i64v" || rk == "i64v_dyn") ? "i64v" : rk);
     std::string ct = fkind == "f64" ? "double" : "int64_t";
     fvecvars = fastvec.count(name) ? fastvec[name] : std::set<std::string>();
+    fboolvars = fastbool.count(name) ? fastbool[name] : std::set<std::string>();
     std::vector<std::string> names;
     for (const auto &p : decl.params) names.push_back(p.name);
     fsym.clear();
-    std::string args;
+    std::string args, call_args;
     for (const auto &n : names) {
         std::string cn = cname(n);
         fsym[n] = cn;
-        if (!args.empty()) args += ", ";
+        if (!args.empty()) {
+            args += ", ";
+            call_args += ", ";
+        }
         args += fvecvars.count(n) ? cat("Vec *", cn) : cat(ct, " ", cn);
+        call_args += cn;
     }
     frec = rec_fast.count(name) > 0;
-    ln("", cat("static ", ct, " ", fastc[name], "(", args.empty() ? "void" : args, ") {"));
+    fself_rec.clear();
+    if (frec && !trace_lines) {
+        std::set<std::string> calls;
+        for (const Stmt *s : view(decl.body)) collect_calls(*s, calls);
+        bool only_self = calls.count(name) > 0;
+        for (const auto &c : calls) {
+            if (c != name && c != "len" && c != "print") {
+                only_self = false;
+                break;
+            }
+        }
+        if (only_self) fself_rec = name;
+    }
+    if (!fself_rec.empty()) {
+        std::string rargs = args.empty() ? "bint _rem" : cat(args, ", bint _rem");
+        ln("", cat("static ", ct, " ", fastc[name], "_r(", rargs, ") {"));
+    } else {
+        ln("", cat("static ", ct, " ", fastc[name], "(", args.empty() ? "void" : args, ") {"));
+    }
     std::set<std::string> param_set(names.begin(), names.end());
     std::function<bool(const Expr &)> pure_int_leaf = [&](const Expr &e) -> bool {
         if (e.is_float) return false;
@@ -2251,15 +2354,24 @@ void Emitter::emit_fast_fn(const std::string &name) {
             if (ret_st.k != SK::Return || !st.e1 || !ret_st.e1) break;
             if (!pure_int_leaf(*st.e1) || !pure_int_leaf(*ret_st.e1)) break;
             ln("  ", cat("if (", fx(*st.e1), ") {"));
-            ln("    ", "if (bdepth_leaf_overflow()) { vraise(\"recursion too deep\"); return 0; }");
+            if (!fself_rec.empty()) {
+                ln("    ", "if (bdepth_rem_leaf(_rem)) { vraise(\"recursion too deep\"); return 0; }");
+            } else {
+                ln("    ", "if (bdepth_leaf_overflow()) { vraise(\"recursion too deep\"); return 0; }");
+            }
             ln("    ", cat("return ", fchk(*ret_st.e1, "    "), ";"));
             ln("  ", "}");
             body_start++;
         }
     }
     if (frec) {
-        ln("  ", cat("if (bdepth_push()) { vraise(\"recursion too deep\"); return ",
-                     fkind == "f64" ? "0.0" : "0", "; }"));
+        if (!fself_rec.empty()) {
+            ln("  ", cat("if (bdepth_probe_rem(_rem)) { vraise(\"recursion too deep\"); return ",
+                         fkind == "f64" ? "0.0" : "0", "; }"));
+        } else {
+            ln("  ", cat("if (bdepth_push()) { vraise(\"recursion too deep\"); return ",
+                         fkind == "f64" ? "0.0" : "0", "; }"));
+        }
     }
     std::set<std::string> vars(names.begin(), names.end());
     collect_vars(view(decl.body), vars);
@@ -2269,13 +2381,21 @@ void Emitter::emit_fast_fn(const std::string &name) {
         ln("  ", cat(ct, " BRAT_UNUSED ", cname(n), ";"));
     }
     for (size_t bi = body_start; bi < decl.body.size(); bi++) fst(*decl.body[bi], "  ");
-    if (frec) ln("  ", "bdepth_pop();");
+    if (frec && fself_rec.empty()) ln("  ", "bdepth_pop();");
     ln("  ", cat("return ", fkind == "f64" ? "0.0" : "0", ";"));
     ln("", "}");
+    if (!fself_rec.empty()) {
+        std::string rcall = call_args.empty() ? "bdepth_rem()" : cat(call_args, ", bdepth_rem()");
+        ln("", cat("static ", ct, " ", fastc[name], "(", args.empty() ? "void" : args, ") {"));
+        ln("  ", cat("return ", fastc[name], "_r(", rcall, ");"));
+        ln("", "}");
+    }
     ln("", "");
     fsym.clear();
     fkind = "int64_t";
     fvecvars.clear();
+    fboolvars.clear();
+    fself_rec.clear();
     frec = false;
 }
 
@@ -3892,10 +4012,14 @@ V Emitter::borrow_builtin(const std::string &c_name, const ExprList &args) {
     for (const auto &arg : args) {
         V av = ex(*arg);
         for (const auto &p : av.pre) pre.push_back(p);
-        if (auto d = owned_temp(*arg, av.val)) {
-            cargs.push_back(av.val);
-            drops.push_back(*d);
-        } else if (arg->k == EK::VecLit) {
+        if (dec_able(*arg, heap)) {
+            if (auto d = owned_temp(*arg, av.val)) {
+                cargs.push_back(av.val);
+                drops.push_back(*d);
+                continue;
+            }
+        }
+        if (arg->k == EK::VecLit) {
             cargs.push_back(av.val);
             if (auto ct = container_tmp(av.val)) lits.push_back(*ct);
         } else if (arg->k == EK::MapLit || arg->k == EK::StructLit) {
@@ -4028,13 +4152,26 @@ bool Emitter::direct_fast_call(const std::string &name, const ExprList &args, V 
     auto kind = fastkinds.find(name);
     auto fn = fastc.find(name);
     if (kind == fastkinds.end() || kind->second != "i64" || fn == fastc.end()) return false;
+    const auto &params = fns[name].decl->params;
+    if (args.size() != params.size()) return false;
+    const std::set<std::string> empty_bs;
+    const auto &bs = fastbool.count(name) ? fastbool[name] : empty_bs;
 
     std::vector<std::string> raw;
     raw.reserve(args.size());
-    for (const Expr *arg : args) {
-        std::string value;
-        if (!raw_i64_arg(*arg, value)) return false;
-        raw.push_back(std::move(value));
+    for (size_t i = 0; i < args.size(); i++) {
+        const Expr *arg = args[i];
+        if (bs.count(params[i].name)) {
+            if (arg->k == EK::Bool) {
+                raw.push_back(arg->flag ? "1LL" : "0LL");
+            } else {
+                return false;
+            }
+        } else {
+            std::string value;
+            if (!raw_i64_arg(*arg, value)) return false;
+            raw.push_back(std::move(value));
+        }
     }
     std::string call = cat(fn->second, "(");
     for (size_t i = 0; i < raw.size(); i++) {
@@ -5899,6 +6036,57 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             return;
         }
         auto d = sym.find(tgt);
+        if (reclaim.count(tgt) && d != sym.end() && !moved.count(tgt) && !dropped.count(tgt) &&
+            !global_binding && !cap && err_scope_depth == 0 && e.k == EK::Bin && e.a == "+") {
+            std::vector<const Expr *> concat_rhs;
+            const Expr *cur = &e;
+            while (cur->k == EK::Bin && cur->a == "+" && cur->kids.size() == 2) {
+                concat_rhs.push_back(cur->kids[1].get());
+                cur = cur->kids[0].get();
+            }
+            if (cur->k == EK::Var && cur->a == tgt && concat_rhs.size() > 1) {
+                std::reverse(concat_rhs.begin(), concat_rhs.end());
+                std::function<bool(const Expr *)> mentions_tgt = [&](const Expr *x) -> bool {
+                    if (!x) return false;
+                    if (x->k == EK::Var && x->a == tgt) return true;
+                    if (x->k == EK::Str) {
+                        for (const auto &[ck, cv] : split_interp(x->a))
+                            if (ck == "var" && (cv == tgt || cv.rfind(tgt + ".", 0) == 0))
+                                return true;
+                    }
+                    if (x->fn) return true;
+                    for (const auto &k : x->kids)
+                        if (mentions_tgt(k.get())) return true;
+                    return false;
+                };
+                bool tail_clean = true;
+                for (size_t ci = 1; ci < concat_rhs.size(); ++ci) {
+                    if (mentions_tgt(concat_rhs[ci])) {
+                        tail_clean = false;
+                        break;
+                    }
+                }
+                if (tail_clean) {
+                    for (const Expr *re : concat_rhs) {
+                        auto lhs = std::make_unique<Expr>();
+                        lhs->k = EK::Var;
+                        lhs->a = tgt;
+                        auto bin = std::make_unique<Expr>();
+                        bin->k = EK::Bin;
+                        bin->a = "+";
+                        bin->kids.push_back(std::move(lhs));
+                        bin->kids.push_back(clone(*re));
+                        Stmt step;
+                        step.k = SK::Set;
+                        step.line = s.line;
+                        step.a = tgt;
+                        step.e1 = std::move(bin);
+                        st(step, ind);
+                    }
+                    return;
+                }
+            }
+        }
         bool self_concat = reclaim.count(tgt) && d != sym.end() &&
                            !moved.count(tgt) && !dropped.count(tgt) &&
                            e.k == EK::Bin && e.a == "+" &&
@@ -5909,11 +6097,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         if (self_concat) {
             v = ex(*e.kids[1]);
             for (auto &p : v.pre) ln(ind, p);
-            if (auto d = owned_temp(*e.kids[1], v.val)) drop.push_back(*d);
+            const bool rhs_owned = dec_able(*e.kids[1], heap_returns());
+            if (rhs_owned) {
+                if (auto d = owned_temp(*e.kids[1], v.val)) drop.push_back(*d);
+            }
             if (drop.empty() &&
                 (e.kids[1]->k == EK::Call || e.kids[1]->k == EK::MCall ||
                  e.kids[1]->k == EK::Idx || e.kids[1]->k == EK::Quest) &&
-                dec_able(*e.kids[1], heap_returns())) {
+                rhs_owned) {
                 std::string h = new_tmp("h");
                 ln(ind, cat("Val ", h, " = (", v.val, ");"));
                 v.val = h;
@@ -5928,7 +6119,9 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         } else {
             v = ex(e);
             for (auto &p : v.pre) ln(ind, p);
-            if (auto d = owned_temp(e, v.val)) drop.push_back(*d);
+            if (dec_able(e, heap_returns())) {
+                if (auto d = owned_temp(e, v.val)) drop.push_back(*d);
+            }
             // `n = n + f()`: see the append case above.
             if (!v.pre.empty() && may_raise(e)) emit_err_check(ind);
             own = own_of(e);
@@ -6586,7 +6779,9 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         }
         const std::string vret =
             ret_bool ? "vbool((__r) != 0)"
-                     : ((kind == "f64" || kind == "f64_dyn") ? "vfloat(__r)" : "vint(__r)");
+                     : ((kind == "f64" || kind == "f64_dyn" || kind == "f64v") ? "vfloat(__r)" : "vint(__r)");
+        const std::set<std::string> empty_bs;
+        const std::set<std::string> &bv = (fastname && fastbool.count(*fastname)) ? fastbool[*fastname] : empty_bs;
         if (kind == "f64") {
             std::string checks, rawargs;
             for (size_t i = 0; i < names.size(); i++) {
@@ -6612,6 +6807,25 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
             }
             ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { double __r = ", *fastraw, "(", rawargs,
                          "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
+        } else if (kind == "f64v") {
+            const std::set<std::string> &vv = fastvec[*fastname];
+            std::string checks, rawargs;
+            for (size_t i = 0; i < names.size(); i++) {
+                if (i) {
+                    checks += " && ";
+                    rawargs += ", ";
+                }
+                if (vv.count(names[i])) {
+                    checks += cat(arg_exprs[i], ".tag == V_VEC && vvec_all_float(", arg_exprs[i], ".as.vec)");
+                    rawargs += cat(arg_exprs[i], ".as.vec");
+                } else {
+                    checks += cat("(", arg_exprs[i], ".tag == V_INT || ", arg_exprs[i], ".tag == V_FLOAT)");
+                    rawargs += cat("(", arg_exprs[i], ".tag == V_INT ? (double)", arg_exprs[i],
+                                   ".as.ival : ", arg_exprs[i], ".as.fval)");
+                }
+            }
+            ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { double __r = ", *fastraw, "(", rawargs,
+                         "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
         } else if (kind == "i64v" || kind == "i64v_dyn") {
             const std::set<std::string> &vv = fastvec[*fastname];
             std::string checks, rawargs;
@@ -6626,6 +6840,9 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                     // once and falls back if one is not an int.
                     checks += cat(arg_exprs[i], ".tag == V_VEC && vvec_all_int(", arg_exprs[i], ".as.vec)");
                     rawargs += cat(arg_exprs[i], ".as.vec");
+                } else if (bv.count(names[i])) {
+                    checks += cat(arg_exprs[i], ".tag == V_BOOL");
+                    rawargs += cat("(int64_t)", arg_exprs[i], ".as.b");
                 } else {
                     checks += cat(arg_exprs[i], ".tag == V_INT");
                     rawargs += cat(arg_exprs[i], ".as.ival");
@@ -6640,8 +6857,13 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                     checks += " && ";
                     rawargs += ", ";
                 }
-                checks += cat(arg_exprs[i], ".tag == V_INT");
-                rawargs += cat(arg_exprs[i], ".as.ival");
+                if (bv.count(names[i])) {
+                    checks += cat(arg_exprs[i], ".tag == V_BOOL");
+                    rawargs += cat("(int64_t)", arg_exprs[i], ".as.b");
+                } else {
+                    checks += cat(arg_exprs[i], ".tag == V_INT");
+                    rawargs += cat(arg_exprs[i], ".as.ival");
+                }
             }
             ln("  ", cat("if (", checks.empty() ? "1" : checks, ") { int64_t __r = ", *fastraw, "(", rawargs,
                          "); if (verr_pending()) return verr_leave(); return ", vret, "; }"));
@@ -7079,6 +7301,17 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
         return false;
     };
 
+    std::set<std::string> copy_called;
+    std::map<std::string, std::set<std::string>> copy_deps;
+    std::map<std::string, std::string> copy_ann;
+    auto is_var_copy = [](const Expr *e, std::string &src_out) -> bool {
+        if (e && e->k == EK::MCall && e->b == "copy" && e->kids.size() == 1 &&
+            e->kids[0] && e->kids[0]->k == EK::Var) {
+            src_out = e->kids[0]->a;
+            return true;
+        }
+        return false;
+    };
     std::function<void(const Expr *)> scan_expr = [&](const Expr *e) {
         if (!e) return;
         switch (e->k) {
@@ -7088,6 +7321,14 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
         case EK::Field:
             if (!e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Var) {
                 used_fields[e->kids[0]->a].insert(e->b);
+                return;
+            }
+            for (const auto &k : e->kids) scan_expr(k.get());
+            return;
+        case EK::MCall:
+            if (e->b == "copy" && e->kids.size() == 1 && e->kids[0] &&
+                e->kids[0]->k == EK::Var) {
+                copy_called.insert(e->kids[0]->a);
                 return;
             }
             for (const auto &k : e->kids) scan_expr(k.get());
@@ -7185,12 +7426,18 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             let_count[s.a]++;
             if (let_count[s.a] > 1) banned.insert(s.a);
             std::string st = is_full_struct_lit(s.e1.get());
+            std::string csrc;
             if (!st.empty() && (!s.ann || *s.ann == st)) {
                 if (cand_type.count(s.a) && cand_type[s.a] != st) banned.insert(s.a);
                 else {
                     cand_type[s.a] = st;
                     if (!cand_line.count(s.a)) cand_line[s.a] = static_cast<int>(s.line);
                 }
+            } else if (is_var_copy(s.e1.get(), csrc) && csrc != s.a) {
+                copy_called.insert(csrc);
+                copy_deps[s.a].insert(csrc);
+                if (s.ann) copy_ann[s.a] = *s.ann;
+                if (!cand_line.count(s.a)) cand_line[s.a] = static_cast<int>(s.line);
             } else {
                 banned.insert(s.a);
             }
@@ -7211,10 +7458,15 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
                 return;
             }
             std::string st = is_full_struct_lit(s.e1.get());
+            std::string csrc;
             if (!st.empty()) {
                 if (cand_type.count(s.a) && cand_type[s.a] != st) banned.insert(s.a);
                 else cand_type[s.a] = st;
                 for (const auto &k : s.e1->kids) scan_expr(k.get());
+            } else if (is_var_copy(s.e1.get(), csrc)) {
+                copy_called.insert(csrc);
+                copy_deps[s.a].insert(csrc);
+                scan_expr(s.e1.get());
             } else {
                 banned.insert(s.a);
                 scan_expr(s.e1.get());
@@ -7253,9 +7505,32 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
     };
     scan_stmts(decl.body);
 
+    for (bool prog = true; prog;) {
+        prog = false;
+        for (const auto &[dst, srcs] : copy_deps) {
+            for (const auto &src : srcs) {
+                auto sit = cand_type.find(src);
+                if (sit == cand_type.end()) continue;
+                const std::string &st = sit->second;
+                if (copy_ann.count(dst) && copy_ann[dst] != st) {
+                    banned.insert(dst);
+                    continue;
+                }
+                auto dit = cand_type.find(dst);
+                if (dit == cand_type.end()) {
+                    cand_type[dst] = st;
+                    prog = true;
+                } else if (dit->second != st) {
+                    banned.insert(dst);
+                }
+            }
+        }
+    }
+
     std::set<std::string> approved;
     for (const auto &[v, st] : cand_type) {
         if (banned.count(v) || let_count[v] != 1) continue;
+        if (copy_called.count(v) && mtab.count(std::make_pair(st, std::string("copy")))) continue;
         bool fields_ok = true;
         auto uf = used_fields.find(v);
         if (uf != used_fields.end()) {
@@ -7267,6 +7542,19 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             }
         }
         if (fields_ok) approved.insert(v);
+    }
+    for (bool dep_changed = true; dep_changed;) {
+        dep_changed = false;
+        for (const auto &[dst, srcs] : copy_deps) {
+            if (!approved.count(dst)) continue;
+            for (const auto &src : srcs) {
+                if (!approved.count(src)) {
+                    approved.erase(dst);
+                    dep_changed = true;
+                    break;
+                }
+            }
+        }
     }
     if (approved.empty()) return false;
 
@@ -7300,6 +7588,19 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
         if (e->k == EK::Field && !e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Var &&
             approved.count(e->kids[0]->a)) {
             return mk_var(sra_names[e->kids[0]->a][e->b]);
+        }
+        if (e->k == EK::MCall && e->b == "copy" && e->kids.size() == 1 && e->kids[0] &&
+            e->kids[0]->k == EK::Var && approved.count(e->kids[0]->a)) {
+            const std::string &v = e->kids[0]->a;
+            const std::string &st = cand_type[v];
+            auto lit = std::make_unique<Expr>();
+            lit->k = EK::StructLit;
+            lit->a = st;
+            for (const auto &fld : *native_structs.at(st)) {
+                lit->names.push_back(fld.name);
+                lit->kids.push_back(mk_var(sra_names[v][fld.name]));
+            }
+            return lit;
         }
         if (e->k == EK::Move && !e->kids.empty() && e->kids[0] && e->kids[0]->k == EK::Field &&
             !e->kids[0]->kids.empty() && e->kids[0]->kids[0] &&
@@ -7383,6 +7684,7 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             }
             if ((sp->k == SK::Let || sp->k == SK::LetTmp) && approved.count(sp->a)) {
                 const std::string &st = cand_type[sp->a];
+                if (sp->e1 && sp->e1->k == EK::MCall) sp->e1 = rw_expr(std::move(sp->e1));
                 Expr *lit = sp->e1.get();
                 for (size_t k = 0; k < lit->names.size(); k++) {
                     const std::string &fnm = lit->names[k];
@@ -7396,6 +7698,7 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             }
             if (sp->k == SK::Set && approved.count(sp->a)) {
                 const std::string &st = cand_type[sp->a];
+                if (sp->e1 && sp->e1->k == EK::MCall) sp->e1 = rw_expr(std::move(sp->e1));
                 Expr *lit = sp->e1.get();
                 const size_t klen = lit->names.size();
                 if (klen == 1) {
@@ -7749,6 +8052,21 @@ void Emitter::run_pipeline() {
         ln("  ", "v->items[i] = vint(x);");
         ln("", "}");
     }
+    if (need_vfat) {
+        ln("", cat("static ", opt_unused, "double bf_vfat(Vec *v, int64_t i) {"));
+        ln("  ", "if (i < 0 || i >= v->len) { vraise(\"index out of range\"); return 0.0; }");
+        ln("  ", "Val x = v->items[i];");
+        ln("  ", "if (x.tag == V_FLOAT) return x.as.fval;");
+        ln("  ", "if (x.tag == V_INT) return (double)x.as.ival;");
+        ln("  ", "vraise(\"vec elem not float\"); return 0.0;");
+        ln("", "}");
+    }
+    if (need_vset_f) {
+        ln("", cat("static ", opt_unused, "void bf_vset_f(Vec *v, int64_t i, double x) {"));
+        ln("  ", "if (i < 0 || i >= v->len) { vraise(\"index out of range\"); return; }");
+        ln("  ", "v->items[i] = vfloat(x);");
+        ln("", "}");
+    }
     emit_forward_decls();
     for (const auto &o : order) {
         if (!o.meth) {
@@ -8078,13 +8396,17 @@ void Emitter::emit_forward_decls() {
     }
     for (const auto &[name, e] : fast) {
         const std::vector<Param> &params = e.decl->params;
-        std::string ct = (fastkinds[name] == "f64" || fastkinds[name] == "f64_dyn") ? "double" : "int64_t";
+        std::string ct = (fastkinds[name] == "f64" || fastkinds[name] == "f64_dyn" ||
+                          fastkinds[name] == "f64v")
+                             ? "double"
+                             : "int64_t";
         std::string types;
-        if (fastkinds[name] == "i64v" || fastkinds[name] == "i64v_dyn") {
+        if (fastkinds[name] == "i64v" || fastkinds[name] == "i64v_dyn" ||
+            fastkinds[name] == "f64v") {
             const std::set<std::string> &vv = fastvec[name];
             for (const auto &p : params) {
                 if (!types.empty()) types += ", ";
-                types += vv.count(p.name) ? "Vec *" : "int64_t";
+                types += vv.count(p.name) ? "Vec *" : ct;
             }
         } else {
             for (size_t i = 0; i < params.size(); i++) {

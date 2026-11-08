@@ -1534,6 +1534,28 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
     case EK::VecLit: return "vec";
     case EK::MapLit: return "map";
     case EK::StructLit: return e.a;
+    case EK::Field: {
+        if (e.kids.empty() || !e.kids[0]) return {};
+        if (e.kids[0]->k == EK::Var) {
+            for (const auto &sp : root_body) {
+                if (!sp) continue;
+                const Stmt *s = (sp->k == SK::Pub && !sp->body.empty()) ? sp->body.front().get() : sp.get();
+                if (s && s->k == SK::Enum && s->a == e.kids[0]->a) return s->a;
+            }
+        }
+        const std::string base_ty = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);
+        if (!base_ty.empty()) {
+            for (const auto &sp : root_body) {
+                if (!sp) continue;
+                const Stmt *s = (sp->k == SK::Pub && !sp->body.empty()) ? sp->body.front().get() : sp.get();
+                if (s && (s->k == SK::Struct || s->k == SK::ExternStruct) && s->a == base_ty) {
+                    for (const auto &f : s->fields)
+                        if (f.name == e.b && f.ann) return *f.ann;
+                }
+            }
+        }
+        return {};
+    }
     case EK::Quest:
         if (!e.kids.empty())
             return unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
@@ -1543,6 +1565,8 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
             return "bool";
         if (e.b == "parse_int") return "Result[i64, str]";
         if (e.b == "parse_float") return "Result[f64, str]";
+        if (e.b == "copy" && !e.kids.empty())
+            return infer_expr_type_hint(*e.kids[0], root_body, ext_rets);
         if (!e.kids.empty() && (e.b == "unwrap" || e.b == "unwrap_or")) {
             std::string u = unwrap_hint_adt(infer_expr_type_hint(*e.kids[0], root_body, ext_rets));
             if (!u.empty() && u != "dyn") return u;
@@ -2493,26 +2517,72 @@ private:
                 }
                 std::string recv_ty;
                 bool static_struct = false;
+                std::vector<std::string> qual_parts;
+                {
+                    size_t s0 = 0;
+                    while (s0 <= qual.size()) {
+                        size_t d = qual.find('.', s0);
+                        if (d == std::string::npos) {
+                            qual_parts.push_back(qual.substr(s0));
+                            break;
+                        }
+                        qual_parts.push_back(qual.substr(s0, d - s0));
+                        s0 = d + 1;
+                    }
+                }
+                const std::string root_qual = qual_parts.empty() ? qual : qual_parts[0];
+                auto check_static_decl = [&](const std::vector<StmtP> &b) {
+                    if (qual_parts.size() != 1) return;
+                    for (const auto &sp : b) {
+                        if (!sp) continue;
+                        const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
+                        if ((s.k == SK::Struct || s.k == SK::ExternStruct || s.k == SK::Enum) && s.a == qual)
+                            static_struct = true;
+                    }
+                };
                 auto find_var_ty = [&](const std::vector<StmtP> &b) {
                     std::function<void(const std::vector<StmtP> &)> walk = [&](const std::vector<StmtP> &ss) {
                         for (const auto &sp : ss) {
                             if (!sp) continue;
                             const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
-                            if ((s.k == SK::Struct || s.k == SK::ExternStruct || s.k == SK::Enum) && s.a == qual)
-                                static_struct = true;
                             if (s.k == SK::Fn || s.k == SK::ExportFn || s.k == SK::Impl) {
                                 for (const FnDecl &fn : s.fns) {
                                     for (const Param &p : fn.params) {
-                                        if (p.name == qual && s.line - 1 <= line) {
+                                        if (p.name == root_qual && s.line - 1 <= line) {
                                             if (p.ann && !p.ann->empty()) recv_ty = *p.ann;
                                             else if (s.k == SK::Impl && p.name == "self") recv_ty = s.a;
                                         }
                                     }
                                     walk(fn.body);
                                 }
-                            } else if ((s.k == SK::Let || s.k == SK::LetTmp) && s.a == qual && s.line - 1 <= line) {
+                            } else if ((s.k == SK::Let || s.k == SK::LetTmp) && s.a == root_qual && s.line - 1 <= line) {
                                 if (s.ann && !s.ann->empty()) recv_ty = *s.ann;
                                 else if (s.e1) recv_ty = infer_expr_type_hint(*s.e1, b);
+                            } else if (s.k == SK::ForRange && s.a == root_qual && s.line - 1 <= line) {
+                                recv_ty = "i64";
+                            } else if (s.k == SK::ForIter && s.a == root_qual && s.line - 1 <= line && s.e1) {
+                                std::string cty;
+                                if (s.e1->k == EK::Var) {
+                                    const std::string saved_rq = recv_ty;
+                                    // Check vector annotation if declared earlier.
+                                    for (const auto &top : b) {
+                                        if (!top) continue;
+                                        const Stmt &ts = (top->k == SK::Pub && !top->body.empty()) ? *top->body.front() : *top;
+                                        if (ts.k == SK::Fn || ts.k == SK::ExportFn || ts.k == SK::Impl) {
+                                            for (const FnDecl &fn : ts.fns) {
+                                                for (const Param &p : fn.params)
+                                                    if (p.name == s.e1->a && p.ann) cty = *p.ann;
+                                                for (const auto &bs : fn.body)
+                                                    if (bs && (bs->k == SK::Let || bs->k == SK::LetTmp) &&
+                                                        bs->a == s.e1->a && bs->ann)
+                                                        cty = *bs->ann;
+                                            }
+                                        }
+                                    }
+                                    (void)saved_rq;
+                                }
+                                if (cty.rfind("vec[", 0) == 0 && cty.back() == ']')
+                                    recv_ty = cty.substr(4, cty.size() - 5);
                             }
                             walk(s.body);
                             walk(s.body2);
@@ -2521,7 +2591,38 @@ private:
                     };
                     walk(b);
                 };
-                if (body_ptr) find_var_ty(*body_ptr);
+                if (body_ptr) {
+                    check_static_decl(*body_ptr);
+                    for (const ResolvedModule &rm : mods) check_static_decl(*rm.body);
+                    if (!static_struct) find_var_ty(*body_ptr);
+                }
+                auto resolve_field_ty = [&](const std::string &sty, const std::string &fname) -> std::string {
+                    auto scan_b = [&](const std::vector<StmtP> &b) -> std::string {
+                        for (const auto &sp : b) {
+                            if (!sp) continue;
+                            const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
+                            if ((s.k == SK::Struct || s.k == SK::ExternStruct) && s.a == sty) {
+                                for (const auto &f : s.fields)
+                                    if (f.name == fname && f.ann) return *f.ann;
+                            }
+                        }
+                        return {};
+                    };
+                    if (body_ptr) {
+                        std::string r = scan_b(*body_ptr);
+                        if (!r.empty()) return r;
+                    }
+                    for (const ResolvedModule &rm : mods) {
+                        std::string r = scan_b(*rm.body);
+                        if (!r.empty()) return r;
+                    }
+                    return {};
+                };
+                if (!static_struct && !recv_ty.empty() && qual_parts.size() > 1) {
+                    for (size_t qi = 1; qi < qual_parts.size() && !recv_ty.empty(); ++qi) {
+                        recv_ty = resolve_field_ty(recv_ty, qual_parts[qi]);
+                    }
+                }
                 bool matched_struct = false;
                 bool is_native_struct = false;
                 if (!static_struct && (recv_ty.rfind("Option", 0) == 0 || recv_ty.rfind("Result", 0) == 0)) {
@@ -2540,7 +2641,11 @@ private:
                     for (const auto &sp : b) {
                         if (!sp) continue;
                         const Stmt &s = (sp->k == SK::Pub && !sp->body.empty()) ? *sp->body.front() : *sp;
-                        if (static_struct && s.k == SK::Impl && s.a == qual) {
+                        if (static_struct && s.k == SK::Enum && s.a == qual) {
+                            matched_struct = true;
+                            for (const auto &v : s.variants)
+                                add_item(v.name, 20, format_enum_variant_sig(v) + " -> " + s.a);
+                        } else if (static_struct && s.k == SK::Impl && s.a == qual) {
                             for (const FnDecl &fn : s.fns) {
                                 const bool has_self = !fn.params.empty() && fn.params[0].name == "self";
                                 if (fn.name && !has_self) {

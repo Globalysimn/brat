@@ -108,14 +108,21 @@ jobs:
           ./bin/brat run examples/hello.brat
           ./bin/brat run examples/json_arena.brat
           python3 lang/tests/test_agreement.py --native-only
-          python3 lang/tests/test_cxx_frontend.py
-          python3 lang/tests/test_cxx_checker.py
-          python3 lang/tests/test_cxx_borrow.py
-          python3 lang/tests/test_cxx_modules.py
-          python3 lang/tests/test_bitwise.py
-          python3 lang/tests/test_runtime_json_enum.py
-          python3 lang/tests/test_defer_try_soundness.py
-          python3 lang/tests/test_import_prune.py
+          python3 lang/tests/run_all.py -j "$(sysctl -n hw.ncpu)" \
+            test_cxx_frontend.py \
+            test_cxx_checker.py \
+            test_cxx_borrow.py \
+            test_cxx_modules.py \
+            test_bitwise.py \
+            test_runtime_json_enum.py \
+            test_defer_try_soundness.py \
+            test_import_prune.py \
+            test_structs.py \
+            test_typed_enums.py \
+            test_struct_sra.py \
+            test_stack_depth.py \
+            test_perf_codegen.py \
+            test_lsp.py
 
   windows-x86_64:
     name: Native Windows (x86_64 LLP64)
@@ -139,17 +146,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./lang/cxx/bin/brat-cxx.exe run examples/json_arena.brat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_cxx_frontend.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_cxx_checker.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_cxx_borrow.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_cxx_modules.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_bitwise.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_runtime_json_enum.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & python lang/tests/test_import_prune.py
+          & python lang/tests/run_all.py -j $env:NUMBER_OF_PROCESSORS `
+            test_cxx_frontend.py `
+            test_cxx_checker.py `
+            test_cxx_borrow.py `
+            test_cxx_modules.py `
+            test_bitwise.py `
+            test_runtime_json_enum.py `
+            test_import_prune.py `
+            test_structs.py `
+            test_typed_enums.py `
+            test_struct_sra.py `
+            test_stack_depth.py `
+            test_perf_codegen.py `
+            test_lsp.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

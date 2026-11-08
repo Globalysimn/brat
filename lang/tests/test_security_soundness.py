@@ -796,6 +796,156 @@ def test_batch_1_2_3_regressions(cxx, env):
     assert "extern struct CbData { v: i32 }" in r_cb.stdout and "extern fn on_ev(cb: fn(CbData)) -> none;" in r_cb.stdout
 
 
+def test_ten_subsystem_improvements(cxx, env):
+    d = os.path.join(TMP, "ten_improvements")
+    os.makedirs(d, exist_ok=True)
+
+    # #1 (pinned str + chained vadd_self), #3 (bool + vec[f64] fast), #4 (register _rem exact budget)
+    src = os.path.join(d, "perf_and_pin.brat")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(
+            'extern fn strlen(p: ptr) -> usize\n'
+            'fn pick_step(x: i64, up: bool) -> i64 {\n'
+            '  if up { return x + 3 }\n'
+            '  return x - 1\n'
+            '}\n'
+            'fn both_ok(a: bool, b: bool) -> bool {\n'
+            '  return a && !b\n'
+            '}\n'
+            'fn scale_sum(mut xs: vec[f64], factor: f64) -> f64 {\n'
+            '  for i in 0..len(xs) {\n'
+            '    xs[i] = xs[i] * factor\n'
+            '  }\n'
+            '  let mut acc = 0.0\n'
+            '  for v in xs {\n'
+            '    acc = acc + v\n'
+            '  }\n'
+            '  return acc\n'
+            '}\n'
+            'fn rec_exact(n: i64) -> i64 {\n'
+            '  if n == 0 { return 0 }\n'
+            '  return 1 + rec_exact(n - 1)\n'
+            '}\n'
+            'fn main() -> i64 {\n'
+            '  let mut s = "0123456789abcdef"\n'
+            '  unsafe {\n'
+            '    let p = ptr_of_str(s)\n'
+            '    assert(strlen(p) == 16)\n'
+            '  }\n'
+            '  for i in 0..200 {\n'
+            '    s = s + "k" + "=" + str(i) + ";"\n'
+            '  }\n'
+            '  assert(s.starts_with("0123456789abcdefk=0;k=1;"))\n'
+            '  let mut mp = {}\n'
+            '  let dyn_k = "host"\n'
+            '  mp.set(dyn_k, "127.0.0.1:18080")\n'
+            '  assert(len(mp.get(dyn_k)) == 15)\n'
+            '  let mut hdr_wire = "GET /\\r\\n"\n'
+            '  hdr_wire = hdr_wire + dyn_k + ": " + mp.get(dyn_k) + "\\r\\n"\n'
+            '  assert(hdr_wire == "GET /\\r\\nhost: 127.0.0.1:18080\\r\\n")\n'
+            '  assert(mp.get(dyn_k) == "127.0.0.1:18080")\n'
+            '  assert(pick_step(10, true) == 13)\n'
+            '  assert(pick_step(10, false) == 9)\n'
+            '  assert(both_ok(true, false) == true)\n'
+            '  assert(both_ok(true, true) == false)\n'
+            '  let mut fv: vec[f64] = [1.5, 2.5, 4.0]\n'
+            '  assert(scale_sum(fv, 2.0) == 16.0)\n'
+            '  assert(rec_exact(1998) == 1998)\n'
+            '  let mut caught = ""\n'
+            '  try { let _bad = rec_exact(1999) } catch e { caught = e }\n'
+            '  assert(caught == "recursion too deep")\n'
+            '  return 0\n'
+            '}\n'
+        )
+    em = subprocess.check_output([cxx, "emit-c", "-O2", "--unsafe-ffi", src],
+                                 env=env, text=True)
+    assert "_r(" in em and "bf_vfat" in em and "bf_vset_f" in em, "expected fast codegen helpers missing"
+    c_p = os.path.join(d, "perf_and_pin.c")
+    exe_p = os.path.join(d, "perf_and_pin.asan")
+    with open(c_p, "w", encoding="utf-8") as f:
+        f.write(em)
+    subprocess.run(
+        ["gcc", "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined",
+         f"-I{ENGINE}", c_p, "-o", exe_p, "-lm", "-lpthread"],
+        check=True,
+    )
+    asan_env = dict(env, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1")
+    subprocess.run([exe_p], env=asan_env, check=True)
+
+    # #5 PCH caching when BRAT_CC is set
+    pch_home = os.path.join(d, "pch_cache")
+    pch_env = dict(env, XDG_CACHE_HOME=pch_home, BRAT_CC="gcc -O2")
+    pch_env.pop("BRAT_NO_PCH", None)
+    pch_env.pop("BRAT_NATIVE_CACHE_DISABLE", None)
+    for k in range(2):
+        p_b = os.path.join(d, f"pch_{k}.brat")
+        with open(p_b, "w", encoding="utf-8") as f:
+            f.write(f"print({k + 10})\n")
+        subprocess.run([cxx, "build", p_b, "-o", os.path.join(d, f"pch_{k}.bin")],
+                       env=pch_env, check=True)
+    pch_dir = os.path.join(pch_home, "brat", "pch")
+    assert os.path.isdir(pch_dir) and any(fn.endswith(".gch") or fn.endswith(".pch")
+                                          for fn in os.listdir(pch_dir)), "PCH not built under BRAT_CC"
+
+    # #6 LSP dot-completion on Enum. and chained struct fields (b.pos.)
+    lsp_base = (
+        "enum Color {\n  Red,\n  Green(i64),\n}\n"
+        "struct Vec3 {\n  x: i64,\n  y: i64,\n}\n"
+        "struct Body {\n  pos: Vec3,\n}\n"
+        "fn demo(b: Body) -> i64 {\n"
+    )
+    lsp_doc1 = lsp_base + "  let c = Color.\n  return 0\n}\n"
+    lsp_doc2 = lsp_base + "  return b.pos.\n}\n"
+    uri1 = "file://" + os.path.join(d, "comp1.brat")
+    uri2 = "file://" + os.path.join(d, "comp2.brat")
+
+    def lsp_frame(obj):
+        raw = json.dumps(obj).encode("utf-8")
+        return f"Content-Length: {len(raw)}\r\n\r\n".encode("ascii") + raw
+
+    payload = b"".join([
+        lsp_frame({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}}),
+        lsp_frame({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+        lsp_frame({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                   "params": {"textDocument": {"uri": uri1, "languageId": "brat", "version": 1, "text": lsp_doc1}}}),
+        lsp_frame({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+                   "params": {"textDocument": {"uri": uri1}, "position": {"line": 12, "character": 16}}}),
+        lsp_frame({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+                   "params": {"textDocument": {"uri": uri2, "languageId": "brat", "version": 1, "text": lsp_doc2}}}),
+        lsp_frame({"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion",
+                   "params": {"textDocument": {"uri": uri2}, "position": {"line": 12, "character": 15}}}),
+        lsp_frame({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": None}),
+        lsp_frame({"jsonrpc": "2.0", "method": "exit", "params": None}),
+    ])
+    lsp_out = subprocess.run([cxx, "lsp"], input=payload, capture_output=True, timeout=30, check=True).stdout
+    msgs = {}
+    idx = 0
+    while idx < len(lsp_out):
+        hdr_end = lsp_out.find(b"\r\n\r\n", idx)
+        if hdr_end < 0:
+            break
+        clen = int(lsp_out[idx:hdr_end].decode("ascii").split(":")[1].strip())
+        body = json.loads(lsp_out[hdr_end + 4:hdr_end + 4 + clen].decode("utf-8"))
+        if "id" in body:
+            msgs[body["id"]] = body.get("result")
+        idx = hdr_end + 4 + clen
+    enum_labels = {it["label"] for it in (msgs.get(2) or [])}
+    chain_labels = {it["label"] for it in (msgs.get(3) or [])}
+    assert {"Red", "Green"} <= enum_labels, f"Enum dot-completion missing variants: {enum_labels}"
+    assert {"x", "y"} <= chain_labels, f"Chained struct dot-completion missing fields: {chain_labels}"
+
+    # #7 Parallel `brat test -j 2 --filter`
+    tdir = os.path.join(d, "tfiles")
+    os.makedirs(tdir, exist_ok=True)
+    for name in ("test_alpha_1.brat", "test_alpha_2.brat", "test_skipme.brat"):
+        with open(os.path.join(tdir, name), "w", encoding="utf-8") as f:
+            f.write("assert(1 + 1 == 2)\n")
+    tr = subprocess.run([cxx, "test", "-j", "2", "--filter", "alpha", tdir],
+                        env=env, capture_output=True, text=True, check=True)
+    assert "ok " in tr.stdout and "test_alpha_1.brat" in tr.stdout and "test_alpha_2.brat" in tr.stdout
+    assert "test_skipme.brat" not in tr.stdout and "2 passed, 0 failed" in tr.stdout
+
+
 def main():
     cxx = _cxx.build()
     env = zero_python_env()
@@ -832,6 +982,7 @@ def main():
     test_13_2b2_and_compiler_leaks_under_asan(cxx)
     test_security_and_soundness_hardening(cxx, env)
     test_batch_1_2_3_regressions(cxx, env)
+    test_ten_subsystem_improvements(cxx, env)
     print("(v0.7) CLOSURE SUITE ALL GREEN")
 
 
