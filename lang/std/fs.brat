@@ -1,6 +1,5 @@
 pub fn exists(path: str) -> bool {
-  let r = read_file(path)
-  return !is_err(r)
+  return fs_exists(path)
 }
 
 pub fn read_or(path: str, fallback: str) -> str {
@@ -28,19 +27,7 @@ pub fn write_lines(path: str, lines: vec[str]) -> Result[i64, str] {
 }
 
 pub fn append_text(path: str, extra: str) -> Result[i64, str] {
-  let r = read_file(path)
-  if is_err(r) {
-    match r {
-      Err(msg) => {
-        if !msg.starts_with("[Errno 2]") {
-          return Err(msg)
-        }
-      }
-      Ok(_) => {}
-    }
-    return write_file(path, extra)
-  }
-  return write_file(path, unwrap(r) + extra)
+  return append_file(path, extra)
 }
 
 pub fn write_atomic(path: str, content: str) -> Result[i64, str] {

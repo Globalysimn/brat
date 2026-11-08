@@ -28,8 +28,8 @@ const std::set<std::string> BUILTINS = {
     "len", "__at", "__stag_is", "__shas", "Ok", "Err", "Some", "unwrap", "unwrap_or",
     "is_ok", "is_err", "is_some", "is_none", "is_vec",
     "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
-    "str", "read_file", "write_file", "read_bytes", "write_bytes", "proc_run",
-    "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_rename", "fs_remove", "assert",
+    "str", "read_file", "write_file", "append_file", "read_bytes", "write_bytes", "proc_run",
+    "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_exists", "fs_rename", "fs_remove", "assert",
     "mono_ns", "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
     "args", "args_bytes", "exit", "eprint", "raise", "time_ms", "sleep_ms", "env_get", "env_get_bytes",
@@ -418,7 +418,9 @@ std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
             }
             return infer_expr_ann(e->kids[1].get(), decl, funcs);
         }
+        if (e->a == "fs_exists") return std::string("bool");
         if (e->a == "read_file") return std::string("Result[str, str]");
+        if (e->a == "append_file" || e->a == "write_file") return std::string("Result[i64, str]");
         if (e->a == "re_find") return std::string("Option[str]");
         if (!funcs) return std::nullopt;
         auto rit = funcs->fn_rets.find(e->a);

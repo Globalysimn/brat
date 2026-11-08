@@ -544,7 +544,7 @@ static bool pure_read_builtin(const std::string &name) {
         "len", "str", "print", "eprint", "is_ok", "is_err", "is_some", "is_none",
         "is_vec", "is_str", "is_map", "is_bool", "is_int", "is_float", "tagof",
         "__stag_is", "__shas", "own", "sbuf_add", "tcp_send", "write_file",
-        "write_bytes", "json_stringify"
+        "append_file", "fs_exists", "write_bytes", "json_stringify"
     };
     return ro.count(name) > 0;
 }
@@ -554,7 +554,7 @@ static bool scalar_only_call(const std::string &name) {
         "own", "len", "is_ok", "is_err", "is_some", "is_none", "is_vec", "is_str",
         "is_map", "is_bool", "is_int", "is_float", "__stag_is", "__shas",
         "ptr_is_null", "ptr_read_i64", "ptr_read_f64", "ptr_read_f32", "ptr_read_u8",
-        "re_match", "sbuf_len", "slice_len", "time_ms", "mono_ns", "errno"
+        "re_match", "fs_exists", "sbuf_len", "slice_len", "time_ms", "mono_ns", "errno"
     };
     return sc.count(name) > 0;
 }
@@ -933,6 +933,7 @@ static const std::map<std::string, Ty> BRES = {
     {"__stag_is", Ty::of(Ty::Bool)}, {"__shas", Ty::of(Ty::Bool)},
     {"read_file", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
     {"write_file", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
+    {"append_file", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"read_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},
     {"write_bytes", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"proc_run", Ty::result(Ty::of(Ty::Map), Ty::of(Ty::Str))},
@@ -940,6 +941,7 @@ static const std::map<std::string, Ty> BRES = {
     {"utf8_str", Ty::result(Ty::of(Ty::Str), Ty::of(Ty::Str))},
     {"json_parse", Ty::result(Ty::dyn(), Ty::of(Ty::Str))},
     {"json_stringify", Ty::of(Ty::Str)},
+    {"fs_exists", Ty::of(Ty::Bool)},
     {"fs_rename", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"fs_remove", Ty::result(Ty::of(Ty::Int), Ty::of(Ty::Str))},
     {"sha256_bytes", Ty::result(Ty::wrap(Ty::Vec, Ty::of(Ty::Int)), Ty::of(Ty::Str))},

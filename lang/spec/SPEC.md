@@ -229,8 +229,9 @@ Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
 - System and I/O: `print`, `eprint`, `str`, `len`, `tagof`, `assert`, `raise`,
   `unwrap`, `is_err`, `is_none`, `is_bool`, `is_int`, `is_float`, `own`, `args`,
   `args_bytes`, `env_get`, `env_get_bytes`, `exit`, `time_ms`, `sleep_ms`,
-  `read_file`, `read_bytes`, `write_file`, `write_bytes`, `fs_rename`,
-  `fs_remove`, `proc_run`, `sql_open`, `lib_open`, `lib_sym`, `lib_close`, `call`.
+  `read_file`, `read_bytes`, `write_file`, `append_file`, `write_bytes`,
+  `fs_exists`, `fs_rename`, `fs_remove`, `proc_run`, `sql_open`, `lib_open`,
+  `lib_sym`, `lib_close`, `call`.
 - Telemetry: `log.info(...)`, `log.warn(...)`, `log.error(...)` and
   `trace.span("name") { ... }` emit structured JSON lines (`ts`, `lvl`, `msg`,
   `span`).

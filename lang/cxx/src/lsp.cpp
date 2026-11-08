@@ -1418,10 +1418,12 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"str", "fn str(x) -> str: convert value to UTF-8 string"},
         {"read_file", "fn read_file(path: str|vec[i64]) -> Result[str, str] (confined)"},
         {"write_file", "fn write_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined)"},
+        {"append_file", "fn append_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined atomic append)"},
         {"read_bytes", "fn read_bytes(path: str|vec[i64]) -> Result[vec[i64], str] (confined)"},
         {"write_bytes", "fn write_bytes(path: str|vec[i64], data: vec[i64]) -> Result[i64, str] (confined)"},
         {"utf8_bytes", "fn utf8_bytes(s: str) -> vec[i64]: UTF-8 octets 0..255"},
         {"utf8_str", "fn utf8_str(data: vec[i64]) -> Result[str, str]: decode validated UTF-8"},
+        {"fs_exists", "fn fs_exists(path: str|vec[i64]) -> bool (confined regular-file probe)"},
         {"fs_rename", "fn fs_rename(src: str|vec[i64], dst: str|vec[i64]) -> Result[i64, str] (confined atomic rename)"},
         {"fs_remove", "fn fs_remove(path: str|vec[i64]) -> Result[i64, str] (confined unlink)"},
         {"proc_run", "fn proc_run(prog: str, argv: vec[str|vec[i64]]) -> Result[map, str] (gated by BRAT_EXEC)"},
@@ -1606,8 +1608,9 @@ std::string infer_expr_type_hint(const Expr &e, const std::vector<StmtP> &root_b
         if (e.a == "len" || e.a == "time_ms" || e.a == "mono_ns") return "i64";
         if (e.a == "str") return "str";
         if (e.a == "is_ok" || e.a == "is_err" || e.a == "is_some" || e.a == "is_none" ||
-            e.a == "re_match") return "bool";
+            e.a == "re_match" || e.a == "fs_exists") return "bool";
         if (e.a == "read_file") return "Result[str, str]";
+        if (e.a == "write_file" || e.a == "append_file") return "Result[i64, str]";
         if (e.a == "re_find") return "Option[str]";
         if (e.a == "Some" && e.kids.size() == 1) {
             std::string in = infer_expr_type_hint(*e.kids[0], root_body, ext_rets);

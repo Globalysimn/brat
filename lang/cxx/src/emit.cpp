@@ -625,7 +625,7 @@ const std::string LOCAL_BINDING_PREFIX = "\x01local:";
 
 const std::set<std::string> HEAP_CALLS = {
     "str", "own", "str_from_ptr", "args", "args_bytes", "read_file", "write_file",
-    "read_bytes", "write_bytes", "proc_run", "env_get", "env_get_bytes",
+    "append_file", "read_bytes", "write_bytes", "proc_run", "env_get", "env_get_bytes",
     "utf8_bytes", "utf8_str", "json_parse", "json_stringify", "fs_rename", "fs_remove",
     "sha256_bytes", "random_bytes", "https_request_raw",
     "sql_open", "sql_close", "sql_exec", "sql_query",
@@ -10097,10 +10097,11 @@ V Emitter::ex_call(const Expr &e) {
         pre.push_back(cat("if (!vassert1(", keep(*args[0], a.val), ")) ", bail));
         return {pre, "vbool(1)"};
     }
-    if (name == "read_file" || name == "write_file" || name == "read_bytes" || name == "write_bytes" ||
+    if (name == "read_file" || name == "write_file" || name == "append_file" ||
+        name == "read_bytes" || name == "write_bytes" ||
         name == "proc_run" || name == "utf8_bytes" || name == "utf8_str" ||
         name == "json_parse" || name == "json_stringify" ||
-        name == "fs_rename" || name == "fs_remove" ||
+        name == "fs_exists" || name == "fs_rename" || name == "fs_remove" ||
         name == "sha256_bytes" || name == "random_bytes" || name == "https_request_raw" ||
         name == "sql_open" || name == "sql_close" || name == "sql_exec" || name == "sql_query" ||
         name == "tcp_listen" || name == "tcp_connect" ||
@@ -10113,7 +10114,8 @@ V Emitter::ex_call(const Expr &e) {
             {"read_file", "vreadfile"}, {"read_bytes", "vreadbytes"},
             {"utf8_bytes", "vutf8_bytes"}, {"utf8_str", "vutf8_str"},
             {"json_parse", "vjson_parse"},
-            {"fs_remove", "vfs_remove"}, {"sha256_bytes", "vsha256_bytes"},
+            {"fs_exists", "vfs_exists"}, {"fs_remove", "vfs_remove"},
+            {"sha256_bytes", "vsha256_bytes"},
             {"random_bytes", "vrandom_bytes"},
             {"sql_open", "vsql_open"}, {"sql_close", "vsql_close"},
             {"tcp_listen", "vtcp_listen"}, {"tcp_connect", "vtcp_connect"},
@@ -10121,7 +10123,8 @@ V Emitter::ex_call(const Expr &e) {
             {"sbuf_len", "vsbuf_len"}, {"sbuf_str", "vsbuf_str"},
         };
         static const std::map<std::string, std::string> BORROW_2 = {
-            {"write_file", "vwritefile"}, {"write_bytes", "vwritebytes"},
+            {"write_file", "vwritefile"}, {"append_file", "vappendfile"},
+            {"write_bytes", "vwritebytes"},
             {"proc_run", "vproc_run"}, {"fs_rename", "vfs_rename"},
             {"json_stringify", "vjson_stringify"},
             {"sql_exec", "vsql_exec"}, {"sbuf_add", "vsbuf_add"},

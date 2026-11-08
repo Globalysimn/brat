@@ -116,6 +116,35 @@ fs_out = run_prog(
 assert fs_out.strip().lower() == "true true true true true", fs_out
 assert os.path.exists(outside_txt) and os.path.islink(os.path.join(td, "link_keep.txt"))
 
+# 3b. std.fs.exists and append_text use O_NOFOLLOW stat/O_APPEND without UTF-8 whole-file reads
+os.makedirs(os.path.join(td, "sub_dir"), exist_ok=True)
+with open(os.path.join(td, "bin.dat"), "wb") as f:
+    f.write(b"\xff\x00\xfe")
+
+fs_bin_out = run_prog(
+    td,
+    "fs_exists_append_bin",
+    '''import std.fs
+fn main() -> i64 {
+    let ex_bin = std.fs.exists("bin.dat")
+    let ex_lnk = std.fs.exists("link_keep.txt")
+    let ex_dir = std.fs.exists("sub_dir")
+    let ex_out = std.fs.exists("../outside")
+    let ap_lnk = is_err(std.fs.append_text("link_keep.txt", "nope"))
+    let n1 = unwrap(std.fs.append_text("bin.dat", "tail"))
+    let n2 = unwrap(std.fs.append_text("fresh_log.txt", "a\\n"))
+    let n3 = unwrap(std.fs.append_text("fresh_log.txt", "b\\n"))
+    let fresh = unwrap(read_file("fresh_log.txt"))
+    print("{ex_bin} {ex_lnk} {ex_dir} {ex_out} {ap_lnk} {n1} {n2} {n3} {len(fresh)}")
+    return 0
+}
+''',
+)
+assert fs_bin_out.strip().lower() == "true false false false true 4 2 2 4", fs_bin_out
+with open(os.path.join(td, "bin.dat"), "rb") as f:
+    assert f.read() == b"\xff\x00\xfetail"
+assert open(outside_txt, encoding="utf-8").read() == "secret"
+
 # 4. Static borrow checker rejects inline `return ptr_of_str(local_s)` escape
 esc_bad = os.path.join(td, "escape_ptr.brat")
 with open(esc_bad, "w", encoding="utf-8") as f:

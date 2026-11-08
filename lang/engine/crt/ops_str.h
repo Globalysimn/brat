@@ -2272,7 +2272,7 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
     memset(&sa, 0, sizeof sa);
     sa.nLength = sizeof sa;
     sa.bInheritHandle = FALSE;
-    DWORD access = write_mode ? GENERIC_WRITE : GENERIC_READ;
+    DWORD access = (write_mode == 2) ? FILE_APPEND_DATA : (write_mode ? GENERIC_WRITE : GENERIC_READ);
     DWORD disp = write_mode ? OPEN_ALWAYS : OPEN_EXISTING;
     DWORD flags = FILE_ATTRIBUTE_NORMAL;
     if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
@@ -2306,7 +2306,7 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
             return NULL;
         }
     }
-    if (write_mode) {
+    if (write_mode == 1) {
         LARGE_INTEGER z;
         z.QuadPart = 0;
         if (!SetFilePointerEx(h, z, NULL, FILE_BEGIN) || !SetEndOfFile(h)) {
@@ -2315,22 +2315,24 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
             return NULL;
         }
     }
-    int fd = _open_osfhandle((intptr_t)h, (write_mode ? _O_WRONLY : _O_RDONLY) | _O_BINARY | _O_NOINHERIT);
+    int ofl = ((write_mode == 2) ? (_O_WRONLY | _O_APPEND) : (write_mode ? _O_WRONLY : _O_RDONLY)) | _O_BINARY | _O_NOINHERIT;
+    int fd = _open_osfhandle((intptr_t)h, ofl);
     if (fd < 0) { CloseHandle(h); errno = EIO; return NULL; }
-    FILE *f = _fdopen(fd, write_mode ? "wb" : "rb");
+    FILE *f = _fdopen(fd, (write_mode == 2) ? "ab" : (write_mode ? "wb" : "rb"));
     if (!f) { _close(fd); errno = EIO; return NULL; }
     return f;
 #else
     int fd = -1;
+    int wfl = (write_mode == 2) ? (O_WRONLY | O_CREAT | O_APPEND) : (write_mode ? (O_WRONLY | O_CREAT) : O_RDONLY);
     if (_vfiles_free()) {
-        int fl = (write_mode ? (O_WRONLY | O_CREAT) : O_RDONLY) | O_CLOEXEC;
+        int fl = wfl | O_CLOEXEC;
         fd = open(rp, fl, 0666);
         if (fd < 0) return NULL;
     } else {
         char leaf[1024];
         int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, escaped);
         if (dfd < 0) return NULL;
-        int fl = (write_mode ? (O_WRONLY | O_CREAT) : O_RDONLY) | O_CLOEXEC;
+        int fl = wfl | O_CLOEXEC;
 #ifdef O_NOFOLLOW
         fl |= O_NOFOLLOW;
 #endif
@@ -2361,13 +2363,13 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
         if (too_large) *too_large = 1;
         return NULL;
     }
-    if (write_mode && ftruncate(fd, 0) != 0) {
+    if (write_mode == 1 && ftruncate(fd, 0) != 0) {
         int e = errno;
         close(fd);
         errno = e;
         return NULL;
     }
-    FILE *f = fdopen(fd, write_mode ? "wb" : "rb");
+    FILE *f = fdopen(fd, (write_mode == 2) ? "ab" : (write_mode ? "wb" : "rb"));
     if (!f) { int e = errno; close(fd); errno = e; return NULL; }
     return f;
 #endif

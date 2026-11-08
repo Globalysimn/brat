@@ -1051,6 +1051,82 @@ BFN Val vwritefile(Val p, Val t) {
     return vtagv("ok", a);
 }
 
+BFN Val vappendfile(Val p, Val t) {
+    if (t.tag != V_STR) return verr("append_file wants string path and text");
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad == 1) return verr("append_file wants string path and text");
+    if (pbad == 2) return verr("embedded NUL in file path");
+    if (pbad == 4) return verr("append_file byte out of range 0..255");
+    if (!rp) return verr("path outside the program directory");
+    int escaped = 0;
+    FILE *f = _vopen_confined_stream(rp, 2, 0, &escaped, NULL);
+    if (!f) {
+        if (escaped) return verr("path escaped during open");
+        return verr_os(rp);
+    }
+    const char *ts = vstr_c(&t);
+    size_t n = vstr_len_fast(&t);
+    errno = 0;
+    size_t w = n ? fwrite(ts, 1, n, f) : 0;
+    int werr = errno;
+    int ferr = ferror(f);
+    errno = 0;
+    int cerr = fclose(f);
+    int clerr = errno;
+    if (w != n || ferr) { errno = werr ? werr : EIO; return verr_os(rp); }
+    if (cerr != 0) { errno = clerr ? clerr : EIO; return verr_os(rp); }
+    Vec *a = vvec();
+    vec_push(a, vint((bint)n));
+    return vtagv("ok", a);
+}
+
+BFN Val vfs_exists(Val p) {
+    char pbuf[8192];
+    int pbad = 0;
+    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
+    if (pbad != 0 || !rp) return vbool(0);
+#if defined(_WIN32)
+    wchar_t wp[4096];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0)
+        return vbool(0);
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL;
+    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           &sa, OPEN_EXISTING, flags, NULL);
+    if (h == INVALID_HANDLE_VALUE) return vbool(0);
+    BY_HANDLE_FILE_INFORMATION fi;
+    int ok = GetFileType(h) == FILE_TYPE_DISK &&
+             GetFileInformationByHandle(h, &fi) &&
+             !(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+             (_vfiles_free() ||
+              (!(fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && _vhandle_confined(h)));
+    CloseHandle(h);
+    return vbool(ok);
+#else
+    if (_vfiles_free()) {
+        struct stat st;
+        return vbool(stat(rp, &st) == 0 && S_ISREG(st.st_mode));
+    }
+    char leaf[1024];
+    int esc = 0;
+    int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
+    if (dfd < 0) return vbool(0);
+    struct stat st;
+    int ok = _vfd_confined(dfd) &&
+             fstatat(dfd, leaf, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+             S_ISREG(st.st_mode);
+    close(dfd);
+    return vbool(ok);
+#endif
+}
+
 BFN Val vreadbytes(Val p) {
     char pbuf[8192];
     int pbad = 0;
