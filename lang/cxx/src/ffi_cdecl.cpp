@@ -2142,18 +2142,61 @@ bool parse_c_header(std::string_view raw_text,
             }
             if (match_lp < clean_item.size() && match_lp > 0) {
                 std::string head = trim_sv(std::string_view(clean_item).substr(0, match_lp));
-                // Skip if `head` itself contains `(` (e.g. `void (*signal(int, void (*)(int)))(int)`)
-                if (head.find('(') != std::string::npos) continue;
-                std::string ret_t, fn_name;
-                if (!split_c_decl_type_and_name(head, const_env, ret_t, fn_name, false) || fn_name.empty()) continue;
+                std::string ret_t, fn_name, args_str;
+                if (head.find('(') != std::string::npos) {
+                    // Handle functions returning a function pointer, e.g.
+                    // `void (*signal(int sig, void (*h)(int)))(int)`.
+                    if (head.empty() || head.back() != ')') continue;
+                    int hd = 0;
+                    size_t outer_lp = head.size();
+                    for (size_t k = head.size(); k > 0; --k) {
+                        if (head[k - 1] == ')') ++hd;
+                        else if (head[k - 1] == '(') {
+                            if (--hd == 0) { outer_lp = k - 1; break; }
+                        }
+                    }
+                    if (outer_lp >= head.size()) continue;
+                    std::string base_ret = trim_sv(std::string_view(head).substr(0, outer_lp));
+                    if (base_ret.rfind("extern ", 0) == 0)
+                        base_ret = trim_sv(std::string_view(base_ret).substr(7));
+                    if (base_ret.rfind("static ", 0) == 0 || base_ret.empty()) continue;
+                    std::string mid = trim_sv(std::string_view(head).substr(outer_lp + 1, head.size() - outer_lp - 2));
+                    if (mid.empty() || mid[0] != '*') continue;
+                    mid = trim_sv(std::string_view(mid).substr(1));
+                    if (mid.empty() || mid.back() != ')') continue;
+                    int md = 0;
+                    size_t fn_lp = mid.size();
+                    for (size_t k = mid.size(); k > 0; --k) {
+                        if (mid[k - 1] == ')') ++md;
+                        else if (mid[k - 1] == '(') {
+                            if (--md == 0) { fn_lp = k - 1; break; }
+                        }
+                    }
+                    if (fn_lp >= mid.size() || fn_lp == 0) continue;
+                    fn_name = trim_sv(std::string_view(mid).substr(0, fn_lp));
+                    bool valid_id = !fn_name.empty() && is_ident0(fn_name[0]);
+                    for (char c : fn_name)
+                        if (!is_identc(c)) valid_id = false;
+                    if (!valid_id) continue;
+                    args_str = trim_sv(std::string_view(mid).substr(fn_lp + 1, mid.size() - fn_lp - 2));
+                    std::string cb_params = trim_sv(std::string_view(clean_item).substr(
+                        match_lp + 1, clean_item.size() - match_lp - 2));
+                    std::string dummy_nm;
+                    if (!parse_fnptr_decl(base_ret + " (*__r)(" + cb_params + ")", ret_t, dummy_nm))
+                        continue;
+                } else {
+                    if (!split_c_decl_type_and_name(head, const_env, ret_t, fn_name, false) || fn_name.empty())
+                        continue;
+                    if (ret_t.rfind("extern ", 0) == 0) ret_t = trim_sv(std::string_view(ret_t).substr(7));
+                    if (ret_t.rfind("static ", 0) == 0) continue;  // internal static helper declaration
+                    args_str = trim_sv(std::string_view(clean_item).substr(
+                        match_lp + 1, clean_item.size() - match_lp - 2));
+                }
                 if (fn_name == "if" || fn_name == "while" || fn_name == "for" || fn_name == "switch" || fn_name == "return" || fn_name == "sizeof")
                     continue;
-                if (ret_t.rfind("extern ", 0) == 0) ret_t = trim_sv(std::string_view(ret_t).substr(7));
-                if (ret_t.rfind("static ", 0) == 0) continue;  // internal static helper declaration
 
                 if (!abi_bad.empty()) out.abi_unsupported[fn_name] = abi_bad;
 
-                std::string args_str = trim_sv(std::string_view(clean_item).substr(match_lp + 1, clean_item.size() - match_lp - 2));
                 CFnDecl fn;
                 fn.ret = ret_t;
                 if (!args_str.empty() && args_str != "void") {

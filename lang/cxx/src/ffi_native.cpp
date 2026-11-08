@@ -872,47 +872,59 @@ static CheckReport check_declarations(const BratFfiSurface &surf,
         }
 
         std::string bret = d.ret.value_or("none");
-        auto rrc = resolve_c_type(&cdecl, cfn.ret, tm);
-        if (bret == "none") {
-            if (rrc.kind != "none") {
-                rep.err("extern fn " + d.name + ": BRAT declares no result, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
+        std::string ret_cb_r;
+        std::vector<std::string> ret_cb_p;
+        if (bret.rfind("fn(", 0) == 0 || parse_c_callback(cfn.ret, &cdecl, ret_cb_r, ret_cb_p)) {
+            if (!(is_plugin && bret == "ptr")) {
+                std::string why;
+                if (!same_callback_sig(bret, cfn.ret, cdecl, brat_struct_names, tm, why)) {
+                    rep.err("extern fn " + d.name + ": return value " + why);
+                    fn_bad = true;
+                }
+            }
+        } else {
+            auto rrc = resolve_c_type(&cdecl, cfn.ret, tm);
+            if (bret == "none") {
+                if (rrc.kind != "none") {
+                    rep.err("extern fn " + d.name + ": BRAT declares no result, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
+                    fn_bad = true;
+                }
+            } else if (rrc.kind == "none") {
+                rep.err("extern fn " + d.name + ": " + std::string(header_name) + " returns `void`, BRAT declares `" + bret + "`");
+                fn_bad = true;
+            } else if (rrc.kind == "struct") {
+                if (bret != rrc.extra || !brat_struct_names.count(bret) ||
+                    !cdecl.structs.count(rrc.extra) || cdecl.structs.at(rrc.extra).empty()) {
+                    rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + rrc.extra + "`");
+                    fn_bad = true;
+                }
+            } else if (rrc.kind == "ptr" || rrc.kind == "str") {
+                std::string relem = element_of_ptr(bret);
+                const bool ptr_word_int = (tm.ptr == 4)
+                    ? (bret == "i32" || bret == "u32" || bret == "usize")
+                    : (bret == "i64" || bret == "u64" || bret == "usize");
+                if (rrc.kind == "str" && bret != "str" && bret != "ptr" && !ptr_word_int && relem != "u8" && relem != "i8") {
+                    rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
+                    fn_bad = true;
+                } else if (!is_plugin && rrc.kind == "ptr" && bret == "ptr" && is_fixed_scalar(rrc.extra)) {
+                    rep.err("extern fn " + d.name + ": BRAT returns erased `ptr`, incompatible with scalar `" + rrc.extra + " *`; use `ptr[T]`");
+                    fn_bad = true;
+                } else if (!is_plugin && rrc.kind == "ptr" && bret == "ptr" && c_struct_representable(rrc.extra)) {
+                    rep.err("extern fn " + d.name + ": BRAT returns erased `ptr` for `" + rrc.extra + " *`; use `ptr[" + rrc.extra + "]`");
+                    fn_bad = true;
+                } else if (rrc.kind == "ptr" && relem.empty() && bret != "ptr" && !ptr_word_int) {
+                    rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
+                    fn_bad = true;
+                } else if (rrc.kind == "ptr" && !relem.empty() && !pointee_ok(relem, rrc.extra, brat_struct_names, tm)) {
+                    rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
+                    fn_bad = true;
+                }
+            } else if (!same_brat_ffi_scalar(bret, rrc.kind, tm)) {
+                rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "` (" + size_note_str(bret, tm) +
+                        "), " + std::string(header_name) + " returns `" +
+                        (rrc.kind == "typedef" ? trim_sv(cfn.ret) : rrc.kind) + "` (" + size_note_str(rrc.kind, tm) + ")");
                 fn_bad = true;
             }
-        } else if (rrc.kind == "none") {
-            rep.err("extern fn " + d.name + ": " + std::string(header_name) + " returns `void`, BRAT declares `" + bret + "`");
-            fn_bad = true;
-        } else if (rrc.kind == "struct") {
-            if (bret != rrc.extra || !brat_struct_names.count(bret) ||
-                !cdecl.structs.count(rrc.extra) || cdecl.structs.at(rrc.extra).empty()) {
-                rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + rrc.extra + "`");
-                fn_bad = true;
-            }
-        } else if (rrc.kind == "ptr" || rrc.kind == "str") {
-            std::string relem = element_of_ptr(bret);
-            const bool ptr_word_int = (tm.ptr == 4)
-                ? (bret == "i32" || bret == "u32" || bret == "usize")
-                : (bret == "i64" || bret == "u64" || bret == "usize");
-            if (rrc.kind == "str" && bret != "str" && bret != "ptr" && !ptr_word_int && relem != "u8" && relem != "i8") {
-                rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
-                fn_bad = true;
-            } else if (!is_plugin && rrc.kind == "ptr" && bret == "ptr" && is_fixed_scalar(rrc.extra)) {
-                rep.err("extern fn " + d.name + ": BRAT returns erased `ptr`, incompatible with scalar `" + rrc.extra + " *`; use `ptr[T]`");
-                fn_bad = true;
-            } else if (!is_plugin && rrc.kind == "ptr" && bret == "ptr" && c_struct_representable(rrc.extra)) {
-                rep.err("extern fn " + d.name + ": BRAT returns erased `ptr` for `" + rrc.extra + " *`; use `ptr[" + rrc.extra + "]`");
-                fn_bad = true;
-            } else if (rrc.kind == "ptr" && relem.empty() && bret != "ptr" && !ptr_word_int) {
-                rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
-                fn_bad = true;
-            } else if (rrc.kind == "ptr" && !relem.empty() && !pointee_ok(relem, rrc.extra, brat_struct_names, tm)) {
-                rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "`, " + std::string(header_name) + " returns `" + trim_sv(cfn.ret) + "`");
-                fn_bad = true;
-            }
-        } else if (!same_brat_ffi_scalar(bret, rrc.kind, tm)) {
-            rep.err("extern fn " + d.name + ": BRAT returns `" + bret + "` (" + size_note_str(bret, tm) +
-                    "), " + std::string(header_name) + " returns `" +
-                    (rrc.kind == "typedef" ? trim_sv(cfn.ret) : rrc.kind) + "` (" + size_note_str(rrc.kind, tm) + ")");
-            fn_bad = true;
         }
 
         if (!fn_bad) {

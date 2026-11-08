@@ -596,7 +596,7 @@ struct Late {
 };
 
 struct Cb {
-    std::string name, ret;
+    std::string name, ret, ret_ann;
     std::vector<std::string> params;
 };
 
@@ -8807,33 +8807,43 @@ std::string Emitter::emit_program() {
     out.clear();
     run_pipeline();
     cb_wrappers.clear();
-    auto ffi_decl_type_impl = [&](auto &&self, const std::string &ann) -> std::string {
-        if (ann.empty() || ann == "none") return "void";
-        if (structs.count(ann)) return ffi_c(ann);
-        if (ann == "ptr") return "void *";
+    auto ffi_decl_impl = [&](auto &&self, const std::string &ann,
+                             const std::string &inner) -> std::string {
+        auto attach = [](const std::string &base, const std::string &d) -> std::string {
+            if (d.empty()) return base;
+            return base + " " + d;
+        };
+        if (ann.empty() || ann == "none") return attach("void", inner);
+        if (structs.count(ann)) return attach(ffi_c(ann), inner);
+        if (ann == "ptr") return attach("void *", inner);
         if (ann.rfind("fn", 0) == 0) {
             auto sig = callback_signature(ann);
             if (!sig) throw std::runtime_error("unsupported FFI callback type `" + ann + "`");
             std::string params;
             for (const auto &param : sig->first) {
                 if (!params.empty()) params += ", ";
-                params += self(self, param);
+                params += self(self, param, "");
             }
-            return self(self, sig->second) + " (*) (" + (params.empty() ? "void" : params) + ")";
+            std::string ptr_decl =
+                "(*" + inner + ") (" + (params.empty() ? "void" : params) + ")";
+            return self(self, sig->second, ptr_decl);
         }
         if (ann.rfind("ptr[", 0) == 0 && ann.back() == ']') {
             std::string elem = ann.substr(4, ann.size() - 5);
             if (elem.rfind("fn", 0) == 0)
                 throw std::runtime_error("pointer to callback is not a supported FFI type");
-            return self(self, elem) + " *";
+            return attach(self(self, elem, "") + " *", inner);
         }
         auto it = ffi_scalar_c().find(ann);
         if (it == ffi_scalar_c().end())
             throw std::runtime_error("unsupported FFI type `" + ann + "` in an extern declaration");
-        return it->second;
+        return attach(it->second, inner);
     };
     auto ffi_decl_type = [&](const std::string &ann) {
-        return ffi_decl_type_impl(ffi_decl_type_impl, ann);
+        return ffi_decl_impl(ffi_decl_impl, ann, "");
+    };
+    auto ffi_decl_named = [&](const std::string &ann, const std::string &inner) {
+        return ffi_decl_impl(ffi_decl_impl, ann, inner);
     };
     for (const auto &[cbname, info] : fns) {
         if (info.ctor || info.decl == nullptr) continue;
@@ -8857,21 +8867,22 @@ std::string Emitter::emit_program() {
                 break;
             }
             try {
-                t = ffi_decl_type(*ann);
+                t = ffi_decl_named(*ann, arg);
             } catch (const std::runtime_error &) {
                 ok = false;
                 break;
             }
-            cparams.push_back(cat(t, " ", arg));
+            cparams.push_back(t);
         }
         if (!ok) continue;
+        std::string ret_s = ret ? *ret : std::string("none");
         std::string cret;
         try {
-            cret = ffi_decl_type(ret ? *ret : std::string("none"));
+            cret = ffi_decl_type(ret_s);
         } catch (const std::runtime_error &) {
             continue;
         }
-        cb_wrappers.push_back(Cb{cbname, cret, cparams});
+        cb_wrappers.push_back(Cb{cbname, cret, ret_s, cparams});
     }
     out.clear();
     ic_n = 0;
@@ -9179,8 +9190,9 @@ std::string Emitter::emit_program() {
             if (has_pure) attr = has_reads ? " BRAT_ATTR_PURE" : " BRAT_ATTR_CONST";
             else if (has_nothrow) attr = " BRAT_ATTR_NOTHROW";
         }
-        ln("", cat("extern ", cret, " ", e.name, "(", cparams.empty() ? "void" : cparams, ")",
-                   attr, ";"));
+        const std::string ext_head =
+            cat(e.name, "(", cparams.empty() ? "void" : cparams, ")");
+        ln("", cat("extern ", ffi_decl_named(e.ret ? *e.ret : std::string(), ext_head), attr, ";"));
     }
     ln("", "");
     for (const auto &cb : cb_wrappers) {
@@ -9189,7 +9201,9 @@ std::string Emitter::emit_program() {
             if (!joined.empty()) joined += ", ";
             joined += p;
         }
-        ln("", cat(cb.ret, " brat_cb_", cb.name, "(", joined, ");"));
+        const std::string cb_head =
+            cat("brat_cb_", cb.name, "(", joined.empty() ? "void" : joined, ")");
+        ln("", cat(ffi_decl_named(cb.ret_ann, cb_head), ";"));
     }
     ln("", "");
     if (!global_lets.empty()) {
@@ -9221,7 +9235,7 @@ std::string Emitter::emit_program() {
                 // a single float type and the callee expects one.
                 pushes.push_back(cat("vec_push(_a, vfloat((double)", arg, "));"));
             } else if (ann && (ann->rfind("ptr", 0) == 0 || ann->rfind("fn", 0) == 0)) {
-                pushes.push_back(cat("vec_push(_a, vint((int64_t)", arg, "));"));
+                pushes.push_back(cat("vec_push(_a, vint((int64_t)(intptr_t)", arg, "));"));
             } else if (ann) {
                 // Every integer width, sign-extended: a `short -1` is -1.
                 pushes.push_back(cat("vec_push(_a, vint((int64_t)", arg, "));"));
@@ -9232,7 +9246,9 @@ std::string Emitter::emit_program() {
             if (!joined.empty()) joined += ", ";
             joined += p;
         }
-        ln("", cat(cb.ret, " brat_cb_", cb.name, "(", joined, ") {"));
+        const std::string cb_head =
+            cat("brat_cb_", cb.name, "(", joined.empty() ? "void" : joined, ")");
+        ln("", cat(ffi_decl_named(cb.ret_ann, cb_head), " {"));
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
         ln("  ", "vcb_check(vnil());");
@@ -9247,8 +9263,8 @@ std::string Emitter::emit_program() {
             ln("  ", "return _r.as.b;");
         } else if (*ret == "str") {
             ln("  ", "const char *_sp = vstr_pin(_r); vcb_check(_r); return _sp;");
-        } else if (ret->rfind("ptr", 0) == 0) {
-            ln("  ", cat("return (", ffi_decl_type(*ret), ")_r.as.ival;"));
+        } else if (ret->rfind("ptr", 0) == 0 || ret->rfind("fn", 0) == 0) {
+            ln("  ", cat("return (", ffi_decl_type(*ret), ")(intptr_t)_r.as.ival;"));
         } else if (*ret == "f32" || *ret == "f64") {
             // BRAT has one float type; a `float` return read out of `ival` is
             // the float's bit pattern, which is how 3.5 became 4.6e18.
@@ -10223,10 +10239,10 @@ V Emitter::ex_call(const Expr &e) {
             pa_all.push_back(cat("if (verr_pending()) ", err_bail()));
             return {pa_all, t};
         }
-        if (ret == "ptr" || ret.rfind("ptr[", 0) == 0) {
-            if (fl.empty() && held.empty()) return {pa_all, cat("vint((int64_t)(", call, "))")};
+        if (ret == "ptr" || ret.rfind("ptr[", 0) == 0 || ret.rfind("fn", 0) == 0) {
+            if (fl.empty() && held.empty()) return {pa_all, cat("vint((int64_t)(intptr_t)(", call, "))")};
             std::string r = new_tmp("pr");
-            pa_all.push_back(cat("int64_t ", r, " = (int64_t)(", call, ");"));
+            pa_all.push_back(cat("int64_t ", r, " = (int64_t)(intptr_t)(", call, ");"));
             finish_post_call();
             return {pa_all, cat("vint(", r, ")")};
         }

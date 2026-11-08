@@ -215,6 +215,40 @@ def main():
     n += 1
     print("ffi cb gate ok: typed pointer callback is C-compatible")
 
+    fn_ptr_hdr = os.path.join(TMP, "fn_ptr_decl.h")
+    with open(fn_ptr_hdr, "w", encoding="utf-8") as f:
+        f.write("int (*install_hook(int sig, int (*h)(int)))(int);\n")
+    fn_ptr_decl_src = os.path.join(TMP, "fn_ptr_decl.brat")
+    with open(fn_ptr_decl_src, "w", encoding="utf-8") as f:
+        f.write(
+            'extern "c" fn install_hook(sig: i32, h: fn(i32) -> i32) -> fn(i32) -> i32\n'
+            'fn takes_cb(cb: fn(i64) -> str, k: i64) -> i64 {\n'
+            '  return k\n'
+            '}\n'
+            'fn returns_cb(x: i32) -> fn(i32) -> i32 {\n'
+            '  return install_hook(x, "id_cb")\n'
+            '}\n'
+            'fn id_cb(v: i32) -> i32 {\n'
+            '  return v\n'
+            '}\n'
+            'fn main() -> i64 {\n'
+            '  return 0\n'
+            '}\n'
+        )
+    cxx2 = subprocess.run([CXX, "emit-c", "--header", fn_ptr_hdr, fn_ptr_decl_src],
+                          capture_output=True, timeout=60)
+    assert cxx2.returncode == 0, cxx2.stderr.decode("utf-8", "replace")
+    cfile2 = os.path.join(TMP, "fn_ptr_decl.c")
+    obj2 = os.path.join(TMP, "fn_ptr_decl.o")
+    with open(cfile2, "wb") as f:
+        f.write(cxx2.stdout)
+    cc2 = subprocess.run(["cc", "-std=c99", "-Wall", "-Werror", "-Wno-unused-function",
+                          "-I", ENG, "-c", cfile2, "-o", obj2],
+                         capture_output=True, timeout=120)
+    assert cc2.returncode == 0, cc2.stderr.decode("utf-8", "replace")[-600:]
+    n += 1
+    print("ffi cb gate ok: function-pointer parameter and return declarators compile cleanly")
+
     print("FFI CALLBACK GATE ALL GREEN (%d asserts)" % n)
 
 
