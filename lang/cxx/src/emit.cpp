@@ -711,6 +711,7 @@ struct Emitter {
     std::vector<ir::Proof> *proofs = nullptr;
     std::map<std::string, std::set<std::string>> fastvec;
     std::map<std::string, std::set<std::string>> fastbool;
+    std::map<std::string, std::set<std::string>> fastint;
     std::string fkind = "int64_t";
     std::map<std::string, std::string> fsym;
     bool need_idiv = false, need_imod = false, need_idiv_nz = false, need_imod_nz = false;
@@ -719,6 +720,7 @@ struct Emitter {
     bool need_vfat = false, need_vset_f = false;
     std::set<std::string> fvecvars;
     std::set<std::string> fboolvars;
+    std::set<std::string> fintvars;
     std::string fself_rec;
     int ic_n = 0, fic_n = 0, mic_slot = -1;
     std::map<std::pair<std::string, std::vector<std::string>>, int> shapes;
@@ -814,6 +816,7 @@ struct Emitter {
     bool int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand, const std::string &kind,
                   const std::set<std::string> &intvars, const std::set<std::string> &vecvars);
     bool intish(const Expr &e, const std::string &kind, const std::set<std::string> &intvars);
+    bool fint(const Expr &e);
     bool booly(const Expr &e);
     bool all_bool(const Expr &e);
     bool print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand, const std::string &kind,
@@ -1100,6 +1103,7 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
     case EK::Var:
         return intvars.count(e.a);
     case EK::Un:
+        if (e.a == "!") return true;
         return intish(*e.kids[0], kind, intvars);
     case EK::Move:
         return intish(*e.kids[0], kind, intvars);
@@ -1107,8 +1111,11 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
         return kind == "i64v" || kind == "i64v_dyn";
     case EK::Bin:
         if (e.a == "==" || e.a == "!=" || e.a == "<" || e.a == ">" || e.a == "<=" ||
-            e.a == ">=" || e.a == "&&" || e.a == "||")
+            e.a == ">=")
             return true;
+        if (e.a == "&&" || e.a == "||")
+            return all_bool(e) ||
+                   (intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars));
         return intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars);
     case EK::Call: {
         if (e.a == "len" && (kind == "i64v" || kind == "i64v_dyn" || kind == "f64v") && e.kids.size() == 1)
@@ -1120,6 +1127,10 @@ bool Emitter::intish(const Expr &e, const std::string &kind, const std::set<std:
     default:
         return false;
     }
+}
+
+bool Emitter::fint(const Expr &e) {
+    return fkind != "f64" || intish(e, "f64v", fintvars);
 }
 
 bool Emitter::all_bool(const Expr &e) {
@@ -1152,7 +1163,7 @@ bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand
                     if (p.second.find('.') != std::string::npos || vecvars.count(p.second) ||
                         fboolvars.count(p.second) || global_lets.count(p.second))
                         return false;
-                    if (dbl) fslots++;
+                    if (dbl && !intvars.count(p.second)) fslots++;
                 }
             }
             continue;
@@ -1160,7 +1171,7 @@ bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand
         if (booly(a) || (a.k == EK::Var && fboolvars.count(a.a))) return false;
         if (!int_expr(a, cand, kind, intvars, vecvars)) return false;
         if (a.k == EK::Num && a.is_float) fslots++;
-        else if (dbl && !(a.k == EK::Num && !a.is_float)) fslots++;
+        else if (dbl && !intish(a, kind, intvars)) fslots++;
     }
     return fslots <= 8;
 }
@@ -1195,7 +1206,8 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
             if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) return false;
             if (!intish(*s.e2, kind, intvars)) return false;
             if (kind == "f64v") {
-                if (!int_expr(*s.e3, cand, kind, intvars, vecvars)) return false;
+                if (!int_expr(*s.e3, cand, kind, intvars, vecvars) || intish(*s.e3, kind, intvars))
+                    return false;
             } else {
                 if (!intish(*s.e3, kind, intvars)) return false;
             }
@@ -1500,6 +1512,7 @@ void Emitter::compute_fast() {
     std::map<std::string, std::string> kinds;
     fastvec.clear();
     fastbool.clear();
+    fastint.clear();
     for (const auto &[name, entry] : fns) {
         if (entry.ctor || entry.decl == nullptr) continue;
         const std::vector<Param> &params = entry.decl->params;
@@ -1617,13 +1630,57 @@ void Emitter::compute_fast() {
             const std::set<std::string> &vvars = fastvec[name];
             fboolvars = fastbool.count(name) ? fastbool[name] : std::set<std::string>();
             std::set<std::string> intvars;
+            bool mixed_fvar = false;
             if (kind == "i64" || kind == "i64_dyn" || kind == "i64v" || kind == "i64v_dyn") {
                 for (const auto &pn : pnames)
                     if (!vvars.count(pn)) intvars.insert(pn);
+            } else {
+                std::set<std::string> lvars;
+                collect_vars(view(fns[name].decl->body), lvars);
+                for (const auto &pn : pnames) lvars.erase(pn);
+                for (const auto &vv : vvars) lvars.erase(vv);
+                intvars = lvars;
+                std::function<void(const StmtList &, bool)> walk_fvars = [&](const StmtList & sl,
+                                                                             bool verify) {
+                    for (const Stmt *sp : sl) {
+                        const Stmt &s = *sp;
+                        if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::Set) {
+                            if (s.e1 && s.a.find('.') == std::string::npos) {
+                                bool rhs_i = intish(*s.e1, kind, intvars);
+                                if (!verify) {
+                                    if (!rhs_i && intvars.erase(s.a)) mixed_fvar = true;
+                                } else if (rhs_i != (intvars.count(s.a) > 0)) {
+                                    mixed_fvar = true;
+                                }
+                            }
+                        } else if (s.k == SK::ForRange) {
+                            if (verify && !intvars.count(s.a)) mixed_fvar = true;
+                        } else if (s.k == SK::ForIter) {
+                            if (!verify) {
+                                if (intvars.erase(s.a)) mixed_fvar = true;
+                            } else if (intvars.count(s.a)) {
+                                mixed_fvar = true;
+                            }
+                        }
+                        walk_fvars(view(s.body), verify);
+                        walk_fvars(view(s.body2), verify);
+                        if (const Stmt *els = real_else(s)) {
+                            StmtList one = els->k == SK::Block ? view(els->body) : StmtList{els};
+                            walk_fvars(one, verify);
+                        }
+                    }
+                };
+                do {
+                    mixed_fvar = false;
+                    walk_fvars(view(fns[name].decl->body), false);
+                } while (mixed_fvar);
+                mixed_fvar = false;
+                walk_fvars(view(fns[name].decl->body), true);
             }
             auto snapshot = cand;   // int_body mutates a copy of candidate vars
             std::vector<bool> returned;
-            const bool ok = int_body(view(fns[name].decl->body), snapshot, kind, intvars,
+            const bool ok = !mixed_fvar &&
+                            int_body(view(fns[name].decl->body), snapshot, kind, intvars,
                                      vvars, &returned);
             bool any_int = false;
             for (bool r : returned) any_int = any_int || r;
@@ -1646,9 +1703,12 @@ void Emitter::compute_fast() {
                 bad_bool_ret || bad_fdyn ||
                 ((kind == "i64_dyn" || kind == "i64v_dyn") && !has_ret_ann &&
                  !pure_int_returns(view(fns[name].decl->body), snapshot, pnames, vvars))) {
+                fastint.erase(name);
                 it = cand.erase(it);
                 changed = true;
             } else {
+                if (kind == "f64" || kind == "f64_dyn" || kind == "f64v")
+                    fastint[name] = std::move(intvars);
                 ++it;
             }
         }
@@ -1790,12 +1850,23 @@ std::string clit64(int64_t n) {
     return cat("(", n, "LL)");
 }
 
+static std::string fcmp_di_expr(const std::string &op, bool left_int,
+                                const std::string &a, const std::string &b) {
+    const std::string &d = left_int ? b : a;
+    const std::string &i = left_int ? a : b;
+    if (op == "==") return cat("vcmp_di_eq(", d, ", ", i, ")");
+    if (op == "!=") return cat("(!vcmp_di_eq(", d, ", ", i, "))");
+    if (op == "<") return cat(left_int ? "vcmp_di_gt(" : "vcmp_di_lt(", d, ", ", i, ")");
+    if (op == "<=") return cat(left_int ? "vcmp_di_ge(" : "vcmp_di_le(", d, ", ", i, ")");
+    if (op == ">") return cat(left_int ? "vcmp_di_lt(" : "vcmp_di_gt(", d, ", ", i, ")");
+    return cat(left_int ? "vcmp_di_le(" : "vcmp_di_ge(", d, ", ", i, ")");
+}
+
 std::string Emitter::fx(const Expr &e) {
     bool dbl = fkind == "f64";
     switch (e.k) {
     case EK::Num:
-        if (dbl) {
-            if (!e.is_float) return cat("(", fmt17g(static_cast<double>(e.i)), ")");
+        if (dbl && e.is_float) {
             // `%.17g` of 1e10 is "10000000000", which C reads as an int: in an
             // f64 fast function `1e10 * 1e10` then multiplies two int64s and
             // overflows. A float literal keeps its point.
@@ -1807,58 +1878,65 @@ std::string Emitter::fx(const Expr &e) {
         }
         return clit64(e.i);
     case EK::Bool:
-        return dbl ? cat("(", e.flag ? "1" : "0", ")") : cat("(", e.flag ? 1 : 0, "LL)");
+        return cat("(", e.flag ? 1 : 0, "LL)");
     case EK::Var:
         return fsym[e.a];
     case EK::Un: {
         std::string v = fx(*e.kids[0]);
         if (e.a == "!") return cat("(!(", v, "))");
         if (e.a == "~") return cat("((int64_t)(~(uint64_t)(", v, ")))");
-        return dbl ? cat("(-(", v, "))") : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
+        return (dbl && !fint(*e.kids[0])) ? cat("(-(", v, "))")
+                                          : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
     }
     case EK::Move:
         return fx(*e.kids[0]);
     case EK::Idx:
         if (fkind == "f64")
-            return cat("bf_vfat(", fsym[e.kids[0]->a], ", (int64_t)(", fx(*e.kids[1]), "))");
+            return cat("bf_vfat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
         if (opt >= 2 && unchecked_idx.count(&e))
             return cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
         return cat("bf_viat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
     case EK::Bin: {
         std::string a = fx(*e.kids[0]), b = fx(*e.kids[1]);
         const std::string &op = e.a;
+        const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
         if (op == "/" || op == "%") {
             if (!dbl && opt >= 1 && unchecked.count(&e)) return cat("(", a, " ", op, " ", b, ")");
             if (!dbl && opt >= 2 && nonzero_div.count(&e))
                 return cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
-            return cat(dbl ? (op == "/" ? "bf_fdiv" : "bf_fmod") : (op == "/" ? "bf_idiv" : "bf_imod"),
-                       "(", a, ", ", b, ")");
+            if (dbl)
+                return cat(op == "/" ? "bf_fdiv" : "bf_fmod", "((double)(", a, "), (double)(", b, "))");
+            return cat(op == "/" ? "bf_idiv" : "bf_imod", "(", a, ", ", b, ")");
         }
         if (op == "&&") {
-            if (all_bool(e))
-                return dbl ? cat("((", a, " && ", b, ") ? (1.0) : (0.0))") : cat("(", a, " && ", b, ")");
-            return cat("(", a, " ? ", b, " : ", a, ")");
+            if (all_bool(e)) return cat("(", a, " && ", b, ")");
+            if (ia == ib) return cat("(", a, " ? ", b, " : ", a, ")");
+            return cat("((", a, ") ? (double)(", b, ") : (double)(", a, "))");
         }
         if (op == "||") {
-            if (all_bool(e))
-                return dbl ? cat("((", a, " || ", b, ") ? (1.0) : (0.0))") : cat("(", a, " || ", b, ")");
-            return cat("(", a, " ? ", a, " : ", b, ")");
+            if (all_bool(e)) return cat("(", a, " || ", b, ")");
+            if (ia == ib) return cat("(", a, " ? ", a, " : ", b, ")");
+            return cat("((", a, ") ? (double)(", a, ") : (double)(", b, "))");
         }
-        if (!dbl && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^"))
+        if (ia && ib && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^"))
             return cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
-        if (!dbl && op == "<<") return cat("bshl64(", a, ", ", b, ")");
-        if (!dbl && op == ">>") return cat("bshr64(", a, ", ", b, ")");
+        if (ia && ib && op == "<<") return cat("bshl64(", a, ", ", b, ")");
+        if (ia && ib && op == ">>") return cat("bshr64(", a, ", ", b, ")");
+        if (dbl && (op == "+" || op == "-" || op == "*"))
+            return cat("((double)(", a, ") ", op, " (double)(", b, "))");
+        if (dbl && ia != ib &&
+            (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="))
+            return fcmp_di_expr(op, ia, a, b);
         return cat("(", a, " ", op, " ", b, ")");
     }
     case EK::Call:
-        if (e.a == "len")
-            return fkind == "f64" ? cat("((double)((", fsym[e.kids[0]->a], ")->len))")
-                                  : cat("((", fsym[e.kids[0]->a], ")->len)");
+        if (e.a == "len") return cat("((", fsym[e.kids[0]->a], ")->len)");
         {
             std::string args;
             for (size_t i = 0; i < e.kids.size(); i++) {
                 if (i) args += ", ";
-                args += fx(*e.kids[i]);
+                std::string ai = fx(*e.kids[i]);
+                args += (dbl && fint(*e.kids[i])) ? cat("(double)(", ai, ")") : ai;
             }
             if (!fself_rec.empty() && e.a == fself_rec) {
                 if (!args.empty()) args += ", ";
@@ -1984,10 +2062,10 @@ bool Emitter::has_rec_call(const Expr &e) const {
 std::string Emitter::fchk(const Expr &e, const std::string &ind) {
     if (!fraise(e)) return fx(e);
     const bool dbl = fkind == "f64";
-    const char *ct = dbl ? "double" : "int64_t";
+    const char *ect = (dbl && !fint(e)) ? "double" : "int64_t";
     if (!has_rec_call(e)) {
         std::string t = new_tmp("t");
-        ln(ind, cat(ct, " ", t, " = ", fx(e), ";"));
+        ln(ind, cat(ect, " ", t, " = ", fx(e), ";"));
         ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
@@ -1996,18 +2074,19 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
         std::string v = fchk(*e.kids[0], ind);
         if (e.a == "!") return cat("(!(", v, "))");
         if (e.a == "~") return cat("((int64_t)(~(uint64_t)(", v, ")))");
-        return dbl ? cat("(-(", v, "))") : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
+        return (dbl && !fint(*e.kids[0])) ? cat("(-(", v, "))")
+                                          : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
     }
     case EK::Move:
         return fchk(*e.kids[0], ind);
     case EK::Idx: {
         std::string idx = fchk(*e.kids[1], ind);
-        std::string call = dbl ? cat("bf_vfat(", fsym[e.kids[0]->a], ", (int64_t)(", idx, "))")
+        std::string call = dbl ? cat("bf_vfat(", fsym[e.kids[0]->a], ", ", idx, ")")
                                : ((opt >= 2 && unchecked_idx.count(&e))
                                       ? cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", idx, ")")
                                       : cat("bf_viat(", fsym[e.kids[0]->a], ", ", idx, ")"));
         std::string t = new_tmp("t");
-        ln(ind, cat(ct, " ", t, " = ", call, ";"));
+        ln(ind, cat(ect, " ", t, " = ", call, ";"));
         ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
@@ -2017,15 +2096,15 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
         for (size_t i = 0; i < e.kids.size(); i++) {
             std::string ai = fchk(*e.kids[i], ind);
             if (i) args += ", ";
-            args += ai;
+            args += (dbl && fint(*e.kids[i])) ? cat("(double)(", ai, ")") : ai;
         }
         std::string t = new_tmp("t");
         if (!fself_rec.empty() && e.a == fself_rec) {
             if (!args.empty()) args += ", ";
             args += "_rem - 1";
-            ln(ind, cat(ct, " ", t, " = ", fastc[e.a], "_r(", args, ");"));
+            ln(ind, cat(ect, " ", t, " = ", fastc[e.a], "_r(", args, ");"));
         } else {
-            ln(ind, cat(ct, " ", t, " = ", fastc[e.a], "(", args, ");"));
+            ln(ind, cat(ect, " ", t, " = ", fastc[e.a], "(", args, ");"));
         }
         if (!fastc.count(e.a) || fails.count(e.a))
             ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
@@ -2033,16 +2112,21 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
     }
     case EK::Bin: {
         const std::string &op = e.a;
+        const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
         if (op == "&&" || op == "||") {
             std::string a = fchk(*e.kids[0], ind);
             std::string res = new_tmp("t");
             const bool ab = all_bool(e);
-            const char *one = dbl ? "1.0" : "1LL";
-            const char *zero = dbl ? "0.0" : "0LL";
-            ln(ind, cat(ct, " ", res, " = ", ab ? cat("((", a, ") ? (", one, ") : (", zero, "))") : a, ";"));
+            const std::string init_a =
+                ab ? cat("((", a, ") ? 1LL : 0LL)")
+                   : ((dbl && !fint(e) && ia) ? cat("(double)(", a, ")") : a);
+            ln(ind, cat(ect, " ", res, " = ", init_a, ";"));
             ln(ind, cat("if (", op == "&&" ? res : cat("!(", res, ")"), ") {"));
             std::string b = fchk(*e.kids[1], ind + "  ");
-            ln(ind + "  ", cat(res, " = ", ab ? cat("((", b, ") ? (", one, ") : (", zero, "))") : b, ";"));
+            const std::string set_b =
+                ab ? cat("((", b, ") ? 1LL : 0LL)")
+                   : ((dbl && !fint(e) && ib) ? cat("(double)(", b, ")") : b);
+            ln(ind + "  ", cat(res, " = ", set_b, ";"));
             ln(ind, "}");
             return res;
         }
@@ -2056,24 +2140,30 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
                 div_can_fail = (opt < 2);
             } else if (!dbl && opt >= 2 && nonzero_div.count(&e)) {
                 comb = cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
+            } else if (dbl) {
+                comb = cat(op == "/" ? "bf_fdiv" : "bf_fmod", "((double)(", a, "), (double)(", b, "))");
+                div_can_fail = true;
             } else {
-                comb = cat(dbl ? (op == "/" ? "bf_fdiv" : "bf_fmod")
-                               : (op == "/" ? "bf_idiv" : "bf_imod"),
-                           "(", a, ", ", b, ")");
+                comb = cat(op == "/" ? "bf_idiv" : "bf_imod", "(", a, ", ", b, ")");
                 div_can_fail = true;
             }
-        } else if (!dbl && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^")) {
+        } else if (ia && ib && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^")) {
             comb = cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
-        } else if (!dbl && op == "<<") {
+        } else if (ia && ib && op == "<<") {
             comb = cat("bshl64(", a, ", ", b, ")");
-        } else if (!dbl && op == ">>") {
+        } else if (ia && ib && op == ">>") {
             comb = cat("bshr64(", a, ", ", b, ")");
+        } else if (dbl && (op == "+" || op == "-" || op == "*")) {
+            comb = cat("((double)(", a, ") ", op, " (double)(", b, "))");
+        } else if (dbl && ia != ib &&
+                   (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=")) {
+            comb = fcmp_di_expr(op, ia, a, b);
         } else {
             comb = cat("(", a, " ", op, " ", b, ")");
         }
         if (div_can_fail) {
             std::string t = new_tmp("t");
-            ln(ind, cat(ct, " ", t, " = ", comb, ";"));
+            ln(ind, cat(ect, " ", t, " = ", comb, ";"));
             ln(ind, cat("if (verr_pending()) ", fret_bail()));
             return t;
         }
@@ -2081,7 +2171,7 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
     }
     default: {
         std::string t = new_tmp("t");
-        ln(ind, cat(ct, " ", t, " = ", fx(e), ";"));
+        ln(ind, cat(ect, " ", t, " = ", fx(e), ";"));
         ln(ind, cat("if (verr_pending()) ", fret_bail()));
         return t;
     }
@@ -2102,9 +2192,10 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
                         else fmt.push_back(c);
                     }
                 } else {
-                    fmt += dbl ? "%s" : "%lld";
-                    vals += dbl ? cat(", vfmt_double(", fsym[val], ")")
-                                : cat(", (long long)(", fsym[val], ")");
+                    const bool vi = !dbl || fintvars.count(val) > 0;
+                    fmt += vi ? "%lld" : "%s";
+                    vals += vi ? cat(", (long long)(", fsym[val], ")")
+                               : cat(", vfmt_double(", fsym[val], ")");
                 }
             }
         } else if (a.k == EK::Num && a.is_float) {
@@ -2113,7 +2204,7 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
         } else if (a.k == EK::Num) {
             fmt += "%lld";
             vals += cat(", (long long)(", clit64(a.i), ")");
-        } else if (dbl) {
+        } else if (dbl && !fint(a)) {
             fmt += "%s";
             vals += cat(", vfmt_double(", fchk(a, ind), ")");
         } else {
@@ -2137,7 +2228,10 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
     case SK::Return: {
         std::string rv = fchk(*s.e1, ind);
         if (frec && fself_rec.empty()) ln(ind, "bdepth_pop();");
-        ln(ind, cat("return ", rv, ";"));
+        if (fkind == "f64" && fint(*s.e1))
+            ln(ind, cat("return (double)(", rv, ");"));
+        else
+            ln(ind, cat("return ", rv, ";"));
         break;
     }
     case SK::Expr:
@@ -2165,9 +2259,9 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         break;
     case SK::ForRange: {
         std::string kk = new_tmp("k"), lo = new_tmp("lo"), hi = new_tmp("hi");
-        ln(ind, cat("int64_t ", lo, " = (int64_t)(", fx(*s.e1), "), ", hi, " = (int64_t)(", fx(*s.e2), ");"));
+        ln(ind, cat("int64_t ", lo, " = ", fx(*s.e1), ", ", hi, " = ", fx(*s.e2), ";"));
         ln(ind, cat("for (int64_t ", kk, " = ", lo, "; ", kk, " < ", hi, "; ++", kk, ") {"));
-        ln(ind + "  ", cat(fsym[s.a], " = ", fkind == "f64" ? cat("(double)", kk) : kk, ";"));
+        ln(ind + "  ", cat(fsym[s.a], " = ", kk, ";"));
         for (const Stmt *t : view(s.body)) fst(*t, ind + "  ");
         ln(ind, "}");
         break;
@@ -2186,7 +2280,7 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         if (fkind == "f64") {
             std::string idx_s = fchk(*s.e2, ind);
             std::string val_s = fchk(*s.e3, ind);
-            ln(ind, cat("bf_vset_f(", fsym[s.e1->a], ", (int64_t)(", idx_s, "), ", val_s, ");"));
+            ln(ind, cat("bf_vset_f(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
             ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         } else if (opt >= 2 && unchecked_setidx.count(&s)) {
             std::string idx_s = fchk(*s.e2, ind);
@@ -2288,6 +2382,7 @@ void Emitter::emit_fast_fn(const std::string &name) {
     std::string ct = fkind == "f64" ? "double" : "int64_t";
     fvecvars = fastvec.count(name) ? fastvec[name] : std::set<std::string>();
     fboolvars = fastbool.count(name) ? fastbool[name] : std::set<std::string>();
+    fintvars = fastint.count(name) ? fastint[name] : std::set<std::string>();
     std::vector<std::string> names;
     for (const auto &p : decl.params) names.push_back(p.name);
     fsym.clear();
@@ -2378,7 +2473,8 @@ void Emitter::emit_fast_fn(const std::string &name) {
     for (const auto &n : vars) {
         if (std::find(names.begin(), names.end(), n) != names.end()) continue;
         fsym[n] = cname(n);
-        ln("  ", cat(ct, " BRAT_UNUSED ", cname(n), ";"));
+        const std::string vct = (fkind == "f64" && fintvars.count(n)) ? "int64_t" : ct;
+        ln("  ", cat(vct, " BRAT_UNUSED ", cname(n), ";"));
     }
     for (size_t bi = body_start; bi < decl.body.size(); bi++) fst(*decl.body[bi], "  ");
     if (frec && fself_rec.empty()) ln("  ", "bdepth_pop();");
@@ -2395,6 +2491,7 @@ void Emitter::emit_fast_fn(const std::string &name) {
     fkind = "int64_t";
     fvecvars.clear();
     fboolvars.clear();
+    fintvars.clear();
     fself_rec.clear();
     frec = false;
 }

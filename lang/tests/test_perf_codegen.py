@@ -205,8 +205,87 @@ def test_large_frame_compile_speed_and_leak_freedom():
                 assert asan_run.stdout == expected_out
 
 
+def test_f64_fast_int_subexprs_and_ub_freedom():
+    src = """
+fn mul_lit(x: f64) -> f64 {
+    return 10000000000 * 10000000000 + x
+}
+fn mul_lit_boxed(x: f64, s: str) -> f64 {
+    return 10000000000 * 10000000000 + x
+}
+fn mul_var(x: f64) -> f64 {
+    let a = 10000000000
+    return a * a + x
+}
+fn mul_var_boxed(x: f64, s: str) -> f64 {
+    let a = 10000000000
+    return a * a + x
+}
+fn idx_wrap(v: vec[f64]) -> f64 {
+    let i = 4294967296
+    let j = i * i
+    return v[j]
+}
+fn idx_wrap_boxed(v: vec[f64], s: str) -> f64 {
+    let i = 4294967296
+    let j = i * i
+    return v[j]
+}
+fn cmp_exact(x: f64) -> bool {
+    let big = 9007199254740993
+    return x == big
+}
+fn range_max(v: vec[f64]) -> f64 {
+    let mut acc = 10.0
+    for i in 0..9223372036854775807 {
+        print("iter={i}")
+        acc = acc + v[i]
+        break
+    }
+    return acc
+}
+fn main() -> i64 {
+    assert(mul_lit(0.5) == mul_lit_boxed(0.5, ""))
+    assert(mul_var(0.5) == mul_var_boxed(0.5, ""))
+    let v: vec[f64] = [42.5]
+    assert(idx_wrap(v) == idx_wrap_boxed(v, ""))
+    assert(idx_wrap(v) == 42.5)
+    assert(cmp_exact(9007199254740992.0) == false)
+    assert(range_max(v) == 52.5)
+    return 0
+}
+"""
+    for opt in ("-O0", "-O1", "-O2"):
+        c_code = emit_c(src, opt)
+        rc, out, err = build_and_run(src, opt=opt)
+        assert rc == 0, f"{opt} failed: {err}"
+        assert out.strip() == "iter=0", f"{opt} unexpected output: {out!r}"
+        if sys.platform != "win32":
+            with tempfile.TemporaryDirectory() as td:
+                cp = os.path.join(td, "f64_ub.c")
+                exe = os.path.join(td, "f64_ub")
+                with open(cp, "w", encoding="utf-8") as f:
+                    f.write(c_code)
+                cc = os.environ.get("CC", "gcc")
+                link_libs = ["-lm", "-lpthread"] if sys.platform == "darwin" else ["-lm", "-lpthread", "-ldl"]
+                comp = subprocess.run(
+                    [cc, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+                     "-fsanitize=address,undefined,float-cast-overflow",
+                     "-fno-sanitize-recover=all",
+                     "-I", ENGINE, cp, *link_libs, "-o", exe],
+                    capture_output=True, text=True,
+                )
+                assert comp.returncode == 0, f"{opt} -Werror/UBSan compile failed:\n{comp.stderr}"
+                asan_opts = "halt_on_error=1" if sys.platform == "darwin" else "detect_leaks=1:halt_on_error=1"
+                run = subprocess.run([exe], capture_output=True, text=True,
+                                     env=dict(os.environ, ASAN_OPTIONS=asan_opts))
+                assert run.returncode == 0, f"{opt} UBSan/ASan runtime failure:\n{run.stderr}"
+                assert run.stdout.strip() == "iter=0"
+
+
 if __name__ == "__main__":
     test_recursive_fast_path_i64_and_f64()
     test_recursive_fast_budget_recovery()
     test_large_frame_compile_speed_and_leak_freedom()
+    test_f64_fast_int_subexprs_and_ub_freedom()
     print("PERF CODEGEN ALL GREEN")

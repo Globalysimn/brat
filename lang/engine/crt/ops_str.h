@@ -706,7 +706,7 @@ BFN bint veq(Val a, Val b);
 
 /* Exact numeric ordering without rounding 64-bit integers through `double`
    (which loses precision past 2^53). */
-static int vcmp_int_double(double d, bint i) {
+BFN int vcmp_int_double(double d, bint i) {
     if (d != d) return 1;
     if (d >= 9223372036854775808.0) return 1;
     if (d < -9223372036854775808.0) return -1;
@@ -716,6 +716,11 @@ static int vcmp_int_double(double d, bint i) {
     if (fi > i) return 1;
     return d > fl ? 1 : 0;
 }
+BFN int vcmp_di_eq(double d, bint i) { return (d == d) && vcmp_int_double(d, i) == 0; }
+BFN int vcmp_di_lt(double d, bint i) { return (d == d) && vcmp_int_double(d, i) < 0; }
+BFN int vcmp_di_le(double d, bint i) { return (d == d) && vcmp_int_double(d, i) <= 0; }
+BFN int vcmp_di_gt(double d, bint i) { return (d == d) && vcmp_int_double(d, i) > 0; }
+BFN int vcmp_di_ge(double d, bint i) { return (d == d) && vcmp_int_double(d, i) >= 0; }
 
 static int vcmp_num(Val a, Val b) {
     if (a.tag == V_FLOAT || b.tag == V_FLOAT) {
