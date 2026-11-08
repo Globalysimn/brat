@@ -5416,6 +5416,9 @@ void Emitter::st_ptr_setidx(const std::string &elem, const Stmt &s, const std::s
 std::string Emitter::var_def(const std::string &name, Own own, const std::string &ptr,
                              const std::string &elem) {
     std::string cn = slot_cn(name);
+    auto it = sym.find(name);
+    if (it != sym.end() && it->second.cn == cn && it->second.own == Own::Owned)
+        own = Own::Owned;
     sym[name] = Sym{cn, own, ptr, elem};
     return cn;
 }
@@ -6202,7 +6205,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             own = Own::Owned;
         }
         bool lit = v.val.rfind("vlit(", 0) == 0;
-        if ((reclaim.count(name) || relet.count(name)) && lit) {
+        if (reclaim.count(name) && lit) {
             v.val = "vstr(" + v.val.substr(5);
             own = Own::Owned;
         }
@@ -6216,6 +6219,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         auto d = sym.find(name);
         bool is_relet = relet.count(name) && d != sym.end() && !moved.count(name) &&
                         !dropped.count(name);
+        if (relet.count(name) && own == Own::Copy) own = Own::Owned;
         // `let p: ptr[T]` -- the element is part of the declaration, and it is
         // what `p[i]` reads through later. Without an annotation, a call that
         // returns `ptr[T]` is the declaration: `let p = node_new(...)` is the
@@ -6242,7 +6246,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             // After the RHS: it may still read the previous pass value.
             std::string tmp = new_tmp("v");
             ln(ind, cat("Val ", tmp, " = (", v.val, ");"));
-            ln(ind, cat("vrc_dec(", d->second.cn, ");"));
+            ln(ind, cat("vrelease(", d->second.cn, ");"));
             ln(ind, cat(cn, " = ", tmp, ";"));
         } else {
             ln(ind, cat(cn, " = (", v.val, ");"));
@@ -6373,10 +6377,11 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         }
         bool release = (reclaim.count(tgt) || global_binding) && d != sym.end() &&
                        !moved.count(tgt) && !dropped.count(tgt);
-        if (!dec_able(e, heap_returns()) && !moves_owned_local(e)) {
+        if (!dec_able(e, heap_returns()) && e.k != EK::Call && !moves_owned_local(e)) {
             v.val = cat("vrc_inc(", v.val, ")");
-            if (e.k != EK::Call) own = Own::Owned;
+            own = Own::Owned;
         }
+        if (reclaim.count(tgt) && !global_binding && own == Own::Copy) own = Own::Owned;
         if (global_binding) own = Own::Copy;
         std::string cn = var_def(tgt, own);
         assigned.insert(tgt);
@@ -6388,7 +6393,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             emit_err_check(ind, drop);
             // After the RHS, so a hot store loop pays one dec per store. Never
             // for an append: `vadd_self` hands back the receiver itself.
-            if (release && !self_concat) ln(ind, cat("vrc_dec(", d->second.cn, ");"));
+            if (release && !self_concat) ln(ind, cat("vrelease(", d->second.cn, ");"));
             ln(ind, cat(cn, " = ", tmp, ";"));
             // `vadd_self` copies the right side in and keeps its own reference,
             // so the temp this statement built dies here, not only on error.
@@ -6709,6 +6714,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind, cat("for (int64_t ", kk, " = ", lo, "; ", kk, " < ", hi, "; ++", kk, ") {"));
         if (ub_ints.count(s.a)) {
             ln(ind + "  ", cat("ub_", cname(s.a), " = ", kk, ";"));
+        } else if (reclaim.count(s.a) || relet.count(s.a)) {
+            std::string cn = var_def(s.a, Own::Owned);
+            ln(ind + "  ", cat("vrelease(", cn, ");"));
+            ln(ind + "  ", cat(cn, " = vint(", kk, ");"));
         } else {
             std::string cn = var_def(s.a, Own::Copy);
             ln(ind + "  ", cat(cn, " = vint(", kk, ");"));
@@ -6743,8 +6752,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         auto pre_moved = moved;
         auto pre_dropped = dropped;
         ln(ind, cat("for (int64_t ", kk, " = 0; ", kk, " < ", vv, "->len; ++", kk, ") {"));
-        std::string cn = var_def(s.a, Own::Copy);
-        ln(ind + "  ", cat(cn, " = ", vv, "->items[", kk, "];"));
+        if (reclaim.count(s.a) || relet.count(s.a)) {
+            std::string cn = var_def(s.a, Own::Owned);
+            ln(ind + "  ", cat("vrelease(", cn, ");"));
+            ln(ind + "  ", cat(cn, " = vrc_inc(", vv, "->items[", kk, "]);"));
+        } else {
+            std::string cn = var_def(s.a, Own::Copy);
+            ln(ind + "  ", cat(cn, " = ", vv, "->items[", kk, "];"));
+        }
         assigned.insert(s.a);
         loop_exit_depths.emplace_back(scopes.size(), dfb.size());
         iter_cleanups.push_back(iclean);
@@ -6940,39 +6955,35 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
 }
 
 
-bool reclaimable_rhs(const Expr &e, const std::set<std::string> &heap) {
-    const Expr *cur = &e;
-    while (cur->k == EK::Move && !cur->kids.empty()) cur = cur->kids[0].get();
-    return dec_able(*cur, heap) || cur->k == EK::Field || cur->k == EK::Var;
-}
-
 std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
     const StmtList &body, const std::set<std::string> &params,
     const std::set<std::string> &heap) {
-    std::map<std::string, bool> ok;
+    (void)heap;
+    std::map<std::string, int> let_cnt, for_iter_cnt, for_range_cnt;
     std::set<std::string> has_set, loop_let;
     std::function<void(const StmtList &, bool)> walk = [&](const StmtList &stmts, bool loop) {
         for (const Stmt *st : stmts) {
             switch (st->k) {
             case SK::Let:
             case SK::LetTmp: {
-                std::string n = head_of(st->a);
-                ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
-                if (loop) loop_let.insert(n);
+                if (st->a.find('.') == std::string::npos) {
+                    let_cnt[st->a]++;
+                    if (loop) loop_let.insert(st->a);
+                }
                 break;
             }
             case SK::Set: {
-                std::string n = head_of(st->a);
-                ok[n] = (ok.count(n) ? ok[n] : true) && reclaimable_rhs(*st->e1, heap);
-                has_set.insert(n);
+                if (st->a.find('.') == std::string::npos) {
+                    has_set.insert(st->a);
+                }
                 break;
             }
             case SK::ForIter:
-                ok[st->a] = false;   // elements come from the container
+                for_iter_cnt[st->a]++;
                 walk(view(st->body), true);
                 break;
             case SK::ForRange:
-                ok[st->a] = false;
+                for_range_cnt[st->a]++;
                 walk(view(st->body), true);
                 break;
             case SK::If:
@@ -6996,7 +7007,6 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
             case SK::Try:
                 walk(view(st->body), loop);
                 walk(view(st->body2), loop);
-                if (st->opt1) ok[*st->opt1] = false;
                 break;
             default:
                 break;   // a spawn body is its own frame, like a closure
@@ -7004,13 +7014,22 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
         }
     };
     walk(body, false);
-    std::set<std::string> reclaim, relet;
-    for (const auto &[n, v] : ok) {
-        if (v && has_set.count(n)) reclaim.insert(n);
+    std::set<std::string> reclaim = has_set;
+    std::set<std::string> relet;
+    for (const auto &[n, cnt] : for_iter_cnt) {
+        if (cnt > 0 && (params.count(n) || let_cnt[n] > 0 || has_set.count(n)))
+            reclaim.insert(n);
     }
-    for (const auto &n : loop_let) {
-        auto it = ok.find(n);
-        if (it != ok.end() && it->second && !params.count(n)) relet.insert(n);
+    for (const auto &[n, cnt] : for_range_cnt) {
+        if (cnt > 0 && (params.count(n) || let_cnt[n] > 0 || has_set.count(n)))
+            reclaim.insert(n);
+    }
+    for (const auto &[n, cnt] : let_cnt) {
+        if (cnt <= 0) continue;
+        if (cnt > 1 || loop_let.count(n) || params.count(n) || has_set.count(n) ||
+            for_iter_cnt[n] > 0 || for_range_cnt[n] > 0) {
+            relet.insert(n);
+        }
     }
     return {reclaim, relet};
 }
@@ -7291,14 +7310,18 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         ln("  ", cat("for (size_t __fi = 0; __fi < ", frame_arr_n, "; ++__fi) __fv[__fi] = vnil();"));
         for (size_t idx = 0; idx < val_vars.size(); idx++) {
             const std::string &n = val_vars[idx];
-            Own own = reclaim.count(n) ? Own::Owned : (param_names.count(n) ? Own::Borrow : Own::Copy);
+            Own own = (reclaim.count(n) || relet.count(n))
+                          ? Own::Owned
+                          : (param_names.count(n) ? Own::Borrow : Own::Copy);
             std::string fcn = cat("__fv[", idx, "]");
             sym[n] = Sym{fcn, own, "", ""};
             frame_idx[n] = static_cast<int>(idx);
         }
     } else {
         for (const auto &n : val_vars) {
-            Own own = reclaim.count(n) ? Own::Owned : (param_names.count(n) ? Own::Borrow : Own::Copy);
+            Own own = (reclaim.count(n) || relet.count(n))
+                          ? Own::Owned
+                          : (param_names.count(n) ? Own::Borrow : Own::Copy);
             sym[n] = Sym{cname(n), own, "", ""};
             ln("  ", cat("Val BRAT_UNUSED ", cname(n), " = vnil();"));
         }
@@ -7310,7 +7333,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         if (caps_set.count(n) && !param_names.count(n))
             ln("  ", cat(slot_cn(n), " = (*vclosure_env_at(cap, ", cap_slots[n], "));"));
     for (size_t i = 0; i < names.size(); i++) {
-        std::string init_expr = reclaim.count(names[i])
+        std::string init_expr = (reclaim.count(names[i]) || relet.count(names[i]))
             ? cat("vrc_inc(", arg_exprs[i], ")")
             : arg_exprs[i];
         ln("  ", cat(slot_cn(names[i]), " = ", init_expr, ";"));

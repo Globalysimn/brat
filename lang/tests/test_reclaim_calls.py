@@ -179,6 +179,60 @@ fn main() -> i64 {
 }
 ''', "100\nt 99\n")
 
+CASES["mixed_slot_relet_and_iter"] = ('''
+fn iter_then_untaken_set(flag: bool, k: i64) -> str {
+  let v = ["heap_element_long_enough_no_sso_" + str(k)]
+  let mut x = ""
+  for x in v {
+    let _n = len(x)
+  }
+  if flag {
+    x = "owned_heap_string_never_taken_" + str(k)
+  }
+  return v[0]
+}
+
+fn owned_then_iter(k: i64) -> str {
+  let v = ["heap_element_after_init_long_" + str(k)]
+  let mut x = "initial_heap_string_long_enough_" + str(k)
+  for x in v {
+    let _n = len(x)
+  }
+  return v[0]
+}
+
+fn param_cond_relet(p: str, flag: bool, k: i64) -> i64 {
+  if flag {
+    let p = "rebound_param_heap_string_long_" + str(k)
+    return len(p)
+  }
+  return len(p)
+}
+
+fn seq_and_branch_relet(flag: bool, k: i64) -> i64 {
+  let x = ["first_vec_long_" + str(k), "second"]
+  let x = ["replaced_vec_long_" + str(k)]
+  let mut acc = len(x)
+  if flag {
+    let y = ["branch_vec_long_" + str(k)]
+    acc = acc + len(y)
+  } else {
+    let y = 42
+    acc = acc + y
+  }
+  return acc
+}
+
+fn main() -> i64 {
+  print(iter_then_untaken_set(false, 99))
+  print(owned_then_iter(99))
+  let caller_s = "caller_owned_heap_string_long_" + str(77)
+  print(param_cond_relet(caller_s, false, 77) + param_cond_relet(caller_s, true, 77))
+  print(seq_and_branch_relet(true, 55) + seq_and_branch_relet(false, 55))
+  return 0
+}
+''', "heap_element_long_enough_no_sso_99\nheap_element_after_init_long_99\n65\n45\n")
+
 
 def emit(src, name):
     path = os.path.join(TMP, name + ".brat")
