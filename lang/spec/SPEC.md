@@ -13,8 +13,10 @@ runs static ownership, type, effect and FFI checks, emits GNU C11 against
 `lang/engine/crt.h`, and invokes a host C compiler to produce an executable or
 shared library.
 
-Top-level statements execute in order. Defining `fn main() -> i64` is optional;
-when present, its return value becomes the process exit status.
+Top-level statements execute in order. Defining `fn main() -> i64` or
+`fn main() -> Result[i64, E]` is optional; when present, the returned integer
+(or `Ok(code)`) sets the process exit status, and `Err(e)` reports to `stderr`
+and exits with status `1`.
 
 ## 2. Values and types
 
@@ -121,10 +123,10 @@ narrowing for `unwrap()`; unannotated functions operate on dynamic `Val` values.
 Generic type parameters (`fn first<T>(v: vec[T]) -> T`) are checked for
 declaration consistency and erased before code generation.
 
-Functions whose parameters are all `i64` (or all `f64`, or a mix of `i64` and
-`vec[i64]`) and whose body uses arithmetic, comparisons, loops and calls to
-compatible numeric functions compile to unboxed C scalar functions (`int64_t`,
-`double`, raw `Vec *` item access) paired with a tag-checking boxed wrapper for
+Functions whose parameters are `i64`, `f64`, `bool`, `vec[i64]` or `vec[f64]`
+and whose body uses arithmetic, comparisons, loops and calls to compatible
+numeric functions compile to unboxed C scalar functions (`int64_t`, `double`,
+`bool`, raw `Vec *` item access) paired with a tag-checking boxed wrapper for
 dynamic callers. At `-O1` and `-O2`, non-escaping, unaliased local `struct`
 bindings (including nested structs) are decomposed by Scalar Replacement of
 Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
@@ -157,7 +159,10 @@ Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
 
 - `if cond { ... } else { ... }`, `if let Pat = expr { ... }`, `while cond { ... }`,
   `while let Pat = expr { ... }`, `for x in vec_expr { ... }`, and half-open
-  integer range loops `for i in lo..hi { ... }`.
+  integer range loops `for i in lo..hi { ... }`. Nested `let`, `match` arm and
+  `catch` bindings are lexically scoped to their block without overwriting outer
+  bindings of the same name, whereas `for` loop targets reuse an existing outer
+  slot when one is in scope.
 - `match expr { pat => { ... }, ... }` supports literals, variable bindings
   (lowercase), nullary enum tags (uppercase), struct destructuring
   (`Point { x, y }`, `Point { x, .. }`), nested destructuring (`Some(Ok(v))`),
@@ -238,7 +243,8 @@ Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
    `arena` reset); container insertions check and refuse parent-pointer cycles at
    run time.
 3. Values and call stacks are bounded at 2,000 levels by default
-   (`BRAT_RECURSION_BUDGET`, plus a 256 KiB pthread stack-floor check on Linux).
+   (`BRAT_RECURSION_BUDGET`, plus a 256 KiB thread stack-floor check on Linux,
+   macOS and Windows 8+).
 4. FFI declarations, raw pointers and dynamic `lib_open` plugins are trusted
    past header/DWARF signature verification.
 5. Relative file and SQLite operations default to module-root confinement unless

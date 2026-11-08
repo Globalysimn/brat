@@ -180,8 +180,8 @@ None of them cause C undefined behavior:
   catchable runtime error (`div by zero`) instead of `SIGFPE`.
 - **Deep recursion:** capped at `2000` frames by default (`BRAT_RECURSION_BUDGET`,
   range `1..1000000`),
-  plus a Linux pthread stack-floor check, raising catchable `recursion too deep`
-  instead of `SIGSEGV`.
+  plus a 256 KiB thread stack-floor check on Linux, macOS, and Windows 8+,
+  raising catchable `recursion too deep` instead of `SIGSEGV`.
 
 ```brat run
 fn main() -> i64 {

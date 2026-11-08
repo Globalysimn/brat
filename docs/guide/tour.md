@@ -17,7 +17,9 @@ Blocks marked `brat run` and `brat check` below are compiled and checked by
 ## 1. Top level and `main`
 
 Top-level statements execute in source order. A `main` function is optional;
-when defined as `fn main() -> i64`, its return value sets the process exit code.
+when defined as `fn main() -> i64` or `fn main() -> Result[i64, str]`, its
+returned integer (or `Ok(code)`) sets the process exit code, while `Err(e)`
+prints to `stderr` and exits with status `1`.
 
 ```brat
 let host = "127.0.0.1:9001"

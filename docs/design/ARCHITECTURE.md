@@ -16,10 +16,11 @@ native compilation or execution pipeline.
    and `pub` visibility rules (including `pub struct` and `pub enum`) are
    enforced before flattening imported functions under mangled `module__name`
    symbols into one whole-program AST.
-3. **Static checking (`borrow.cpp`, `check.cpp`, `capability.cpp`, `session.cpp`, `parfor.cpp`).**
-   - `borrow.cpp` checks per-place `move`/`ref`/`mut` ownership, NLL-lite borrow
-     lifetimes, container iteration locks, `defer`/`try` unwinding paths, `spawn`
-     read/write exclusivity and `ptr_of_str` local return escapes.
+3. **Static checking (`borrow.cpp`, `caps.cpp`, `check.cpp`, `capability.cpp`, `session.cpp`, `parfor.cpp`).**
+   - `borrow.cpp` and `caps.cpp` check per-place `move`/`ref`/`mut` ownership,
+     NLL-lite borrow lifetimes and capability transitions, container iteration
+     locks, `defer`/`try` unwinding paths, `spawn` read/write exclusivity and
+     `ptr_of_str` local return escapes.
    - `check.cpp` type-checks annotated functions, nominal `struct` fields, typed
      `enum` variants, `Option[T]` / `Result[T, E]` flow narrowing and `match`
      exhaustiveness, built-in method arity, `arena` region escapes, callback
@@ -39,8 +40,8 @@ native compilation or execution pipeline.
      local `struct` bindings into scalar or `Val` locals before `compute_fast()`
      and `ir.cpp` (interval, bitwise known-bits and Granger congruence analysis
      proving division/shift/index checks redundant; inspectable via `--why-opt`).
-   - Annotated numeric kernels (`i64`, `f64`, `vec[i64]`) emit unboxed C scalar
-     functions alongside boxed `Val` entry wrappers. Heap-allocated nominal
+   - Annotated numeric kernels (`i64`, `f64`, `bool`, `vec[i64]`, `vec[f64]`)
+     emit unboxed C scalar functions alongside boxed `Val` entry wrappers. Heap-allocated nominal
      `struct` instances use a canonical declaration-order `BShape` layout and
      constant-slot loads/stores (`vstruct_slot_ptr` / `vstruct_slot_set`).
    - General BRAT functions emit C11 against `lang/engine/crt.h`. Functions with
