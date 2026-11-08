@@ -5508,7 +5508,7 @@ void Emitter::emit_fn_drops(const std::string &ind, const std::string &skip,
         for (const auto &name : sorted_sym_names()) {
             const Sym &sy = sym[name];
             if (!move_rt || sy.own != Own::Owned) continue;
-            if (moved.count(name) || shared.count(name)) continue;
+            if (shared.count(name)) continue;
             auto fit = frame_idx.find(name);
             if (fit != frame_idx.end()) fidxs.push_back(fit->second);
             else extras.push_back(sy.cn);
@@ -5536,7 +5536,7 @@ void Emitter::emit_fn_drops(const std::string &ind, const std::string &skip,
     for (const auto &name : sorted_sym_names()) {
         const Sym &sy = sym[name];
         if (!move_rt || sy.own != Own::Owned) continue;
-        if (moved.count(name) || name == skip || keep.count(name)) continue;
+        if ((at_return && moved.count(name)) || name == skip || keep.count(name)) continue;
         if (!at_return && shared.count(name)) continue;
         ln(ind, cat("vrelease(", sy.cn, ");"));
         ln(ind, cat(sy.cn, " = vnil();"));
@@ -5993,6 +5993,82 @@ void Emitter::emit_defer(const Expr &e, const std::string &ind) {
     for (auto &p : pre) ln(ind, p);
 }
 
+static std::set<std::string> intersect_names(const std::set<std::string> &a,
+                                             const std::set<std::string> &b) {
+    std::set<std::string> out;
+    for (const auto &x : a)
+        if (b.count(x)) out.insert(x);
+    return out;
+}
+
+static void assigned_vars_in(const StmtList &stmts, std::set<std::string> &out) {
+    for (const Stmt *sp : stmts) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        switch (s.k) {
+        case SK::Let:
+        case SK::LetTmp:
+        case SK::Set:
+            out.insert(head_of(s.a));
+            break;
+        case SK::ForRange:
+        case SK::ForIter:
+            out.insert(s.a);
+            assigned_vars_in(view(s.body), out);
+            break;
+        case SK::While:
+        case SK::Block:
+        case SK::Unsafe:
+        case SK::Scope:
+        case SK::Pub:
+            assigned_vars_in(view(s.body), out);
+            break;
+        case SK::If:
+            assigned_vars_in(view(s.body), out);
+            if (const Stmt *els = real_else(s)) {
+                if (els->k == SK::Block) assigned_vars_in(view(els->body), out);
+                else assigned_vars_in({els}, out);
+            }
+            break;
+        case SK::Try:
+            assigned_vars_in(view(s.body), out);
+            assigned_vars_in(view(s.body2), out);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static bool block_returns(const StmtList &stmts);
+
+static bool stmt_returns(const Stmt &s) {
+    switch (s.k) {
+    case SK::Return:
+        return true;
+    case SK::Block:
+    case SK::Unsafe:
+    case SK::Scope:
+        return block_returns(view(s.body));
+    case SK::If: {
+        const Stmt *els = real_else(s);
+        if (!els) return false;
+        return block_returns(view(s.body)) &&
+               (els->k == SK::Block ? block_returns(view(els->body)) : stmt_returns(*els));
+    }
+    case SK::Try:
+        return block_returns(view(s.body)) && block_returns(view(s.body2));
+    default:
+        return false;
+    }
+}
+
+static bool block_returns(const StmtList &stmts) {
+    for (const Stmt *sp : stmts)
+        if (sp && stmt_returns(*sp)) return true;
+    return false;
+}
+
 void Emitter::st(const Stmt &s, const std::string &ind) {
     switch (s.k) {
     case SK::Block:
@@ -6362,7 +6438,6 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
                 // The container reference was consumed above. Clear its slot so
                 // shared exit cleanup cannot release the stale pointer again.
                 ln(ind, sym[*root].cn + " = vnil();");
-                dropped.insert(*root);
                 v.val = t;
             } else if (global_lets.count(*root) || fin == "__fin_top") {
                 // A script-level binding outlives the frame that returns it, so
@@ -6450,11 +6525,22 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             cond_c = truth(*s.e1, c.val, test);
             for (auto &p : test) ln(ind, p);
         }
+        auto pre_moved = moved;
+        auto pre_dropped = dropped;
         ln(ind, cat("if (", cond_c, ") {"));
         emit_block(view(s.body), ind + "  ");
+        auto then_moved = moved;
+        auto then_dropped = dropped;
+        const bool then_ret = block_returns(view(s.body));
+        moved = pre_moved;
+        dropped = pre_dropped;
         const Stmt *els = real_else(s);
         if (!els) {
             ln(ind, "}");
+            if (!then_ret) {
+                moved = intersect_names(then_moved, pre_moved);
+                dropped = intersect_names(then_dropped, pre_dropped);
+            }
             return;
         }
         if (els->k != SK::Block) {
@@ -6464,14 +6550,37 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ln(ind, "} else {");
             st(*els, ind + "  ");
             ln(ind, "}");
-            return;
+        } else {
+            ln(ind, "} else {");
+            emit_block(view(els->body), ind + "  ");
+            ln(ind, "}");
         }
-        ln(ind, "} else {");
-        emit_block(view(els->body), ind + "  ");
-        ln(ind, "}");
+        const bool else_ret = (els->k == SK::Block) ? block_returns(view(els->body))
+                                                     : stmt_returns(*els);
+        if (then_ret && !else_ret) {
+            // Keep `moved` / `dropped` from `else`.
+        } else if (!then_ret && else_ret) {
+            moved = std::move(then_moved);
+            dropped = std::move(then_dropped);
+        } else {
+            moved = intersect_names(then_moved, moved);
+            dropped = intersect_names(then_dropped, dropped);
+        }
         return;
     }
     case SK::While: {
+        std::set<std::string> loop_defs;
+        assigned_vars_in(view(s.body), loop_defs);
+        for (const auto &nm : loop_defs) {
+            moved.erase(nm);
+            dropped.erase(nm);
+        }
+        auto pre_moved = moved;
+        auto pre_dropped = dropped;
+        auto finish_loop = [&]() {
+            moved = intersect_names(pre_moved, moved);
+            dropped = intersect_names(pre_dropped, dropped);
+        };
         if (!ub_ints.empty() && s.e1->k == EK::Bin &&
             (s.e1->a == "==" || s.e1->a == "!=" || s.e1->a == "<" || s.e1->a == ">" ||
              s.e1->a == "<=" || s.e1->a == ">=") &&
@@ -6483,6 +6592,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             loop_exit_depths.pop_back();
             ln(ind, "}");
             emit_loop_drops(view(s.body), ind);
+            finish_loop();
             return;
         }
         if (!ub_floats.empty() && s.e1->k == EK::Bin &&
@@ -6496,6 +6606,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             loop_exit_depths.pop_back();
             ln(ind, "}");
             emit_loop_drops(view(s.body), ind);
+            finish_loop();
             return;
         }
         V c = ex(*s.e1);
@@ -6511,6 +6622,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         loop_exit_depths.pop_back();
         ln(ind, "}");
         emit_loop_drops(view(s.body), ind);
+        finish_loop();
         return;
     }
     case SK::ForRange: {
@@ -6523,6 +6635,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind, cat("int64_t ", lo, " = vlong(", a.val, ");"));
         ln(ind, cat("int64_t ", hi, " = vlong(", b.val, ");"));
         emit_err_check(ind);
+        std::set<std::string> loop_defs{s.a};
+        assigned_vars_in(view(s.body), loop_defs);
+        for (const auto &nm : loop_defs) {
+            moved.erase(nm);
+            dropped.erase(nm);
+        }
+        auto pre_moved = moved;
+        auto pre_dropped = dropped;
         ln(ind, cat("for (int64_t ", kk, " = ", lo, "; ", kk, " < ", hi, "; ++", kk, ") {"));
         if (ub_ints.count(s.a)) {
             ln(ind + "  ", cat("ub_", cname(s.a), " = ", kk, ";"));
@@ -6536,6 +6656,8 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         loop_exit_depths.pop_back();
         ln(ind, "}");
         emit_loop_drops(view(s.body), ind);
+        moved = intersect_names(pre_moved, moved);
+        dropped = intersect_names(pre_dropped, dropped);
         return;
     }
     case SK::ForIter: {
@@ -6549,6 +6671,14 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         emit_err_check(ind, drop_src ? std::vector<std::string>{src} : std::vector<std::string>{});
         std::string iclean = cat("viter_done(", src, ", ", vv, "); ",
                                  drop_src ? cat("vdrop_temp(", src, "); ") : std::string());
+        std::set<std::string> loop_defs{s.a};
+        assigned_vars_in(view(s.body), loop_defs);
+        for (const auto &nm : loop_defs) {
+            moved.erase(nm);
+            dropped.erase(nm);
+        }
+        auto pre_moved = moved;
+        auto pre_dropped = dropped;
         ln(ind, cat("for (int64_t ", kk, " = 0; ", kk, " < ", vv, "->len; ++", kk, ") {"));
         std::string cn = var_def(s.a, Own::Copy);
         ln(ind + "  ", cat(cn, " = ", vv, "->items[", kk, "];"));
@@ -6562,6 +6692,8 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         ln(ind, cat("viter_done(", src, ", ", vv, ");"));
         if (drop_src) ln(ind, cat("vdrop_temp(", src, ");"));
         emit_loop_drops(view(s.body), ind);
+        moved = intersect_names(pre_moved, moved);
+        dropped = intersect_names(pre_dropped, dropped);
         return;
     }
     case SK::Break:
@@ -6577,6 +6709,8 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         auto saved_goto = err_goto;
         size_t saved_scope_depth = err_scope_depth;
         size_t saved_iter_depth = err_iter_depth;
+        auto pre_moved = moved;
+        auto pre_dropped = dropped;
         std::string b = new_tmp("dfb");
         ln(ind, "{");
         ln(ind + "  ", cat("int64_t ", b, " = vdfsp;"));
@@ -6584,11 +6718,22 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         err_scope_depth = scopes.size();
         err_iter_depth = iter_cleanups.size();
         emit_block(view(s.body), ind + "  ");
+        auto try_moved = moved;
+        auto try_dropped = dropped;
+        const bool try_ret = block_returns(view(s.body));
         err_goto = saved_goto;
         err_scope_depth = saved_scope_depth;
         err_iter_depth = saved_iter_depth;
         ln(ind + "  ", cat("goto ", after_lbl, ";"));
         ln(ind, cat(catch_lbl, ":;"));
+        std::set<std::string> try_defs;
+        assigned_vars_in(view(s.body), try_defs);
+        moved = pre_moved;
+        dropped = pre_dropped;
+        for (const auto &nm : try_defs) {
+            moved.erase(nm);
+            dropped.erase(nm);
+        }
         for (const auto &nm : nested_owned_let_names(view(s.body))) {
             if (ub_ints.count(nm) || ub_floats.count(nm)) continue;
             auto sit = sym.find(nm);
@@ -6603,11 +6748,17 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         bool had_prev = false;
         Sym prev_sym;
         bool had_prev_assigned = false;
+        bool had_prev_moved = false;
+        bool had_prev_dropped = false;
         std::string cn;
         if (s.opt1) {
             auto pit = sym.find(*s.opt1);
             if (pit != sym.end()) { had_prev = true; prev_sym = pit->second; }
             had_prev_assigned = assigned.count(*s.opt1) > 0;
+            had_prev_moved = moved.count(*s.opt1) > 0;
+            had_prev_dropped = dropped.count(*s.opt1) > 0;
+            moved.erase(*s.opt1);
+            dropped.erase(*s.opt1);
             cn = slot_cn("@catch_" + *s.opt1);
             sym[*s.opt1] = Sym{cn, Own::Owned, "", ""};
             catch_cns.insert(cn);
@@ -6618,12 +6769,26 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             ln(ind + "  ", "verr_catch_discard();");
         }
         emit_block(view(s.body2), ind + "  ");
+        const bool catch_ret = block_returns(view(s.body2));
         if (s.opt1) {
             ln(ind + "  ", cat("vrelease(", cn, ");"));
             ln(ind + "  ", cat(cn, " = vnil();"));
             if (had_prev) sym[*s.opt1] = prev_sym;
             else sym.erase(*s.opt1);
             if (!had_prev_assigned) assigned.erase(*s.opt1);
+            if (had_prev_moved) moved.insert(*s.opt1);
+            else moved.erase(*s.opt1);
+            if (had_prev_dropped) dropped.insert(*s.opt1);
+            else dropped.erase(*s.opt1);
+        }
+        if (try_ret && !catch_ret) {
+            // Keep `moved` / `dropped` from `catch`.
+        } else if (!try_ret && catch_ret) {
+            moved = std::move(try_moved);
+            dropped = std::move(try_dropped);
+        } else {
+            moved = intersect_names(try_moved, moved);
+            dropped = intersect_names(try_dropped, dropped);
         }
         ln(ind, cat(after_lbl, ":;"));
         ln(ind, "}");
@@ -7101,7 +7266,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         // end of the block, so the alias is given back here.
         for (const auto &name : std::set<std::string>(alias_temps)) {
             auto it = sym.find(name);
-            if (it == sym.end() || dropped.count(name)) continue;
+            if (it == sym.end()) continue;
             ln("  ", cat("vrc_dec(", it->second.cn, ");"));
             ln("  ", cat(it->second.cn, " = vnil();"));
             alias_temps.erase(name);

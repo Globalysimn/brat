@@ -640,7 +640,22 @@ std::vector<std::string> borrow_srcs(const Expr *e, const Decls &decl, FnTable &
     if (auto v = deref_var(e, decl, funcs)) return borrow_srcs_at(*v, decl, funcs);
     switch (e->k) {
     case EK::Var: return borrow_srcs_at(e->a, decl, funcs);
-    case EK::Move: return borrow_srcs(e->kids[0].get(), decl, funcs);
+    case EK::Move: {
+        if (auto p = path_of(e->kids[0].get())) {
+            std::string r = root_of(*p);
+            const Decl *d = decl.find(r);
+            if (!d || d->copy) return out;
+            if (!d->srcs.empty()) {
+                for (const std::string &s : d->srcs) {
+                    if (s != r) add_unique(out, borrow_srcs_at(s, decl, funcs));
+                }
+                return out;
+            }
+            if (d->src && *d->src != r) return borrow_srcs_at(*d->src, decl, funcs);
+            return out;
+        }
+        return borrow_srcs(e->kids[0].get(), decl, funcs);
+    }
     case EK::Idx:
         if (elem_copy(decl, e->kids[0].get()) || expr_is_copy_slot(e, decl, &funcs)) return out;
         return borrow_srcs(e->kids[0].get(), decl, funcs);
@@ -1306,10 +1321,16 @@ bool check_write(const std::string &path, Decls &decl, Borrows &borrows, Errs &e
         errs.note("assign to const `" + path + "`");
         return false;
     }
-    if (d->moved) {
+    if (d->moved && !(rebind && path == root)) {
         errs.note("use of moved `" + root + "`",
                   rel_at(d->moved_line, "`" + root + "` moved here"));
         return false;
+    }
+    for (const std::string &mp : d->moved_paths) {
+        if (starts_with(path, mp + ".")) {
+            errs.note("use of moved `" + mp + "`");
+            return false;
+        }
     }
     if (d->spawn_frozen && rebind) {
         errs.note("assign to captured `" + root +
@@ -1803,6 +1824,14 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
     }
     if (!check_write(path, decl, borrows, errs, true)) return;
     Decl *d = decl.find(tgt);
+    if (path == tgt) {
+        if (d->owned && !d->moved) {
+            errs.note("leaked owned pointer `" + tgt + "`: free it or return it",
+                      rel_at(d->dl, "`" + tgt + "` allocated here"));
+        }
+        d->owned = value && value->k == EK::Call && funcs.owned_ret.count(value->a) > 0;
+        if (d->owned) d->dl = errs.line;
+    }
     d->moved = false;
     if (d->pinned && is_copy_expr(value, decl, funcs)) {
         d->copy = true;
@@ -1815,7 +1844,7 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
     } else {
         std::set<std::string> kept;
         for (const std::string &mp : d->moved_paths) {
-            if (!paths_conflict(path, mp)) kept.insert(mp);
+            if (mp != path && !starts_with(mp, path + ".")) kept.insert(mp);
         }
         d->moved_paths = std::move(kept);
     }

@@ -299,6 +299,144 @@ fn pure_dot(ax: i64, ay: i64, bx: i64, by: i64) -> i64 {
   return a.x * b.x + a.y * b.y
 }
 
+struct Envelope {
+  inner: Packet,
+  label: str,
+}
+
+fn cf_take_str(s: move str) -> i64 {
+  return len(s)
+}
+
+fn cf_maybe_err(fail: bool, v: i64) -> Result[i64, str] {
+  if fail {
+    return Err("cf_err_" + str(v))
+  }
+  return Ok(v + 10)
+}
+
+fn cf_sra_rebind(flag: bool, k: i64) -> i64 {
+  let mut p = Packet { tag: "hello_world_" + str(k), items: [k, k + 1], weight: k }
+  if flag {
+    let _ = cf_take_str(move p.tag)
+  }
+  p = Packet { tag: "rebound_" + str(k), items: [k + 2], weight: k + 1 }
+  return len(p.tag) + len(p.items) + p.weight
+}
+
+fn cf_nested_rebind(flag: bool, k: i64) -> i64 {
+  let mut env = Envelope {
+    inner: Packet { tag: "sub_" + str(k), items: [k], weight: k },
+    label: "env_" + str(k),
+  }
+  if flag {
+    let _ = cf_take_str(move env.inner.tag)
+  }
+  env.inner = Packet { tag: "fresh_sub_" + str(k), items: [k, k + 1], weight: k + 2 }
+  return len(env.inner.tag) + len(env.label) + env.inner.weight + len(env.inner.items)
+}
+
+fn cf_sra_early_ret(flag: bool, k: i64) -> i64 {
+  let mut p = Packet { tag: "sra_ret_" + str(k), items: [k], weight: k }
+  if flag {
+    let m = cf_take_str(move p.tag)
+    return m + p.weight
+  }
+  return len(p.tag) + p.weight
+}
+
+fn cf_early_ret_before_move(early: bool, k: i64) -> i64 {
+  let x = "allocated_early_" + str(k)
+  if early {
+    return k
+  }
+  return cf_take_str(move x)
+}
+
+fn cf_quest_before_move(fail: bool, k: i64) -> Result[i64, str] {
+  let x = "allocated_quest_" + str(k)
+  let v = cf_maybe_err(fail, k)?
+  let n = cf_take_str(move x)
+  return Ok(v + n)
+}
+
+fn cf_loop_rebind_after_move(iters: i64) -> i64 {
+  let mut s = "initial_" + str(iters)
+  let mut acc = cf_take_str(move s)
+  let mut i = 0
+  while i < iters {
+    s = "iter_payload_" + str(i)
+    acc = acc + len(s)
+    i = i + 1
+  }
+  return acc
+}
+
+fn cf_loop_break_after_rebind(flag: bool, k: i64) -> i64 {
+  let mut z = "pre_" + str(k)
+  let mut acc = cf_take_str(move z)
+  let mut i = 0
+  while i < 2 {
+    i = i + 1
+    z = "fresh_in_loop_" + str(k + i)
+    if flag {
+      acc = acc + cf_take_str(move z)
+    } else {
+      break
+    }
+  }
+  return acc
+}
+
+fn cf_part_return_fallthrough(flag: bool, k: i64) -> str {
+  let mut v = ["first_" + str(k), "second_" + str(k)]
+  if flag {
+    return v[0]
+  }
+  v = ["replaced_" + str(k)]
+  return v[0]
+}
+
+fn cf_boom_str(fail: bool, k: i64) -> str {
+  if fail {
+    let a = [1]
+    return str(a[5])
+  }
+  return "ok_" + str(k)
+}
+
+fn cf_try_catch_rebind(fail: bool, k: i64) -> i64 {
+  let mut s = "init_try_" + str(k)
+  let _ = cf_take_str(move s)
+  let mut total = 0
+  try {
+    s = "rebound_before_throw_" + str(k)
+    let r = cf_boom_str(fail, k)
+    total = total + len(r) + cf_take_str(move s)
+  } catch _e {
+    s = "recovered_" + str(k)
+    total = total + len(s)
+  }
+  return total
+}
+
+fn cf_move_and_rebind() -> i64 {
+  let mut sum = 0
+  sum = sum + cf_sra_rebind(true, 10) + cf_sra_rebind(false, 10)
+  sum = sum + cf_nested_rebind(true, 20) + cf_nested_rebind(false, 20)
+  sum = sum + cf_sra_early_ret(true, 30) + cf_sra_early_ret(false, 30)
+  sum = sum + cf_early_ret_before_move(true, 40) + cf_early_ret_before_move(false, 40)
+  let r1 = cf_quest_before_move(true, 50)
+  let r2 = cf_quest_before_move(false, 50)
+  if r1.is_err() { sum = sum + 1 }
+  sum = sum + r2.unwrap_or(0)
+  sum = sum + cf_loop_rebind_after_move(0) + cf_loop_rebind_after_move(5)
+  sum = sum + cf_loop_break_after_rebind(true, 60) + cf_loop_break_after_rebind(false, 60)
+  sum = sum + len(cf_part_return_fallthrough(true, 70)) + len(cf_part_return_fallthrough(false, 70))
+  sum = sum + cf_try_catch_rebind(true, 80) + cf_try_catch_rebind(false, 80)
+  return sum
+}
+
 fn main() -> i64 {
   print(eval_order())
   print(nested_ray_loop(1000))
@@ -310,6 +448,7 @@ fn main() -> i64 {
   print(heap_and_arena_sra())
   let mut p = Point { x: 4, y: 9 }.shifted(2, 3)
   print("{p.bump(5)}|{pure_dot(3, 4, 5, 6)}")
+  print(cf_move_and_rebind())
   print("struct-sra-all-ok")
   return 0
 }
@@ -335,6 +474,7 @@ check(lines[3] == "35:30|ok:888:999", f"normal Set broken: {lines[3]!r}")
 check(lines[4] == "59|105|5-9|true", f"match_and_interp broken: {lines[4]!r}")
 check(lines[5] == "77|55|20|11", f"escape_semantics broken: {lines[5]!r}")
 check(lines[6] == "17,42->117|caught", f"gradual_safety broken: {lines[6]!r}")
+check(lines[-2] == "536", f"cf_move_and_rebind broken: {lines[-2]!r}")
 check(lines[-1] == "struct-sra-all-ok", f"missing final sentinel: {lines[-1]!r}")
 
 

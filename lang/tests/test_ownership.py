@@ -934,6 +934,37 @@ REJECT.append(("c30_setidx_on_moved_value", {"m.brat": """fn main() -> i64 {
 }
 """}, "use of moved"))
 
+REJECT.append(("c31_setfield_on_moved_struct", {"m.brat": """struct Holder {
+  s: str,
+  n: i64,
+}
+
+fn main() -> i64 {
+  let mut h = Holder { s: "a", n: 1 }
+  let moved_h = move h
+  h.s = "b"
+  print(moved_h.n)
+  return 0
+}
+"""}, "use of moved"))
+
+REJECT.append(("c32_setfield_under_moved_substruct", {"m.brat": """struct Inner {
+  s: str,
+}
+
+struct Outer {
+  inner: Inner,
+}
+
+fn main() -> i64 {
+  let mut o = Outer { inner: Inner { s: "a" } }
+  let sub = move o.inner
+  o.inner.s = "b"
+  print(sub.s)
+  return 0
+}
+"""}, "use of moved"))
+
 
 ACCEPT.append(("d01_copy_scalar_flow_through_annotated_param", {"m.brat": """fn f(n: i64) -> i64 {
   let x = n
@@ -1103,6 +1134,52 @@ ACCEPT.append(("d15_move_param_can_transfer_ownership", {"m.brat": """fn consume
 fn main() -> i64 {
   let v = [1]
   return consume(v)
+}
+"""}))
+
+ACCEPT.append(("d17_rebind_mut_var_after_move", {"m.brat": """fn main() -> i64 {
+  let mut s = "first"
+  let m = move s
+  s = "second"
+  print(m)
+  print(s)
+  return 0
+}
+"""}))
+
+ACCEPT.append(("d18_rebind_parent_struct_after_field_move", {"m.brat": """struct Holder {
+  s: str,
+  n: i64,
+}
+
+fn main() -> i64 {
+  let mut h = Holder { s: "first", n: 1 }
+  let m = move h.s
+  h = Holder { s: "second", n: 2 }
+  print(m)
+  print(h.s)
+  return h.n
+}
+"""}))
+
+ACCEPT.append(("d19_rebind_nested_substruct_after_leaf_move", {"m.brat": """struct Inner {
+  s: str,
+  n: i64,
+}
+
+struct Outer {
+  inner: Inner,
+  tag: str,
+}
+
+fn main() -> i64 {
+  let mut o = Outer { inner: Inner { s: "leaf", n: 1 }, tag: "root" }
+  let m = move o.inner.s
+  o.inner = Inner { s: "rebound", n: 2 }
+  print(m)
+  print(o.inner.s)
+  print(o.tag)
+  return o.inner.n
 }
 """}))
 

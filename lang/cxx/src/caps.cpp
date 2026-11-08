@@ -809,14 +809,18 @@ struct Walk {
                 note(line, msg, rel);
                 return;
             }
-            if (st.cap(p) == kMoved) {
-                st.caps[p] = kNone;
-                st.who.erase(p);
+        }
+        // Replacing `p` restores `p` and any moved sub-places under it.
+        const std::string sub = p + ".";
+        for (auto it = st.caps.begin(); it != st.caps.end();) {
+            if ((it->first == p || it->first.compare(0, sub.size(), sub) == 0) &&
+                it->second == kMoved) {
+                st.who.erase(it->first);
+                st.verb.erase(it->first);
+                it = st.caps.erase(it);
+            } else {
+                ++it;
             }
-        } else if (st.cap(p) == kMoved) {
-            // `v = ...` on a moved binding rebinds it: the move is over.
-            st.caps[p] = kNone;
-            st.who.erase(p);
         }
         st.claim(p, kWrite, root_name(p), line);
     }
