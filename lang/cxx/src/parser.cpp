@@ -2,7 +2,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <clocale>
 #include <cstdlib>
+#if defined(__APPLE__) && defined(__has_include)
+#if __has_include(<xlocale.h>)
+#include <xlocale.h>
+#endif
+#elif defined(__APPLE__)
+#include <xlocale.h>
+#endif
 
 #include <unordered_map>
 #include <unordered_set>
@@ -16,6 +24,28 @@ namespace {
 bool is_name(const Tok &t) { return t.kind == TK::Id || t.kind == TK::Kw; }
 
 std::string to_str(std::string_view v) { return std::string(v); }
+
+double parse_c_double(const char *s, char **endp) {
+#if defined(_MSC_VER)
+    static _locale_t c_loc = _create_locale(LC_NUMERIC, "C");
+    return c_loc ? _strtod_l(s, endp, c_loc) : std::strtod(s, endp);
+#elif defined(_WIN32)
+    const char *dp = std::localeconv()->decimal_point;
+    if (dp && dp[0] && !(dp[0] == '.' && dp[1] == '\0')) {
+        std::string tmp(s);
+        size_t dot = tmp.find('.');
+        if (dot != std::string::npos) tmp.replace(dot, 1, dp);
+        char *ep = nullptr;
+        double v = std::strtod(tmp.c_str(), &ep);
+        if (endp) *endp = const_cast<char *>(s + (ep ? (ep - tmp.c_str()) : 0));
+        return v;
+    }
+    return std::strtod(s, endp);
+#else
+    static locale_t c_loc = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    return c_loc ? strtod_l(s, endp, c_loc) : std::strtod(s, endp);
+#endif
+}
 
 std::string join(const std::vector<std::string> &v) {
     std::string out;
@@ -1263,9 +1293,7 @@ private:
         return node;
     }
 
-    // `pure`, `nothrow`, `reads`, `writes` --
-    // EFFECTS. Kept identical here on purpose: an effect one front end knows and
-    // the other does not is a program that means two things.
+    // Recognized function effect annotations.
     static bool is_effect(std::string_view w) {
         return w == "pure" || w == "nothrow" || w == "reads" || w == "writes" || w == "borrows";
     }
@@ -2625,11 +2653,9 @@ private:
         }
         if (!buf.empty()) parts.push_back({true, unescape(buf), nullptr});
         if (parts.empty()) return mk_str("");
-        if (parts.size() == 1) {
-            if (parts[0].is_text) return mk_rstr(parts[0].text);
-            return std::move(parts[0].sub);
-        }
-        ExprP node = parts[0].is_text ? mk_rstr(parts[0].text) : std::move(parts[0].sub);
+        if (parts.size() == 1 && parts[0].is_text) return mk_rstr(parts[0].text);
+        ExprP node = parts[0].is_text ? mk_rstr(parts[0].text)
+                                      : mk_bin("+", mk_rstr(""), std::move(parts[0].sub));
         for (size_t j = 1; j < parts.size(); j++) {
             ExprP rhs = parts[j].is_text ? mk_rstr(parts[j].text) : std::move(parts[j].sub);
             node = mk_bin("+", std::move(node), std::move(rhs));
@@ -2723,16 +2749,7 @@ private:
         }
         if (t.find('.') != std::string::npos || t.find('e') != std::string::npos
             || t.find('E') != std::string::npos) {
-            char dp[8];
-            std::snprintf(dp, sizeof dp, "%.1f", 1.5);
-            size_t dplen = (dp[0] == '1' && std::char_traits<char>::length(dp) >= 3) ? (std::char_traits<char>::length(dp) - 2) : 1;
-            if (!(dp[1] == '.' && dplen == 1)) {
-                std::string loc = t;
-                size_t dot = loc.find('.');
-                if (dot != std::string::npos) loc.replace(dot, 1, dp + 1, dplen);
-                return mk_float(std::strtod(loc.c_str(), nullptr));
-            }
-            return mk_float(std::strtod(t.c_str(), nullptr));
+            return mk_float(parse_c_double(t.c_str(), nullptr));
         }
         uint64_t v = 0;
         for (char ch : t) {

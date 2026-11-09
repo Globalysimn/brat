@@ -1428,13 +1428,21 @@ static int run_captured(const std::vector<std::string> &args, std::string &combi
     const pid_t pid = fork();
     if (pid < 0) return 127;
     if (pid == 0) {
-        const int lfd = ::open(log_file.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        int lfd = ::open(log_file.string().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
         if (lfd >= 0) {
-            if (lfd == STDOUT_FILENO) ::fcntl(STDOUT_FILENO, F_SETFD, 0);
-            else ::dup2(lfd, STDOUT_FILENO);
-            if (lfd == STDERR_FILENO) ::fcntl(STDERR_FILENO, F_SETFD, 0);
-            else ::dup2(lfd, STDERR_FILENO);
-            if (lfd > 2) ::close(lfd);
+            if (lfd < 3) {
+                int m = ::fcntl(lfd, F_DUPFD_CLOEXEC, 3);
+                if (m >= 0) { ::close(lfd); lfd = m; }
+            }
+            if (lfd >= 3) {
+                ::dup2(lfd, STDOUT_FILENO);
+                ::dup2(lfd, STDERR_FILENO);
+                ::close(lfd);
+            } else {
+                if (lfd == STDOUT_FILENO) { ::fcntl(STDOUT_FILENO, F_SETFD, 0); ::dup2(lfd, STDERR_FILENO); }
+                else if (lfd == STDERR_FILENO) { ::fcntl(STDERR_FILENO, F_SETFD, 0); ::dup2(lfd, STDOUT_FILENO); }
+                else { ::dup2(lfd, STDOUT_FILENO); ::dup2(lfd, STDERR_FILENO); ::close(lfd); }
+            }
         }
         execvp(argv[0], argv.data());
         _exit(127);

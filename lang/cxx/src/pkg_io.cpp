@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1425,6 +1426,14 @@ int connect_with_timeout(const std::string &host,
             struct timeval tv {};
             tv.tv_sec = timeout_ms / 1000;
             tv.tv_usec = (timeout_ms % 1000) * 1000;
+#if !defined(_WIN32) && defined(SIGPIPE)
+            static std::once_flag sigpipe_once;
+            std::call_once(sigpipe_once, []() { std::signal(SIGPIPE, SIG_IGN); });
+#endif
+#if defined(__APPLE__) && defined(SO_NOSIGPIPE)
+            int nosig = 1;
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+#endif
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
             if (connected_internal_out) *connected_internal_out = non_pub;
@@ -1585,9 +1594,14 @@ bool fetch_http_single(const ParsedUrl &u,
                             "Connection: close\r\n\r\n";
 
     size_t sent = 0;
+#if defined(MSG_NOSIGNAL)
+    constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+    constexpr int kSendFlags = 0;
+#endif
     while (sent < req.size()) {
         const ssize_t w = ssl ? ossl->SSL_write(ssl, req.data() + sent, static_cast<int>(req.size() - sent))
-                              : send(fd, req.data() + sent, req.size() - sent, 0);
+                              : send(fd, req.data() + sent, req.size() - sent, kSendFlags);
         if (w <= 0) {
             cleanup();
             err = "HTTP write failed to " + u.host;

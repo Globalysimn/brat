@@ -99,11 +99,9 @@ std::string stray_message(std::string_view src, size_t i) {
 
 }  // namespace
 
-// Source files must be valid UTF-8; a
-// byte its decoder rejects is a file neither front end can read. Rejecting it
-// here -- before the first token, with the line the bad byte sits on -- keeps
-// `check`, `cc` and `run` on one answer for one file instead of one of them
-// silently compiling garbage.
+// Source files must be valid UTF-8. Rejecting invalid sequences before the
+// first token, with the line number of the bad byte, keeps `check`, `cc`, and
+// `run` consistent.
 bool utf8_valid(std::string_view s, uint32_t &bad_line, uint32_t start_line) {
     uint32_t line = start_line;
     for (size_t i = 0; i < s.size();) {

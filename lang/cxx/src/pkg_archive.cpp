@@ -15,6 +15,10 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -385,6 +389,7 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
     }
+    if (timed_out || over_cap) CancelIoEx(rd, nullptr);
     if (reader.joinable()) reader.join();
     CloseHandle(rd);
     DWORD code = 1;
@@ -416,12 +421,19 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
     }
     if (pid == 0) {
         setpgid(0, 0);
+#if defined(SIGPIPE)
+        signal(SIGPIPE, SIG_DFL);
+#endif
         close(pipefd[0]);
-        if (pipefd[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
-        else dup2(pipefd[1], STDOUT_FILENO);
-        if (pipefd[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
-        else dup2(pipefd[1], STDERR_FILENO);
-        if (pipefd[1] > 2) close(pipefd[1]);
+        if (pipefd[1] >= 0 && pipefd[1] < 3) {
+            int m = fcntl(pipefd[1], F_DUPFD_CLOEXEC, 3);
+            if (m < 0) _exit(126);
+            close(pipefd[1]);
+            pipefd[1] = m;
+        }
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
+        close(pipefd[1]);
         const int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (devnull >= 0) {
             if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);

@@ -20,6 +20,10 @@
 #define NOMINMAX
 #endif
 #include <thread>
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #ifdef cdecl
 #undef cdecl
@@ -480,6 +484,10 @@ bool preprocess_header_cc(const std::string &path,
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
     }
+    if (timed_out || over) {
+        CancelIoEx(out_rd, nullptr);
+        CancelIoEx(err_rd, nullptr);
+    }
     out_thr.join();
     err_thr.join();
     DWORD win_ec = 1;
@@ -522,17 +530,18 @@ bool preprocess_header_cc(const std::string &path,
         setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
-        if (err_pipe[1] == STDOUT_FILENO && out_pipe[1] != STDOUT_FILENO) {
-            int m = fcntl(err_pipe[1], F_DUPFD_CLOEXEC, 3);
-            if (m < 0) _exit(126);
-            err_pipe[1] = m;
+        for (int *wp : {&out_pipe[1], &err_pipe[1]}) {
+            if (*wp >= 0 && *wp < 3) {
+                int m = fcntl(*wp, F_DUPFD_CLOEXEC, 3);
+                if (m < 0) _exit(126);
+                close(*wp);
+                *wp = m;
+            }
         }
-        if (out_pipe[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
-        else dup2(out_pipe[1], STDOUT_FILENO);
-        if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
-        else dup2(err_pipe[1], STDERR_FILENO);
-        if (out_pipe[1] > STDERR_FILENO) close(out_pipe[1]);
-        if (err_pipe[1] > STDERR_FILENO) close(err_pipe[1]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
+        close(out_pipe[1]);
+        close(err_pipe[1]);
         std::vector<char *> cargv;
         for (auto &s : argv) cargv.push_back(s.data());
         cargv.push_back(nullptr);

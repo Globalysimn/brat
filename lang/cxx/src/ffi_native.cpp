@@ -34,6 +34,10 @@
 #endif
 #include <atomic>
 #include <thread>
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #ifdef cdecl
 #undef cdecl
@@ -1112,6 +1116,7 @@ static bool write_temp_probe_c(const char *prefix, const std::string &body, std:
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
     }
+    if (timed_out || over) CancelIoEx(rd, nullptr);
     reader.join();
     DWORD win_ec = 1;
     GetExitCodeProcess(pi.hProcess, &win_ec);
@@ -1143,11 +1148,15 @@ static bool write_temp_probe_c(const char *prefix, const std::string &body, std:
     if (pid == 0) {
         setpgid(0, 0);
         close(pfd[0]);
-        if (pfd[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
-        else dup2(pfd[1], STDOUT_FILENO);
-        if (pfd[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
-        else dup2(pfd[1], STDERR_FILENO);
-        if (pfd[1] > 2) close(pfd[1]);
+        if (pfd[1] >= 0 && pfd[1] < 3) {
+            int m = fcntl(pfd[1], F_DUPFD_CLOEXEC, 3);
+            if (m < 0) _exit(126);
+            close(pfd[1]);
+            pfd[1] = m;
+        }
+        if (dup2(pfd[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(pfd[1], STDERR_FILENO) < 0) _exit(126);
+        close(pfd[1]);
         std::vector<char *> cargv;
         std::vector<std::string> copy = argv;
         for (auto &s : copy) cargv.push_back(s.data());

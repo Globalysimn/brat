@@ -25,6 +25,10 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -282,19 +286,23 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
     }
     if (pid == 0) {
         setpgid(0, 0);
+#if defined(SIGPIPE)
+        signal(SIGPIPE, SIG_DFL);
+#endif
         close(out_pipe[0]);
         close(err_pipe[0]);
-        if (err_pipe[1] == STDOUT_FILENO && out_pipe[1] != STDOUT_FILENO) {
-            int m = fcntl(err_pipe[1], F_DUPFD_CLOEXEC, 3);
-            if (m < 0) _exit(126);
-            err_pipe[1] = m;
+        for (int *wp : {&out_pipe[1], &err_pipe[1]}) {
+            if (*wp >= 0 && *wp < 3) {
+                int m = fcntl(*wp, F_DUPFD_CLOEXEC, 3);
+                if (m < 0) _exit(126);
+                close(*wp);
+                *wp = m;
+            }
         }
-        if (out_pipe[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
-        else if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
-        if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
-        else if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
-        if (out_pipe[1] > 2) close(out_pipe[1]);
-        if (err_pipe[1] > 2) close(err_pipe[1]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
+        close(out_pipe[1]);
+        close(err_pipe[1]);
         const int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (null_fd >= 0) {
             if (null_fd == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
@@ -513,6 +521,10 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
         if (job) TerminateJobObject(job, 124);
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
+    }
+    if (result.timed_out || too_large_flag.load(std::memory_order_relaxed)) {
+        CancelIoEx(out_rd, nullptr);
+        CancelIoEx(err_rd, nullptr);
     }
     if (t_out.joinable()) t_out.join();
     if (t_err.joinable()) t_err.join();
