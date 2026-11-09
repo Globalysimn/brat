@@ -28,7 +28,7 @@ PAIRING = {"run": "output", "check": "diagnostics"}
 
 def execute(command, cwd):
     return subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=300,
-                          env=dict(os.environ, BRAT_NO_NATIVE_CLI="1"))
+                          env=dict(os.environ))
 
 
 def verify_stdlib_signatures():

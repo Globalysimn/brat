@@ -1,6 +1,6 @@
-"""Crafted-program interpreter/native byte agreement: defer capture and repr.
+"""Crafted-program -O0/native byte agreement: defer capture and repr.
 
-Each case runs through the interpreter and a compiled C binary; stdout and
+Each case runs through the -O0 build and a compiled C binary; stdout and
 exit code must match byte-for-byte. `test_agreement.py` keeps the shipped examples
 green, this one pins the semantic seams those examples do not touch.
 """
@@ -207,7 +207,7 @@ for name, (files, src) in CASES.items():
     else:
         bad += 1
         print('%-22s DIFF rc i=%d n=%d' % (name, a.returncode, b.returncode))
-        print('   interp: %r' % a.stdout[:150])
+        print('   run_o0: %r' % a.stdout[:150])
         print('   native: %r' % b.stdout[:150])
 print('---- semantic diffs:', bad)
 sys.exit(1 if bad else 0)

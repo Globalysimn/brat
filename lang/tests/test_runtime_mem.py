@@ -1,4 +1,4 @@
-"""Native memory safety under ASan and native/interpreter parity: a truncated
+"""Native memory safety under ASan and native/-O0 parity: a truncated
 UTF-8 read and a stored container alias must not touch freed memory."""
 import _cxx
 import _scratch
@@ -9,7 +9,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-mem-')
-BRAT = os.path.join(ENGINE, 'brat.py')
 # Final scope-locals, expression temporaries and container scaffolding are not
 # released yet, so the leak check stays off.
 ASAN = {'ASAN_OPTIONS': 'detect_leaks=0'}
@@ -322,9 +321,9 @@ for name, case in CASES.items():
     # Any sanitizer finding lands in stderr.
     check('AddressSanitizer' not in np.stderr,
           '%s native ASan: %s' % (name, np.stderr[:300]))
-    check(ip.stdout == want_out, '%s interp out=%r want=%r'
+    check(ip.stdout == want_out, '%s run_o0 out=%r want=%r'
           % (name, ip.stdout[:120], want_out))
-    check(ip.stderr == want_err, '%s interp err=%r want=%r'
+    check(ip.stderr == want_err, '%s run_o0 err=%r want=%r'
           % (name, ip.stderr[:120], want_err))
     check(np.stdout == want_out, '%s native out=%r want=%r'
           % (name, np.stdout[:120], want_out))

@@ -1,4 +1,4 @@
-"""Round 4 regressions: shaped map literals + IC, PCH cache, system C FFI, bundle CLI, and parser fuzzing."""
+"""Shaped map literals + inline caches, PCH cache, system C FFI, bundle CLI, and parser fuzzing."""
 import gzip
 import io
 import json
@@ -365,4 +365,4 @@ if __name__ == "__main__":
     test_pch_cache_and_bundle_cli()
     test_real_system_headers_ffi()
     test_adversarial_fuzzing_parsers()
-    print("ROUND 4 IDENTITY, FFI, FUZZ & SPEED ALL GREEN")
+    print("SHAPED MAP IC, FFI, FUZZ & SPEED ALL GREEN")

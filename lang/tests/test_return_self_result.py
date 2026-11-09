@@ -4,7 +4,7 @@
 native emitter took such a call for a fresh value, so a function that returned it released `r` on the way out
 and the caller printed freed memory: `[, 2, 3]` for `[3, 1, 2]` in a release build, a heap-use-after-free
 under ASan. Returning `v.first()` of a parameter handed out the caller's own reference. The compiled
-program must print what the interpreter prints, and must be clean under AddressSanitizer when the C
+program must print what the -O0 build prints, and must be clean under AddressSanitizer when the C
 compiler has it.
 """
 import _cxx
@@ -87,12 +87,12 @@ path = os.path.join(TMP, "self_result.brat")
 with open(path, "w") as f:
     f.write(PROGRAM)
 
-want = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+want = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                       timeout=120)
 assert want.returncode == 0, want.stderr[-300:]
 got = subprocess.run([NATIVE, "run", path], capture_output=True, text=True, timeout=120)
 assert got.returncode == 0, got.stderr[-300:]
-assert got.stdout == want.stdout, "compiled %r, interpreter %r" % (got.stdout[:120], want.stdout[:120])
+assert got.stdout == want.stdout, "compiled %r, -O0 %r" % (got.stdout[:120], want.stdout[:120])
 
 wrapper = os.path.join(TMP, "cc-asan.sh")
 with open(wrapper, "w") as f:

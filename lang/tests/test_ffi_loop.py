@@ -77,12 +77,8 @@ WANT = "7\n1.5\n11.5\n99\n0.25\n"
 
 
 def run(args, **kw):
-    if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+    if args and args[0] in ("build", "run", "emit-c", "dist") and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
-    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
-        i = args.index("--interp") + 1
-        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     p = subprocess.run(_cxx.cli_args(*(args)), capture_output=True, text=True, timeout=600, **kw)
     return p.returncode, p.stdout, p.stderr
 
@@ -133,8 +129,8 @@ def main():
     check(rc == 0, "the generator produced bindings its own proof refuses:\n%s%s" % (out2, err2))
 
     # 3. Struct-through-a-pointer, in all three implementations.
-    rc, out3, err3 = run(["run", "--interp", prog])
-    check(rc == 0 and out3 == WANT, "interp:\nwant %r\ngot  %r%s" % (WANT, out3, err3))
+    rc, out3, err3 = run(["run", "-O0", prog])
+    check(rc == 0 and out3 == WANT, "run_o0:\nwant %r\ngot  %r%s" % (WANT, out3, err3))
 
     exe = os.path.join(TMP, "prog.exe")
     rc, out4, err4 = run(["build", prog, "-o", exe])

@@ -184,8 +184,8 @@ assert "VSTACK_VEC_INIT(" in native_c
 assert "int64_t BRAT_UNUSED ub_b_s = 0;" in native_c
 assert "bf_f" in native_c  # unannotated dyn_hot_arith / dyn_poly_or_int lowered to fast raw C
 
-# 2. Interpreter vs Native ASan+UBSan+LSan parity:
-ri = subprocess.run(_cxx.cli_args("run", "--interp", prog_path),
+# 2. Unoptimized (-O0) vs Native ASan+UBSan+LSan parity:
+ri = subprocess.run(_cxx.cli_args("run", "-O0", prog_path),
                     capture_output=True, text=True, timeout=30)
 assert ri.returncode == 0 and ri.stdout == "DYN_SPEED_OK\n", (ri.returncode, ri.stdout, ri.stderr)
 

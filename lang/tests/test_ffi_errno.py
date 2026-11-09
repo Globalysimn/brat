@@ -69,7 +69,7 @@ CASES = {
 
 
 def run_interp(path):
-    p = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path),
+    p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                        capture_output=True, timeout=120)
     return p.returncode, p.stdout
 
@@ -94,7 +94,7 @@ def main():
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
         ri, oi = run_interp(path)
-        assert ri == 0 and oi == want, "%s interp: rc=%d out=%r want %r" % (name, ri, oi, want)
+        assert ri == 0 and oi == want, "%s run_o0: rc=%d out=%r want %r" % (name, ri, oi, want)
         rn, on = run_native(src, name)
         assert rn == 0 and on == want, "%s native: rc=%d out=%r want %r" % (name, rn, on, want)
         n += 1

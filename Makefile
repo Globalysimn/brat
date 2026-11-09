@@ -30,7 +30,7 @@ asan:
 test: $(BIN)
 	python3 lang/tests/run_all.py
 test-native: $(BIN)
-	python3 lang/tests/test_agreement.py --native-only
+	python3 lang/tests/test_agreement.py
 	python3 lang/tests/test_bitwise.py
 	python3 lang/tests/test_runtime_json_enum.py
 	python3 lang/tests/test_defer_try_soundness.py

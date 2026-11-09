@@ -313,7 +313,7 @@ def fail(name, msg):
 def checkers(path):
     """Both checkers' diagnostics, normalised to the lines that carry a message."""
     out = {}
-    for tag, cmd in (("py", _cxx.cli_args("check", "--py", path)),
+    for tag, cmd in (("py", _cxx.cli_args("check", path)),
                      ("cxx", [CXX, "check", path])):
         p = sh(cmd)
         out[tag] = (p.returncode,
@@ -344,9 +344,9 @@ def main():
                 run = sh([exe])
                 if run.stdout != stdout:
                     fail(name, "%s stdout %r, want %r" % (tag, run.stdout, stdout))
-            interp = sh(_cxx.run_args(path))
-            if interp.stdout != stdout:
-                fail(name, "interp stdout %r, want %r" % (interp.stdout, stdout))
+            run_o0 = sh(_cxx.run_args(path))
+            if run_o0.stdout != stdout:
+                fail(name, "run_o0 stdout %r, want %r" % (run_o0.stdout, stdout))
         else:
             if rc == 0:
                 fail(name, "must be rejected, got 0 error(s)")
@@ -403,7 +403,7 @@ def run_gate():
     with open(path, "w", encoding="utf-8") as f:
         f.write("fn main() -> i64 {\n  let mut cell = [0]\n  spawn { print(cell[0]) }\n"
                 "  cell[0] = 5\n  join_all()\n  return 0\n}\n")
-    p = sh(_cxx.cli_args("run", "--interp", path))
+    p = sh(_cxx.cli_args("run", "-O0", path))
     assert p.returncode != 0 and "refusing to run" in (p.stdout + p.stderr), \
         "brat run must refuse a race: rc=%d %r" % (p.returncode, (p.stdout + p.stderr)[-300:])
     print("CAPABILITY gate ok (brat run refuses the race)")

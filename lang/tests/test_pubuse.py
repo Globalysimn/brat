@@ -19,13 +19,13 @@ def write(rel, src):
 
 
 def run(path):
-    return subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, timeout=120)
+    return subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, timeout=120)
 
 
 def expect_both(path, tag, stdout):
-    interp = run(path)
-    assert interp.returncode == 0 and interp.stdout == stdout, \
-        "interp: rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr)
+    run_o0 = run(path)
+    assert run_o0.returncode == 0 and run_o0.stdout == stdout, \
+        "run_o0: rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr)
     exe = os.path.join(TMP, tag + ".exe")
     built = subprocess.run(_cxx.cli_args("build", path, "-o", exe),
                            capture_output=True, timeout=300)
@@ -36,9 +36,9 @@ def expect_both(path, tag, stdout):
 
 
 def expect_error(path, text):
-    interp = run(path)
-    out = (interp.stdout + interp.stderr).decode("utf-8", "replace")
-    assert interp.returncode != 0 and text in out, "run: rc=%d out=%r" % (interp.returncode, out)
+    run_o0 = run(path)
+    out = (run_o0.stdout + run_o0.stderr).decode("utf-8", "replace")
+    assert run_o0.returncode != 0 and text in out, "run: rc=%d out=%r" % (run_o0.returncode, out)
     exe = os.path.join(TMP, "bad.exe")
     if os.path.exists(exe):
         os.unlink(exe)

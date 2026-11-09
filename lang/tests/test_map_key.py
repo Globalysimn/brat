@@ -8,14 +8,14 @@ it, and none of it looked like a failure:
   vec_push), so the raise waited for the lock it was holding. No message, no
   exit code, a program that never ends.
 * `m.get([1, 2])` let a CPython `TypeError: unhashable type: 'list'` out of the
-  interpreter, which no `try`/`catch` can see, while the C backend answered
+  -O0, which no `try`/`catch` can see, while the C backend answered
   `None` for the same call.
-* a map **literal** with a scalar key was unreadable in the interpreter:
+* a map **literal** with a scalar key was unreadable in the -O0 build:
   `{1: "a"}` stored the raw `1` while every lookup went through `_mkey`, which
   tags a number, so `{1: "a"}[1]` was `no key 1` here and `a` in C.
-* `{[1, 2]: 3}` was an err value in the interpreter and a half-built map that
+* `{[1, 2]: 3}` was an err value in the -O0 build and a half-built map that
   printed `{}` in C.
-* a NaN key was one key in the interpreter (object identity) and a new key on
+* a NaN key was one key in the -O0 build (object identity) and a new key on
   every store in C (`nan != nan`).
 
 The shape of the refusal is the one `test_forge.py` pins for `$type`: an
@@ -50,18 +50,18 @@ def run(*argv, timeout=180):
 
 def backends(path, name):
     """(-O0 output, -O2 built output) for one program, both asserted equal."""
-    interp = run(BIN, "run", "-O0", path, timeout=60)
-    assert interp.returncode == 0, "%s: -O0 rc=%d %r" % (
-        name, interp.returncode, interp.stdout + interp.stderr)
+    run_o0 = run(BIN, "run", "-O0", path, timeout=60)
+    assert run_o0.returncode == 0, "%s: -O0 rc=%d %r" % (
+        name, run_o0.returncode, run_o0.stdout + run_o0.stderr)
     exe = os.path.join(TMP, name + ".exe")
     built = run(BIN, "build", "-O2", path, "-o", exe, timeout=300)
     assert built.returncode == 0, "%s: build %r" % (name, built.stdout + built.stderr)
     native = run(exe, timeout=60)
     assert native.returncode == 0, "%s: native rc=%d %r" % (
         name, native.returncode, native.stdout + native.stderr)
-    assert native.stdout == interp.stdout, "%s: -O0/-O2 differ\n  -O0: %r\n  -O2: %r" % (
-        name, interp.stdout, native.stdout)
-    return interp.stdout
+    assert native.stdout == run_o0.stdout, "%s: -O0/-O2 differ\n  -O0: %r\n  -O2: %r" % (
+        name, run_o0.stdout, native.stdout)
+    return run_o0.stdout
 
 
 def main():

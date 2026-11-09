@@ -120,8 +120,8 @@ for name, src in PROGS.items():
     exe = build(name, src)
     irc, iout, ierr = run(_cxx.run_args(os.path.join(TMP, name + '.brat')))
     nrc, nout, nerr = run([exe])
-    assert irc == nrc, '%s exit: interp=%d native=%d' % (name, irc, nrc)
-    assert iout == nout, '%s DIFF:\n--- interp ---\n%s\n--- native ---\n%s' % (name, iout, nout)
+    assert irc == nrc, '%s exit: run_o0=%d native=%d' % (name, irc, nrc)
+    assert iout == nout, '%s DIFF:\n--- run_o0 ---\n%s\n--- native ---\n%s' % (name, iout, nout)
     OUT[name] = iout
     n += 2
     print('recursion ok: %s (rc=%d)' % (name, irc))
@@ -140,7 +140,7 @@ irc, iout, ierr = run(_cxx.run_args(os.path.join(TMP, 'runaway.brat')))
 nrc, nout, nerr = run([os.path.join(TMP, 'runaway.exe')])
 assert irc == 1 and iout == '', 'runaway must exit 1 with empty stdout, got rc=%d %r' % (irc, iout)
 assert nrc == 1 and nout == '', 'native runaway must exit 1 with empty stdout, got rc=%d %r' % (nrc, nout)
-assert 'recursion too deep' in ierr, 'interpreter diagnostic missing: %r' % ierr
+assert 'recursion too deep' in ierr, '-O0 diagnostic missing: %r' % ierr
 assert 'recursion too deep' in nerr, 'native diagnostic missing: %r' % nerr
 n += 4
 

@@ -34,7 +34,7 @@ def write(name, text):
 
 def cli(*args):
     if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+            and "-O0" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
     return subprocess.run(_cxx.cli_args(*(list(args))), capture_output=True,
                           text=True, timeout=300)
@@ -78,16 +78,16 @@ fn main() -> i64 {
 """
 path = write("use.brat", SRC)
 check(cli("check", path).returncode == 0, "the user of the bindings must check clean")
-interp = cli("run", path)
-check(interp.returncode == 0 and interp.stdout == "42\nbindgen c ok\n",
-      "interp: rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
+run_o0 = cli("run", path)
+check(run_o0.returncode == 0 and run_o0.stdout == "42\nbindgen c ok\n",
+      "run_o0: rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 exe = os.path.join(TMP, "use.exe")
 built = cli("build", path, "-o", exe)
 check(built.returncode == 0, "build: %r" % (built.stdout + built.stderr))
 native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-check((native.returncode, native.stdout) == (interp.returncode, interp.stdout),
-      "native %r vs interp %r" % ((native.returncode, native.stdout),
-                                  (interp.returncode, interp.stdout)))
+check((native.returncode, native.stdout) == (run_o0.returncode, run_o0.stdout),
+      "native %r vs run_o0 %r" % ((native.returncode, native.stdout),
+                                  (run_o0.returncode, run_o0.stdout)))
 
 # A type with no BRAT width must be skipped with a note, never bound as `ptr`:
 # `long double` is 80-bit extended in 16 bytes here, so a `ptr` parameter would

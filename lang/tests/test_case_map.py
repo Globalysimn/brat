@@ -1,4 +1,4 @@
-"""Native case mapping must match the interpreter (Python str.upper / str.lower).
+"""Native case mapping must match the -O0 build.
 
 Every code point from U+0000 to U+10FFFF is checked for
 single-character simple mappings. Code points where Python maps to several

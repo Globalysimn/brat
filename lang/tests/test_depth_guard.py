@@ -7,7 +7,7 @@ that builds a deep value cheaply --
     for i in 0..200000 { v = [v] }
 
 -- used to make the C backend walk the machine stack once per level and die with
-SIGSEGV (observed at ~100 000 levels, exit 139, no output). The interpreter
+SIGSEGV (observed at ~100 000 levels, exit 139, no output). The -O0 build
 refused the same program with "recursion too deep" because it has a frame budget
 of 2000, so the two backends disagreed twice over: one gave a clean error, the
 other a signal.
@@ -28,7 +28,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-BRAT = os.path.join(ENGINE, "brat.py")
 TMP = _scratch.mkdtemp(prefix="brat-depth-")
 
 
@@ -81,7 +80,7 @@ def main():
             bad += 1
             continue
         nat = run([exe])
-        interp = run(_cxx.run_args(path))
+        run_o0 = run(_cxx.run_args(path))
 
         if nat.returncode < 0 or nat.returncode >= 128:
             print("FAIL %s: native died by signal (rc=%d)" % (name, nat.returncode))
@@ -93,9 +92,9 @@ def main():
         if nat.stdout != want_out:
             print("FAIL %s: native stdout %r, want %r" % (name, nat.stdout, want_out))
             bad += 1
-        if (interp.returncode, interp.stdout) != (want_rc, want_out):
-            print("FAIL %s: interpreter %r/%r, want %r/%r"
-                  % (name, interp.returncode, interp.stdout, want_rc, want_out))
+        if (run_o0.returncode, run_o0.stdout) != (want_rc, want_out):
+            print("FAIL %s: -O0 %r/%r, want %r/%r"
+                  % (name, run_o0.returncode, run_o0.stdout, want_rc, want_out))
             bad += 1
 
     if bad:

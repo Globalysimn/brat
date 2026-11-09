@@ -1,6 +1,6 @@
 """Containers own their elements, under AddressSanitizer.
 
-Every case fills a container inside a loop and drops it; the interpreter and the
+Every case fills a container inside a loop and drops it; the -O0 build and the
 native binary must print the same thing and the binary must leave nothing
 behind. These are the shapes that leaked while containers aliased their
 elements: a vector literal, a map literal, a push of a fresh value, a slice, a
@@ -488,9 +488,9 @@ for name, (src, want) in CASES.items():
     assert "AddressSanitizer" not in out, "%s broken: %s" % (name, out[-800:])
     assert "LeakSanitizer" not in out, "%s leaked: %s" % (name, out[-800:])
     assert run.stdout == want, "%s stdout=%r want=%r" % (name, run.stdout, want)
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True,
                             timeout=120)
-    assert interp.returncode == 0 and interp.stdout == want, \
-        "%s interp=%r" % (name, interp.stdout + interp.stderr)
+    assert run_o0.returncode == 0 and run_o0.stdout == want, \
+        "%s run_o0=%r" % (name, run_o0.stdout + run_o0.stderr)
 
 print("CONTAINERS OWN ALL GREEN (%d cases)" % len(CASES))

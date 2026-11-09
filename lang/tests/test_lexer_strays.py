@@ -1,10 +1,4 @@
-"""A character that starts no token is an error, and both front ends say the same thing.
-
-The scanners used to skip such a character. `let flags = 6 | 1` was read as `let flags = 6`
-followed by the expression `1`, `~x` as `x`, and `a ^ b` as two arguments, so a program that
-reached for a bitwise operator the language does not have compiled and ran with the wrong
-meaning. The Python lexer and `lexer.cpp` now refuse the character, name it, and give the line.
-"""
+"""Characters that start no valid token are rejected with an explicit diagnostic and line number."""
 import _cxx
 import _scratch
 
@@ -43,35 +37,24 @@ ACCEPTED = [
 n = 0
 
 
-def front_ends(path):
-    env = dict(os.environ, BRAT_NO_NATIVE_CLI="1")
-    py = subprocess.run(_cxx.cli_args("check", "example.brat"), cwd=TMP, env=env,
-                        capture_output=True, text=True, timeout=120)
-    cxx = subprocess.run([NATIVE, "check", "example.brat"], cwd=TMP,
-                         capture_output=True, text=True, timeout=120)
-    return py, cxx
-
-
 for src, message in REFUSED:
     with open(os.path.join(TMP, "example.brat"), "w", encoding="utf-8", newline="") as f:
         f.write(src)
-    py, cxx = front_ends(src)
+    cxx = subprocess.run([NATIVE, "check", "example.brat"], cwd=TMP,
+                         capture_output=True, text=True, timeout=120)
     shown = repr(src)
-    assert py.returncode == 1 and cxx.returncode == 1, \
-        "%s should be refused: python rc=%d native rc=%d" % (shown, py.returncode, cxx.returncode)
-    assert message in py.stderr, "python front end, %s: want %r in %r" % (shown, message, py.stderr)
-    assert py.stderr == cxx.stderr, \
-        "front ends disagree on %s:\npython: %r\nnative: %r" % (shown, py.stderr, cxx.stderr)
-    n += 3
+    assert cxx.returncode == 1, "%s should be refused: rc=%d" % (shown, cxx.returncode)
+    assert message in cxx.stderr, "%s: want %r in %r" % (shown, message, cxx.stderr)
+    n += 2
 
 for src in ACCEPTED:
     with open(os.path.join(TMP, "example.brat"), "w", encoding="utf-8", newline="") as f:
         f.write(src)
-    py, cxx = front_ends(src)
-    assert py.returncode == 0 and cxx.returncode == 0, \
-        "%s should be accepted: python rc=%d (%r) native rc=%d (%r)" % (
-            repr(src), py.returncode, py.stdout[-200:], cxx.returncode, cxx.stdout[-200:])
-    n += 2
+    cxx = subprocess.run([NATIVE, "check", "example.brat"], cwd=TMP,
+                         capture_output=True, text=True, timeout=120)
+    assert cxx.returncode == 0, "%s should be accepted: rc=%d (%r)" % (
+        repr(src), cxx.returncode, cxx.stdout[-200:])
+    n += 1
 
 with open(os.path.join(TMP, "example.brat"), "w", encoding="utf-8", newline="") as f:
     f.write(REFUSED[0][0])

@@ -1,4 +1,4 @@
-"""The -O2 error paths: the interpreter and the native build must agree, and a
+"""The -O2 error paths: the -O0 build and the native build must agree, and a
 credential-shaped env name is refused in both."""
 import _cxx
 import _scratch
@@ -10,7 +10,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-o2-')
-BRAT = os.path.join(ENGINE, 'brat.py')
 
 
 _spec = importlib.util.spec_from_file_location('cc_tc_o2', os.path.join(HERE, '_toolchain.py'))
@@ -48,7 +47,7 @@ CASES = {
               '  print(env_get("MY_PUBLIC"))\n'
               '  return 0\n'
               '}',
-    # Repr quote selection: the interpreter prints double quotes here.
+    # Repr quote selection: the -O0 build prints double quotes here.
     'repr_quote': 'fn main() -> i64 {\n'
                   '  print(Err("it\'s here"))\n'
                   '  return 0\n'
@@ -89,9 +88,9 @@ for name, src in CASES.items():
         continue
     np = subprocess.run([exe], capture_output=True, text=True, env=env, timeout=120)
 
-    check(ip.returncode == 0, '%s interp rc=%d' % (name, ip.returncode))
+    check(ip.returncode == 0, '%s run_o0 rc=%d' % (name, ip.returncode))
     check(np.returncode == 0, '%s native rc=%d (signal → 139/11)' % (name, np.returncode))
-    check(ip.stdout == np.stdout, '%s interp=%r native=%r' % (name, ip.stdout[:120], np.stdout[:120]))
+    check(ip.stdout == np.stdout, '%s run_o0=%r native=%r' % (name, ip.stdout[:120], np.stdout[:120]))
 
     if name == 'env_secret':
         check('leaked' not in ip.stdout and 'leaked' not in np.stdout,

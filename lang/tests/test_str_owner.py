@@ -9,7 +9,7 @@ know — a crash waiting for the right program.
 
 Every case here binds the result to a name (so the scope exit drops it), stores one
 in a container (so releasing the container drops it), and returns one from a
-function. The interpreter is the oracle for what the program prints.
+function. The -O0 build is the oracle for what the program prints.
 """
 import _cxx
 
@@ -110,14 +110,14 @@ def build(src, name, sanitize):
 
 
 for name, (src, want) in CASES.items():
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", os.path.join(TMP, name + ".brat")),
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", os.path.join(TMP, name + ".brat")),
                             capture_output=True, text=True, timeout=120) \
         if os.path.exists(os.path.join(TMP, name + ".brat")) else None
     path, exe = build(src, name, sanitize=True)
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                             timeout=120)
-    assert interp.returncode == 0, "%s interp rc=%d %r" % (name, interp.returncode, interp.stdout)
-    assert interp.stdout == want, "%s interp stdout=%r want=%r" % (name, interp.stdout, want)
+    assert run_o0.returncode == 0, "%s run_o0 rc=%d %r" % (name, run_o0.returncode, run_o0.stdout)
+    assert run_o0.stdout == want, "%s run_o0 stdout=%r want=%r" % (name, run_o0.stdout, want)
 
     run = subprocess.run([exe], capture_output=True, text=True, timeout=120,
                          env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:exitcode=0"))
@@ -126,5 +126,5 @@ for name, (src, want) in CASES.items():
     assert run.returncode == 0, "%s rc=%d %r" % (name, run.returncode, out[-900:])
     assert run.stdout == want, "%s native stdout=%r want=%r" % (name, run.stdout, want)
 
-print("STROWN ALL GREEN (%d cases, interpreter == native == expected, ASan and LSan clean)"
+print("STROWN ALL GREEN (%d cases, -O0 == native == expected, ASan and LSan clean)"
       % len(CASES))

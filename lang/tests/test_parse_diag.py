@@ -81,7 +81,7 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(CASES[name])
-        a = run(_cxx.cli_args("check", "--py", path))
+        a = run(_cxx.cli_args("check", path))
         b = run([cxx, "check", path])
         py = norm(a.stdout + a.stderr, path)
         cx = norm(b.stdout + b.stderr, path)

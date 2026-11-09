@@ -15,7 +15,7 @@ ENG = os.path.abspath(os.path.join(HERE, "..", "engine"))
 TMP = _scratch.mkdtemp(prefix="brat-ffisafe-")
 
 CASES = {
-    # i32 return must be sign-extended in the interpreter too (C: strcmp < 0).
+    # i32 return must be sign-extended in the -O0 build too (C: strcmp < 0).
     "i32_negative_return": (
         'extern fn strcmp(a: str, b: str) -> i32;\n'
         'fn main() -> i32 {\n'
@@ -69,7 +69,7 @@ def write(name, src):
 
 
 def run_interp(path, no_check=False):
-    cmd = _cxx.cli_args("run", "--interp", "--unsafe-ffi")
+    cmd = _cxx.cli_args("run", "-O0", "--unsafe-ffi")
     if no_check:
         cmd.append("--no-check")
     cmd.append(path)
@@ -93,7 +93,7 @@ def main():
     for name, (src, want, want_rc) in CASES.items():
         ri, oi = run_interp(write(name, src), no_check=(name == "arg_type_caught_interp"))
         assert oi == want and ri == want_rc, (
-            "%s interp: rc=%d out=%r want rc=%d out=%r"
+            "%s run_o0: rc=%d out=%r want rc=%d out=%r"
             % (name, ri, oi, want_rc, want))
         if name != "arg_type_caught_interp":
             rn, on = run_native(src, name)

@@ -1,4 +1,4 @@
-"""`arena { }` in the interpreter and in the C backend.
+"""`arena { }` in the -O0 build and in the C backend.
 
 Each program must print the same output in both. An error raised inside a
 block must still leave the arena. A loop that fills arenas far beyond the
@@ -13,7 +13,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
-BRAT = os.path.join(ENGINE, 'brat.py')
 
 n = 0
 
@@ -152,7 +151,7 @@ try:
         with open(src, 'w', encoding='utf-8') as f:
             f.write(src_text)
         ip = run_interp(src)
-        check(ip.returncode == 0, '%s: interp exit=%d err=%s' % (name, ip.returncode, ip.stderr[-400:]))
+        check(ip.returncode == 0, '%s: run_o0 exit=%d err=%s' % (name, ip.returncode, ip.stderr[-400:]))
         exe = os.path.join(tmp, name + '_bin')
         # 16 MiB of address space: a leaking arena cannot finish the reclaim loop.
         limit = 16 * 1024 * 1024 if name == 'reclaim' else None

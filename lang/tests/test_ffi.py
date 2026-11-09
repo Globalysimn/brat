@@ -39,7 +39,7 @@ def run_interp(src):
     path = os.path.join(TMP, "t.brat")
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
-    p = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True, timeout=120)
+    p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True, timeout=120)
     return p.returncode, p.stdout.replace("\r\n", "\n")
 
 
@@ -89,7 +89,7 @@ def main():
     for name, src in CASES.items():
         ri, oi = run_interp(src)
         rn, on = run_native(src, name)
-        assert ri == rn, "%s exit: interp=%d native=%d" % (name, ri, rn)
+        assert ri == rn, "%s exit: run_o0=%d native=%d" % (name, ri, rn)
         assert oi == on, "%s stdout differs:\ninterp=%r\nnative=%r" % (name, oi, on)
         n += 1
         print("ffi ok: %s" % name)
@@ -105,7 +105,7 @@ def main():
         )
         ri, oi = run_interp(src)
         rn, on = run_native(src, "custom_add42")
-        assert ri == rn == 43, "custom exit: interp=%d native=%d" % (ri, rn)
+        assert ri == rn == 43, "custom exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on, "custom stdout differs"
         n += 1
         print("ffi ok: custom_add42")
@@ -119,7 +119,7 @@ def main():
         )
         ri, oi = run_interp(src)
         rn, on = run_native(src, "custom_greet")
-        assert ri == rn == 0, "greet exit: interp=%d native=%d" % (ri, rn)
+        assert ri == rn == 0, "greet exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
         n += 1
         print("ffi ok: custom_greet")
@@ -132,7 +132,7 @@ def main():
         )
         ri, oi = run_interp(src)
         rn, on = run_native(src, "custom_varargs")
-        assert ri == rn == 60, "varargs exit: interp=%d native=%d" % (ri, rn)
+        assert ri == rn == 60, "varargs exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
         n += 1
         print("ffi ok: custom_varargs")
@@ -154,7 +154,7 @@ def main():
         )
         ri, oi = run_interp(src)
         rn, on = run_native(src, "custom_struct")
-        assert ri == rn == 0, "struct exit: interp=%d native=%d" % (ri, rn)
+        assert ri == rn == 0, "struct exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
         n += 1
         print("ffi ok: custom_struct")
@@ -172,7 +172,7 @@ def main():
         )
         ri, oi = run_interp(src)
         rn, on = run_native(src, "custom_callback")
-        assert ri == rn == 0, "callback exit: interp=%d native=%d" % (ri, rn)
+        assert ri == rn == 0, "callback exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
         n += 1
         print("ffi ok: custom_callback")

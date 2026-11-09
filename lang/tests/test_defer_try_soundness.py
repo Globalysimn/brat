@@ -241,7 +241,7 @@ for name, src, want_rc, want_frag in CHECK_CASES:
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
     r_cxx = run_check([CXX, "check", path])
-    r_py = run_check(_cxx.cli_args("check", "--py", path))
+    r_py = run_check(_cxx.cli_args("check", path))
     out_cxx = r_cxx.stdout + r_cxx.stderr
     out_py = r_py.stdout + r_py.stderr
     assert r_cxx.returncode == want_rc, (
@@ -316,7 +316,7 @@ else:
 
 
 # Runtime 2: `--no-check` FFI call and second `move` on a moved value report
-# `use of moved value` (matching the interpreter), never `ffi: arg 1 ... wants ptr`.
+# `use of moved value` (matching the -O0 build), never `ffi: arg 1 ... wants ptr`.
 moved_ffi_src = (
     "extern fn malloc(size: i64) -> move ptr\n"
     "extern fn free(move p: ptr)\n"

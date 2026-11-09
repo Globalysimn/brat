@@ -30,7 +30,7 @@ def write(rel, src):
 
 
 def run(path):
-    return subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, timeout=120)
+    return subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, timeout=120)
 
 
 def build(path, exe):
@@ -52,7 +52,7 @@ def main():
     main_ok = case("ok", CIRCLE_OK, "fn area(r: i64) -> i64\n", MAIN_AREA)
     ri = run(main_ok)
     assert ri.returncode == 0 and ri.stdout == b"16\n", \
-        "interp ok rc=%d out=%r err=%r" % (ri.returncode, ri.stdout, ri.stderr[-300:])
+        "run_o0 ok rc=%d out=%r err=%r" % (ri.returncode, ri.stdout, ri.stderr[-300:])
     exe = os.path.join(TMP, "ok.exe")
     b = build(main_ok, exe)
     assert b.returncode == 0, "build ok failed:\n" + (b.stdout + b.stderr)[-500:].decode("utf-8", "replace")

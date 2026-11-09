@@ -1,4 +1,4 @@
-"""Aggregate callbacks agree with C across compiler and interpreter boundaries."""
+"""Aggregate callbacks agree with C across compiler and -O0 boundaries."""
 import os
 from pathlib import Path
 import shutil
@@ -32,7 +32,7 @@ class AggregateCallbacks(unittest.TestCase):
                 env = dict(os.environ, CC=compiler, BRAT_CC=compiler,
                            BRAT_CACHE=str(root / "cache"), TMPDIR=str(root))
                 commands = ([BIN, "run", "--unsafe-ffi", str(program)],
-                            _cxx.cli_args("run", "--interp", "--unsafe-ffi", str(program)))
+                            _cxx.cli_args("run", "-O0", "--unsafe-ffi", str(program)))
                 for command in commands:
                     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

@@ -1,24 +1,21 @@
-"""Regression suite for external static security, memory/lifetime, and deep round-3 audits.
+"""Filesystem/SQLite confinement, resource budgets, arena internals, string borrow tracking, and LSP/MCP limits.
 
 Covers:
-  - MEM-01 / F-07: ILP32 Vec/Map checked capacity multiply, 64 MiB read_file cap,
-    16 MiB read_bytes & utf8_bytes caps.
-  - MEM-02: __arena_enter / __arena_leave internalized to $arena_enter / $arena_leave.
-  - MEM-03: ptr_of_str rejects temporaries and tracks live borrow on the owner string.
-  - MEM-04: stack-rooted FFI str args + bounded stable string pins.
-  - F-01 / F-06 / R3-supp-1: openat/O_NOFOLLOW filesystem & SQLite + sidecar confinement.
-  - F-02 / F-08: TLS hostname/IP verification & Win64 cross-compile cleanly linked.
-  - F-03 / R3-07: C compiler & preprocessor timeouts (BRAT_CC_TIMEOUT_MS) + pgid kill.
-  - F-04: cumulative dependency graph archive/extracted/file/index budgets.
-  - F-05 / R3-06: MCP 2 MiB streaming output cap + timeout process-group kill.
-  - R3-01 / R3-02 / R3-09: SQLite generation handles, concurrent op/close safety (TSan/ASan),
-    and sql_query row/column/blob/byte caps.
-  - R3-04: LSP 16 MiB frame/doc cap (full & incremental didChange), 1M JSON node cap,
-    strict JSON-RPC 2.0 (-32600) envelope check, and 2048 open-doc cap.
-  - R3-05: proc_run 3-arg timeout_ms / std.proc.run_timeout / BRAT_PROC_TIMEOUT_MS + pgid kill.
-  - R3-08: aggregate channel slot budget (4,194,304) + reclamation on close.
-  - R3-10: refcounted heap sbuf (>63 builders, ASan leak-free, Unicode codepoint len parity).
-  - R3-11: expanded env_get credential denylist + BRAT_ENV_DENY_ALL=1 strict default-deny.
+  - ILP32 Vec/Map checked capacity multiply, 64 MiB read_file cap, 16 MiB read_bytes & utf8_bytes caps.
+  - Internalized $arena_enter / $arena_leave builtins.
+  - ptr_of_str temporary rejection and live borrow tracking on the owner string.
+  - Stack-rooted FFI str args and bounded stable string pins.
+  - openat/O_NOFOLLOW filesystem, SQLite, and sidecar confinement.
+  - TLS hostname/IP verification and Win64 cross-compile link checks.
+  - C compiler & preprocessor timeouts (BRAT_CC_TIMEOUT_MS) and process-group cleanup.
+  - Cumulative dependency graph archive/extracted/file/index budgets.
+  - MCP 2 MiB streaming output cap and timeout process-group kill.
+  - SQLite generation handles, concurrent op/close safety, and sql_query row/column/blob/byte caps.
+  - LSP 16 MiB frame/doc cap, 1M JSON node cap, JSON-RPC 2.0 (-32600) envelope check, and 2048 open-doc cap.
+  - proc_run timeout_ms / std.proc.run_timeout / BRAT_PROC_TIMEOUT_MS and process-group kill.
+  - Aggregate channel slot budget and reclamation on close.
+  - Refcounted heap sbuf (>63 builders, ASan leak-free, Unicode codepoint len).
+  - expanded env_get credential denylist + BRAT_ENV_DENY_ALL=1 strict default-deny.
   - Dynamic TLS/SQLite backends reject libraries missing required symbols.
 """
 
@@ -60,7 +57,7 @@ def run_both_backends(td, name, src, env=None, asan=False):
     p = os.path.join(td, name + ".brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write(src)
-    r_int = run_cmd(_cxx.cli_args("run", "--interp", p), cwd=td, env=env)
+    r_int = run_cmd(_cxx.cli_args("run", "-O0", p), cwd=td, env=env)
     cc = shutil.which("gcc") or shutil.which("clang") or "cc"
     r_emit = run_cmd([CXX, "cc", "-O2", p], cwd=td, env=env)
     assert r_emit.returncode == 0, f"emit failed ({name}): {r_emit.stderr.decode()}"
@@ -103,7 +100,7 @@ def check_both_reject(td, name, src, needle):
 
 
 def test_mem02_arena_intrinsics_locked():
-    td = _scratch.mkdtemp(prefix="audit-mem02")
+    td = _scratch.mkdtemp(prefix="brat-mem02")
     # Direct user calls to __arena_enter / __arena_leave must be rejected as unknown functions
     check_both_reject(
         td,
@@ -138,7 +135,7 @@ def test_mem02_arena_intrinsics_locked():
 
 
 def test_mem03_mem04_ptr_of_str_borrow_and_pin_ring():
-    td = _scratch.mkdtemp(prefix="audit-mem03-04")
+    td = _scratch.mkdtemp(prefix="brat-mem03-04")
     # 1. Temporary argument to ptr_of_str rejected identically by both checkers
     check_both_reject(
         td,
@@ -174,7 +171,7 @@ def test_mem03_mem04_ptr_of_str_borrow_and_pin_ring():
 
 
 def test_mem01_f07_size_caps_and_ilp32_mul():
-    td = _scratch.mkdtemp(prefix="audit-mem01-f07")
+    td = _scratch.mkdtemp(prefix="brat-mem01-f07")
     # Sparse 65 MiB file and 17 MiB file take 0 disk blocks on tmpfs/ext4
     big65 = os.path.join(td, "sparse65.txt")
     with open(big65, "wb") as f:
@@ -254,8 +251,8 @@ def test_mem01_f07_size_caps_and_ilp32_mul():
 
 
 def test_f06_sqlite_and_fs_symlink_confinement():
-    td = _scratch.mkdtemp(prefix="audit-f06-sql")
-    outside = _scratch.mkdtemp(prefix="audit-f06-outside")
+    td = _scratch.mkdtemp(prefix="brat-f06-sql")
+    outside = _scratch.mkdtemp(prefix="brat-f06-outside")
     outside_db = os.path.join(outside, "secret.db")
     with open(outside_db, "wb") as f:
         f.write(b"")
@@ -287,8 +284,8 @@ def test_f06_sqlite_and_fs_symlink_confinement():
 
 
 def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
-    td = _scratch.mkdtemp(prefix="audit-r3-sql")
-    # R3-01 (handle generation: stale handle rejected after slot reuse) + R3-09 (100,000 row cap)
+    td = _scratch.mkdtemp(prefix="brat-r3-sql")
+    # (handle generation: stale handle rejected after slot reuse) + (100,000 row cap)
     rc, out = run_both_backends(
         td,
         "sql_gen_and_cap",
@@ -318,7 +315,7 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
     assert rc == 0
     assert out.strip().lower() == "true true true true 22 true true 1 true", f"got: {out!r}"
 
-    # R3-02: Concurrent sql_query + sql_close race test under ThreadSanitizer (TSan) and --interp
+    # Concurrent sql_query + sql_close race test under ThreadSanitizer (TSan) and -O0
     race_src = (
         'import std.sqlite\n'
         'fn main() -> i64 {\n'
@@ -406,7 +403,7 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
         return proc.returncode, out, err, elapsed
 
     want_busy = "Ok(1)\n7\n"
-    for argv in (_cxx.cli_args("run", "--interp", busy_path), [busy_exe]):
+    for argv in (_cxx.cli_args("run", "-O0", busy_path), [busy_exe]):
         rc_b, out_b, err_b, elapsed_b = run_locked(argv)
         assert rc_b == 0 and out_b == want_busy and elapsed_b >= 0.4, (
             f"busy lock: rc={rc_b} elapsed={elapsed_b} out={out_b!r} err={err_b!r}"
@@ -414,7 +411,7 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
 
 
 def test_r305_proc_run_timeout_and_pgid_kill():
-    td = _scratch.mkdtemp(prefix="audit-r305")
+    td = _scratch.mkdtemp(prefix="brat-r305")
     t0 = time.monotonic()
     rc, out = run_both_backends(
         td,
@@ -442,10 +439,10 @@ def test_r305_proc_run_timeout_and_pgid_kill():
 
 
 def test_r308_r310_r311_chan_budget_sbuf_and_env():
-    td = _scratch.mkdtemp(prefix="audit-r3-misc")
-    # R3-08: aggregate channel budget enforced (>4,194,304 refused) and reclaimed on chan_close
-    # R3-10: >63 concurrent & sequential sbuf instances + Unicode codepoint len parity
-    # R3-11: expanded env_get denylist + BRAT_ENV_DENY_ALL=1
+    td = _scratch.mkdtemp(prefix="brat-r3-misc")
+    # aggregate channel budget enforced (>4,194,304 refused) and reclaimed on chan_close
+    # >63 concurrent & sequential sbuf instances + Unicode codepoint len parity
+    # expanded env_get denylist + BRAT_ENV_DENY_ALL=1
     rc, out = run_both_backends(
         td,
         "chan_sbuf_env",
@@ -564,8 +561,8 @@ def test_r304_lsp_caps_and_jsonrpc_envelope():
 
 
 def test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets():
-    td = _scratch.mkdtemp(prefix="audit-subproc-pkg")
-    # 1. R3-06: Native `brat-cxx mcp` caps oversized tool stdout (>2 MiB) cleanly
+    td = _scratch.mkdtemp(prefix="brat-subproc-pkg")
+    # 1. Native `brat-cxx mcp` caps oversized tool stdout (>2 MiB) cleanly
     big_brat = os.path.join(td, "big_out.brat")
     with open(big_brat, "w", encoding="utf-8") as f:
         f.write('fn main() -> i64 {\n  print("A".repeat(3 * 1024 * 1024))\n  return 0\n}\n')
@@ -582,7 +579,7 @@ def test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets():
         f"native mcp did not enforce 2 MiB output cap: {r_mcp.stdout[:300]!r} {r_mcp.stderr[:300]!r}"
     )
 
-    # 2. F-03 / R3-07: Hang C compiler killed by BRAT_CC_TIMEOUT_MS across brat-cxx ffi & build
+    # 2. Hang C compiler killed by BRAT_CC_TIMEOUT_MS across brat-cxx ffi & build
     fake_cc = os.path.join(td, "hang_cc.sh")
     fake_cc_calls = os.path.join(td, "hang_cc.calls")
     with open(fake_cc, "w", encoding="utf-8") as f:
@@ -626,7 +623,7 @@ def test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets():
         calls = f.read()
     assert "program.c" in calls and "-o" in calls, f"fake compiler was not invoked as the build compiler: {calls!r}"
 
-    # 3. F-04: Dependency graph >64 resolved packages rejected by brat-cxx pkg
+    # 3. Dependency graph >64 resolved packages rejected by brat-cxx pkg
     idx_path = os.path.join(td, "huge_index.json")
     pkgs = {
         f"acme/pkg{i}": {"0.1.0": {"url": f"file://{td}/none.tar.gz", "sha256": "0" * 64}}
@@ -673,7 +670,7 @@ def test_dynamic_backend_missing_symbols_fail_closed():
         return
     cc = shutil.which("gcc") or shutil.which("clang") or shutil.which("cc")
     assert cc, "C compiler required for dynamic backend symbol test"
-    td = _scratch.mkdtemp(prefix="audit-dlsym-")
+    td = _scratch.mkdtemp(prefix="brat-dlsym-")
 
     def write(name, content):
         path = os.path.join(td, name)
@@ -803,26 +800,26 @@ int SSL_shutdown(void *ssl) { (void)ssl; return 1; }
 
 def main():
     test_mem02_arena_intrinsics_locked()
-    print("audit ok: MEM-02 ($arena_enter/$arena_leave lockdown + ASan)")
+    print("ok: ($arena_enter/$arena_leave lockdown + ASan)")
     test_mem03_mem04_ptr_of_str_borrow_and_pin_ring()
-    print("audit ok: MEM-03 & MEM-04 (ptr_of_str borrow tracking + bounded stable SSO pins)")
+    print("ok: & (ptr_of_str borrow tracking + bounded stable SSO pins)")
     test_mem01_f07_size_caps_and_ilp32_mul()
-    print("audit ok: MEM-01 & F-07 (64 MiB/16 MiB caps + ILP32 -m32 checked multiply)")
+    print("ok: & (64 MiB/16 MiB caps + ILP32 -m32 checked multiply)")
     test_f06_sqlite_and_fs_symlink_confinement()
-    print("audit ok: F-01/F-06/R3-supp-1 (openat/O_NOFOLLOW + SQLite & sidecar confinement)")
+    print("ok: (openat/O_NOFOLLOW + SQLite & sidecar confinement)")
     test_r301_r302_r309_sqlite_generations_concurrency_and_caps()
-    print("audit ok: R3-01/R3-02/R3-09 (SQLite generations + TSan close race + 100k row cap)")
+    print("ok: (SQLite generations + TSan close race + 100k row cap)")
     test_r305_proc_run_timeout_and_pgid_kill()
-    print("audit ok: R3-05 (proc_run timeout_ms + process-group tree kill)")
+    print("ok: (proc_run timeout_ms + process-group tree kill)")
     test_r308_r310_r311_chan_budget_sbuf_and_env()
-    print("audit ok: R3-08/R3-10/R3-11 (channel budget + refcounted sbuf + env_get policy)")
+    print("ok: (channel budget + refcounted sbuf + env_get policy)")
     test_r304_lsp_caps_and_jsonrpc_envelope()
-    print("audit ok: R3-04 (LSP 16 MiB cap + 1M JSON token cap + -32600 JSON-RPC envelope)")
+    print("ok: (LSP 16 MiB cap + 1M JSON token cap + -32600 JSON-RPC envelope)")
     test_r306_r307_f03_f04_mcp_cc_timeout_and_pkg_budgets()
-    print("audit ok: F-03/F-04/F-05/R3-06/R3-07 (MCP 2 MiB cap + CC timeout + pkg graph cap + MinGW)")
+    print("ok: (MCP 2 MiB cap + CC timeout + pkg graph cap + MinGW)")
     test_dynamic_backend_missing_symbols_fail_closed()
-    print("audit ok: dynamic TLS/SQLite libraries with missing symbols fail closed")
-    print("EXTERNAL AUDITS REGRESSION SUITE ALL GREEN")
+    print("ok: dynamic TLS/SQLite libraries with missing symbols fail closed")
+    print("CONFINEMENT & RESOURCE SUITE ALL GREEN")
 
 
 if __name__ == "__main__":

@@ -411,12 +411,7 @@ fn main() -> i64 {{
     with open(brat_p, "w", encoding="utf-8") as f:
         f.write(src)
 
-    cli_emit_env = dict(os.environ)
-    cli_emit_env.update(BRAT_CXX=cxx, BRAT_NO_NATIVE_CLI="1")
-    c_cli = subprocess.check_output(_cxx.cli_args("emit-c", brat_p),
-                                    env=cli_emit_env, text=True)
-    c_cx = subprocess.check_output([cxx, "cc", brat_p], text=True)
-    assert c_cli == c_cx, "Python CLI and native cc diverged on closure program"
+    c_cx = subprocess.check_output([cxx, "emit-c", brat_p], text=True)
     with open(c_p, "w", encoding="utf-8") as f:
         f.write(c_cx)
     subprocess.run(
@@ -488,7 +483,7 @@ def test_security_and_soundness_hardening(cxx, env):
         p = os.path.join(d, f"esc_{tag}.brat")
         with open(p, "w", encoding="utf-8") as f:
             f.write(code)
-        for cmd in ([cxx, "check", p], _cxx.cli_args("check", "--py", p),
+        for cmd in ([cxx, "check", p], _cxx.cli_args("check", p),
                     [cxx, "emit-c", p], [cxx, "cc", p], _cxx.cli_args("emit-c", p)):
             r = subprocess.run(cmd, capture_output=True, text=True)
             assert r.returncode != 0, (tag, cmd, r.stdout, r.stderr)
@@ -543,7 +538,7 @@ def test_security_and_soundness_hardening(cxx, env):
         assert subprocess.run(_cxx.cli_args("pkg", "add", bad_u), cwd=proj_h5,
                               capture_output=True, text=True).returncode != 0
 
-    # 5. Deep Subsystem 1–6 & stdlib audit regressions:
+    # 5. Subsystem & stdlib regressions:
     # 5a. Arena UAF via raise/catch, assert message, closure-captured `own`, and
     #     runtime parity (`vis_true({})`, `vparse_int`, `vslice`/`vzip`/`vchunks`
     #     error propagation, `ptr_write_struct` temporary drop) under ASan+UBSan+LSan.
@@ -634,7 +629,7 @@ def test_security_and_soundness_hardening(cxx, env):
     san_env = dict(os.environ, ASAN_OPTIONS="detect_leaks=1:abort_on_error=1",
                    UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1")
     subprocess.run([rt_exe], env=san_env, check=True)
-    subprocess.run(_cxx.cli_args("run", "--interp", "--header", pt_h, rt_src), check=True)
+    subprocess.run(_cxx.cli_args("run", "-O0", "--header", pt_h, rt_src), check=True)
 
     # 5b. Checker parity across newly hardened arena/parfor/plugin/session/capability rules.
     more_rejects = [
@@ -648,7 +643,7 @@ def test_security_and_soundness_hardening(cxx, env):
         with open(p, "w", encoding="utf-8") as f:
             f.write(code)
         r1 = subprocess.run([cxx, "check", p], capture_output=True, text=True)
-        r2 = subprocess.run(_cxx.cli_args("check", "--py", p), capture_output=True, text=True)
+        r2 = subprocess.run(_cxx.cli_args("check", p), capture_output=True, text=True)
         assert r1.returncode != 0 and r2.returncode != 0, (tag, r1.returncode, r2.returncode, r1.stderr, r2.stderr)
 
     # 5c. Formatter preserves raw strings `r"..."` and multi-line string bodies across C++ & Python.
@@ -665,7 +660,7 @@ def test_security_and_soundness_hardening(cxx, env):
     assert subprocess.run([cxx, "new", "bad\x07name"], cwd=d, env=env,
                           capture_output=True, text=True).returncode != 0
     assert subprocess.run(_cxx.cli_args("new", "bad\x07name"), cwd=d,
-                          env=dict(os.environ, BRAT_INTERP="1"),
+                          env=dict(os.environ),
                           capture_output=True, text=True).returncode != 0
 
     # 5e. Stdlib hardening (`bytes.from_base64` pad bits, `crypto.hmac_sha256` type check,
@@ -686,14 +681,14 @@ def test_security_and_soundness_hardening(cxx, env):
             '}\n'
         )
     subprocess.run([cxx, "run", std_p], env=env, check=True)
-    subprocess.run(_cxx.cli_args("run", "--interp", std_p), check=True)
+    subprocess.run(_cxx.cli_args("run", "-O0", std_p), check=True)
 
     # 5f. MCP rejects non-scalar/boolean JSON-RPC `id` with -32600 across C++ & Python.
     for bad_req in ('{"jsonrpc":"2.0","id":[1],"method":"ping"}\n',
                     '{"jsonrpc":"2.0","id":true,"method":"ping"}\n'):
         r_m1 = subprocess.run([cxx, "mcp"], input=bad_req, capture_output=True, text=True, check=True)
         r_m2 = subprocess.run(_cxx.cli_args("mcp"), input=bad_req,
-                              env=dict(os.environ, BRAT_INTERP="1"),
+                              env=dict(os.environ),
                               capture_output=True, text=True, check=True)
         assert "-32600" in r_m1.stdout and "-32600" in r_m2.stdout, (r_m1.stdout, r_m2.stdout)
 
@@ -976,7 +971,7 @@ def main():
             '  return 0\n'
             '}\n'
         )
-    subprocess.run(_cxx.cli_args("run", "--interp", interp_src), check=True)
+    subprocess.run(_cxx.cli_args("run", "-O0", interp_src), check=True)
     test_13_6b_native_ffi_and_bindgen(cxx, env)
     test_13_1c_native_pkg_http_targz_and_c_sources(cxx, env)
     test_13_2b2_and_compiler_leaks_under_asan(cxx)

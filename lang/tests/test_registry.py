@@ -265,7 +265,7 @@ main = os.path.join(TMP, "main.brat")
 with open(main, "w", encoding="utf-8") as f:
     f.write("import vendor.mathx\n\nfn main() -> i64 {\n  print(mathx.square(7))\n"
             "  return 0\n}\n")
-run = subprocess.run(_cxx.cli_args("run", "--interp", main), cwd=TMP, capture_output=True,
+run = subprocess.run(_cxx.cli_args("run", "-O0", main), cwd=TMP, capture_output=True,
                      text=True, timeout=120)
 assert run.returncode == 0 and run.stdout == "49\n", run.stdout + run.stderr
 exe = os.path.join(TMP, "main.exe")
@@ -299,7 +299,7 @@ assert os.path.exists(os.path.join(TMP, "vendor", "main.brat"))
 main = os.path.join(TMP, "transitive-main.brat")
 with open(main, "w", encoding="utf-8") as f:
     f.write("import vendor.main\nfn main() -> i64 {\n  print(main.quad(7))\n  return 0\n}\n")
-run = subprocess.run(_cxx.cli_args("run", "--interp", main), cwd=TMP, capture_output=True,
+run = subprocess.run(_cxx.cli_args("run", "-O0", main), cwd=TMP, capture_output=True,
                      text=True, timeout=120)
 assert run.returncode == 0 and run.stdout == "28\n", run.stdout + run.stderr
 

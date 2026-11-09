@@ -50,7 +50,7 @@ def write(name, src):
 
 def run(name):
     path = os.path.join(TMP, name)
-    p = subprocess.run(_cxx.cli_args("run", "--interp", "--no-check", path),
+    p = subprocess.run(_cxx.cli_args("run", "-O0", "--no-check", path),
                        capture_output=True, text=True, encoding="utf-8",
                        timeout=120, env=ENV)
     return p.returncode, p.stdout + p.stderr

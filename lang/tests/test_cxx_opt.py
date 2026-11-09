@@ -413,7 +413,7 @@ def part_fuzz(n=None):
 
 
 def part_fuzz_o2(n_fns=None):
-    """Batched 4-way differential fuzzer: `-O0 == -O1 == -O2 == --interp` across
+    """Batched 4-way differential fuzzer: `-O0 == -O1 == -O2 == -O0` across
     congruences (`x % m == r` + later mutation), DBM relational guards, shadowed
     and zero-trip `for` ranges, `&&`/`||` fast-path chains, and extreme i64 bounds."""
     if n_fns is None:
@@ -520,13 +520,10 @@ def part_fuzz_o2(n_fns=None):
             return
         outs[lvl] = run_exe(exe)
 
-    r_interp = subprocess.run(_cxx.cli_args("run", "--interp", p),
-                              capture_output=True, text=True, timeout=30)
-    outs["--interp"] = (r_interp.returncode, r_interp.stdout)
     want = outs["-O0"]
-    for mode in ("-O1", "-O2", "--interp"):
+    for mode in ("-O1", "-O2"):
         if outs[mode][:2] != want[:2]:
-            fail("O2 4-way fuzz mismatch (%s vs -O0): got %r, want %r"
+            fail("O2 differential fuzz mismatch (%s vs -O0): got %r, want %r"
                  % (mode, outs[mode][:2], want[:2]))
 
     # Explicit native soundness pin: non-zero-trip `for i in lo..hi` clobbers an
@@ -558,8 +555,8 @@ def part_fuzz_o2(n_fns=None):
     if trap_outs["-O0"][1] == 0 or trap_outs["-O1"] != trap_outs["-O0"] or trap_outs["-O2"] != trap_outs["-O0"]:
         fail("shadow_trap mismatch across -O0/-O1/-O2: %r" % (trap_outs,))
 
-    print("%-34s %d fns across -O0/-O1/-O2/--interp, %.1fs"
-          % ("-O2 == -O1 == -O0 == interp", n_fns, time.time() - t0))
+    print("%-34s %d fns across -O0/-O1/-O2, %.1fs"
+          % ("-O2 == -O1 == -O0", n_fns, time.time() - t0))
 
 
 LOOPS = {

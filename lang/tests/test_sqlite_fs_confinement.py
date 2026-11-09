@@ -23,7 +23,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
 NATIVE = _cxx.build()
-COMPARE_PYTHON = False
 
 
 def run_prog(td, name, code, env=None):
@@ -34,12 +33,6 @@ def run_prog(td, name, code, env=None):
     nat = subprocess.run([NATIVE, "run", path], cwd=td, env=merged,
                          capture_output=True, text=True, timeout=120)
     assert nat.returncode == 0, "%s native failed:\n%s\n%s" % (name, nat.stdout, nat.stderr)
-    if COMPARE_PYTHON:
-        py = subprocess.run(_cxx.cli_args("run", "--interp", path), cwd=td, env=merged,
-                            capture_output=True, text=True, timeout=120)
-        assert py.returncode == 0, "%s interp failed:\n%s\n%s" % (name, py.stdout, py.stderr)
-        assert nat.stdout == py.stdout, "%s mismatch:\nnative=%r\ninterp=%r" % (
-            name, nat.stdout, py.stdout)
     return nat.stdout
 
 
@@ -256,10 +249,6 @@ chk_bad = subprocess.run([NATIVE, "check", esc_bad], capture_output=True, text=T
 assert chk_bad.returncode != 0 and "ref `s` escapes via return" in (chk_bad.stdout + chk_bad.stderr), (
     chk_bad.stdout + chk_bad.stderr
 )
-if COMPARE_PYTHON:
-    py_bad = subprocess.run(_cxx.cli_args("check", "--py", esc_bad),
-                            capture_output=True, text=True, timeout=30)
-    assert py_bad.returncode != 0 and "ref `s` escapes via return" in (py_bad.stdout + py_bad.stderr)
 
 esc_ok = os.path.join(td, "param_ptr.brat")
 with open(esc_ok, "w", encoding="utf-8") as f:

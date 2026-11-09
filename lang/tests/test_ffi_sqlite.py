@@ -4,7 +4,7 @@ The program in `examples/sqlite_ffi.brat` declares the C API itself: opaque
 handles through `ptr[ptr]`, prepared statements, typed binds (with
 `SQLITE_TRANSIENT` passed as the raw destructor bits), reset/reuse, and column
 name/type/value reads. This file proves those declarations with both FFI front
-ends and runs the same add/list scenario on the interpreter, on a native build,
+ends and runs the same add/list scenario on the -O0 build, on a native build,
 and under ASan/UBSan/LSan.
 """
 import _cxx
@@ -100,13 +100,13 @@ def main():
     check(r.returncode == 0, "native ffi rc=%d out=%s err=%s" % (r.returncode, r.stdout[-400:], r.stderr[-400:]))
     check("18 binding(s) proven, 0 error(s)" in r.stdout, r.stdout)
 
-    def interp(args):
-        cmd = _cxx.cli_args("run", "--interp", EXAMPLE, "--header", header)
+    def run_o0(args):
+        cmd = _cxx.cli_args("run", "-O0", EXAMPLE, "--header", header)
         if args:
             cmd += ["--"] + args
         return run(cmd, cwd=TMP)
 
-    scenario("interp", interp)
+    scenario("run_o0", run_o0)
 
     exe = os.path.join(TMP, "sqlite_ffi")
     r = run([cxx, "build", EXAMPLE, "-o", exe, "--header", header], cwd=TMP)

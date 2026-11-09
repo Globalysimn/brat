@@ -42,9 +42,9 @@ fn main() -> i64 {
     assert cpp.returncode == 0, cpp.stderr
     assert "vstr_ascii_cmp(" in cpp.stdout, "ASCII comparison lowering was not selected"
 
-    interp = run(_cxx.cli_args("run", "--interp", path))
-    assert interp.returncode == 0, interp.stderr
-    assert interp.stdout == "true\nfalse\ntrue\nfalse\nindex out of range\n"
+    run_o0 = run(_cxx.cli_args("run", "-O0", path))
+    assert run_o0.returncode == 0, run_o0.stderr
+    assert run_o0.stdout == "true\nfalse\ntrue\nfalse\nindex out of range\n"
 
     cfile = os.path.join(TMP, "ascii.c")
     exe = os.path.join(TMP, "ascii")
@@ -56,7 +56,7 @@ fn main() -> i64 {
     assert compiled.returncode == 0, compiled.stderr
     native = run([exe])
     assert (native.returncode, native.stdout, native.stderr) == \
-           (interp.returncode, interp.stdout, ""), native.stderr
+           (run_o0.returncode, run_o0.stdout, ""), native.stderr
 
     print("ASCII STRING FAST PATH ALL GREEN")
 

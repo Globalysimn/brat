@@ -46,10 +46,10 @@ good = write("good.brat",
              '  print(len("ab' + BS + 'tcd"));\n'
              '  return 0;\n'
              '}\n')
-interp = subprocess.run(_cxx.cli_args("run", "--interp", good), capture_output=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", good), capture_output=True,
                         text=True, timeout=120)
-assert interp.returncode == 0 and interp.stdout == "4\n5\n", \
-    "run: rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr)
+assert run_o0.returncode == 0 and run_o0.stdout == "4\n5\n", \
+    "run: rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr)
 exe = os.path.join(TMP, "good.exe")
 built = subprocess.run(_cxx.cli_args("build", good, "-o", exe),
                        capture_output=True, text=True, timeout=300)

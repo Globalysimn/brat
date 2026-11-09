@@ -16,7 +16,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 ENGINE = os.path.join(ROOT, "lang", "engine")
 CXX = _cxx.build()
-COMPARE_PY = False
 
 TMP = _scratch.mkdtemp(prefix="brat-leaks-ffi-")
 n = 0
@@ -79,10 +78,10 @@ fn main() -> i64 {
 }
 ''')
 c_cli = run_py("emit-c", leak_brat,
-               env=dict(os.environ, BRAT_CXX=CXX, BRAT_NO_NATIVE_CLI="1"))
+               env=dict(os.environ, BRAT_CXX=CXX))
 c_cx = run_cxx("cc", leak_brat)
 check(c_cli.returncode == 0 and c_cx.returncode == 0 and c_cli.stdout == c_cx.stdout,
-      "Python CLI/native cc output mismatch")
+      "CLI/native cc output mismatch")
 leak_c = os.path.join(TMP, "step36.c")
 leak_exe = os.path.join(TMP, "step36_asan")
 with open(leak_c, "w", encoding="utf-8") as f:
@@ -185,14 +184,6 @@ check(run_cxx("ffi", coff_ok_brat, "--object", coff_path).returncode == 0,
       "native PE/COFF x64 symbol reader rejected present symbol")
 check(run_cxx("ffi", macho_miss_brat, "--object", coff_path).returncode != 0,
       "native PE/COFF x64 symbol reader accepted missing symbol")
-
-if COMPARE_PY:
-    sys.path.insert(0, ENGINE)
-    import ffi as ffi_mod
-    macho_info = ffi_mod.inspect_object_symbols_bytes(macho_hdr + symtab_cmd + nlist64 + macho_sym)
-    check(macho_info["format"] == "macho" and "sensor_sum" in macho_info["symbols"], "py Mach-O")
-    coff_info = ffi_mod.inspect_object_symbols_bytes(coff_hdr + coff_sec + coff_sym + coff_str)
-    check(coff_info["format"] == "coff" and "win_fn" in coff_info["symbols"], "py COFF")
 
 
 # `.bratbind` portable FFI packages (FFI Ladder L4)
@@ -387,7 +378,7 @@ fn main() -> i64 {
   return 0
 }
 ''' % plug_so)
-r_lp = run_py("check", "--py", leak_own)
+r_lp = run_py("check", leak_own)
 r_lc = run_cxx("check", leak_own)
 check(r_lp.returncode != 0 and r_lc.returncode != 0 and r_lp.stdout == r_lc.stdout,
       "own ptr leak parity mismatch:\nPY:\n%s\nCXX:\n%s" % (r_lp.stdout, r_lc.stdout))
@@ -426,10 +417,10 @@ check(gate_ref.returncode != 0 and "--header" in gate_ref.stderr,
 p38_exe = os.path.join(p38_dir, "ok_p38_exe")
 b_p38 = run_py("build", ok_p38, "--header", plug_h, "-o", p38_exe)
 check(b_p38.returncode == 0, "proven plugin build failed: %s" % (b_p38.stdout + b_p38.stderr))
-i_p38 = run_py("run", "--interp", "--header", plug_h, ok_p38)
+i_p38 = run_py("run", "-O0", "--header", plug_h, ok_p38)
 n_p38 = subprocess.run([p38_exe], capture_output=True, text=True, check=True)
 check(i_p38.returncode == 0 and i_p38.stdout.strip() == "133" and n_p38.stdout.strip() == "133",
-      "interp vs native mismatch: %r vs %r" % (i_p38.stdout, n_p38.stdout))
+      "run_o0 vs native mismatch: %r vs %r" % (i_p38.stdout, n_p38.stdout))
 
 
 # Cross-function escape summaries & `spawn` graph isolation
@@ -450,7 +441,7 @@ fn main() -> i64 {
   return 0
 }
 ''')
-e_py = run_py("check", "--py", p39_escape)
+e_py = run_py("check", p39_escape)
 e_cx = run_cxx("check", p39_escape)
 check(e_py.returncode != 0 and e_cx.returncode != 0 and e_py.stdout == e_cx.stdout,
       "cross-fn arena escape parity failed:\nPY:\n%s\nCXX:\n%s" % (e_py.stdout, e_cx.stdout))
@@ -470,7 +461,7 @@ fn main() -> i64 {
   return 0
 }
 ''')
-s_py = run_py("check", "--py", p39_spawn)
+s_py = run_py("check", p39_spawn)
 s_cx = run_cxx("check", p39_spawn)
 check(s_py.returncode != 0 and s_cx.returncode != 0 and s_py.stdout == s_cx.stdout,
       "spawn pointer race/isolation parity failed:\nPY:\n%s\nCXX:\n%s" % (s_py.stdout, s_cx.stdout))
@@ -724,12 +715,12 @@ os.makedirs(conf_dir, exist_ok=True)
 esc_plug = os.path.join(conf_dir, "escape_plug.brat")
 with open(esc_plug, "w", encoding="utf-8") as f:
     f.write('fn main() -> i64 {\n  let h = lib_open("../p38/libp38.so")\n  return h\n}\n')
-ep_i = run_py("run", "--interp", "--unsafe-ffi", esc_plug)
+ep_i = run_py("run", "-O0", "--unsafe-ffi", esc_plug)
 ep_exe = os.path.join(conf_dir, "esc_exe")
 run_py("build", "--unsafe-ffi", esc_plug, "-o", ep_exe)
 ep_n = subprocess.run([ep_exe], capture_output=True, text=True)
 check(ep_i.returncode != 0 and "outside the program directory" in (ep_i.stdout + ep_i.stderr),
-      "interp lib_open allowed path escape: %s" % (ep_i.stdout + ep_i.stderr))
+      "run_o0 lib_open allowed path escape: %s" % (ep_i.stdout + ep_i.stderr))
 check(ep_n.returncode != 0 and "outside the program directory" in (ep_n.stdout + ep_n.stderr),
       "native lib_open allowed path escape: %s" % (ep_n.stdout + ep_n.stderr))
 

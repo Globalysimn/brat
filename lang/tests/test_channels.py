@@ -225,20 +225,20 @@ def build(src, name):
 
 
 def run_both(path, name):
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                             timeout=120)
     exe = os.path.join(TMP, name + ".exe")
     built = subprocess.run(_cxx.cli_args("build", path, "-o", exe),
                            capture_output=True, text=True, timeout=300)
     assert built.returncode == 0, "%s build: %r" % (name, (built.stdout + built.stderr)[-800:])
     native = subprocess.run([exe], capture_output=True, text=True, timeout=120)
-    assert interp.returncode == 0, "%s interp rc=%d %r" % (name, interp.returncode,
-                                                           interp.stdout + interp.stderr)
+    assert run_o0.returncode == 0, "%s run_o0 rc=%d %r" % (name, run_o0.returncode,
+                                                           run_o0.stdout + run_o0.stderr)
     assert native.returncode == 0, "%s native rc=%d %r" % (name, native.returncode,
                                                            native.stdout + native.stderr)
-    assert native.stdout == interp.stdout, "%s interp=%r native=%r" % (
-        name, interp.stdout, native.stdout)
-    return interp.stdout
+    assert native.stdout == run_o0.stdout, "%s run_o0=%r native=%r" % (
+        name, run_o0.stdout, native.stdout)
+    return run_o0.stdout
 
 
 WANT = {

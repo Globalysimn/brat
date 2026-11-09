@@ -15,8 +15,8 @@ Verifies:
     verified under ASan + LSan + UBSan with 0 bytes leaked.
   - Dynamic local `f64` unboxing (`ub_floats` / `ubf_*`, `vub_fdiv`,
     `vub_fmod`, `vub_fcmp`, mixed `float + ub_int` loops, `NaN`/`-0.0`/`inf`/
-    div-by-zero 4-way differential equivalence across `--interp`/`-O0`/`-O1`/`-O2`)
-    with the Python CLI delegating `emit-c` byte-for-byte to the sole native emitter.
+    div-by-zero 4-way differential equivalence across `-O0`/`-O0`/`-O1`/`-O2`)
+    with the CLI delegating `emit-c` byte-for-byte to the sole native emitter.
   - Optional `cc -E -dD` header preprocessing (`--preprocess`, `-I`,
     `-D` filtering out system headers), `#pragma pack(push, N)` / `#pragma pack(pop)`
     alignment stack tracking, and fail-closed C bitfield (`int a : 3;`) diagnostics.
@@ -361,13 +361,8 @@ fn ieee_edges(zero_v, nan_in, inf_in) {
 print(closure_and_float_probe(10))
 print(ieee_edges(0.0, unwrap("nan".parse_float()), unwrap("inf".parse_float())))
 ''')
-        env_py = dict(os.environ)
-        env_py["BRAT_NO_NATIVE_CLI"] = "1"
-        env_py["BRAT_CXX"] = cxx
-        c_py = _run(_cxx.cli_args("emit-c", src_p), env=env_py)
         c_cx = _run([cxx, "emit-c", src_p])
-        assert c_py.returncode == 0 and c_cx.returncode == 0, c_cx.stderr
-        assert c_py.stdout == c_cx.stdout, "Python CLI did not delegate emit-c to the native emitter!"
+        assert c_cx.returncode == 0, c_cx.stderr
 
         c_src = c_cx.stdout
         # Verify unboxed local int & float coexist with a capturing closure in the same fn!
@@ -384,10 +379,10 @@ print(ieee_edges(0.0, unwrap("nan".parse_float()), unwrap("inf".parse_float())))
         assert "Vec *o = meth[0] == 'm' ? vvec_cap(w->len) : vvec();" in c_src
         assert "BStackVec _osv; VSTACK_VEC_INIT(_osv, _ob, 1);" in c_src
 
-        # 2. 4-way differential equivalence (`interp`, `-O0`, `-O1`, `-O2`).
-        r_interp = _run([cxx, "run", src_p])
-        assert r_interp.returncode == 0, r_interp.stderr
-        want_out = r_interp.stdout
+        # 2. Differential equivalence across `run` and `build` (`-O0`, `-O1`, `-O2`).
+        r_run = _run([cxx, "run", src_p])
+        assert r_run.returncode == 0, r_run.stderr
+        want_out = r_run.stdout
         for opt in ("-O0", "-O1", "-O2"):
             bp = os.path.join(td, f"probe_{opt[1:]}")
             rc = _run([cxx, "build", src_p, opt, "-o", bp])

@@ -1,16 +1,4 @@
-"""`brat ffi` gives one verdict, whichever front end runs it.
-
-The Python front end and the C++ one each carry their own copy of the rules
-that decide whether a BRAT declaration matches a C header. The guide promises
-the same verdict from both, so this test feeds them the same cross product of
-BRAT and C types -- as a parameter, as a result, as a callback argument and as a
-callback result -- and compares the set of declarations each one rejects.
-
-Messages are free to differ; only accept versus reject must not. A handful of
-verdicts the guide states in words are pinned on top, because two front ends
-can agree and both be wrong (the callback `void *user_data` slot and a record
-passed through a callback were refused by one of them for a long time).
-"""
+"""`brat ffi` verification matrix across scalar, pointer, struct, and callback types."""
 import _cxx
 import _scratch
 
@@ -138,28 +126,18 @@ def rejected(command, env_extra, brat_path, header_path):
     return names
 
 
-def both(brat_path, header_path):
-    python = rejected(_cxx.cli_args(), {"BRAT_NO_NATIVE_CLI": "1"}, brat_path, header_path)
-    native = rejected([NATIVE], {}, brat_path, header_path)
-    return python, native
-
-
 brat_src, header_src, shape_of = declarations()
-python, native = both(write("matrix.brat", brat_src), write("matrix.h", header_src))
+native = rejected([NATIVE], {}, write("matrix.brat", brat_src), write("matrix.h", header_src))
 
 for shape in SHAPES:
     total = sum(1 for s, _, _ in shape_of.values() if s == shape)
-    refused = sum(1 for name in python if shape_of[name][0] == shape)
+    refused = sum(1 for name in native if shape_of[name][0] == shape)
     check(0 < refused < total, "%s matrix refuses %d of %d: it must contain both verdicts" % (shape, refused, total))
 
-split = sorted((name in python, name in native, shape_of[name]) for name in python ^ native)
-check(not split, "front ends disagree on %d declaration(s) (python rejects, native rejects, shape/brat/c): %s"
-      % (len(split), split[:12]))
-
 for label, accepted, brat_decl, c_decl in PINNED:
-    python, native = both(write(label + ".brat", brat_decl + "\n" + MAIN), write(label + ".h", c_decl + "\n"))
-    check(bool(python) != accepted and bool(native) != accepted,
-          "%s: python rejects %s, native rejects %s, the guide says %s"
-          % (label, sorted(python), sorted(native), "accept" if accepted else "reject"))
+    got = rejected([NATIVE], {}, write(label + ".brat", brat_decl + "\n" + MAIN), write(label + ".h", c_decl + "\n"))
+    check(bool(got) != accepted,
+          "%s: native rejects %s, expected %s"
+          % (label, sorted(got), "accept" if accepted else "reject"))
 
-print("FFI FRONT ENDS AGREE (%d asserts, %d declarations)" % (n, len(shape_of)))
+print("FFI TYPE MATRIX ALL GREEN (%d asserts, %d declarations)" % (n, len(shape_of)))

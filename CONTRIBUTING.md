@@ -20,7 +20,7 @@ python3 lang/tests/run_all.py -j 4
 Run targeted native suites while iterating:
 
 ```sh
-python3 lang/tests/test_agreement.py --native-only
+python3 lang/tests/test_agreement.py
 python3 lang/tests/test_cxx_frontend.py
 python3 lang/tests/test_cxx_checker.py
 python3 lang/tests/test_cxx_borrow.py

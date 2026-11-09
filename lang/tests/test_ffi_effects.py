@@ -52,7 +52,7 @@ def errors(cmd):
 
 def both_checkers(path):
     """(rc, messages) from each front end -- they must be identical, not similar."""
-    return {"py": errors(_cxx.cli_args("check", "--py", path)),
+    return {"py": errors(_cxx.cli_args("check", path)),
             "cxx": errors([CXX, "check", path])}
 
 

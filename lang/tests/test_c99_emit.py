@@ -15,7 +15,7 @@ test ever compiled the emitted C with an explicit `-std`:
 
 So the test compiles the emitted C for a few programs with `-std=c99` explicitly,
 requires a warning-free compile of the integer-literal class, runs the binary and
-compares stdout with the interpreter.
+compares stdout with the -O0 build.
 """
 import _cxx
 import _scratch
@@ -77,7 +77,7 @@ def main():
                 f.write(src)
 
         cfile = os.path.join(TMP, name + ".c")
-        e = run(_cxx.cli_args("emit-c", path), env=dict(os.environ, BRAT_INTERP="1"))
+        e = run(_cxx.cli_args("emit-c", path), env=dict(os.environ))
         if e.returncode != 0:
             print("FAIL %s: emit-c: %s" % (name, (e.stdout + e.stderr)[-400:]))
             bad += 1
@@ -100,14 +100,14 @@ def main():
         got = run([exe])
         want = run(_cxx.run_args(path))
         if (got.returncode, norm(got.stdout)) != (want.returncode, norm(want.stdout)):
-            print("FAIL %s: binary %r/%r, interpreter %r/%r"
+            print("FAIL %s: binary %r/%r, -O0 %r/%r"
                   % (name, got.returncode, got.stdout, want.returncode, want.stdout))
             bad += 1
 
     if bad:
         print("C99 EMIT: %d program(s) failed" % bad)
         return 1
-    print("C99 EMIT OK (%d programs compile as C99 and print what the interpreter prints)"
+    print("C99 EMIT OK (%d programs compile as C99 and print what the -O0 build prints)"
           % len(PROGRAMS))
     return 0
 

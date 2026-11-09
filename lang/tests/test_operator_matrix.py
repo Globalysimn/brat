@@ -4,7 +4,7 @@ The program below applies `+ - * / % == != < <= > >= && || in []` to each ordere
 (ints, floats with NaN and infinity, bools, strings, None, vectors, maps and the three tags) and
 prints the result, or the error the pair raises: 9550 lines of output from 61 lines of source. The
 compiled program must run cleanly under AddressSanitizer + UBSan, reject variant indexing
-(`Ok(1)[1]` -> `index of non-indexable`), and match `--interp` on all 9550 lines.
+(`Ok(1)[1]` -> `index of non-indexable`), and match `-O0` on all 9550 lines.
 
 The source lives in this file because the optimiser and emitter tests treat every `.brat` file in
 the tree as part of their corpus and pin its size.
@@ -86,13 +86,13 @@ PROGRAM = os.path.join(TMP, "matrix.brat")
 with open(PROGRAM, "w", encoding="utf-8") as f:
     f.write(SOURCE)
 
-interp = subprocess.run(_cxx.cli_args("run", "--interp", PROGRAM), capture_output=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", PROGRAM), capture_output=True,
                         text=True, timeout=300)
 native = subprocess.run([NATIVE, "run", PROGRAM], capture_output=True, text=True, timeout=300)
-assert interp.returncode == 0, interp.stderr[-400:]
+assert run_o0.returncode == 0, run_o0.stderr[-400:]
 assert native.returncode == 0, native.stderr[-400:]
 
-a, b = interp.stdout.split("\n"), native.stdout.split("\n")
+a, b = run_o0.stdout.split("\n"), native.stdout.split("\n")
 assert len(a) == len(b) == 9551, "%d and %d lines" % (len(a), len(b))
 different = [(x, y) for x, y in zip(a, b) if x != y]
 assert not different, "%d of %d lines differ, first: %r" % (

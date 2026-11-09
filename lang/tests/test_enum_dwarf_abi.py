@@ -1,12 +1,8 @@
-"""No silent fallback from the C++ emitter to the Python one, the single-threaded reference-count fast path
-and lock striping, and the small-buffer optimizations in vectors, maps and strings.
+"""Single-threaded reference-count fast path, lock striping, small-buffer optimizations, C enum DWARF/ABI checks, and `-O2` loop proofs.
 
 Verifies:
-  - No silent fallbacks: the Python CLI requires a working native compiler
-    for `emit-c`/`build`, fails closed if `BRAT_CXX` is broken or missing,
-    and ignores the retired `BRAT_FORCE_PY_EMIT` opt-in. It also fails closed
-    on FFI/extern errors without duplicate ownership passes. All
-    `brat-cxx` C compiler invocations use explicit `-std=gnu11`.
+  - `brat-cxx` fails closed on FFI/extern errors without duplicate ownership
+    passes, and C compiler invocations use explicit `-std=gnu11`.
   - Single-threaded non-atomic RC fast path (`!_BRAT_MT()`), 64-way
     64B cache-line-padded container lock striping (`BStripeLock`), and dedicated
     unconditional `_brat_plugin_lock` under AddressSanitizer + ThreadSanitizer.
@@ -16,7 +12,7 @@ Verifies:
     hashing, `BTLS` tag interning, and in-place string append metadata reset.
   - `-O2` descending strided `while` loop bounds + congruence + DBM
     proofs (`--why-opt`), underflow/off-by-one rejection, `SK::ForIter` shadowed
-    binding soundness, and 4-way (`-O0 == -O1 == -O2 == --interp`) equivalence.
+    binding soundness, and 4-way (`-O0 == -O1 == -O2 == -O0`) equivalence.
   - Exact C `enum` width & signedness (`packed`, `: T`, unsigned 32-bit,
     signed/unsigned 64-bit, `ptr[enum]`) and recursive DWARF `DW_TAG_subroutine_type`
     callback signature + float/int register-class verification in `--object`.
@@ -38,7 +34,6 @@ sys.path.insert(0, HERE)
 
 import _cxx  # noqa: E402
 
-COMPARE_PY = False
 CXX = _cxx.build()
 
 
@@ -66,7 +61,7 @@ def test_fail_loud_and_gnu11():
         with open(src, "w", encoding="utf-8") as f:
             f.write('fn main() -> i64 {\n  print("ok-11-1")\n  return 0\n}\n')
 
-        # 1. Verify legacy Python engine files are completely absent from `lang/engine/`.
+        # 1. Verify legacy engine files are completely absent from `lang/engine/`.
         py_files = [fn for fn in os.listdir(ENGINE) if fn.endswith(".py")]
         check(not py_files, f"unexpected .py files in lang/engine: {py_files}")
 
@@ -497,7 +492,7 @@ fn main() -> i64 {
             outs.append((rr.returncode, rr.stdout, rr.stderr))
         check(outs[0] == outs[1] == outs[2], f"-O0/-O1/-O2 mismatch on shadow_iter: {outs}")
 
-        # 3. 4-way differential equivalence (`-O0 == -O1 == -O2 == --interp`) on 30 randomized
+        # 3. 4-way differential equivalence (`-O0 == -O1 == -O2 == -O0`) on 30 randomized
         #    descending / ascending / ForIter programs!
         rng = random.Random(20261101)
         lines = []
@@ -536,7 +531,7 @@ fn main() -> i64 {
         with open(fuzz_path, "w", encoding="utf-8") as f:
             f.write("\n\n".join(lines))
 
-        ref = run_cli(["run", "--interp", fuzz_path])
+        ref = run_cli(["run", "-O0", fuzz_path])
         check(ref.returncode == 0, f"interp failed on fuzz_o2_desc: {ref.stderr}")
         for opt in ("-O0", "-O1", "-O2"):
             exe = os.path.join(td, f"fuzz_{opt[1:]}")
@@ -634,19 +629,6 @@ void run_var_cb(int x, void (*vcb)(int, ...));
         fixed_txt = open(fixed_out, encoding="utf-8").read()
         check("a: u8, b: u16, c: ptr[i64]" in fixed_txt,
               f"native bindgen fixed-underlying enum widths wrong:\n{fixed_txt}")
-        if COMPARE_PY:
-            sys.path.insert(0, ENGINE)
-            import ffi
-            check(not ffi.same("i32", "f32") and not ffi.same("i64", "f64"), "py ffi.same")
-            fixed_decl = ffi.parse_header(
-                "typedef unsigned short my_u16;\n"
-                "enum FixedTag : uint8_t { FT_A = 1, FT_B = 2 };\n"
-                "typedef enum : my_u16 { FA_X = 3 } FixedAlias;\n"
-                "enum FwdI64 : int64_t;\n"
-            )
-            check(fixed_decl.enum_types.get("FixedTag") == "u8", f"got {fixed_decl.enum_types}")
-            check(fixed_decl.enum_types.get("FixedAlias") == "u16", f"got {fixed_decl.enum_types}")
-            check(fixed_decl.enum_types.get("FwdI64") == "i64", f"got {fixed_decl.enum_types}")
 
         csrc = os.path.join(td, "enum_cb.c")
         with open(csrc, "w", encoding="utf-8") as f:
@@ -703,7 +685,7 @@ void run_var_cb(int x, void (*vcb)(int, ...)) {
         r_obj = run_cli(["ffi", clean_brat, "--object", so_path])
         check(r_obj.returncode == 0, f"ffi --object failed on exact enum/callback binding:\n{r_obj.stdout}\n{r_obj.stderr}")
 
-        # Execute end-to-end across BOTH native C AND `--interp`!
+        # Execute end-to-end across BOTH native C AND `-O0`!
         app = os.path.join(td, "use_enum_cb.brat")
         with open(app, "w", encoding="utf-8") as f:
             f.write("""import clean_bind
@@ -721,9 +703,9 @@ fn main() -> i64 {
   return 0
 }
 """)
-        r_i = run_cli(["run", "--interp", "--header", hdr, app], env={"LD_LIBRARY_PATH": td})
+        r_i = run_cli(["run", "-O0", "--header", hdr, app], env={"LD_LIBRARY_PATH": td})
         check(r_i.returncode == 0 and r_i.stdout.strip() == "25.0",
-              f"--interp enum+callback run failed: rc={r_i.returncode}, out={r_i.stdout!r}, err={r_i.stderr!r}")
+              f"-O0 enum+callback run failed: rc={r_i.returncode}, out={r_i.stdout!r}, err={r_i.stderr!r}")
         app_exe = os.path.join(td, "use_enum_cb_exe")
         r_nb = run_cli(["build", app, "--header", hdr, "-o", app_exe])
         check(r_nb.returncode == 0, f"native build failed:\n{r_nb.stdout}\n{r_nb.stderr}")

@@ -25,7 +25,7 @@ def run(argv, cwd=None, env=None):
 def main():
     native = _cxx.build()
     for args in (["--version"], ["-V"], ["version"]):
-        ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+        ref = run(_cxx.cli_args(*(args)), env={})
         got = run([native] + args)
         assert (got.returncode, got.stdout, got.stderr) == \
                (ref.returncode, ref.stdout, ref.stderr), (args, got.stdout, ref.stdout)
@@ -58,7 +58,7 @@ def main():
         for command, options in (("deps", []), ("deps", ["--json"]),
                                  ("api", []), ("api", ["--json"])):
             args = [command, main_file] + options
-            ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+            ref = run(_cxx.cli_args(*(args)), env={})
             got = run([native] + args)
             assert (got.returncode, got.stdout, got.stderr) == \
                    (ref.returncode, ref.stdout, ref.stderr), (
@@ -83,7 +83,7 @@ def main():
                     "fn removed() -> none\n")
         for options in ([], ["--json"]):
             args = ["api", "--diff", old_api, new_api] + options
-            ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+            ref = run(_cxx.cli_args(*(args)), env={})
             got = run([native] + args)
             assert (got.returncode, got.stdout, got.stderr) == \
                    (ref.returncode, ref.stdout, ref.stderr), (args, got.stdout, ref.stdout)
@@ -99,7 +99,7 @@ def main():
                                              (old_api, renamed_args, "none"),
                                              (old_api, minor_api, "minor")):
             args = ["api", "--diff", old_path, new_path, "--json"]
-            ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+            ref = run(_cxx.cli_args(*(args)), env={})
             got = run([native] + args)
             assert (got.returncode, got.stdout, got.stderr) == \
                    (ref.returncode, ref.stdout, ref.stderr), (args, got.stdout, ref.stdout)
@@ -115,7 +115,7 @@ def main():
         for invalid_api in (malformed_api, invalid_utf8_api, missing_api):
             for options in ([], ["--json"]):
                 args = ["api", "--diff", old_api, invalid_api] + options
-                ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+                ref = run(_cxx.cli_args(*(args)), env={})
                 got = run([native] + args)
                 assert (got.returncode, got.stdout, got.stderr) == \
                        (ref.returncode, ref.stdout, ref.stderr), (
@@ -126,14 +126,14 @@ def main():
             options_list = (["--json"], [], ["--dot"]) if command == "deps" else (["--json"], [])
             for options in options_list:
                 args = [command, empty_file] + options
-                ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+                ref = run(_cxx.cli_args(*(args)), env={})
                 got = run([native] + args)
                 assert (got.returncode, got.stdout, got.stderr) == \
                        (ref.returncode, ref.stdout, ref.stderr), (
                            command, "empty", options, got.stdout, ref.stdout)
 
         dot_args = ["deps", main_file, "--dot"]
-        ref = run(_cxx.cli_args(*(dot_args)), env={"BRAT_INTERP": "1"})
+        ref = run(_cxx.cli_args(*(dot_args)), env={})
         got = run([native] + dot_args)
         assert (got.returncode, got.stdout, got.stderr) == \
                (ref.returncode, ref.stdout, ref.stderr)
@@ -144,7 +144,7 @@ def main():
 
         graph = os.path.join(td, "graph.json")
         ref = run(_cxx.cli_args("deps", main_file, "-o", graph),
-                  env={"BRAT_INTERP": "1"})
+                  env={})
         ref_graph = open(graph, encoding="utf-8").read()
         os.unlink(graph)
         got = run([native, "deps", main_file, "-o", graph])
@@ -177,7 +177,7 @@ def main():
 
         dot_path = os.path.join(td, "graph.dot")
         ref = run(_cxx.cli_args("deps", main_file, "--dot", "-o", dot_path),
-                  env={"BRAT_INTERP": "1"})
+                  env={})
         ref_dot = open(dot_path, encoding="utf-8").read()
         os.unlink(dot_path)
         got = run([native, "deps", main_file, "--dot", "-o", dot_path])
@@ -230,13 +230,13 @@ def main():
             with open(os.path.join(ref_vendor_dir, filename), "w", encoding="utf-8") as f:
                 f.write("fn demo() -> i64 { return 1 }\n")
         ref_listed = run(_cxx.cli_args("pkg", "list"), cwd=ref_pkg_dir,
-                         env={"BRAT_INTERP": "1"})
+                         env={})
         assert (listed.returncode, listed.stdout, listed.stderr) == \
                (ref_listed.returncode, ref_listed.stdout, ref_listed.stderr)
         removed = subprocess.run([native, "pkg", "remove", pkg_file], cwd=pkg_dir, env=pkg_env,
                                  capture_output=True, text=True, timeout=120)
         ref_removed = run(_cxx.cli_args("pkg", "remove", pkg_file), cwd=ref_pkg_dir,
-                          env={"BRAT_INTERP": "1"})
+                          env={})
         assert (removed.returncode, removed.stdout, removed.stderr) == \
                (ref_removed.returncode, ref_removed.stdout, ref_removed.stderr)
         assert removed.returncode == 0 and removed.stdout == "removed native-demo.brat\n"
@@ -281,7 +281,7 @@ def main():
         with open(index_path, "wb") as f:
             f.write(initial_index_bytes)
         reference_publish = run(_cxx.cli_args(*(publish_args)), cwd=publish_dir,
-                                env={"BRAT_INDEX": index_path, "BRAT_NO_NATIVE_CLI": "1"})
+                                env={"BRAT_INDEX": index_path})
         assert (published.returncode, published.stdout, published.stderr) == \
                (reference_publish.returncode, reference_publish.stdout,
                 reference_publish.stderr)
@@ -304,7 +304,7 @@ def main():
         for invalid_args in invalid_publish:
             native_error = run([native] + invalid_args, cwd=publish_dir, env=native_env)
             ref_error = run(_cxx.cli_args(*(invalid_args)), cwd=publish_dir,
-                            env={"BRAT_INDEX": index_path, "BRAT_NO_NATIVE_CLI": "1"})
+                            env={"BRAT_INDEX": index_path})
             assert (native_error.returncode, native_error.stdout, native_error.stderr) == \
                    (ref_error.returncode, ref_error.stdout, ref_error.stderr), (
                        invalid_args, native_error.stdout, native_error.stderr,
@@ -314,8 +314,7 @@ def main():
                            cwd=publish_dir,
                            env={"BRAT_INDEX": "https://example.test/index.json"})
         remote_reference = run(_cxx.cli_args("pkg", "publish", "me/math@1.2.3", "math.brat"), cwd=publish_dir,
-                               env={"BRAT_INDEX": "https://example.test/index.json",
-                                    "BRAT_NO_NATIVE_CLI": "1"})
+                               env={"BRAT_INDEX": "https://example.test/index.json"})
         assert (remote_index.returncode, remote_index.stdout, remote_index.stderr) == \
                (remote_reference.returncode, remote_reference.stdout, remote_reference.stderr)
         if hasattr(os, "symlink"):
@@ -391,7 +390,7 @@ def main():
         shutil.rmtree(os.path.join(registry_dir, "vendor"))
         os.unlink(os.path.join(registry_dir, "brat.lock"))
         python_add = run(_cxx.cli_args(*(add_args)), cwd=registry_dir,
-                         env={"BRAT_INDEX": registry_index, "BRAT_NO_NATIVE_CLI": "1"})
+                         env={"BRAT_INDEX": registry_index})
         assert (native_add.returncode, native_add.stdout, native_add.stderr) == \
                (python_add.returncode, python_add.stdout, python_add.stderr)
         assert native_lock == json.load(open(os.path.join(registry_dir, "brat.lock"),
@@ -412,7 +411,7 @@ def main():
                             for name in ("dep.brat", "root.brat")}
         shutil.rmtree(os.path.join(registry_dir, "vendor"))
         python_install = run(_cxx.cli_args("pkg", "install"), cwd=registry_dir,
-                             env={"BRAT_INDEX": registry_index, "BRAT_NO_NATIVE_CLI": "1"})
+                             env={"BRAT_INDEX": registry_index})
         assert (native_install.returncode, native_install.stdout, native_install.stderr) == \
                (python_install.returncode, python_install.stdout, python_install.stderr)
         assert installed_native == {name: open(os.path.join(registry_dir, "vendor", name), "rb").read()
@@ -439,7 +438,7 @@ def main():
         extra_args = ["pkg", "add", "acme/extra"]
         native_extra = run([native] + extra_args, cwd=registry_dir, env=registry_env)
         python_extra = run(_cxx.cli_args(*(extra_args)), cwd=update_ref_dir,
-                           env={"BRAT_INDEX": update_ref_index, "BRAT_NO_NATIVE_CLI": "1"})
+                           env={"BRAT_INDEX": update_ref_index})
         assert (native_extra.returncode, native_extra.stdout, native_extra.stderr) == \
                (python_extra.returncode, python_extra.stdout, python_extra.stderr)
 
@@ -467,7 +466,7 @@ def main():
         targeted_update = ["pkg", "update", "acme/root", "--dry-run"]
         native_update_dry = run([native] + targeted_update, cwd=registry_dir, env=registry_env)
         python_update_dry = run(_cxx.cli_args(*(targeted_update)), cwd=update_ref_dir,
-                                env={"BRAT_INDEX": update_ref_index, "BRAT_NO_NATIVE_CLI": "1"})
+                                env={"BRAT_INDEX": update_ref_index})
         assert (native_update_dry.returncode, native_update_dry.stdout, native_update_dry.stderr) == \
                (python_update_dry.returncode, python_update_dry.stdout, python_update_dry.stderr)
         assert native_update_dry.returncode == 0 and "acme/extra" not in native_update_dry.stdout
@@ -481,7 +480,7 @@ def main():
         targeted_update.pop()
         native_update = run([native] + targeted_update, cwd=registry_dir, env=registry_env)
         python_update = run(_cxx.cli_args(*(targeted_update)), cwd=update_ref_dir,
-                            env={"BRAT_INDEX": update_ref_index, "BRAT_NO_NATIVE_CLI": "1"})
+                            env={"BRAT_INDEX": update_ref_index})
         assert (native_update.returncode, native_update.stdout, native_update.stderr) == \
                (python_update.returncode, python_update.stdout, python_update.stderr)
         assert native_update.returncode == 0 and "updated acme/extra" not in native_update.stdout
@@ -495,14 +494,14 @@ def main():
         all_update_dry = ["pkg", "update", "--dry-run"]
         native_all_dry = run([native] + all_update_dry, cwd=registry_dir, env=registry_env)
         python_all_dry = run(_cxx.cli_args(*(all_update_dry)), cwd=update_ref_dir,
-                             env={"BRAT_INDEX": update_ref_index, "BRAT_NO_NATIVE_CLI": "1"})
+                             env={"BRAT_INDEX": update_ref_index})
         assert (native_all_dry.returncode, native_all_dry.stdout, native_all_dry.stderr) == \
                (python_all_dry.returncode, python_all_dry.stdout, python_all_dry.stderr)
         assert "would update acme/extra" in native_all_dry.stdout
         all_update = ["pkg", "update"]
         native_all = run([native] + all_update, cwd=registry_dir, env=registry_env)
         python_all = run(_cxx.cli_args(*(all_update)), cwd=update_ref_dir,
-                         env={"BRAT_INDEX": update_ref_index, "BRAT_NO_NATIVE_CLI": "1"})
+                         env={"BRAT_INDEX": update_ref_index})
         assert (native_all.returncode, native_all.stdout, native_all.stderr) == \
                (python_all.returncode, python_all.stdout, python_all.stderr)
         unchanged_update = run([native] + all_update_dry, cwd=registry_dir, env=registry_env)
@@ -522,7 +521,7 @@ def main():
         direct_args = ["pkg", "add", direct_url]
         native_direct = run([native] + direct_args, cwd=direct_dir, env={"PATH": ""})
         python_direct = run(_cxx.cli_args(*(direct_args)), cwd=direct_ref_dir,
-                            env={"BRAT_NO_NATIVE_CLI": "1"})
+                            env={})
         assert (native_direct.returncode, native_direct.stdout, native_direct.stderr) == (
             python_direct.returncode, python_direct.stdout, python_direct.stderr)
         direct_sha = hashlib.sha256(direct_source.read_bytes()).hexdigest()[:12]
@@ -538,7 +537,7 @@ def main():
         native_direct_install = run([native, "pkg", "install"], cwd=direct_dir,
                                     env={"PATH": ""})
         python_direct_install = run(_cxx.cli_args("pkg", "install"), cwd=direct_ref_dir,
-                                    env={"BRAT_NO_NATIVE_CLI": "1"})
+                                    env={})
         assert (native_direct_install.returncode, native_direct_install.stdout,
                 native_direct_install.stderr) == (python_direct_install.returncode,
                                                   python_direct_install.stdout,
@@ -559,7 +558,7 @@ def main():
         native_bad = run([native] + bad_args, cwd=bad_registry,
                          env={"BRAT_INDEX": bad_index, "PATH": ""})
         python_bad = run(_cxx.cli_args(*(bad_args)), cwd=bad_registry,
-                         env={"BRAT_INDEX": bad_index, "BRAT_NO_NATIVE_CLI": "1"})
+                         env={"BRAT_INDEX": bad_index})
         assert (native_bad.returncode, native_bad.stdout, native_bad.stderr) == \
                (python_bad.returncode, python_bad.stdout, python_bad.stderr)
         assert native_bad.returncode == 1 and "HASH MISMATCH acme/bad@1.0" in native_bad.stderr
@@ -578,7 +577,7 @@ def main():
             for source in (broken, malformed):
                 for options in ([], ["--json"]):
                     args = [command, source] + options
-                    ref = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+                    ref = run(_cxx.cli_args(*(args)), env={})
                     got = run([native] + args)
                     assert (got.returncode, got.stdout, got.stderr) == \
                            (ref.returncode, ref.stdout, ref.stderr), (
@@ -590,7 +589,7 @@ def main():
                          ("deps", main_file, "--target", "native"),
                          ("deps", main_file, "--json", "--dot"))
         for args in invalid_cases:
-            ref = run(_cxx.cli_args(*(list(args))), env={"BRAT_INTERP": "1"})
+            ref = run(_cxx.cli_args(*(list(args))), env={})
             got = run([native] + list(args))
             assert (got.returncode, got.stdout, got.stderr) == \
                    (ref.returncode, ref.stdout, ref.stderr), (

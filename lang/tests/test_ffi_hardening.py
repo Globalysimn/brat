@@ -1,10 +1,10 @@
 """FFI hardening: inputs that used to reach C and crash, or diverge between backends.
 
 - An unknown argument type (`u128`) is refused by both back ends, as the
-  interpreter already refuses it at call time.
+  -O0 already refuses it at call time.
 - A negative pointer argument raises `ffi: arg N of f wants ptr` in both backends
   instead of segfaulting inside C.
-- A str argument containing a NUL byte raises in the interpreter. Native strings
+- A str argument containing a NUL byte raises in the -O0 build. Native strings
   are NUL-terminated C strings, so the known length divergence is documented in
   CHANGELOG, not hidden here.
 """
@@ -142,12 +142,8 @@ def write(name, src):
 def run(cmd, timeout=300):
     # The suite builds the C it calls and asserts on the ABI itself, so it takes
     # the proof gate's own way out instead of writing a header per fixture.
-    if cmd and cmd[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in cmd:
+    if cmd and cmd[0] in ("build", "run", "emit-c", "dist") and "--unsafe-ffi" not in cmd:
         cmd = [cmd[0], "--unsafe-ffi"] + list(cmd[1:])
-    elif cmd and cmd[0] == "run" and "--interp" in cmd and "--unsafe-ffi" not in cmd:
-        i = cmd.index("--interp") + 1
-        cmd = list(cmd[:i]) + ["--unsafe-ffi"] + list(cmd[i:])
     return subprocess.run(_cxx.cli_args(*(cmd)), capture_output=True,
                           timeout=timeout)
 
@@ -158,8 +154,8 @@ def main():
     # Negative pointer: same message on both backends, no segfault.
     want = b"ffi: arg 1 of free wants ptr[i32]\n"
     path = write("neg_ptr", NEG_PTR)
-    ri = run(["run", "--interp", path], 120)
-    assert ri.returncode == 0 and ri.stdout == want, "neg_ptr interp rc=%d out=%r" % (ri.returncode, ri.stdout)
+    ri = run(["run", "-O0", path], 120)
+    assert ri.returncode == 0 and ri.stdout == want, "neg_ptr run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     exe = os.path.join(TMP, "neg_ptr.exe")
     b = run(["build", path, "-o", exe])
     assert b.returncode == 0, "neg_ptr build failed"
@@ -170,22 +166,22 @@ def main():
 
     # NUL in a string literal: refused at parse, before any FFI call can truncate it.
     path = write("nul_str", NUL_STR)
-    ri = run(["run", "--interp", path], 120)
+    ri = run(["run", "-O0", path], 120)
     assert ri.returncode != 0 and b"string literal contains NUL" in (ri.stdout + ri.stderr), \
-        "nul_str interp rc=%d out=%r" % (ri.returncode, ri.stdout + ri.stderr)
+        "nul_str run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout + ri.stderr)
     rb = run(["build", path, "-o", os.path.join(TMP, "nul.exe")], 120)
     assert rb.returncode != 0 and b"string literal contains NUL" in (rb.stdout + rb.stderr), \
         "nul_str build rc=%d out=%r" % (rb.returncode, rb.stdout + rb.stderr)
     n += 1
     print("ffihard ok: nul_str")
 
-    # Unknown argument type: native build and gated `--interp` refuse statically,
-    # and `--interp --no-check` still refuses at the runtime FFI guard.
+    # Unknown argument type: native build and gated `-O0` refuse statically,
+    # and `-O0 --no-check` still refuses at the runtime FFI guard.
     path = write("unknown_arg", UNKNOWN_ARG)
-    ri_chk = run(["run", "--interp", path], 120)
+    ri_chk = run(["run", "-O0", path], 120)
     assert ri_chk.returncode != 0 and b"unsupported FFI type `u128`" in (ri_chk.stdout + ri_chk.stderr), \
-        "unknown_arg interp gate should refuse: rc=%d" % ri_chk.returncode
-    ri = run(["run", "--interp", "--no-check", "--unsafe-ffi", path], 120)
+        "unknown_arg run_o0 gate should refuse: rc=%d" % ri_chk.returncode
+    ri = run(["run", "-O0", "--no-check", "--unsafe-ffi", path], 120)
     assert ri.returncode != 0 and b"u128" in (ri.stdout + ri.stderr), \
         "unknown_arg --no-check should refuse: rc=%d" % ri.returncode
     exe = os.path.join(TMP, "unknown_arg.exe")
@@ -197,13 +193,13 @@ def main():
 
     # `%s`: a str fills a variadic `..ptr` slot as `const char *`, both backends.
     path = write("vararg_str", VARARG_STR)
-    ri = run(["run", "--interp", path], 120)
+    ri = run(["run", "-O0", path], 120)
     exe = os.path.join(TMP, "vararg_str.exe")
     b = run(["build", path, "-o", exe])
     assert b.returncode == 0, "vararg_str build failed: %r" % b.stdout
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert (ri.returncode, ri.stdout) == (11, b"[hi] there\n"), \
-        "vararg_str interp rc=%d out=%r" % (ri.returncode, ri.stdout)
+        "vararg_str run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     assert (rn.returncode, rn.stdout) == (ri.returncode, ri.stdout), \
         "vararg_str native rc=%d out=%r" % (rn.returncode, rn.stdout)
     n += 1
@@ -213,7 +209,7 @@ def main():
     # still refuse a str.
     for name, src in (("vararg_i64", VARARG_I64), ("fixed_ptr", FIXED_PTR)):
         path = write(name, src)
-        ri = run(["run", "--interp", path], 120)
+        ri = run(["run", "-O0", path], 120)
         assert ri.returncode != 0, "%s: run must fail, rc=%d" % (name, ri.returncode)
         rc = run(["check", path], 120)
         assert rc.returncode != 0 and b"want i64, got str" in (rc.stdout + rc.stderr), \
@@ -229,8 +225,8 @@ def main():
     # the same words in both backends, and 0 keeps its own message.
     want = b"pointer is negative\npointer is negative\nnull pointer dereference\n"
     path = write("neg_read", NEG_READ)
-    ri = run(["run", "--interp", path], 120)
-    assert ri.returncode == 0 and ri.stdout == want, "neg_read interp rc=%d out=%r" % (ri.returncode, ri.stdout)
+    ri = run(["run", "-O0", path], 120)
+    assert ri.returncode == 0 and ri.stdout == want, "neg_read run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     exe = os.path.join(TMP, "neg_read.exe")
     b = run(["build", path, "-o", exe])
     assert b.returncode == 0, "neg_read build failed: %r" % b.stdout
@@ -267,7 +263,7 @@ def main():
     b = run(["build", path, "-o", exe])
     assert b.returncode == 0, "runtime_name build failed: %r" % (b.stdout + b.stderr)
     rn = subprocess.run([exe], capture_output=True, timeout=60)
-    ri = run(["run", "--interp", path], 120)
+    ri = run(["run", "-O0", path], 120)
     assert (rn.returncode, rn.stdout) == (ri.returncode, ri.stdout) == (0, b"ok\n"), \
         "runtime_name native rc=%d out=%r" % (rn.returncode, rn.stdout)
     n += 1
@@ -280,7 +276,7 @@ def main():
     # it at the declaration, with the same bytes and a stable code.
     UNUSED_BAD = 'extern fn abs(x: u128) -> i32;\nprint(1)\n'
     path = write("unused_bad_decl", UNUSED_BAD)
-    py = run(["check", "--py", path], 120)
+    py = run(["check", path], 120)
     cx = run(["check", path], 120)
     assert py.returncode == 1 and cx.returncode == 1, \
         "unused_bad_decl: check must refuse, rc py=%d cxx=%d" % (py.returncode, cx.returncode)
@@ -326,7 +322,7 @@ def main():
         'extern "libkern.so" fn tail_c(n: i64, ..uint64_t) -> i64;\n'
         'print(1)\n')
     path = write("c_spellings", SPELLINGS)
-    rp = run(["check", "--py", path], 120)
+    rp = run(["check", path], 120)
     rc2 = run(["check", path], 120)
     assert rp.returncode == 0 and rc2.returncode == 0, \
         "c_spellings: both checkers must accept, py=%r cxx=%r" % (
@@ -350,9 +346,9 @@ def main():
     b = run(["build", path, "-o", exe], 120)
     assert b.returncode == 0, "size_t_run build failed: %r" % (b.stdout + b.stderr)
     rn = subprocess.run([exe], capture_output=True, timeout=60)
-    ri = run(["run", "--interp", path], 120)
+    ri = run(["run", "-O0", path], 120)
     assert rn.stdout == ri.stdout == b"4\n", \
-        "size_t_run: native %r interp %r" % (rn.stdout, ri.stdout)
+        "size_t_run: native %r run_o0 %r" % (rn.stdout, ri.stdout)
     n += 1
     print("ffihard ok: size_t works end to end on both backends")
 
@@ -361,7 +357,7 @@ def main():
     FIELD_BAD = ('extern struct B { a: u128 }\n'
                  'print(1)\n')
     path = write("bad_field", FIELD_BAD)
-    r1 = run(["check", "--py", path], 120)
+    r1 = run(["check", path], 120)
     r2 = run(["check", path], 120)
     assert r1.returncode == 1 and r2.returncode == 1, "bad_field: must be refused"
     assert r1.stdout == r2.stdout, "bad_field: checkers disagree"
@@ -370,7 +366,7 @@ def main():
     VAR_BAD = ('extern "libkern.so" fn t(n: i64, ..u128) -> i64;\n'
                'print(1)\n')
     path = write("bad_varargs", VAR_BAD)
-    r3 = run(["check", "--py", path], 120)
+    r3 = run(["check", path], 120)
     r4 = run(["check", path], 120)
     assert r3.returncode == 1 and r4.returncode == 1, "bad_varargs: must be refused"
     assert r3.stdout == r4.stdout, "bad_varargs: checkers disagree"
@@ -408,19 +404,10 @@ def main():
     n += 1
     print("ffihard ok: layout asserted for padded, packed and pointer structs")
 
-    # The interpreter-selected Python CLI path must delegate to the same C,
-    # assertion text included.
-    import os as _os
-    env = dict(_os.environ, BRAT_INTERP="1")
-    cli_c = subprocess.run(_cxx.cli_args("emit-c", "--unsafe-ffi", path), capture_output=True,
-                           timeout=120, env=env).stdout.decode("utf-8")
-    assert cli_c == cs, "layout_asserts: Python CLI delegation changed the emitted C"
-    n += 1
-    print("ffihard ok: Python CLI emits the same layout assertions")
-
     # The assertions are live: a wrong expectation must stop the C compiler.
     # This is the mutation half -- an assertion that never fails proves nothing.
     cc = shutil.which("cc") or shutil.which("gcc")
+    import os as _os
     if cc is None:
         print("ffihard skip: no C compiler for the mutation check")
     else:

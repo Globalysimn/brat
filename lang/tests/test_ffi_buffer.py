@@ -135,10 +135,10 @@ want = ("hello\n"
         "8\n"
         "ptr_read_str: invalid UTF-8\n")
 
-interp = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", ok), capture_output=True, text=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", ok), capture_output=True, text=True,
                         timeout=120, env=env)
-check(interp.returncode == 0 and interp.stdout == want,
-      "run rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
+check(run_o0.returncode == 0 and run_o0.stdout == want,
+      "run rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 
 exe = os.path.join(TMP, "ok.exe")
 built = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", ok, "-o", exe), capture_output=True,
@@ -154,7 +154,7 @@ def callback_fail(name, cfn, text):
            'fn got(s: str) -> i64 { return len(s); }\n'
            'fn main() -> i64 { print(%s("got")); return 0; }\n') % (LIB, cfn, cfn)
     path = write(name + ".brat", src)
-    r = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path),
+    r = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                        capture_output=True, text=True, timeout=120, env=env)
     check(r.returncode == 1 and r.stdout == "" and text in r.stderr,
           "%s run: rc=%d out=%r err=%r" % (name, r.returncode, r.stdout, r.stderr))
@@ -237,7 +237,7 @@ for name, stmt, text in (
         ("null", 'let q: ptr[i64] = ptr_null();\n  let t = slice_of_ptr(q, 4, "i64");\n  print(slice_len(t));',
          "null pointer dereference")):
     path = write(name + ".brat", RUNTIME % stmt)
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True,
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True,
                         timeout=120, env=env)
     out = ri.stdout + ri.stderr
     check(ri.returncode != 0 and text in out, "%s run: rc=%d out=%r" % (name, ri.returncode, out))

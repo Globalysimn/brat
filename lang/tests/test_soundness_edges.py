@@ -1,4 +1,4 @@
-"""Full-repo security, optimizer soundness, CLI-door C identity, and warnings audit."""
+"""Optimizer soundness, runtime boundary checks, HTTP/package limits, and compiler warning cleanliness."""
 
 import ast
 import glob
@@ -32,7 +32,7 @@ def run_cmd(argv, cwd=None, env=None, input_bytes=None, timeout=60):
     )
 
 
-def build_and_run_levels(td, name, src, levels=("-O0", "-O1", "-O2"), with_interp=True, env=None):
+def build_and_run_levels(td, name, src, levels=("-O0", "-O1", "-O2"), env=None):
     p = os.path.join(td, name + ".brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write(src)
@@ -53,14 +53,11 @@ def build_and_run_levels(td, name, src, levels=("-O0", "-O1", "-O2"), with_inter
         assert r_cc.returncode == 0, f"cc {lvl} failed: {r_cc.stderr.decode()}"
         r_run = run_cmd([exe_path], cwd=td, env=env)
         results[lvl] = (r_run.returncode, r_run.stdout.decode("utf-8", "replace"))
-    if with_interp:
-        r_int = run_cmd(_cxx.cli_args("run", "--interp", p), cwd=td, env=env)
-        results["--interp"] = (r_int.returncode, r_int.stdout.decode("utf-8", "replace"))
     return results
 
 
 def test_o2_ssa_origin_and_congruence_soundness():
-    td = _scratch.mkdtemp(prefix="audit-o2-")
+    td = _scratch.mkdtemp(prefix="brat-o2-")
     # 1. Exact mutated-variable congruence SIGILL regression (`extract_mod_var` SSA origin check)
     src_mut = """fn bug(a: i64) -> i64 {
   let mut x = a
@@ -85,7 +82,6 @@ fn main() -> i64 {
     assert res["-O0"] == (0, "42\n7\n"), res
     assert res["-O1"] == res["-O0"], res
     assert res["-O2"] == res["-O0"], res
-    assert res["--interp"] == res["-O0"], res
 
     # 2. Extreme signed congruence join (`__int128` + 2^62 cap) + zero-trip `for`
     src_join = """fn big_join(flag: i64) -> i64 {
@@ -115,22 +111,19 @@ fn main() -> i64 {
     assert res2["-O0"] == (0, "1152921504606846984\n1152921504606846984\n"), res2
     assert res2["-O1"] == res2["-O0"], res2
     assert res2["-O2"] == res2["-O0"], res2
-    assert res2["--interp"] == res2["-O0"], res2
 
 
 def test_fastpath_logical_ops_and_code_size():
-    td = _scratch.mkdtemp(prefix="audit-logic-")
+    td = _scratch.mkdtemp(prefix="brat-logic-")
     p = os.path.join(td, "use_http.brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write('import std.http\nprint("ok")\n')
-    r_py = run_cmd(_cxx.cli_args("emit-c", p))
     r_cx = run_cmd([CXX, "emit-c", p])
-    assert r_py.returncode == 0 and r_cx.returncode == 0
-    assert r_py.stdout == r_cx.stdout, "Python CLI emit-c and brat-cxx emit-c diverged on std.http"
+    assert r_cx.returncode == 0
     # Client + server HTTP/1.1 stdlib emits about 300 KB; under the O(2^N) logical blowup it was more
     # than 4.8 MB. The bound sits between the two: it used to be 300,000 against an output of
     # 299,589 bytes, so a 941 byte change in how `&&` is written failed it without a blowup.
-    assert len(r_py.stdout) < 450_000, f"O(2^N) logical blowup regressed: {len(r_py.stdout)} bytes"
+    assert len(r_cx.stdout) < 450_000, f"O(2^N) logical blowup regressed: {len(r_cx.stdout)} bytes"
 
     # Short-circuit and single-evaluation check in fast-path i64 functions
     src_sc = """fn bump(x: i64) -> i64 {
@@ -167,11 +160,11 @@ fn main() -> i64 {
 
 
 def test_runtime_nul_confinement_path_regex_and_sql():
-    td = _scratch.mkdtemp(prefix="audit-rt-")
+    td = _scratch.mkdtemp(prefix="brat-rt-")
     with open(os.path.join(td, "ok.txt"), "w", encoding="utf-8") as f:
         f.write("safe")
 
-    # 1. Direct C runtime (`crt.h`) + Python interpreter (`runtime.py`) NUL-byte confinement proof
+    # 1. Direct C runtime (`crt.h`) NUL-byte confinement proof
     # (`str_from_ptr` / FFI can construct length-counted `Val` strings containing embedded '\0').
     c_nul_probe = os.path.join(td, "nul_probe.c")
     c_nul_exe = os.path.join(td, "nul_probe.exe")
@@ -242,7 +235,7 @@ int main(void) {
         "BRAT_EXEC_ALLOW": "echo",
         "PATH": ".:rel_bin:/usr/bin:/bin",
     }
-    r_int = run_cmd(_cxx.cli_args("run", "--interp", p), cwd=td, env=poison_env)
+    r_int = run_cmd(_cxx.cli_args("run", "-O0", p), cwd=td, env=poison_env)
     assert r_int.returncode == 0, r_int.stderr.decode()
     assert r_int.stdout.decode().strip() == "SAFE_OK", r_int.stdout.decode()
 
@@ -255,7 +248,7 @@ int main(void) {
 
 
 def test_http_hardening():
-    td = _scratch.mkdtemp(prefix="audit-http-")
+    td = _scratch.mkdtemp(prefix="brat-http-")
     src = """import std.http
 
 fn main() -> i64 {
@@ -282,7 +275,7 @@ fn main() -> i64 {
     p = os.path.join(td, "http_sec.brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write(src)
-    r_int = run_cmd(_cxx.cli_args("run", "--interp", p), cwd=td)
+    r_int = run_cmd(_cxx.cli_args("run", "-O0", p), cwd=td)
     assert r_int.returncode == 0 and r_int.stdout.decode().strip() == "HTTP_HARDENED_OK", r_int.stderr.decode()
     exe = os.path.join(td, "http_sec.exe")
     r_b = run_cmd([CXX, "build", p, "-o", exe])
@@ -292,7 +285,7 @@ fn main() -> i64 {
 
 
 def test_bratbind_system_header_and_vendor_confinement():
-    td = _scratch.mkdtemp(prefix="audit-pkg-")
+    td = _scratch.mkdtemp(prefix="brat-pkg-")
     vpkg = os.path.join(td, "vendor", "evilpkg")
     os.makedirs(vpkg, exist_ok=True)
     with open(os.path.join(vpkg, "brat.pkg.json"), "w", encoding="utf-8") as f:
@@ -325,7 +318,7 @@ def test_lsp_oversized_header_rejection_and_zero_warnings():
     assert r_lsp.returncode in (0, 1), r_lsp.returncode
 
     # 3. `crt.h` compiles cleanly under `-std=c11 -Wall -Wextra -Wunused -Werror`
-    td = _scratch.mkdtemp(prefix="audit-warn-")
+    td = _scratch.mkdtemp(prefix="brat-warn-")
     probe_c = os.path.join(td, "crt_warn_probe.c")
     with open(probe_c, "w", encoding="utf-8") as f:
         f.write('#include "crt.h"\nstatic Val vcall_any(Val fn, Vec *a) { (void)fn; (void)a; return vnil(); }\nint main(void) { return 0; }\n')
@@ -374,6 +367,252 @@ def test_lsp_oversized_header_rejection_and_zero_warnings():
     assert not unused, f"Unused Python locals found: {unused}"
 
 
+def test_emitter_crt_ownership_and_locale_regressions():
+    td = _scratch.mkdtemp(prefix="brat-own-loc-")
+    sub = os.path.join(td, "sub_dir")
+    os.makedirs(sub, exist_ok=True)
+    fpath = os.path.join(sub, "item.txt")
+    with open(fpath, "w", encoding="utf-8") as fh:
+        fh.write("ok")
+
+    prog = '''import std.fs
+
+struct Box {
+  tag: str,
+  n: i64,
+}
+
+impl Box {
+  fn self_ret(self) -> Box {
+    return self
+  }
+}
+
+fn fail_idx() -> i64 {
+  raise("boom_idx")
+  return 0
+}
+
+fn fail_fn() -> fn(i64, i64) -> i64 {
+  raise("boom_fn")
+  return fn(a, b) { return a + b }
+}
+
+fn make_vec() -> list[str] {
+  return ["alpha_long_heap_string_0001", "beta_long_heap_string_0002"]
+}
+
+fn make_prefix(log: list[str]) -> str {
+  log.push("init")
+  return "seed_" + "heap_string_value_long_0001"
+}
+
+fn make_folder(log: list[str]) -> fn(str, str) -> str {
+  log.push("fn")
+  return fn(acc, x) { return acc + ":" + x }
+}
+
+fn shadow_catch_unboxed(x: i64) -> str {
+  let e = x + 41
+  let b = Box { tag: "outer_box_heap_string_12345", n: 7 }
+  let mut msg = ""
+  try {
+    raise("caught_payload_heap_string_98765")
+  } catch e {
+    msg = e
+  }
+  try {
+    raise("caught_box_shadow_heap_54321")
+  } catch b {
+    msg = msg + "|" + b
+  }
+  return "{e}:{b.n}:{msg}"
+}
+
+fn main() -> i64 {
+  // 1. std.fs.is_dir and std.fs.exists on directory, file, and missing path
+  assert(std.fs.is_dir("sub_dir"))
+  assert(!std.fs.exists("sub_dir"))
+  assert(std.fs.exists("sub_dir/item.txt"))
+  assert(!std.fs.exists("sub_dir/missing.txt"))
+
+  // 2. Empty-key map literal and dynamic empty-key lookup
+  let em = {"": 99, "k": 12}
+  let ek = ""
+  assert(em[""] == 99)
+  assert(em[ek] == 99)
+
+  // 3. vdrop_recv on temporary str.copy(), self-returning user method, and sort_by
+  let sc = ("hello_" + "world_long_heap_str_123456").copy()
+  assert(sc == "hello_world_long_heap_str_123456")
+  let bx = (Box { tag: "temp_" + "box_long_heap_12345", n: 5 }).self_ret()
+  assert(bx.n == 5 && bx.tag == "temp_box_long_heap_12345")
+  let sb = [30, 10, 20].sort_by(fn(v) { return v })
+  assert(sb == [10, 20, 30])
+
+  // 4. EK::Idx cleanup on raising index and temporary heap map key
+  let dm = {"key_long_heap_string_0001": 77}
+  assert(dm["key_" + "long_heap_string_0001"] == 77)
+  let mut caught_i = false
+  try {
+    let _v = make_vec()[fail_idx()]
+  } catch _e {
+    caught_i = true
+  }
+  assert(caught_i)
+
+  // 5. fold(init, fn) left-to-right evaluation and cleanup if fn raises
+  let order: list[str] = []
+  let folded = ["a", "b"].fold(make_prefix(order), make_folder(order))
+  assert(order == ["init", "fn"])
+  assert(folded == "seed_heap_string_value_long_0001:a:b")
+  let mut caught_f = false
+  try {
+    let _bad = [1, 2].fold(10, fail_fn())
+  } catch _e {
+    caught_f = true
+  }
+  assert(caught_f)
+
+  // 6. Fused stream shadowing outer struct local + reassigning base list mid-fold
+  let x = Box { tag: "outer", n: 3 }
+  let mut items = [{"tag": "one_heap_string_12345"}, {"tag": "two_heap_string_12345"}]
+  let joined = items.map(fn(x) { return x["tag"] }).fold("", fn(acc, s) {
+    items = []
+    return acc + s + ";"
+  })
+  assert(x.n == 3)
+  assert(joined == "one_heap_string_12345;two_heap_string_12345;")
+
+  // 7. SK::ForIter retaining collection when loop body reassigns source variable
+  let mut xs = ["first_heap_str_12345", "second_heap_str_12345"]
+  let mut seen = ""
+  for item in xs {
+    xs = []
+    seen = seen + item + ","
+  }
+  assert(seen == "first_heap_str_12345,second_heap_str_12345,")
+
+  // 8. SK::Try catch variable shadowing unboxed int and struct locals
+  assert(shadow_catch_unboxed(1) == "42:7:caught_payload_heap_string_98765|caught_box_shadow_heap_54321")
+
+  // 9. Float parse and format round-trip
+  let fv = 1.5 * 2.25
+  assert("{fv}" == "3.375")
+  assert("{42}" == "42")
+  assert("{1}{2}px" == "12px")
+  let parsed_f = "12.5".parse_float()?
+  assert(parsed_f == 12.5)
+  assert("12,5".parse_float().is_err())
+  print("OWN_LOC_OK")
+  return 0
+}
+'''
+    src_file = os.path.join(td, "own_loc.brat")
+    with open(src_file, "w", encoding="utf-8") as fh:
+        fh.write(prog)
+    cc = shutil.which("gcc") or shutil.which("clang") or "cc"
+    for opt in ("-O0", "-O2"):
+        r_em = run_cmd([CXX, "cc", opt, "--no-check", src_file])
+        assert r_em.returncode == 0, r_em.stderr.decode()
+        c_file = os.path.join(td, f"own_loc_{opt[1:]}.c")
+        exe_file = os.path.join(td, f"own_loc_{opt[1:]}")
+        with open(c_file, "w", encoding="utf-8") as cf:
+            cf.write(r_em.stdout.decode("utf-8"))
+        r_cc = run_cmd([
+            cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer", "-Wall", "-Wextra", "-Wno-unused-parameter",
+            "-I", ENG, c_file, "-o", exe_file, "-lm", "-pthread", "-ldl",
+        ])
+        assert r_cc.returncode == 0, f"ASan compile failed ({opt}):\n{r_cc.stderr.decode()}"
+        for loc in ("C", "de_DE.UTF-8"):
+            r_go = run_cmd([exe_file], cwd=td, env={"LC_ALL": loc, "ASAN_OPTIONS": "detect_leaks=1"})
+            assert r_go.returncode == 0 and r_go.stdout == b"OWN_LOC_OK\n", (
+                f"failed under {opt} LC_ALL={loc}: rc={r_go.returncode}\n"
+                f"out={r_go.stdout!r}\nerr={r_go.stderr.decode()}"
+            )
+
+    # 10. FFI ownership under ASan+LSan: export fn returning extern struct with str field
+    #     and void C callback whose untyped BRAT closure returns a heap string
+    ffi_lib_c = os.path.join(td, "ffi_own_lib.c")
+    ffi_lib_so = os.path.join(td, "libffi_own.so")
+    with open(ffi_lib_c, "w", encoding="utf-8") as lf:
+        lf.write(
+            "typedef struct { long long code; const char *msg; } CReply;\n"
+            "void run_void_cb(long long n, void (*cb)(long long)) {\n"
+            "    for (long long i = 0; i < n; ++i) cb(i);\n"
+            "}\n"
+        )
+    r_so = run_cmd([cc, "-shared", "-fPIC", "-O2", ffi_lib_c, "-o", ffi_lib_so])
+    assert r_so.returncode == 0, r_so.stderr.decode()
+
+    ffi_brat = os.path.join(td, "ffi_own.brat")
+    with open(ffi_brat, "w", encoding="utf-8") as bf:
+        bf.write(
+            f'extern struct CReply {{ code: i64, msg: str }}\n'
+            f'extern "{ffi_lib_so}" fn run_void_cb(n: i64, cb: fn(i64));\n'
+            f'export fn build_reply(x: i64) -> CReply {{\n'
+            f'  return CReply {{ code: x + 100, msg: "export_struct_str_payload_long_" + str(x) }}\n'
+            f'}}\n'
+            f'fn void_sink(i: i64) {{\n'
+            f'  return "void_cb_heap_return_payload_long_" + str(i)\n'
+            f'}}\n'
+            f'fn main() -> i64 {{\n'
+            f'  run_void_cb(40, "void_sink")\n'
+            f'  return 0\n'
+            f'}}\n'
+        )
+    r_fc = run_cmd([CXX, "emit-c", "--unsafe-ffi", ffi_brat])
+    assert r_fc.returncode == 0, r_fc.stderr.decode()
+    # Build both as normal executable (exercises void_cb) and shared library (exercises export fn build_reply)
+    ffi_c = os.path.join(td, "ffi_own.c")
+    ffi_exe = os.path.join(td, "ffi_own_exe")
+    with open(ffi_c, "w", encoding="utf-8") as cf:
+        cf.write(r_fc.stdout.decode("utf-8"))
+    r_fexe = run_cmd([
+        cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer",
+        "-I", ENG, ffi_c, ffi_lib_so, "-o", ffi_exe, "-lm", "-pthread", "-ldl",
+        f"-Wl,-rpath,{td}",
+    ])
+    assert r_fexe.returncode == 0, r_fexe.stderr.decode()
+    r_frun = run_cmd([ffi_exe], cwd=td, env={"ASAN_OPTIONS": "detect_leaks=1"})
+    assert r_frun.returncode == 0, r_frun.stderr.decode()
+
+    exp_so = os.path.join(td, "libbrat_exp.so")
+    r_bso = run_cmd([CXX, "build", "--shared", "--unsafe-ffi", ffi_brat, "-o", exp_so])
+    assert r_bso.returncode == 0, r_bso.stderr.decode()
+    drv_c = os.path.join(td, "exp_drv.c")
+    drv_exe = os.path.join(td, "exp_drv")
+    with open(drv_c, "w", encoding="utf-8") as df:
+        df.write(
+            "#include <string.h>\n"
+            "typedef struct { long long code; const char *msg; } CReply;\n"
+            "extern CReply build_reply(long long x);\n"
+            "int main(void) {\n"
+            "    for (long long i = 0; i < 40; ++i) {\n"
+            "        CReply r = build_reply(i);\n"
+            "        if (r.code != i + 100 || strncmp(r.msg, \"export_struct_str_payload_long_\", 31) != 0) return 1;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+        )
+    r_dcc = run_cmd([
+        cc, "-std=gnu11", "-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer",
+        drv_c, exp_so, "-o", drv_exe, f"-Wl,-rpath,{td}",
+    ])
+    assert r_dcc.returncode == 0, r_dcc.stderr.decode()
+    r_drun = run_cmd([drv_exe], cwd=td, env={"ASAN_OPTIONS": "detect_leaks=1"})
+    assert r_drun.returncode == 0, r_drun.stderr.decode()
+
+    # 11. Standalone BRAT_CRT_TLS header compiles cleanly with -Wall -Wextra -Werror
+    tls_only_c = os.path.join(td, "tls_only.c")
+    tls_only_o = os.path.join(td, "tls_only.o")
+    with open(tls_only_c, "w", encoding="utf-8") as tf:
+        tf.write('#define BRAT_CRT_MASK BRAT_CRT_TLS\n#include "crt.h"\nBFN Val vcall_any(Val fn, Vec *a) { (void)fn; (void)a; return vnil(); }\nint main(void) { return 0; }\n')
+    r_tls = run_cmd([cc, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-I", ENG, "-c", tls_only_c, "-o", tls_only_o])
+    assert r_tls.returncode == 0, f"standalone BRAT_CRT_TLS failed:\n{r_tls.stderr.decode()}"
+
+
 if __name__ == "__main__":
     test_o2_ssa_origin_and_congruence_soundness()
     test_fastpath_logical_ops_and_code_size()
@@ -381,4 +620,5 @@ if __name__ == "__main__":
     test_http_hardening()
     test_bratbind_system_header_and_vendor_confinement()
     test_lsp_oversized_header_rejection_and_zero_warnings()
-    print("SECURITY & SOUNDNESS AUDIT ALL GREEN")
+    test_emitter_crt_ownership_and_locale_regressions()
+    print("SOUNDNESS EDGES ALL GREEN")

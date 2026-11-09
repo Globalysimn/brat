@@ -13,7 +13,6 @@ sys.path.insert(0, HERE)
 
 import _cxx  # noqa: E402
 
-COMPARE_PY = False
 n = 0
 
 

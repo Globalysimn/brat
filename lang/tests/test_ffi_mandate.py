@@ -9,7 +9,7 @@ the two ways out:
     brat build prog.brat --header lib.h    the declarations compared to C
     brat build prog.brat --unsafe-ffi      build it anyway, on your head
 
-`--interp` still crosses the C ABI through ctypes, so it takes the same proof gate.
+`-O0` still crosses the C ABI through ctypes, so it takes the same proof gate.
 """
 import _cxx
 import _scratch
@@ -47,7 +47,6 @@ def write(name, text):
 
 
 env = dict(os.environ, LD_LIBRARY_PATH=TMP)
-env.pop("BRAT_INTERP", None)
 
 
 def cli(*args, **kw):
@@ -71,7 +70,7 @@ plain = write("plain.brat", 'fn main() -> i64 {\n  print(7);\n  return 0\n}\n')
 REFUSAL = "calls C and no header was given"
 HATCHES = ("--header FILE", "--unsafe-ffi")
 
-# Native `brat run` gates before exec; `--interp` uses the same proof because
+# Native `brat run` gates before exec; `-O0` uses the same proof because
 # ctypes crosses the C ABI in the current process.
 NATIVE = os.path.isfile(CXX) and os.access(CXX, os.X_OK)
 
@@ -79,7 +78,7 @@ NATIVE = os.path.isfile(CXX) and os.access(CXX, os.X_OK)
 COMMANDS = [("build", ["-o", os.path.join(TMP, "a.exe")]),
             ("dist", ["-o", os.path.join(TMP, "dist")]),
             ("emit-c", []),
-            ("run", ["--interp"])]
+            ("run", ["-O0"])]
 if NATIVE:
     COMMANDS.append(("run", []))
 for cmd, extra in COMMANDS:
@@ -139,9 +138,9 @@ check(r.returncode == 0, "build --header: %r" % (r.stdout + r.stderr))
 check("--unsafe-ffi" not in r.stderr, "a proven build mentions the opt-out: %r" % r.stderr)
 ran = subprocess.run([good_exe], capture_output=True, text=True, timeout=120, env=env)
 check(ran.stdout == "42\n", "the proven build is wrong: %r" % ran.stdout)
-interp_proved = cli("run", "--interp", prog, "--header", GOOD)
+interp_proved = cli("run", "-O0", prog, "--header", GOOD)
 check(interp_proved.returncode == 0 and interp_proved.stdout == "42\n",
-      "the interpreter must run a C call after the same header proof: %r"
+      "the -O0 build must run a C call after the same header proof: %r"
       % (interp_proved.stdout + interp_proved.stderr))
 
 # A header that disagrees is a refusal, not a warning with a binary next to it.
@@ -162,7 +161,7 @@ if NATIVE:
     check(r.returncode == 0 and r.stdout == "42\n",
           "--unsafe-ffi before `--` must still reach the gate: %r" % (r.stdout + r.stderr))
 else:
-    # `run` goes to the interpreter, but `build` still takes both flags the same
+    # `run` goes to the -O0 build, but `build` still takes both flags the same
     # way, so the argument-splitting rule is checked where it can be.
     r = cli("build", prog, "--", "--header", GOOD, "-o", os.path.join(TMP, "dd.exe"))
     check(r.returncode != 0, "an argument after `--` reached the proof: %r" % (r.stdout + r.stderr))
@@ -173,21 +172,21 @@ check(r.returncode == 0, "a program with no externs was refused: %r" % (r.stdout
 check("--unsafe-ffi" not in r.stderr, "%r" % r.stderr)
 unused = write("unused.brat", ('extern "%s" fn triple(x: i64) -> i64;\n'
                                 'fn main() -> i64 { return 0 }\n') % LIB)
-r = cli("run", "--interp", unused)
+r = cli("run", "-O0", unused)
 check(r.returncode != 0 and REFUSAL in r.stderr,
       "an extern declaration must still require FFI proof in native run: %r"
       % (r.stdout + r.stderr))
 
-# 6. The interpreter uses ctypes and therefore requires an explicit unsafe
+# 6. The -O0 build uses ctypes and therefore requires an explicit unsafe
 # acknowledgement when no header or .bratbind proves the foreign prototype.
-r = cli("run", "--interp", prog)
+r = cli("run", "-O0", prog)
 check(r.returncode != 0 and REFUSAL in r.stderr, r.stderr)
-r = cli("run", "--interp", "--no-check", prog)
+r = cli("run", "-O0", "--no-check", prog)
 check(r.returncode != 0 and REFUSAL in r.stderr,
-      "--no-check bypassed the interpreter's FFI proof gate: %r" % (r.stdout + r.stderr))
-r = cli("run", "--interp", "--unsafe-ffi", prog)
+      "--no-check bypassed unoptimized (-O0) FFI proof gate: %r" % (r.stdout + r.stderr))
+r = cli("run", "-O0", "--unsafe-ffi", prog)
 check(r.returncode == 0 and r.stdout == "42\n",
-      "--interp --unsafe-ffi: %r" % (r.stdout + r.stderr))
+      "-O0 --unsafe-ffi: %r" % (r.stdout + r.stderr))
 check("calls C without a proof (--unsafe-ffi)" in r.stderr, r.stderr)
 
 # Calls inside an imported module cross the same boundary and require the same proof.
@@ -198,13 +197,13 @@ with open(os.path.join(module_dir, "calls.brat"), "w", encoding="utf-8") as f:
              'pub fn run() -> i64 { return triple(14) }\n') % LIB)
 imported = write("imported.brat", 'import ffi.calls\n'
                  'fn main() -> i64 { print(ffi.calls.run()); return 0 }\n')
-r = cli("run", "--interp", imported)
+r = cli("run", "-O0", imported)
 check(r.returncode != 0 and REFUSAL in r.stderr,
-      "an imported module's C call bypassed the interpreter gate: %r" % (r.stdout + r.stderr))
-r = cli("run", "--interp", "--no-check", imported)
+      "an imported module's C call bypassed the -O0 build gate: %r" % (r.stdout + r.stderr))
+r = cli("run", "-O0", "--no-check", imported)
 check(r.returncode != 0 and REFUSAL in r.stderr,
       "--no-check bypassed an imported module's FFI gate: %r" % (r.stdout + r.stderr))
-r = cli("run", "--interp", "--unsafe-ffi", imported)
+r = cli("run", "-O0", "--unsafe-ffi", imported)
 check(r.returncode == 0 and r.stdout == "42\n",
       "an imported module's C call failed with the explicit opt-out: %r" % (r.stdout + r.stderr))
 if NATIVE:

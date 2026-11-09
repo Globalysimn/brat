@@ -11,7 +11,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-reclaim-')
-BRAT = os.path.join(ENGINE, 'brat.py')
 
 
 _spec = importlib.util.spec_from_file_location('tc_reclaim', os.path.join(HERE, '_toolchain.py'))
@@ -74,7 +73,7 @@ for n in (40000, 100000):
     np = capped([exe])
     check(np.returncode == 0, 'n=%d native rc=%d under %d MiB (a leak aborts)'
           % (n, np.returncode, CAP // (1024 * 1024)))
-    check(ip.stdout == np.stdout, 'n=%d interp=%r native=%r'
+    check(ip.stdout == np.stdout, 'n=%d run_o0=%r native=%r'
           % (n, ip.stdout[:60], np.stdout[:60]))
 
 # A same-named binding in an earlier function must not suppress release.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round 5 verification: imported-module dead-function tree-shaking, negative
+"""Imported-module dead-function tree-shaking, negative
 BFieldIC + stdlib shaped maps, pre-1970 ISO-8601 timestamps, LSP %00 URI
 rejection, and native Linux/macOS/Windows C preprocessor + FFI + bundle checks.
 """

@@ -1,6 +1,6 @@
 """A script-level binding, read and written from a function.
 
-This was the "accepted but unbuildable" shape: the interpreter ran it, both
+This was the "accepted but unbuildable" shape: the -O0 build ran it, both
 checkers reported `0 error(s)`, and the native emitter did not produce a
 working binary. Two defects in the emitter caused that, both decisions about
 the *fast* path rather than about globals themselves:
@@ -15,7 +15,7 @@ the *fast* path rather than about globals themselves:
 
 The native emitter now keeps globals off the fast path (and lets the fixpoint
 drop their callers) and leaves globals out of the local declaration list. The
-interpreter and the two CLI build paths must agree, which is what the cases
+-O0 and the two CLI build paths must agree, which is what the cases
 below assert -- the point is not that globals work, it is that they work
 *identically*.
 
@@ -28,7 +28,6 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-INTERP = os.path.abspath(os.path.join(HERE, "..", "engine", "brat.py"))
 CXX = None
 TMP = _scratch.mkdtemp(prefix="brat-globals-")
 
@@ -146,15 +145,15 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        for tag, cmd in (("check-py", _cxx.cli_args("check", "--py", path)),
+        for tag, cmd in (("check-py", _cxx.cli_args("check", path)),
                          ("check-cxx", [CXX, "check", path])):
             p = sh(cmd)
             if p.returncode != 0:
                 fail(name, "%s refused a legal program: %s"
                      % (tag, (p.stdout + p.stderr)[-400:]))
         got = {}
-        # The interpreter is the oracle for what the program means.
-        got["interp"] = sh(_cxx.run_args(path)).stdout
+        # The -O0 build is the oracle for what the program means.
+        got["run_o0"] = sh(_cxx.run_args(path)).stdout
         for tag, cmd in (("py", _cxx.cli_args("build", path, "-o", os.path.join(TMP, name + ".py.exe"))),
                          ("cxx", [CXX, "build", path, "-o",
                                   os.path.join(TMP, name + ".cxx.exe")])):
@@ -168,7 +167,7 @@ def main():
         for tag, out in sorted(got.items()):
             if out != want:
                 fail(name, "%s stdout %r, want %r" % (tag, out, want))
-    print("GLOBALS ALL GREEN (%d cases, interpreter + both CLI build paths)" % len(CASES))
+    print("GLOBALS ALL GREEN (%d cases, -O0 + both CLI build paths)" % len(CASES))
 
 
 if __name__ == "__main__":

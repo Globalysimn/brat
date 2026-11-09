@@ -5,15 +5,15 @@ Two divergences, both found by differential fuzzing rather than by the corpus:
   * In an `f64` fast function the emitter printed a float literal through
     `%.17g`, which turns `1e10` into `10000000000` — an *integer* constant in C.
     `1e10 * 1e10` then multiplied two int64s and wrapped (7.76e18) while the
-    interpreter multiplied two doubles (1e20). The literal now keeps its point.
+    -O0 multiplied two doubles (1e20). The literal now keeps its point.
     Integer literals keep theirs off: `1 / 2` inside an `f64` function is integer
-    division in both backends (`0`), because the interpreter treats an
+    division in both backends (`0`), because the -O0 build treats an
     integer-only subexpression as an integer and SPEC §10 says so.
-  * `fn f() -> f64 { return 3 }` printed `3` from the interpreter and `3.0` from
+  * `fn f() -> f64 { return 3 }` printed `3` from the -O0 build and `3.0` from
     the C backend, whose fast-path signature is `double`. Fixed in the native
     emitter rather than by coercing values: a `f64` function whose every `return` is
     an integer stays on the tagged-union path, so the integer survives `print`.
-    Coercing the interpreter instead would have been the wrong half -- `return
+    Coercing the -O0 build instead would have been the wrong half -- `return
     1 / 2` in an `f64` function is integer division by SPEC §10, and it still
     is. Both halves are pinned below.
 
@@ -32,7 +32,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-BRAT = os.path.join(ENGINE, "brat.py")
 TMP = _scratch.mkdtemp(prefix="brat-f64-")
 
 # name -> (source, expected stdout)
@@ -104,7 +103,7 @@ print(f(0))
     # Two distinct integers past 2^53 are ordered by their value, not by the
     # double they both round to. Both backends used to convert to `double` before
     # comparing, so `a < b` answered `False` for a = 2^60 and b = 2^60 + 1, and
-    # `a == b` answered `True` in C and `False` in the interpreter: the same
+    # `a == b` answered `True` in C and `False` in the -O0 build: the same
     # wrong answer on one side and an open disagreement on the other.
     "int_compare_past_double": ("""fn main() -> i64 {
   let a = 1152921504606846976
@@ -151,7 +150,7 @@ def main():
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
 
-        interp = run(_cxx.run_args(path))
+        run_o0 = run(_cxx.run_args(path))
         exe = os.path.join(TMP, name + ".exe")
         b = run(_cxx.cli_args("build", path, "-o", exe))
         if b.returncode != 0:
@@ -160,8 +159,8 @@ def main():
             continue
         native = run([exe])
 
-        if interp.stdout != want:
-            print("FAIL %s: interpreter %r, want %r" % (name, interp.stdout, want))
+        if run_o0.stdout != want:
+            print("FAIL %s: -O0 %r, want %r" % (name, run_o0.stdout, want))
             bad += 1
         elif native.stdout != want:
             print("FAIL %s: native %r, want %r" % (name, native.stdout, want))

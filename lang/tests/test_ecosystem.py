@@ -159,7 +159,7 @@ fn main() -> i64 {
     b = subprocess.run([BIN, "build", tool_src, "-o", tool_exe],
                        capture_output=True, text=True, timeout=60)
     assert b.returncode == 0, b.stdout + b.stderr
-    ti = subprocess.run(_cxx.cli_args("run", "--interp", tool_src, "--", "--url", url_arg, "10", "20", "12"),
+    ti = subprocess.run(_cxx.cli_args("run", "-O0", tool_src, "--", "--url", url_arg, "10", "20", "12"),
                         capture_output=True, text=True, timeout=30)
     tn = subprocess.run([tool_exe, "--url", url_arg, "10", "20", "12"],
                         capture_output=True, text=True, timeout=30)
@@ -215,7 +215,7 @@ fn main() -> i64 {
 }
 """)
 
-pi = subprocess.run(_cxx.cli_args("run", "--interp", app_src),
+pi = subprocess.run(_cxx.cli_args("run", "-O0", app_src),
                     capture_output=True, text=True, cwd=proj, timeout=30)
 pn = subprocess.run([BIN, "run", app_src],
                     capture_output=True, text=True, cwd=proj, timeout=30)
@@ -346,7 +346,7 @@ assert tr_ver.returncode == 0 and "verified 4 package(s)" in tr_ver.stdout, tr_v
 tapp = os.path.join(tproj, "main.brat")
 with open(tapp, "w", encoding="utf-8") as f:
     f.write("import topkit.api\nfn main() -> i64 {\n  print(topkit.api.total())\n  return 0\n}\n")
-tri = subprocess.run(_cxx.cli_args("run", "--interp", tapp),
+tri = subprocess.run(_cxx.cli_args("run", "-O0", tapp),
                      capture_output=True, text=True, cwd=tproj, timeout=30)
 trn = subprocess.run([BIN, "run", tapp],
                      capture_output=True, text=True, cwd=tproj, timeout=30)
@@ -441,7 +441,7 @@ fn main() -> i64 {
 """)
 
 base_env = dict(os.environ, BRAT_TEST_FLAG="yes", BRAT_EXEC_ALLOW="/bin/echo")
-si = subprocess.run(_cxx.cli_args("run", "--interp", sys_prog),
+si = subprocess.run(_cxx.cli_args("run", "-O0", sys_prog),
                     capture_output=True, text=True, cwd=sys_dir, env=base_env, timeout=30)
 assert si.returncode == 0 and si.stdout == "SYS_STD_OK\n", (si.returncode, si.stdout, si.stderr)
 
@@ -464,7 +464,7 @@ assert sn.returncode == 0 and sn.stdout == "SYS_STD_OK\n", (sn.returncode, sn.st
 
 # Capability gate default-deny blocks subprocesses in both backends:
 deny_env = dict(os.environ, BRAT_TEST_FLAG="yes", BRAT_EXEC="0", BRAT_EXEC_ALLOW="", ASAN_OPTIONS="detect_leaks=1")
-di = subprocess.run(_cxx.cli_args("run", "--interp", sys_prog),
+di = subprocess.run(_cxx.cli_args("run", "-O0", sys_prog),
                     capture_output=True, text=True, cwd=sys_dir, env=deny_env, timeout=30)
 dn = subprocess.run([sys_exe], capture_output=True, text=True, cwd=sys_dir, env=deny_env, timeout=30)
 assert di.returncode == 0 and di.stdout == "PROC_BLOCKED\n", (di.returncode, di.stdout, di.stderr)

@@ -126,7 +126,7 @@ def write(name, text):
 
 def py_check(path):
     return subprocess.run(_cxx.cli_args("check", path), capture_output=True,
-                          text=True, timeout=300, env=dict(os.environ, BRAT_INTERP="1"))
+                          text=True, timeout=300, env=dict(os.environ))
 
 
 def cxx_check(path):
@@ -163,7 +163,7 @@ def main():
     # checkable, they execute in both backends.
     for name in ("while_local", "for_local", "nested_loops"):
         path = os.path.join(TMP, name + ".brat")
-        r = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True,
+        r = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True,
                            text=True, timeout=300)
         assert r.returncode == 0, (name, r.stdout + r.stderr)
         exe = os.path.join(TMP, name + ".bin")

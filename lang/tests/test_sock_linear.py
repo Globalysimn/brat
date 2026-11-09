@@ -126,16 +126,16 @@ path = write("once.brat", ONCE)
 r = run(["check", path])
 check(r.returncode == 0 and "0 error(s)" in r.stdout, "single close: %r" % r.stdout)
 
-interp = run(["run", "--interp", path])
-check(interp.returncode == 0 and interp.stdout == "Ok(0)\n",
-      "interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+run_o0 = run(["run", "-O0", path])
+check(run_o0.returncode == 0 and run_o0.stdout == "Ok(0)\n",
+      "run_o0: rc=%d %r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 
 exe = os.path.join(TMP, "once.exe")
 built = run(["build", path, "-o", exe])
 check(built.returncode == 0, "build: %r" % (built.stdout + built.stderr))
 native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-check(native.returncode == 0 and native.stdout == interp.stdout,
-      "native: %r vs %r" % (native.stdout, interp.stdout))
+check(native.returncode == 0 and native.stdout == run_o0.stdout,
+      "native: %r vs %r" % (native.stdout, run_o0.stdout))
 
 BAD_TYPES = '''fn main() -> i64 {
   let l = tcp_listen("127.0.0.1:47377")
@@ -151,17 +151,17 @@ BAD_TYPES = '''fn main() -> i64 {
 }
 '''
 path = write("bad_types.brat", BAD_TYPES)
-interp = run(["run", "--interp", path])
+run_o0 = run(["run", "-O0", path])
 exe = os.path.join(TMP, "bad_types.exe")
 built = run(["build", path, "-o", exe])
 check(built.returncode == 0, "bad socket types build: %r" % (built.stdout + built.stderr))
 native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-check(interp.returncode == 0 and native.returncode == 0
-      and interp.stdout == native.stdout
+check(run_o0.returncode == 0 and native.returncode == 0
+      and run_o0.stdout == native.stdout
       and "recv wants 0 <= n <= 1048576" in native.stdout
       and "bad socket slot" in native.stdout,
       "fractional counts/handles must be refused identically: %r vs %r"
-      % (interp.stdout, native.stdout))
+      % (run_o0.stdout, native.stdout))
 
 # A stale integer copy must not alias the next socket. Native table slots are
 # reused, so the public handle has to be fresh every time.
@@ -193,9 +193,9 @@ fn main() -> i64 {
 '''
 path = write("stale.brat", STALE)
 want_stale = "Ok(0)\n2\nErr('bad socket slot')\nOk(0)\n"
-interp = run(["run", "--interp", path])
-check(interp.returncode == 0 and interp.stdout == want_stale,
-      "stale handle interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+run_o0 = run(["run", "-O0", path])
+check(run_o0.returncode == 0 and run_o0.stdout == want_stale,
+      "stale handle run_o0: rc=%d %r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 exe = os.path.join(TMP, "stale.exe")
 built = run(["build", path, "-o", exe])
 check(built.returncode == 0, "stale handle build: %r" % (built.stdout + built.stderr))
@@ -244,9 +244,9 @@ MANY = '''fn main() -> i64 {
 '''
 path = write("many.brat", MANY)
 want_many = "101\ndone\n"
-interp = run(["run", "--interp", path])
-check(interp.returncode == 0 and interp.stdout == want_many,
-      "many sockets interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+run_o0 = run(["run", "-O0", path])
+check(run_o0.returncode == 0 and run_o0.stdout == want_many,
+      "many sockets run_o0: rc=%d %r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 exe = os.path.join(TMP, "many.exe")
 built = run(["build", path, "-o", exe])
 check(built.returncode == 0, "many sockets build: %r" % (built.stdout + built.stderr))
@@ -321,9 +321,9 @@ check(not valid_close_race_output("1\nOk(1)\nOk(0)\nErr('recv failed')\ndone\n")
 check(not valid_close_race_output("1\nOk(0)\nOk(1)\nOk('x')\ndone\n"),
       "a successful stale receive must be rejected")
 
-interp = run(["run", "--interp", path])
-check(interp.returncode == 0 and valid_close_race_output(interp.stdout),
-      "close race interp: rc=%d %r" % (interp.returncode, interp.stdout + interp.stderr))
+run_o0 = run(["run", "-O0", path])
+check(run_o0.returncode == 0 and valid_close_race_output(run_o0.stdout),
+      "close race run_o0: rc=%d %r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 exe = os.path.join(TMP, "close_race_runtime.exe")
 built = run(["build", path, "-o", exe])
 check(built.returncode == 0, "close race build: %r" % (built.stdout + built.stderr))
@@ -355,7 +355,7 @@ fn main() -> i64 {
 }
 '''
 path = write("runtime.brat", RUNTIME)
-r = run(["run", "--interp", "--no-check", path])
+r = run(["run", "-O0", "--no-check", path])
 check(r.returncode == 0 and "refused bad socket slot" in r.stdout,
       "runtime guard: %r" % (r.stdout + r.stderr))
 

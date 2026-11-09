@@ -88,15 +88,15 @@ def native(src, name):
 
 # a raise in the callback: both backends say the same thing and exit 1
 path, built_run = native(RAISES, "raises")
-interp = subprocess.run(
-    _cxx.cli_args("run", "--interp", "--header", HEADER, path), capture_output=True,
+run_o0 = subprocess.run(
+    _cxx.cli_args("run", "-O0", "--header", HEADER, path), capture_output=True,
     text=True, timeout=300)
 want_err = "unhandled: Err('bad 2')\n"
-assert interp.returncode == 1, "interp rc=%d, want 1 (stdout=%r)" % (interp.returncode,
-                                                                    interp.stdout)
-assert interp.stdout == "", "interp printed a value from an abandoned callback: %r" % interp.stdout
-assert interp.stderr.endswith(want_err), "interp stderr=%r want suffix=%r" % (interp.stderr, want_err)
-assert "binding(s) proven against" in interp.stderr, "FFI proof notice missing: %r" % interp.stderr
+assert run_o0.returncode == 1, "run_o0 rc=%d, want 1 (stdout=%r)" % (run_o0.returncode,
+                                                                    run_o0.stdout)
+assert run_o0.stdout == "", "run_o0 printed a value from an abandoned callback: %r" % run_o0.stdout
+assert run_o0.stderr.endswith(want_err), "run_o0 stderr=%r want suffix=%r" % (run_o0.stderr, want_err)
+assert "binding(s) proven against" in run_o0.stderr, "FFI proof notice missing: %r" % run_o0.stderr
 assert built_run.returncode == 1, "native rc=%d, want 1 (stdout=%r)" % (built_run.returncode,
                                                                       built_run.stdout)
 assert built_run.stdout == "", "native printed a value from an abandoned callback: %r" % built_run.stdout
@@ -104,11 +104,11 @@ assert built_run.stderr == want_err, "native stderr=%r want=%r" % (built_run.std
 
 # a callback that returns normally does not trip the check
 path, built_run = native(CLEAN, "clean")
-interp = subprocess.run(
-    _cxx.cli_args("run", "--interp", "--header", HEADER, path), capture_output=True,
+run_o0 = subprocess.run(
+    _cxx.cli_args("run", "-O0", "--header", HEADER, path), capture_output=True,
     text=True, timeout=300)
-assert interp.returncode == 0 and interp.stdout == "20\n", \
-    "interp rc=%d out=%r err=%r" % (interp.returncode, interp.stdout, interp.stderr)
+assert run_o0.returncode == 0 and run_o0.stdout == "20\n", \
+    "run_o0 rc=%d out=%r err=%r" % (run_o0.returncode, run_o0.stdout, run_o0.stderr)
 assert built_run.returncode == 0 and built_run.stdout == "20\n", \
     "native rc=%d out=%r err=%r" % (built_run.returncode, built_run.stdout, built_run.stderr)
 

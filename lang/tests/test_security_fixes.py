@@ -1,7 +1,7 @@
 """Regression pins for the security fixes.
 
 FS sandbox type rejection, `defer` vs `catch` order, regex parity (>=65
-alternatives and UTF-8 `.`), and nested `join_all` termination. Interpreter and
+alternatives and UTF-8 `.`), and nested `join_all` termination. Unoptimized (-O0) and
 C binary must agree on stdout and exit code; nested-spawn output is compared as
 a sorted line set because the two backends schedule workers differently.
 """

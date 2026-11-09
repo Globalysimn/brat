@@ -9,13 +9,11 @@ sys.path.insert(0, HERE)
 import _cxx      # noqa: E402
 import _scratch  # noqa: E402
 
-COMPARE_PY = False
 ENGINE = os.path.join(HERE, '..', 'engine')
 EXAMPLES = os.path.join(HERE, '..', 'examples')
 SPEC = os.path.join(HERE, '..', 'spec')
 CXX = _cxx.build()
 
-BRAT = os.path.join(ENGINE, 'brat.py')
 OWN = os.path.join(ENGINE, 'borrow.py')
 NATIVE_EMITTER = os.path.join(HERE, 'test_native_emitter.py')
 

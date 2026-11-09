@@ -53,11 +53,11 @@ try:
     for f in BRATS:
         orig = os.path.join(EXAMPLES, f)
         tp = os.path.join(tmp, f)
-        # The interpreter: the reference. `brat run` is now the native product
+        # The -O0 build: the reference. `brat run` is now the native product
         # path, and it refuses the examples the checker rejects, which is the
         # contract this loop is about.
-        r1 = run_cli("run", "--interp", orig)
-        r2 = run_cli("run", "--interp", tp)
+        r1 = run_cli("run", "-O0", orig)
+        r2 = run_cli("run", "-O0", tp)
         check(r1.returncode == r2.returncode, "fmt broke %s orig=%d fmt=%d err=%s" % (f, r1.returncode, r2.returncode, r2.stderr[-500:]))
         if f not in NO_ARG_EXIT0_OK:
             check(r2.returncode == 0, "formatted %s exit=%d err=%s" % (f, r2.returncode, r2.stderr[-500:]))
@@ -140,19 +140,19 @@ try:
 finally:
     os.remove(bad)
 
-# Both backends of `run`: the native product path agrees with the interpreter on
+# Both backends of `run`: the native product path agrees with the -O0 build on
 # a clean program, prints only the program's output, and refuses what the
 # checker refuses.
 clean = os.path.join(tempfile.mkdtemp(prefix="brat-run-"), "clean.brat")
 with open(clean, "w", encoding="utf-8") as f:
     f.write('fn main() -> i64 {\n  print("both")\n  return 0\n}\n')
 native = run_cli("run", clean)
-interp = run_cli("run", "--interp", clean)
+run_o0 = run_cli("run", "-O0", clean)
 check(native.returncode == 0 and native.stdout == "both\n",
       "run native out=%r err=%r" % (native.stdout, native.stderr[-300:]))
-check(interp.returncode == 0 and interp.stdout == "both\n",
-      "run interp out=%r" % (interp.stdout,))
-check(native.stdout == interp.stdout, "run backends disagree")
+check(run_o0.returncode == 0 and run_o0.stdout == "both\n",
+      "run run_o0 out=%r" % (run_o0.stdout,))
+check(native.stdout == run_o0.stdout, "run backends disagree")
 check("error(s)" not in native.stdout, "native run printed a report: %r" % native.stdout)
 
 p = run_cli("bogus-cmd")

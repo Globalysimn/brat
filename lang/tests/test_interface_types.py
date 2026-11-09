@@ -24,7 +24,7 @@ def build(path, tag):
 
 
 def run(path):
-    return subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+    return subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                           timeout=120)
 
 
@@ -71,12 +71,12 @@ for r in (run(bad), build(bad, "ret_none")):
 # even though the root has no namespace. Python and C++ now share this rule.
 root_src = write("rootapi/main.brat", "fn main() -> i64 { return 0 }\n")
 write("rootapi/main.bri", "fn main() -> i64\n")
-for env in ({"BRAT_INTERP": "1"}, {}):
+for env in ({}, {}):
     ok = subprocess.run(_cxx.cli_args("check", root_src), capture_output=True,
                        text=True, timeout=120, env=dict(os.environ, **env))
     assert ok.returncode == 0, ok.stdout + ok.stderr
 write("rootapi/main.bri", "fn main() -> str\n")
-for env in ({"BRAT_INTERP": "1"}, {}):
+for env in ({}, {}):
     mismatch = subprocess.run(_cxx.cli_args("check", root_src), capture_output=True,
                               text=True, timeout=120, env=dict(os.environ, **env))
     out = mismatch.stdout + mismatch.stderr

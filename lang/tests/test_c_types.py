@@ -56,7 +56,7 @@ assert built.returncode == 0, built.stdout + built.stderr
 want = "9223372036854775807\n9223372036854775806\n"
 out = subprocess.run([exe], capture_output=True, text=True, timeout=60)
 assert out.returncode == 0 and out.stdout == want, out.stdout + out.stderr
-interp = subprocess.run(_cxx.cli_args("run", "--interp", src), capture_output=True, text=True, timeout=60)
-assert interp.returncode == 0 and interp.stdout == want, interp.stdout + interp.stderr
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", src), capture_output=True, text=True, timeout=60)
+assert run_o0.returncode == 0 and run_o0.stdout == want, run_o0.stdout + run_o0.stderr
 
 print("C TYPES ALL GREEN")

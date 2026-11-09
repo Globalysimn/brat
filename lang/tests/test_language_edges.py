@@ -161,7 +161,7 @@ for name, (src, want) in CASES.items():
     if a.stdout != b.stdout or a.returncode != b.returncode:
         bad += 1
         print('%-22s DIFF rc i=%d n=%d' % (name, a.returncode, b.returncode))
-        print('   interp: %r' % a.stdout[:150])
+        print('   run_o0: %r' % a.stdout[:150])
         print('   native: %r' % b.stdout[:150])
     elif a.stdout != want:
         bad += 1

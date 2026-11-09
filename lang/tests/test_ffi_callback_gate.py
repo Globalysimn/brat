@@ -5,7 +5,7 @@ literal. Everything else -- a closure, a bare fn name, a name with no function
 behind it, a function of the wrong arity or the wrong widths -- used to be
 handed to the emitter, which wrote `brat_cb_<name>` for it. That is C that does
 not compile when the name is unknown, and C that calls through a lying
-prototype when the signature does not match; the interpreter's version of the
+prototype when the signature does not match; unoptimized (-O0) version of the
 same program raised a `ctypes` traceback from inside a call C was in the middle
 of. Neither is a diagnostic.
 
@@ -13,13 +13,13 @@ So all three paths refuse, in the words `check` already used:
 
 * `brat-cxx cc` and `brat emit-c` exit 1 with an empty stdout (stdout is the C;
   a refusal writes nothing to it);
-* the interpreter stops with the same sentence;
+* the -O0 build stops with the same sentence;
 
 and the sentence is what `check` says, which is the point: one rule, one text.
 No library has to exist for any of this -- a refusal happens before a call.
 
 The last case is the shape that must keep working: a real callback still gets
-its `brat_cb_` wrapper, and the Python CLI and native `cc` doors write the
+its `brat_cb_` wrapper, and the CLI and native `cc` doors write the
 same C for it.
 """
 import _cxx
@@ -36,7 +36,7 @@ TMP = _scratch.mkdtemp(prefix="brat-ffi-cbgate-")
 version = tuple(int(part) for part in unicodedata.unidata_version.split("."))
 case_version = 1600 if version >= (16, 0) else 1500
 CXX_ENV = dict(os.environ, BRAT_CASE_MAP_VERSION=str(case_version))
-CLI_ENV = dict(CXX_ENV, BRAT_CXX=CXX, BRAT_NO_NATIVE_CLI="1")
+CLI_ENV = dict(CXX_ENV, BRAT_CXX=CXX)
 
 BODY = (
     'fn add_two(x: i64) -> i64 { return x + 2 }\n'
@@ -44,7 +44,7 @@ BODY = (
     'fn halve(x: f32) -> f32 { return x / 2.0 }\n'
 )
 
-# The interpreter opens a library when the call runs, so the refusal it has to
+# The -O0 build opens a library when the call runs, so the refusal it has to
 # make needs a library that really exists and a symbol that really is there.
 # The native emitter refuses before any of that, so it gets a name that never loads.
 LIB_C = "int64_t call_cb(int64_t (*f)(int64_t), int64_t v) { return f(v); }\n"
@@ -104,7 +104,7 @@ def main():
     n = 0
     lib = build_probe_lib()
     if lib is None:
-        print("note: no C compiler; the interpreter half of each case is skipped")
+        print("note: no C compiler; the -O0 build half of each case is skipped")
     for name, (body, sentence) in REFUSED.items():
         path = write(name, source(body, "libnosuch.so"))
         ipath = write(name + "_interp", source(body, lib)) if lib else None
@@ -123,18 +123,18 @@ def main():
                     name, tag, sentence, r.stderr.decode("utf-8", "replace")[-400:]))
         n += 1
 
-        # And the interpreter, which compiles none of this.
+        # And the -O0 build, which compiles none of this.
         if ipath is None:
             print("ffi cb gate ok: %s (native only)" % name)
             continue
-        run = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", ipath),
+        run = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", ipath),
                              capture_output=True, timeout=120)
-        assert run.returncode != 0, "%s interp: ran a program it cannot honour" % name
+        assert run.returncode != 0, "%s run_o0: ran a program it cannot honour" % name
         assert sentence in run.stderr.decode("utf-8", "replace"), (
-            "%s interp: stderr has no %r:\n%s" % (
+            "%s run_o0: stderr has no %r:\n%s" % (
                 name, sentence, run.stderr.decode("utf-8", "replace")[-400:]))
         assert b"Exception ignored" not in run.stderr, (
-            "%s interp: a ctypes traceback reached the user" % name)
+            "%s run_o0: a ctypes traceback reached the user" % name)
         print("ffi cb gate ok: %s" % name)
 
     # The shape that works: a real callback still gets its wrapper.
@@ -146,7 +146,7 @@ def main():
         "cb_ok: a valid callback must emit its wrapper")
     ref = subprocess.run(_cxx.cli_args("emit-c", "--unsafe-ffi", path),
                          capture_output=True, timeout=120, env=CLI_ENV)
-    assert ref.returncode == 0, "cb_ok: Python CLI refused a valid program"
+    assert ref.returncode == 0, "cb_ok: CLI refused a valid program"
     # `emit-c` appends the contract block the driver records for the binary;
     # `brat-cxx cc` is the emitter alone, so the C is what must match.
     code, sep, contract = ref.stdout.rpartition(b"\n/* BRAT FFI contract")
@@ -180,7 +180,7 @@ def main():
     assert ref.returncode == 0 and ref_stdout == cxx.stdout, (
         "cb_raw: raw function pointer CLI doors disagree")
     if lib is not None:
-        run = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", raw_path),
+        run = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", raw_path),
                              capture_output=True, timeout=120)
         assert run.returncode == 0, run.stderr.decode("utf-8", "replace")[-400:]
         assert run.stdout == b"-7\n3\n5\n", run.stdout

@@ -72,8 +72,7 @@ for label, dirname in (("quote", 'we"ird'), ("backslash", "back\\slash")):
         with open(os.path.join(base, name), "w", encoding="utf-8") as f:
             f.write(text)
     src = os.path.join(base, "main.brat")
-    # Python CLI, then the C++ front end: same program, same answer.
-    for who, emit in (("cli", CLI + ["emit-c", src]), ("cxx", [_cxx.build(), "cc", src])):
+    for who, emit in (("emit_c", [_cxx.build(), "emit-c", src]),):
         try:
             r = run(emit)
             cfile = os.path.join(TMP, "%s_%s.c" % (label, who))

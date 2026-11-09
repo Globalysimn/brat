@@ -9,7 +9,6 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BRAT = os.path.join(os.path.dirname(HERE), 'engine', 'brat.py')
 
 n = 0
 

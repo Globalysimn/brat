@@ -174,7 +174,7 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        py = run(_cxx.cli_args("check", "--py", path))
+        py = run(_cxx.cli_args("check", path))
         for want in expect:
             check(want in py.stdout,
                   "%s: `%s` not reported\n%s" % (name, want, py.stdout))

@@ -159,9 +159,9 @@ def main():
     assert 'vcall_method_ic(b_counter, "add"' in cpp.stdout, \
            "dynamic receiver dispatch lost its vector fallback"
 
-    interp = run(_cxx.cli_args("run", "--interp", source))
-    assert interp.returncode == 0, interp.stderr
-    assert interp.stdout == EXPECTED, repr(interp.stdout)
+    run_o0 = run(_cxx.cli_args("run", "-O0", source))
+    assert run_o0.returncode == 0, run_o0.stderr
+    assert run_o0.stdout == EXPECTED, repr(run_o0.stdout)
 
     cfile = os.path.join(TMP, "calls.c")
     exe = os.path.join(TMP, "calls")
@@ -185,7 +185,7 @@ def main():
     assert "vclosure_env_new(3)" in closure_cpp.stdout
     assert "vclosure_env_at(cap," in closure_cpp.stdout
     assert "map_get(cap" not in closure_cpp.stdout
-    closure_interp = run(_cxx.cli_args("run", "--interp", closure_source))
+    closure_interp = run(_cxx.cli_args("run", "-O0", closure_source))
     assert (closure_interp.returncode, closure_interp.stdout, closure_interp.stderr) == \
            (0, CLOSURE_EXPECTED, "")
     closure_cfile = os.path.join(TMP, "closure_slots.c")

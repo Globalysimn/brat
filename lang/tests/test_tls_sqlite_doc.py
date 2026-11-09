@@ -126,7 +126,7 @@ fn main() -> i64 {{
 }}
 ''')
 
-r71_i = run_cli("run", "--interp", step71_src)
+r71_i = run_cli("run", "-O0", step71_src)
 check(r71_i.returncode == 0, f"interp failed: {r71_i.stdout}\n{r71_i.stderr}")
 
 c71 = run_cli("emit-c", step71_src)
@@ -189,7 +189,7 @@ corrupt_src = write("tls_app/corrupt.brat", f'''fn main() -> i64 {{
   return 0
 }}
 ''')
-r_corrupt_i = run_cli("run", "--interp", corrupt_src)
+r_corrupt_i = run_cli("run", "-O0", corrupt_src)
 check(r_corrupt_i.returncode == 0, f"interp corrupt TLS failed: {r_corrupt_i.stdout}\n{r_corrupt_i.stderr}")
 check(r_corrupt_i.stdout.strip() == "TLS_CORRUPT_REJECTED", f"interp corrupt TLS: {r_corrupt_i.stdout}")
 c_corrupt = run_cli("emit-c", corrupt_src)
@@ -237,7 +237,7 @@ fn main() -> i64 {
 }
 ''')
 
-r72_i = run_cli("run", "--interp", step72_src)
+r72_i = run_cli("run", "-O0", step72_src)
 check(r72_i.returncode == 0, f"interp failed: {r72_i.stdout}\n{r72_i.stderr}")
 
 # Remove db file so native starts clean too

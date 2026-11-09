@@ -7,11 +7,11 @@ Covers:
     escaping-return / `ptr_offset` / cross-module `pub extern` enforcement, and
     contradictory declaration refusals across both Python & C++ front ends.
   - `brat_plugin_abi_v1` table in `--shared` builds + runtime
-    `call(sym, sig, ...)` ABI verification in both `--interp` and native `crt.h`.
+    `call(sym, sig, ...)` ABI verification in both `-O0` and native `crt.h`.
   - `extern union` + C11 anonymous/named inline `union` & `struct`
     across `bindgen`, `ffi` (`--header`, DWARF `--object`, L5 `--abi-matrix`,
     `verify --bin` `BRATFFI1`), Python/C++ AST parity, identical C through
-    the Python CLI and native CLI doors, and runtime.
+    the CLI and native CLI doors, and runtime.
   - `KNOWN_LEAKS == set()`, ASan/LSan/UBSan + TSan cleanliness, and
     mock `-D_WIN32 -Wall -Wextra -Werror` `crt.h` header hygiene.
 """
@@ -27,7 +27,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CRT_H = os.path.join(ROOT, "lang", "engine", "crt.h")
 TMP = _scratch.mkdtemp(prefix="brat-safety-")
-COMPARE_PY = False
 
 BIN = _cxx.build()
 asserts = 0
@@ -173,7 +172,7 @@ fn main() -> i32 { return 0 }
     ec_py = subprocess.run(
         _cxx.cli_args("emit-c", plug_brat),
         capture_output=True, text=True, check=True,
-        env=dict(os.environ, BRAT_CXX=BIN, BRAT_NO_NATIVE_CLI="1"),
+        env=dict(os.environ, BRAT_CXX=BIN),
     ).stdout
     ec_cx = subprocess.run([BIN, "emit-c", plug_brat], capture_output=True, text=True, check=True).stdout
     check(ec_py == ec_cx, "plugin emit-c CLI doors mismatch")
@@ -221,8 +220,8 @@ fn main() {{
 }}
 ''')
     want = "42\n10.0\n0\ncaught_abi_mismatch\n42\n"
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", caller), capture_output=True, text=True)
-    check(ri.returncode == 0 and ri.stdout == want, "interp plugin: %r" % (ri.stdout + ri.stderr))
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", caller), capture_output=True, text=True)
+    check(ri.returncode == 0 and ri.stdout == want, "run_o0 plugin: %r" % (ri.stdout + ri.stderr))
 
     caller_exe = os.path.join(TMP, "s92/caller.exe")
     cb = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", caller, "-o", caller_exe),
@@ -241,9 +240,9 @@ fn main() {{
 }}
 ''')
     diag = "call: ABI mismatch on `add_i64`: plugin exports `i64(i64,i64)`, call site wrote `i64(i64,f64)`"
-    ru_i = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", uncaught), capture_output=True, text=True)
+    ru_i = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", uncaught), capture_output=True, text=True)
     check(ru_i.returncode != 0 and diag in (ru_i.stdout + ru_i.stderr),
-          "interp uncaught: %r" % (ru_i.stdout + ru_i.stderr))
+          "run_o0 uncaught: %r" % (ru_i.stdout + ru_i.stderr))
     uncaught_exe = os.path.join(TMP, "s92/uncaught.exe")
     subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", uncaught, "-o", uncaught_exe),
                    check=True, capture_output=True)
@@ -327,7 +326,7 @@ fn main() {
     ec_py = subprocess.run(
         _cxx.cli_args("emit-c", app, "--unsafe-ffi"),
         capture_output=True, text=True, check=True,
-        env=dict(os.environ, BRAT_CXX=BIN, BRAT_NO_NATIVE_CLI="1"),
+        env=dict(os.environ, BRAT_CXX=BIN),
     ).stdout
     ec_cx = subprocess.run([BIN, "emit-c", "--unsafe-ffi", app],
                            capture_output=True, text=True, check=True).stdout
@@ -370,12 +369,12 @@ fn main() {}
     check(ro_bad.returncode != 0 and "union" in (ro_bad.stdout + ro_bad.stderr),
           "DWARF union-vs-struct check missed: %r" % (ro_bad.stdout + ro_bad.stderr))
 
-    # Execution parity (--interp vs native with embedded BRATFFI1 contract).
+    # Execution parity (-O0 vs native with embedded BRATFFI1 contract).
     want = "2.5\n123456\n7.25\n107\n58\n"
     env = dict(os.environ, LD_LIBRARY_PATH=os.path.dirname(so))
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", "--header", hdr, app),
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", "--header", hdr, app),
                         capture_output=True, text=True, env=env)
-    check(ri.returncode == 0 and ri.stdout == want, "interp union: %r" % (ri.stdout + ri.stderr))
+    check(ri.returncode == 0 and ri.stdout == want, "run_o0 union: %r" % (ri.stdout + ri.stderr))
 
     exe = os.path.join(TMP, "s93/app.exe")
     b = subprocess.run(_cxx.cli_args("build", "--header", hdr, "--link", so, app, "-o", exe),

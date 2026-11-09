@@ -1,7 +1,7 @@
 """Modules: name clashes are errors; non-clashing imports work on both backends.
 
 Before this change, two imported files defining `name()` silently kept the first
-definition, in the interpreter and in native code alike, so the program ran and
+definition, in the -O0 build and in native code alike, so the program ran and
 gave the wrong answer.
 """
 import _cxx
@@ -29,8 +29,8 @@ def main():
     main_clash = write("clash/main.brat",
                        "import a\nimport b\nfn main() -> i64 {\n  print(name())\n  return 0\n}\n")
 
-    # Interpreter refuses to run it, and the message names both files.
-    r = subprocess.run(_cxx.cli_args("run", "--interp", main_clash), capture_output=True, timeout=120)
+    # Unoptimized (-O0) refuses to run it, and the message names both files.
+    r = subprocess.run(_cxx.cli_args("run", "-O0", main_clash), capture_output=True, timeout=120)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     assert r.returncode != 0 and "defined in both" in out and "`name`" in out, \
         "run should refuse a name clash: rc=%d out=%r" % (r.returncode, out[-400:])
@@ -52,8 +52,8 @@ def main():
                     "import geo.circle\nimport geo.square\n"
                     "fn main() -> i64 {\n  print(circle_name())\n  print(square_name())\n  return 0\n}\n")
     want = b"circle\nsquare\n"
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", ok_main), capture_output=True, timeout=120)
-    assert ri.returncode == 0 and ri.stdout == want, "interp ok-case rc=%d out=%r" % (ri.returncode, ri.stdout)
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", ok_main), capture_output=True, timeout=120)
+    assert ri.returncode == 0 and ri.stdout == want, "run_o0 ok-case rc=%d out=%r" % (ri.returncode, ri.stdout)
     exe2 = os.path.join(TMP, "ok.exe")
     b2 = subprocess.run(_cxx.cli_args("build", ok_main, "-o", exe2),
                         capture_output=True, timeout=300)

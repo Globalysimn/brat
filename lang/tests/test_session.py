@@ -150,7 +150,7 @@ def run(cmd, **kw):
 
 
 def check(path):
-    out = run(_cxx.cli_args("check", "--py", path))
+    out = run(_cxx.cli_args("check", path))
     return out.returncode, out.stdout + out.stderr
 
 

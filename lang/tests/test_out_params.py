@@ -15,7 +15,7 @@ What this file pins:
 * The width comes from the pointee, not from the word: an `i16 *` writes two
   bytes, and a program that wrote eight would corrupt the neighbour.
 * `&x` is only meaningful as that argument: written anywhere else it is refused
-  by both checkers and, at run time, by the interpreter. It takes a name, not an
+  by both checkers and, at run time, by the -O0 build. It takes a name, not an
   expression.
 * `let p = &x` needs `mut`: the callee writes through it, so the binding changes.
 * Memory the program allocates itself is ordinary FFI now: `malloc` returns
@@ -220,9 +220,9 @@ def main():
     assert p.returncode != 0, p.stdout + p.stderr
     assert "error" in p.stdout.lower(), p.stdout
 
-    p = run(["run", "--interp", prog])
+    p = run(["run", "-O0", prog])
     assert p.returncode == 0, p.stdout + p.stderr
-    assert p.stdout == WANT, "interp:\n%r\nwant %r" % (p.stdout, WANT)
+    assert p.stdout == WANT, "run_o0:\n%r\nwant %r" % (p.stdout, WANT)
 
     got = native(prog, "outs.bin")
     assert got == WANT, "native:\n%r\nwant %r" % (got, WANT)
@@ -233,9 +233,9 @@ def main():
       "usize out-parameter scratch must follow the target's size_t"
     assert "void* _out" in target_c.stdout, \
       "ptr out-parameter scratch must be pointer-sized"
-    p = run(["run", "--interp", buf])
+    p = run(["run", "-O0", buf])
     assert p.returncode == 0, p.stdout + p.stderr
-    assert p.stdout == BUFFER_WANT, "interp buffer:\n%r" % p.stdout
+    assert p.stdout == BUFFER_WANT, "run_o0 buffer:\n%r" % p.stdout
 
     got = native(buf, "buf.bin")
     assert got == BUFFER_WANT, "native buffer:\n%r" % got
@@ -253,7 +253,7 @@ fn main() -> i64 {
     p = run(["check", stray])
     assert p.returncode != 0, "a stray & must not type-check"
     assert "out-parameter" in (p.stdout + p.stderr), p.stdout + p.stderr
-    p = run(["run", "--interp", stray])
+    p = run(["run", "-O0", stray])
     assert p.returncode != 0 and "out-parameter" in (p.stdout + p.stderr), p.stdout + p.stderr
 
     # `&(a + b)` is not a binding.

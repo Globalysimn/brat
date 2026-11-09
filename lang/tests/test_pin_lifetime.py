@@ -27,17 +27,15 @@ for i in 0..5000 {
 }
 print(str_from_ptr(p, 5))
 ''')
-    for cmd in (_cxx.cli_args('run', '--interp', src),
-                [CXX, 'run', src],
-                _cxx.cli_args('run', src)):
+    for cmd in (_cxx.cli_args('run', '-O0', src),
+                [CXX, 'run', src]):
         r = run(cmd)
         assert r.returncode == 0 and r.stdout.strip() == 'hello', (cmd, r.stdout, r.stderr)
 
     src = os.path.join(td, 'effect.brat')
     with open(src, 'w', encoding='utf-8') as f:
         f.write('extern fn f(p: ptr pure)\n')
-    for cmd, env in (([CXX, 'check', src], {}),
-                     (_cxx.cli_args('check', src), {'BRAT_NO_NATIVE_CLI': '1'})):
+    for cmd, env in (([CXX, 'check', src], {}),):
         r = run(cmd, env)
         assert r.returncode != 0 and 'effect of p, not a parameter type' in r.stdout + r.stderr, (cmd, r.stdout, r.stderr)
 

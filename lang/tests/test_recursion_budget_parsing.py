@@ -1,8 +1,8 @@
-"""BRAT_RECURSION_BUDGET means the same thing to the interpreter and to compiled programs.
+"""BRAT_RECURSION_BUDGET means the same thing to the -O0 build and to compiled programs.
 
 A program may nest 2000 BRAT frames by default. The variable sets another limit
 when it is an integer in 1..1000000 (strtoll rules: leading blanks and a sign are
-fine, trailing characters are not); any other value is ignored. The interpreter
+fine, trailing characters are not); any other value is ignored. The -O0 build
 used to call int() on it, so "abc" killed it at import with a misleading
 error and "0" raised a ValueError, while compiled programs
 shrugged both off.
@@ -55,7 +55,7 @@ CASES = [
 ]
 
 RUNNERS = {
-    "interpreter": lambda depth: _cxx.cli_args("run", "--interp", SRC, "--", str(depth)),
+    "-O0": lambda depth: _cxx.cli_args("run", "-O0", SRC, "--", str(depth)),
     "compiled": lambda depth: [EXE, str(depth)],
 }
 

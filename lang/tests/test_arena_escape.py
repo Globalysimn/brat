@@ -13,7 +13,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
-BRAT = os.path.join(ENGINE, 'brat.py')
 CXX = os.path.abspath(os.path.join(HERE, '..', 'cxx', 'bin', 'brat-cxx'))
 HAVE_CXX = os.path.isfile(CXX)
 
@@ -241,7 +240,7 @@ try:
             # `brat run` decides with the native checker, so a rule that only
             # the Python side implements is a program that builds and runs with
             # a dangling arena pointer. Require identical bytes from both.
-            py = subprocess.run(_cxx.cli_args('check', '--py', p),
+            py = subprocess.run(_cxx.cli_args('check', p),
                                 capture_output=True, text=True, timeout=300)
             cx = subprocess.run([CXX, 'check', p],
                                 capture_output=True, text=True, timeout=300)

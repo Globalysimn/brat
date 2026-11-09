@@ -64,11 +64,11 @@ def write(name, text):
 env = dict(os.environ, LD_LIBRARY_PATH=TMP)
 ok = write("ok.brat", SRC)
 
-interp = subprocess.run(
-    _cxx.cli_args("run", "--interp", "--unsafe-ffi", ok), capture_output=True,
+run_o0 = subprocess.run(
+    _cxx.cli_args("run", "-O0", "--unsafe-ffi", ok), capture_output=True,
     text=True, timeout=120, env=env)
-check(interp.returncode == 0, "run exit=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
-check(interp.stdout == "42\n105\n5\n", "run stdout %r" % (interp.stdout,))
+check(run_o0.returncode == 0, "run exit=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
+check(run_o0.stdout == "42\n105\n5\n", "run stdout %r" % (run_o0.stdout,))
 
 exe = os.path.join(TMP, "ok.exe")
 built = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", ok, "-o", exe), capture_output=True,
@@ -128,7 +128,7 @@ checked = subprocess.run(_cxx.cli_args("check", app), capture_output=True, text=
                          timeout=120)
 assert checked.returncode == 0, checked.stdout + checked.stderr
 interpreted = subprocess.run(
-    _cxx.cli_args("run", "--interp", "--unsafe-ffi", app), capture_output=True,
+    _cxx.cli_args("run", "-O0", "--unsafe-ffi", app), capture_output=True,
     text=True, timeout=120, env=env)
 assert interpreted.returncode == 0 and interpreted.stdout == "42\n", (
     interpreted.returncode, interpreted.stdout, interpreted.stderr)

@@ -40,9 +40,9 @@ def main():
     assert cpp.returncode == 0, cpp.stderr
     assert "vadd_self(" in cpp.stdout, "unique-owner append lowering was not selected"
 
-    interp = run(_cxx.cli_args("run", "--interp", small_path))
-    assert (interp.returncode, interp.stdout, interp.stderr) == (0, "%d\n" % small_n, ""), \
-           (interp.returncode, interp.stdout, interp.stderr)
+    run_o0 = run(_cxx.cli_args("run", "-O0", small_path))
+    assert (run_o0.returncode, run_o0.stdout, run_o0.stderr) == (0, "%d\n" % small_n, ""), \
+           (run_o0.returncode, run_o0.stdout, run_o0.stderr)
 
     large_n = 200000
     large_path = os.path.join(TMP, "large.brat")

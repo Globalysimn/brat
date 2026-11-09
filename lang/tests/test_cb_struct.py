@@ -1,9 +1,9 @@
 """A callback may return a record by value: both backends, every layout.
 
 CPython's ctypes answers `invalid result type for callback function` for that
-shape, so the reference interpreter used to be the one place where a legal C
+shape, so the reference -O0 used to be the one place where a legal C
 callback was refused. There is a way through: the callback slot is only an
-address, so the interpreter compiles a small C trampoline that keeps the real
+address, so the -O0 build compiles a small C trampoline that keeps the real
 prototype and shows Python nothing but `void *`. The trampoline reuses the same
 widths ctypes uses and `_Static_assert`s the size and every field offset, so a
 disagreement is a compile error instead of a wrong number.
@@ -137,14 +137,14 @@ check(native.returncode == 0, "native exit=%d %s" % (native.returncode, native.s
 WANT = native.stdout
 check(WANT == "7002\n8\n4329\n17\n5006007\n3000011\n108\n7003\n8002\n717\n1707\n707\n", "native stdout %r" % (WANT,))
 
-interp = run(["run", "--interp", path])
-check(interp.returncode == 0, "interp exit=%d %s" % (interp.returncode, interp.stdout + interp.stderr))
-check(interp.stdout == WANT, "interp %r != native %r" % (interp.stdout, WANT))
+run_o0 = run(["run", "-O0", path])
+check(run_o0.returncode == 0, "run_o0 exit=%d %s" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
+check(run_o0.stdout == WANT, "run_o0 %r != native %r" % (run_o0.stdout, WANT))
 
 # The trampoline is compiled once per named callback and shape and cached on disk, so a second run
 # with the cache in place has to give the same answer.
-again = run(["run", "--interp", path])
-check(again.returncode == 0 and again.stdout == WANT, "second interp run %r" % (again.stdout,))
+again = run(["run", "-O0", path])
+check(again.returncode == 0 and again.stdout == WANT, "second run_o0 run %r" % (again.stdout,))
 
 # No compiler, no guess: the message names the reason and the way out. The shim
 # cache is keyed by the source and lives under TMPDIR, so pointing TMPDIR at an
@@ -152,7 +152,7 @@ check(again.returncode == 0 and again.stdout == WANT, "second interp run %r" % (
 cold = os.path.join(TMP, "cold")
 os.makedirs(cold, exist_ok=True)
 no_cc = dict(env, CC=os.path.join(TMP, "definitely-not-a-compiler"), TMPDIR=cold)
-broken = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True,
+broken = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True,
                         text=True, timeout=120, env=no_cc)
 out = broken.stdout + broken.stderr
 check(broken.returncode != 0, "a missing compiler must not silently pass")

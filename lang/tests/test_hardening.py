@@ -1,13 +1,11 @@
-"""Pins for the audit findings that no other test covered.
+"""Boundary tests for C trigraphs, arena ownership gating, BRAT_FILES parsing, path normalization, MCP body limits, and local package URLs.
 
-Each case names the failure it prevents:
+Covers:
 
 * a literal holding `??` must survive a strict-ISO-C compiler (trigraphs);
-* `arena { }` programs must not reach the interpreter when the ownership
-  checker rejects them -- the gate pattern used to be double-escaped and never
-  matched, so `brat run` ran what `brat build` refused;
-* `BRAT_FILES` must parse the same exact, trimmed, case-insensitive allowlist
-    in both backends; a value beginning with `1` is not an opt-out;
+* `arena { }` programs rejected by the ownership checker are refused by `brat run`;
+* `BRAT_FILES` parses an exact, trimmed, case-insensitive allowlist; a value
+  beginning with `1` is not an opt-out;
 * a path with more components than the normaliser holds must be refused, not
   silently truncated to a different path;
 * the MCP server must not allocate whatever body size a client claims;
@@ -27,7 +25,6 @@ sys.path.insert(0, HERE)
 import _cxx
 CXX = os.environ.get('BRAT_CXX') or _cxx.build()
 ENGINE = os.path.abspath(os.path.join(HERE, '..', 'engine'))
-BRAT = os.path.join(ENGINE, 'brat.py')
 TMP = _scratch.mkdtemp(prefix='brat-hard-')
 
 ENV = dict(os.environ)
@@ -288,7 +285,7 @@ def test_write_file_symlink_escape():
         os.symlink(outside, link)
         src = 'print(write_file("escape_dir_link/pwned", "owned"))\n'
         path = write('wf_symlink.brat', src)
-        rc_i, out_i = cli(['run', '--interp', path])
+        rc_i, out_i = cli(['run', '-O0', path])
         rc_n, out_n = cli(['run', path])
         check(not os.path.exists(os.path.join(outside, 'pwned')),
               'write_file: must not create file through symlink outside sandbox')
@@ -304,7 +301,7 @@ def test_read_file_nul_rejected():
     with open(nul_path, 'wb') as f:
         f.write(b'abc\x00def')
     path = write('rf_nul.brat', 'print(read_file("has_nul.bin"))\n')
-    rc_i, out_i = cli(['run', '--interp', path])
+    rc_i, out_i = cli(['run', '-O0', path])
     rc_n, out_n = cli(['run', path])
     check(out_i.strip() == "Err('invalid utf-8')" and out_i == out_n,
           'read_file: NUL bytes must be rejected identically (%r vs %r)'
@@ -320,7 +317,7 @@ def test_env_get_credentials_refused():
                DATABASE_URL='postgres://admin:supersecret@db:5432/prod',
                PLAIN_URI='redis://user:pass@host:6379/0',
                **{'1': 'numeric-key-value'})
-    rc_i, out_i = cli(['run', '--interp', path], env=env)
+    rc_i, out_i = cli(['run', '-O0', path], env=env)
     rc_n, out_n = cli(['run', path], env=env)
     check('supersecret' not in out_n and 'env_get refused' in out_n
           and 'numeric-key-value' not in out_i and out_i == out_n,
@@ -345,10 +342,10 @@ def test_os_bytes_argv_env():
                 b"Ok([65, 255, 66])\n"
                 b"Err('invalid utf-8')\n"
                 b"Err(\"env_get invalid utf-8: 'BRAT_TEST_RAW'\")\n")
-    ri = subprocess.run(_cxx.cli_args('run', '--interp', bytes_path, '--', raw, 'ok'),
+    ri = subprocess.run(_cxx.cli_args('run', '-O0', bytes_path, '--', raw, 'ok'),
                         capture_output=True, timeout=300, env=env)
     check(ri.returncode == 0 and ri.stdout == expected,
-          'os bytes: interpreter argv/env bytes diverged (rc=%d, out=%r, err=%r)'
+          'os bytes: -O0 argv/env bytes diverged (rc=%d, out=%r, err=%r)'
           % (ri.returncode, ri.stdout, ri.stderr[-300:]))
     exe = os.path.join(TMP, 'os_bytes')
     rc_b, out_b = cli(['build', bytes_path, '-o', exe], env=env)
@@ -359,11 +356,11 @@ def test_os_bytes_argv_env():
               'os bytes: native argv/env bytes diverged (rc=%d, out=%r, err=%r)'
               % (rn.returncode, rn.stdout, rn.stderr[-300:]))
     str_path = write('os_args_str.brat', 'print(args())\n')
-    ri = subprocess.run(_cxx.cli_args('run', '--interp', str_path, '--', raw),
+    ri = subprocess.run(_cxx.cli_args('run', '-O0', str_path, '--', raw),
                         capture_output=True, timeout=300, env=env)
     out_i = ri.stdout + ri.stderr
     check(ri.returncode != 0 and b'invalid utf-8 in argument 1; use args_bytes()' in out_i,
-          'os bytes: interpreter args() accepted invalid UTF-8 (rc=%d, out=%r)'
+          'os bytes: -O0 args() accepted invalid UTF-8 (rc=%d, out=%r)'
           % (ri.returncode, out_i[-300:]))
     exe_s = os.path.join(TMP, 'os_args_str')
     rc_b, out_b = cli(['build', str_path, '-o', exe_s], env=env)
@@ -380,7 +377,7 @@ def test_os_bytes_argv_env():
     rb = subprocess.run(_cxx.run_args(bad_src), capture_output=True, timeout=120, env=ENV)
     out_bad = rb.stdout + rb.stderr
     check(rb.returncode != 0 and b'is not valid UTF-8' in out_bad and b'Traceback' not in out_bad,
-          'os bytes: bare brat.py traceback on invalid UTF-8 source (rc=%d, out=%r)'
+          'os bytes: bare brat-cxx traceback on invalid UTF-8 source (rc=%d, out=%r)'
           % (rb.returncode, out_bad[-300:]))
     bad_link = os.path.join(TMP, 'badlink')
     try:
@@ -388,7 +385,7 @@ def test_os_bytes_argv_env():
     except FileExistsError:
         pass
     link_path = write('os_badlink.brat', 'print(read_file("badlink"))\n')
-    rc_i, out_i = cli(['run', '--interp', link_path], env=env)
+    rc_i, out_i = cli(['run', '-O0', link_path], env=env)
     rc_n, out_n = cli(['run', link_path], env=env)
     expected_link = "Err('[Errno 2] os error')\n"
     check(out_i == expected_link and out_i == out_n,
@@ -421,9 +418,9 @@ def test_os_bytes_egress():
                    "Err('[Errno 2] os error')\n"
                    "Err('embedded NUL in file path')\n"
                    "Err('write_bytes byte out of range 0..255')\n")
-    rc_i, out_i = cli(['run', '--interp', fs_path])
+    rc_i, out_i = cli(['run', '-O0', fs_path])
     check(rc_i == 0 and out_i == expected_fs,
-          'os egress: interpreter byte paths diverged (rc=%d, out=%r)' % (rc_i, out_i))
+          'os egress: -O0 byte paths diverged (rc=%d, out=%r)' % (rc_i, out_i))
     rc_n, out_n = cli(['run', fs_path])
     check(rc_n == 0 and out_n == expected_fs,
           'os egress: native byte paths diverged (rc=%d, out=%r)' % (rc_n, out_n))
@@ -435,7 +432,7 @@ def test_os_bytes_egress():
     sql_path = write('os_egress_sql.brat',
                      'let h = unwrap(sql_open([100, 255, 46, 100, 98]))\n'
                      'print(sql_close(h))\n')
-    for args in (['run', '--interp', sql_path], ['run', sql_path]):
+    for args in (['run', '-O0', sql_path], ['run', sql_path]):
         if os.path.exists(db_raw):
             os.unlink(db_raw)
         rc, out = cli(args)
@@ -456,16 +453,16 @@ def test_os_bytes_egress():
                      "Err('invalid utf-8')\n"
                      "Err('proc_run byte out of range 0..255')\n"
                      "Err('proc_run wants vec[str] args')\n")
-    rc_i, out_i = cli(['run', '--interp', proc_path], env=env)
+    rc_i, out_i = cli(['run', '-O0', proc_path], env=env)
     check(rc_i == 0 and out_i == expected_proc,
-          'os egress: interpreter byte argv diverged (rc=%d, out=%r)' % (rc_i, out_i))
+          'os egress: -O0 byte argv diverged (rc=%d, out=%r)' % (rc_i, out_i))
     rc_n, out_n = cli(['run', proc_path], env=env)
     check(rc_n == 0 and out_n == expected_proc,
           'os egress: native byte argv diverged (rc=%d, out=%r)' % (rc_n, out_n))
 
     nul_path = write('os_egress_proc_nul.brat',
                      'print(proc_run("/bin/echo", [[65, 0]]))\n')
-    rc_i, out_i = cli(['run', '--interp', nul_path], env=env)
+    rc_i, out_i = cli(['run', '-O0', nul_path], env=env)
     check(rc_i == 0 and out_i == "Err('embedded NUL in command argument')\n",
           'os egress: -O0 byte argv NUL accepted (rc=%d, out=%r)' % (rc_i, out_i))
     rc_n, out_n = cli(['run', nul_path], env=env)
@@ -478,7 +475,7 @@ def test_fast_shortcircuit_And_or_multi_source_borrow():
                'fn tick(x: i64) -> i64 {\n  print(x)\n  return x\n}\n'
                'let a = tick(1) || tick(2)\nprint(a)\n'
                'let b = tick(0) && tick(2)\nprint(b)\n')
-    rc_i, out_i = cli(['run', '--interp', sc])
+    rc_i, out_i = cli(['run', '-O0', sc])
     rc_n, out_n = cli(['run', sc])
     check(out_i == '1\n1\n0\n0\n' and out_i == out_n,
           'fast short-circuit: LHS must evaluate once (%r vs %r)' % (out_i, out_n))

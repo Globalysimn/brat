@@ -9,7 +9,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, '..', 'engine'))
 EXAMPLES = os.path.abspath(os.path.join(HERE, '..', 'examples'))
-BRAT = os.path.join(ENGINE, 'brat.py')
 TMP = _scratch.mkdtemp(prefix='brat-stdlib-')
 
 

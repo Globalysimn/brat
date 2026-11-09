@@ -119,9 +119,9 @@ for name in sorted(CASES):
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
 
-    interp = run(_cxx.cli_args("run", "--interp", path))
-    if interp.stdout != want:
-        print("FAIL %s: interpreter %r, want %r" % (name, interp.stdout, want))
+    run_o0 = run(_cxx.cli_args("run", "-O0", path))
+    if run_o0.stdout != want:
+        print("FAIL %s: -O0 %r, want %r" % (name, run_o0.stdout, want))
         bad += 1
 
     for kind in ("cxx",):
@@ -147,5 +147,5 @@ for name in sorted(CASES):
 if bad:
     print("APPEND LEAK: %d case(s) failed" % bad)
     sys.exit(1)
-print("APPEND LEAK ALL GREEN (%d shapes, LSan clean, interpreter == native)"
+print("APPEND LEAK ALL GREEN (%d shapes, LSan clean, -O0 == native)"
       % len(CASES))

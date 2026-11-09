@@ -51,8 +51,8 @@ def main():
     path = os.path.join(TMP, "edges.brat")
     with open(path, "w", encoding="utf-8") as f:
         f.write(SRC)
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, timeout=120)
-    assert ri.returncode == 0 and ri.stdout == WANT, "interp rc=%d out=%r" % (ri.returncode, ri.stdout)
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, timeout=120)
+    assert ri.returncode == 0 and ri.stdout == WANT, "run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     exe = os.path.join(TMP, "edges.exe")
     b = subprocess.run(_cxx.cli_args("build", path, "-o", exe),
                        capture_output=True, timeout=300)

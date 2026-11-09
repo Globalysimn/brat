@@ -35,7 +35,7 @@ check(len(lock) == 1 and len(lock[0]['sha256']) == 64, 'lock: %r' % (lock,))
 main = os.path.join(tmp, 'app.brat')
 with open(main, 'w', encoding='utf-8') as f:
     f.write('import mymod\nfn main() -> i64 {\n  print(twice(21))\n  return 0\n}\n')
-r = subprocess.run(_cxx.cli_args('run', '--interp', main), capture_output=True,
+r = subprocess.run(_cxx.cli_args('run', '-O0', main), capture_output=True,
                    text=True, timeout=60, cwd=tmp)
 check(r.returncode == 0 and '42' in r.stdout, 'vendor import: ' + (r.stdout + r.stderr)[-300:])
 

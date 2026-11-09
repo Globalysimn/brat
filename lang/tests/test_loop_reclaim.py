@@ -12,7 +12,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
 TMP = _scratch.mkdtemp(prefix='brat-loop-reclaim-')
-BRAT = os.path.join(ENGINE, 'brat.py')
 
 
 _spec = importlib.util.spec_from_file_location('tc_loop', os.path.join(HERE, '_toolchain.py'))

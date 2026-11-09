@@ -53,18 +53,18 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(SRC)
 
 before = time.time()
-interp = run(_cxx.cli_args("run", "--interp", path))
+run_o0 = run(_cxx.cli_args("run", "-O0", path))
 after = time.time()
-check(interp.returncode == 0, "run rc=%d %r" % (interp.returncode, interp.stderr))
-rows = stamps(interp.stdout)
-check(len(rows) == 2, "run: two log lines, got %r" % interp.stdout)
+check(run_o0.returncode == 0, "run rc=%d %r" % (run_o0.returncode, run_o0.stderr))
+rows = stamps(run_o0.stdout)
+check(len(rows) == 2, "run: two log lines, got %r" % run_o0.stdout)
 for r in rows:
     check(before - 5 <= r["ts"] <= after + 5,
           "run: ts %r is not wall clock around %r" % (r["ts"], before))
     check(r["lvl"] in ("INFO", "WARN"), "run: level %r" % r.get("lvl"))
 
-ms = [int(line) for line in interp.stdout.splitlines() if line.isdigit()]
-check(len(ms) == 1, "run: time_ms line, got %r" % interp.stdout)
+ms = [int(line) for line in run_o0.stdout.splitlines() if line.isdigit()]
+check(len(ms) == 1, "run: time_ms line, got %r" % run_o0.stdout)
 check(abs(ms[0] - int(time.time() * 1000)) < 5000,
       "run: time_ms %d is not epoch ms" % ms[0])
 
@@ -87,7 +87,7 @@ check(len(ms) == 1, "native: time_ms line, got %r" % native.stdout)
 check(abs(ms[0] - int(time.time() * 1000)) < 5000,
       "native: time_ms %d is not epoch ms" % ms[0])
 
-check(interp.stdout.count("\n") == native.stdout.count("\n"),
+check(run_o0.stdout.count("\n") == native.stdout.count("\n"),
       "backends print a different number of lines")
 
 print("LOG TS ALL GREEN (%d asserts)" % n)

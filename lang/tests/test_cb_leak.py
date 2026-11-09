@@ -10,7 +10,7 @@ The library here calls the callback in a loop, once with an integer and once wit
 a string, and pings a context pointer, so the wrapper has to handle both packing
 paths. A record result must also be released after conversion to C. The native
 binary runs under AddressSanitizer and LeakSanitizer and the
-interpreter prints the same thing.
+-O0 prints the same thing.
 """
 import _cxx
 
@@ -85,11 +85,11 @@ with open(path, "w", encoding="utf-8") as f:
 
 want = "5250\n990\n10000\n"
 
-interp = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True,
                         timeout=300)
-assert interp.returncode == 0, "interp rc=%d %r" % (interp.returncode,
-                                                   (interp.stdout + interp.stderr)[-800:])
-assert interp.stdout == want, "interp out=%r want=%r" % (interp.stdout, want)
+assert run_o0.returncode == 0, "run_o0 rc=%d %r" % (run_o0.returncode,
+                                                   (run_o0.stdout + run_o0.stderr)[-800:])
+assert run_o0.stdout == want, "run_o0 out=%r want=%r" % (run_o0.stdout, want)
 
 c = subprocess.run(_cxx.cli_args("emit-c", "--unsafe-ffi", path), capture_output=True, text=True,
                    timeout=120)
@@ -109,4 +109,4 @@ out = run.stdout + run.stderr
 assert "AddressSanitizer" not in out, "callback wrapper not clean: %s" % out[-1500:]
 assert run.stdout == want, "native out=%r want=%r" % (run.stdout, want)
 
-print("CALLBACK LEAK ALL GREEN (300 calls through C, interpreter == native, ASan+LSan clean)")
+print("CALLBACK LEAK ALL GREEN (300 calls through C, -O0 == native, ASan+LSan clean)")

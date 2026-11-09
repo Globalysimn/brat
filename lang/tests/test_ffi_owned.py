@@ -148,18 +148,18 @@ def main():
     n += 1
     print("ffiown ok: `move` is a mode, the header proof still holds")
 
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True,
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True,
                         text=True, timeout=120)
     exe = os.path.join(TMP, "owned_roundtrip.exe")
     b = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", path, "-o", exe), capture_output=True,
                        text=True, timeout=300)
     assert b.returncode == 0, "build failed:\n" + (b.stdout + b.stderr)[-600:]
     rn = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-    assert ri.returncode == 0 and ri.stdout == "owned\n", "interp out=%r" % ri.stdout
+    assert ri.returncode == 0 and ri.stdout == "owned\n", "run_o0 out=%r" % ri.stdout
     assert (rn.returncode, rn.stdout) == (ri.returncode, ri.stdout), \
-        "native %r vs interp %r" % ((rn.returncode, rn.stdout), (ri.returncode, ri.stdout))
+        "native %r vs run_o0 %r" % ((rn.returncode, rn.stdout), (ri.returncode, ri.stdout))
     n += 1
-    print("ffiown ok: allocate, use, release -- interpreter and native agree")
+    print("ffiown ok: allocate, use, release -- -O0 and native agree")
 
     # The leak and the double free are refused *before* the binary exists, and the
     # sentence is the same in both checkers.

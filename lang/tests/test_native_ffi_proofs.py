@@ -43,7 +43,7 @@ def main():
         assert native_json["differential"]["Packet"]["wasm32-unknown-wasi"]["brat"]["offsets"] == {
             "tag": 0, "ts": 8, "len": 16
         }
-        reference = run(_cxx.cli_args(*(args)), env={"BRAT_INTERP": "1"})
+        reference = run(_cxx.cli_args(*(args)), env={})
         assert reference.returncode == 0, reference.stderr
         reference_json = json.loads(reference.stdout)
         assert native_json["ok"] == reference_json["ok"]

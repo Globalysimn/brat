@@ -113,10 +113,10 @@ want = "checksum 5200\n78\n"
 
 # 1. the program with one arena block: both backends, sanitized, leak free
 path, exe = build("arena", WORKLOAD, sanitize=True)
-interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                         timeout=300)
-assert interp.returncode == 0 and interp.stdout == want, \
-    "interp rc=%d out=%r" % (interp.returncode, (interp.stdout + interp.stderr)[-600:])
+assert run_o0.returncode == 0 and run_o0.stdout == want, \
+    "run_o0 rc=%d out=%r" % (run_o0.returncode, (run_o0.stdout + run_o0.stderr)[-600:])
 run = subprocess.run([exe], capture_output=True, text=True, timeout=300,
                      env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:exitcode=0"))
 out = run.stdout + run.stderr
@@ -124,8 +124,8 @@ assert "AddressSanitizer" not in out, "arena program not clean: %s" % out[-1200:
 assert run.returncode == 0 and run.stdout == want, "native rc=%d out=%r" % (run.returncode, out[-600:])
 
 # 2. own() is a copy: the value it returns outlives the reset
-assert interp.stdout.splitlines()[0] == "checksum 5200", \
-    "own() did not survive the arena reset: %r" % interp.stdout
+assert run_o0.stdout.splitlines()[0] == "checksum 5200", \
+    "own() did not survive the arena reset: %r" % run_o0.stdout
 
 # 3. the escape rule still refuses the shortcut, on both front ends
 bad = write("escape", ESCAPE)

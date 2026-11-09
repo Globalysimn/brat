@@ -80,9 +80,9 @@ def main():
         formatted = f.read()
     check("\n  return 0\n" in formatted, "brat fmt left file unformatted: %r" % formatted)
 
-    p_bad = run([BIN, "run", "--interp", src])
+    p_bad = run([BIN, "run", "--unknown-flag", src])
     check(p_bad.returncode == 2 and "unknown flag" in p_bad.stderr,
-          "retired --interp flag must be rejected cleanly: rc=%d stderr=%r" % (p_bad.returncode, p_bad.stderr))
+          "unknown CLI flag must be rejected cleanly: rc=%d stderr=%r" % (p_bad.returncode, p_bad.stderr))
 
     print("NATIVE STARTUP ALL GREEN (%d asserts, run %.1f ms, check %.1f ms, python %.1f ms)"
           % (n, t_run, t_check, t_py))

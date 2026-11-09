@@ -136,8 +136,6 @@ def main(jobs=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--native-only", action="store_true",
-                        help="retained for Makefile compatibility (native C++20 pipeline is the sole backend)")
     parser.add_argument("-j", "--jobs", type=int, default=0,
                         help="worker threads for C compilation/execution")
     args = parser.parse_args()

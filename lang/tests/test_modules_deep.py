@@ -190,7 +190,7 @@ def main():
     check_cxx_agrees(private, "module `m` has no function `h`")
 
     # Extern callbacks in a module must resolve the callback string to the same
-    # mangled BRAT symbol in the interpreter and the native loader/emitter.
+    # mangled BRAT symbol in the -O0 build and the native loader/emitter.
     callback_lib = os.path.join(TMP, "callback", "libcallback.so")
     callback_c = write("callback/libcallback.c",
                        "long long apply_cb(long long (*cb)(long long)) { return cb(21); }\n")

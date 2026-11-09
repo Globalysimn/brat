@@ -267,9 +267,9 @@ for name, (src, want) in CASES.items():
     else:
         assert "LeakSanitizer" not in out, "%s leaked: %s" % (name, out[-800:])
     assert run.stdout == want, "%s stdout=%r want=%r" % (name, run.stdout, want)
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, text=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                             timeout=120)
-    assert interp.returncode == 0 and interp.stdout == want, \
-        "%s interp=%r" % (name, interp.stdout + interp.stderr)
+    assert run_o0.returncode == 0 and run_o0.stdout == want, \
+        "%s run_o0=%r" % (name, run_o0.stdout + run_o0.stderr)
 
 print("RECLAIM ALL GREEN (%d cases)" % len(CASES))

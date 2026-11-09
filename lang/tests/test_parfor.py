@@ -116,10 +116,10 @@ def write(name, src):
 
 
 def both(path):
-    """(interpreter output, native output) — building the native one on demand."""
-    interp = run(_cxx.cli_args("run", "--interp", path))
-    if interp.returncode not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) and interp.stderr:
-        raise SystemExit("run failed:\n" + interp.stdout + interp.stderr)
+    """(-O0 output, native output) — building the native one on demand."""
+    run_o0 = run(_cxx.cli_args("run", "-O0", path))
+    if run_o0.returncode not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) and run_o0.stderr:
+        raise SystemExit("run failed:\n" + run_o0.stdout + run_o0.stderr)
     native = None
     if HAVE_CXX:
         exe = path[:-5] + ".bin"
@@ -127,14 +127,14 @@ def both(path):
         if b.returncode != 0:
             raise SystemExit("build failed:\n" + b.stdout + b.stderr)
         native = run([exe])
-        if native.stdout != interp.stdout:
-            raise SystemExit("backends disagree on %s:\n--- interp\n%s\n--- native\n%s"
-                             % (path, interp.stdout, native.stdout))
-    return interp.stdout, native
+        if native.stdout != run_o0.stdout:
+            raise SystemExit("backends disagree on %s:\n--- run_o0\n%s\n--- native\n%s"
+                             % (path, run_o0.stdout, native.stdout))
+    return run_o0.stdout, native
 
 
 def check_both(path):
-    py = run(_cxx.cli_args("check", "--py", path))
+    py = run(_cxx.cli_args("check", path))
     text = "\n".join(l for l in (py.stdout + py.stderr).splitlines()
                      if "type error" not in l)
     if HAVE_CXX:

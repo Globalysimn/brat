@@ -14,7 +14,6 @@ sys.path.insert(0, HERE)
 import _cxx      # noqa: E402
 import _scratch  # noqa: E402
 
-COMPARE_PY = False
 CXX = _cxx.build()
 
 EXTRA = {
@@ -98,28 +97,8 @@ def main():
         if expect_accept is False and cx_run.returncode == 0:
             bad.append("REJECT ACCEPTED  %s" % name)
 
-        if COMPARE_PY and ast_probe.returncode == 0:
-            py = {(ln, msg) for _f, ln, msg in
-                  verdicts(subprocess.run(_cxx.cli_args("check", "--py", path),
-                                          capture_output=True, text=True).stdout)}
-            for ln, msg in sorted(py - cx):
-                bad.append("PYTHON ONLY  %s:%s  %s" % (name, ln, msg))
-            for ln, msg in sorted(cx - py):
-                bad.append("C++ ONLY  %s:%s  %s" % (name, ln, msg))
-            if "import " not in src:
-                walked = walk_only(src)
-                for ln, msg in walked:
-                    if (ln, msg) not in py:
-                        bad.append("LOST  %s:%s  %s" % (name, ln, msg))
-                walk_lines = {ln for ln, _m in walked}
-                for ln, msg in sorted(py):
-                    if ln not in walk_lines and (name, ln, msg) not in EXTRA:
-                        bad.append("UNREVIEWED ADDITION  %s:%s  %s" % (name, ln, msg))
-
     if not saw_extra:
         bad.append("MISSING EXTRA  own_paths_bad.brat:5")
-    if not COMPARE_PY:
-        assert not any(k in ("brat", "borrow") or k.startswith("brat.") for k in sys.modules)
 
     shutil.rmtree(tmp, ignore_errors=True)
     if bad:

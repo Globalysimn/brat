@@ -21,7 +21,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
-BRAT = os.path.join(ENGINE, 'brat.py')
 
 PROGRAM = '''enum Res {
   Ok(total),
@@ -135,7 +134,7 @@ try:
         f.write(PROGRAM.replace('i < 3000', 'i < %d' % LONG))
 
     ip = subprocess.run(_cxx.run_args(src), capture_output=True, text=True, timeout=600)
-    check(ip.returncode == 0 and ip.stdout == WANT, 'interp: rc=%d out=%r' % (ip.returncode, ip.stdout))
+    check(ip.returncode == 0 and ip.stdout == WANT, 'run_o0: rc=%d out=%r' % (ip.returncode, ip.stdout))
 
     exe = os.path.join(tmp, 'req_bin')
     b = subprocess.run(_cxx.cli_args('build', src, '-o', exe),

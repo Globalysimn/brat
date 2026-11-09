@@ -1,10 +1,4 @@
-"""`Type.f(x)` for an `impl` function without `self` (F-033).
-
-The checkers accepted the call and every backend then failed: the interpreter
-with a CPython `NameError: no fn Point`, the native backend with `unresolved call
-Point`. The partner case, `Type.f()` for a method that does want `self`, has to
-fail with one sentence rather than two different accidents.
-"""
+"""Associated functions `Type.f(x)` declared in `impl` without `self`, and clear diagnostics when `self` is required."""
 import _cxx
 import os
 import subprocess
@@ -71,9 +65,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         assoc = write(tmp, "assoc.brat", ASSOC)
 
-        r = run(_cxx.cli_args("run", "--interp", assoc))
+        r = run(_cxx.cli_args("run", "-O0", assoc))
         assert r.returncode == 0 and r.stdout == "42\n", \
-            "interp: rc=%d %r %r" % (r.returncode, r.stdout, r.stderr)
+            "run_o0: rc=%d %r %r" % (r.returncode, r.stdout, r.stderr)
 
         exe = os.path.join(tmp, "assoc.exe")
         b = run(_cxx.cli_args("build", assoc, "-o", exe))
@@ -84,17 +78,17 @@ def main():
 
         # A variant receiver still dispatches on the variant, not on the name.
         variant = write(tmp, "variant.brat", VARIANT)
-        r = run(_cxx.cli_args("run", "--interp", variant))
+        r = run(_cxx.cli_args("run", "-O0", variant))
         assert r.returncode == 0 and r.stdout == "1\n", \
-            "variant interp: rc=%d %r %r" % (r.returncode, r.stdout, r.stderr)
+            "variant run_o0: rc=%d %r %r" % (r.returncode, r.stdout, r.stderr)
 
         # Calling an instance method through the type name: one sentence, not
         # a CPython NameError on one side and `unresolved call` on the other.
         needs = write(tmp, "needs.brat", WANTS_SELF)
-        r = run(_cxx.cli_args("run", "--interp", needs))
-        assert r.returncode != 0, "interp accepted Color.code()"
+        r = run(_cxx.cli_args("run", "-O0", needs))
+        assert r.returncode != 0, "run_o0 accepted Color.code()"
         assert "needs instance" in (r.stdout + r.stderr), \
-            "interp wording: %r" % (r.stdout + r.stderr)
+            "run_o0 wording: %r" % (r.stdout + r.stderr)
         if os.path.exists(CXX):
             c = run([CXX, "build", needs, "-o", os.path.join(tmp, "needs.exe")])
             assert c.returncode != 0, "cxx accepted Color.code()"

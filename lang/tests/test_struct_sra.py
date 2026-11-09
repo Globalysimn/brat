@@ -9,7 +9,7 @@ import _scratch
 NATIVE = _cxx.build()
 CXX = NATIVE
 TMP = _scratch.mkdtemp(prefix="brat-struct-sra-")
-ENV = dict(os.environ, BRAT_FILES="1", BRAT_NO_NATIVE_CLI="1")
+ENV = dict(os.environ, BRAT_FILES="1")
 
 n = 0
 

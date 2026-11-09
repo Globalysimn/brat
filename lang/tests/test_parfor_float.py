@@ -21,7 +21,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, '..', 'engine'))
-BRAT = os.path.join(ENGINE, 'brat.py')
 CXX = os.path.abspath(os.path.join(HERE, '..', 'cxx', 'bin', 'brat-cxx'))
 TMP = _scratch.mkdtemp(prefix='brat-parfloat-')
 
@@ -105,10 +104,10 @@ def fold_is_deterministic():
         check(lines and lines[0] == 'identical',
               'native threads=%d: par != seq (%r)' % (threads, lines[:2]))
         seen.add(native.stdout)
-        interp = run_interp(path, threads)
-        check(interp.returncode == 0 and interp.stdout == native.stdout,
-              'interp threads=%d disagrees: %r vs %r'
-              % (threads, interp.stdout, native.stdout))
+        run_o0 = run_interp(path, threads)
+        check(run_o0.returncode == 0 and run_o0.stdout == native.stdout,
+              'run_o0 threads=%d disagrees: %r vs %r'
+              % (threads, run_o0.stdout, native.stdout))
     check(len(seen) == 1, 'float fold changed with the worker count: %r' % (seen,))
 
 

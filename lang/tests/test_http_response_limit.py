@@ -76,7 +76,7 @@ fn main() -> i64 {
         with open(path, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(source)
         if backend == "python":
-            result = run(_cxx.cli_args("run", "--interp", path))
+            result = run(_cxx.cli_args("run", "-O0", path))
         else:
             result = run([native, "run", path])
         thread.join(timeout=15)

@@ -91,7 +91,7 @@ assert mem.returncode == 0, mem.stdout + mem.stderr
 
 # `brat-cxx run` is the product path with no Python in it: check, emit, link
 # once into a content-addressed cache, exec. The cache must never serve a stale
-# program, and the backend the user gets must behave like the interpreter.
+# program, and the backend the user gets must behave like the -O0 build.
 env = dict(os.environ, BRAT_CACHE=os.path.join(TMP, "cache"))
 
 
@@ -110,9 +110,9 @@ for name, (src, want, rc) in RUN_CASES.items():
     extra = ["--", "a", "b"] if name == "args" else []
     got = run_native(path, *extra)
     assert got.returncode == rc and got.stdout == want, (name, got.returncode, got.stdout, got.stderr)
-    interp = subprocess.run(_cxx.run_args(path, *(extra[1:])),
+    run_o0 = subprocess.run(_cxx.run_args(path, *(extra[1:])),
                             capture_output=True, text=True, timeout=300)
-    assert interp.stdout == want, ("interp disagrees", name, interp.stdout)
+    assert run_o0.stdout == want, ("run_o0 disagrees", name, run_o0.stdout)
 
 # A clean run says nothing but the program's own output.
 assert ": 0 error(s)" not in run_native(write(os.path.join(TMP, "quiet.brat"),

@@ -1,7 +1,7 @@
 """Resource bounds that must be the same in both backends.
 
 `chan(cap)` is a bounded queue. The C runtime preallocates `cap` slots, the
-interpreter grows a list, so `chan(100000000)` was a 2.4 GB `calloc` in C —
+-O0 grows a list, so `chan(100000000)` was a 2.4 GB `calloc` in C —
 `vfatal_oom`, SIGABRT, exit 134 — and a perfectly working channel in Python. One
 cap for both (`BRAT_MAX_CHAN_CAP`, 1 048 576 slots) turns the shape into an
 `err` value in either backend, which is what a program can handle.
@@ -19,7 +19,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-BRAT = os.path.join(ENGINE, "brat.py")
 TMP = _scratch.mkdtemp(prefix="brat-bounds-")
 
 CASES = {
@@ -65,8 +64,8 @@ def main():
             bad += 1
             continue
         nat = run([exe])
-        interp = run(_cxx.run_args(path))
-        for tag, r in (("native", nat), ("interpreter", interp)):
+        run_o0 = run(_cxx.run_args(path))
+        for tag, r in (("native", nat), ("-O0", run_o0)):
             if r.returncode < 0 or r.returncode >= 128:
                 print("FAIL %s: %s died by signal (rc=%d)" % (name, tag, r.returncode))
                 bad += 1
@@ -114,7 +113,7 @@ def main():
         print("FAIL regex_no_match_scan: build: %s" % ((b.stdout + b.stderr)[-400:],))
         bad += 1
     else:
-        for argv in (_cxx.cli_args("run", "--interp", quad_path), [quad_exe]):
+        for argv in (_cxx.cli_args("run", "-O0", quad_path), [quad_exe]):
             try:
                 r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
             except Exception as e:

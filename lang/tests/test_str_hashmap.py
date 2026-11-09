@@ -164,13 +164,10 @@ def main():
         with open(src, "w", encoding="utf-8") as f:
             f.write(PROVE_SRC)
 
-        # 1. Byte-identical C through both CLI doors + fast-path/shape symbols
-        cli_c = run_cmd(_cxx.cli_args("emit-c", src))
+        # 1. Emitted C fast-path and shape symbols
         cx_c = run_cmd([CXX, "emit-c", src])
-        assert cli_c.returncode == 0, cli_c.stderr
         assert cx_c.returncode == 0, cx_c.stderr
-        assert cli_c.stdout == cx_c.stdout, "Python CLI and native emit-c diverged on speed.brat"
-        c_code = cli_c.stdout
+        c_code = cx_c.stdout
         assert "vmap_shaped(" in c_code, "expected BShape vmap_shaped in emitted C"
         assert "map_get_ic(" in c_code, "expected BFieldIC map_get_ic in emitted C"
         assert "vfieldset_ic(" in c_code, "expected BFieldIC vfieldset_ic in emitted C"
@@ -179,9 +176,9 @@ def main():
         assert "Vec *b_v" in c_code, "expected i64v_dyn unboxed Vec* fast fn"
         asserts += 8
 
-        # 2. Interpreter execution (proves O(N) sort_by call count == 8 in runtime.py)
-        ri = run_cmd(_cxx.cli_args("run", "--interp", src))
-        assert ri.returncode == 0, f"interp failed:\n{ri.stdout}\n{ri.stderr}"
+        # 2. Unoptimized (-O0) execution (verifies O(N) sort_by call count == 8)
+        ri = run_cmd(_cxx.cli_args("run", "-O0", src))
+        assert ri.returncode == 0, f"-O0 run failed:\n{ri.stdout}\n{ri.stderr}"
         assert ri.stdout == "W2_SPEED_OK\n", ri.stdout
         asserts += 2
 

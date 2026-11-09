@@ -3,7 +3,7 @@
 A program that draws checker warnings still runs, and a script that pipes it
 must read only what the program printed. The C++ front end used to print its
 "N error(s), M warning(s)" report on stdout ahead of the program's own output;
-the interpreter never did. Checker diagnostics belong on stderr in every path.
+the -O0 build never did. Checker diagnostics belong on stderr in every path.
 """
 import _cxx
 import _scratch
@@ -37,17 +37,15 @@ MOVED = write("moved.brat", 'fn main() -> i64 {\n  let h = "hi"\n  let m = move 
 
 PATHS = {
     "brat-cxx run": [NATIVE, "run"],
-    "brat run": _cxx.cli_args("run"),
-    "brat run --interp": _cxx.cli_args("run", "--interp"),
+    "brat-cxx run -O0": _cxx.cli_args("run", "-O0"),
 }
 
 for label, command in PATHS.items():
     ran = subprocess.run(command + [WARNS], capture_output=True, text=True, timeout=300)
     check(ran.returncode == 0, "%s on a warning: exit %d: %r" % (label, ran.returncode, ran.stderr))
     check(ran.stdout == "hi\n", "%s: stdout is %r, the program printed only `hi`" % (label, ran.stdout))
-    if "--interp" not in command:
-        check("warning: unused var `unused`" in ran.stderr,
-              "%s: the warning is missing from stderr: %r" % (label, ran.stderr))
+    check("warning: unused var `unused`" in ran.stderr,
+          "%s: the warning is missing from stderr: %r" % (label, ran.stderr))
 
     refused = subprocess.run(command + [MOVED], capture_output=True, text=True, timeout=300)
     check(refused.returncode != 0, "%s ran a program with a checker error" % label)

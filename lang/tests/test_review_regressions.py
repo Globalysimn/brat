@@ -1,11 +1,4 @@
-"""Emitter and runtime regression corpus for ownership and ABI defects.
-
-The corpus pins dynamic ownership cases found during review: retained local
-aliases, closure-call results, field extraction from an owned receiver, and
-heap values returned through a scalar annotation. Every case compares
-interpreter/native output and compiles the native emitter's C under
-sanitizers; a leak, use-after-free, or warning fails here.
-"""
+"""Emitter and runtime ownership tests: retained local aliases, closure-call results, field extraction from owned receivers, and scalar-annotated returns under sanitizers."""
 import _cxx
 
 import _scratch
@@ -47,7 +40,7 @@ fn main() -> i64 {
   return 0
 }
 """, "1\n", True),
-    # The interpreter is the oracle: it prints `True`, so the fast path may not
+    # The -O0 build is the oracle: it prints `True`, so the fast path may not
     # answer `1`.
     "fast_bool_prints_true": ("""fn is_pos(a: i64) -> bool { return a > 0 }
 fn main() -> i64 {
@@ -170,9 +163,9 @@ for name in sorted(CASES):
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
 
-    interp = run(_cxx.cli_args("run", "--interp", path))
-    if interp.stdout != want:
-        print("FAIL %s: interpreter %r, want %r" % (name, interp.stdout, want))
+    run_o0 = run(_cxx.cli_args("run", "-O0", path))
+    if run_o0.stdout != want:
+        print("FAIL %s: -O0 %r, want %r" % (name, run_o0.stdout, want))
         bad += 1
         continue
 
@@ -210,4 +203,4 @@ if bad:
     print("REVIEW REGRESSIONS: %d case(s) failed" % bad)
     sys.exit(1)
 print("REVIEW REGRESSIONS ALL GREEN (%d cases, LSan clean, "
-      "interpreter == native, no -Wall warnings)" % len(CASES))
+      "-O0 == native, no -Wall warnings)" % len(CASES))

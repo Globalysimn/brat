@@ -1222,7 +1222,7 @@ def closure_capture_both():
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(src)
         outs = {}
-        for tag, cmd in (("py", _cxx.cli_args("check", "--py", path)),
+        for tag, cmd in (("py", _cxx.cli_args("check", path)),
                          ("cxx", _cxx.cli_args("check", path))):
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=ENV)
             outs[tag] = ((r.stdout or "") + (r.stderr or "")).replace(path, "m.brat")

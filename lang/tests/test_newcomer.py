@@ -30,12 +30,7 @@ def run(tool, *cmd):
     if tool == "own":
         argv = [_cxx.build(), "check", *cmd]
     else:
-        # Handle `run --interp FILE ARG` without `--`
-        args = list(cmd)
-        if len(args) >= 3 and args[0] == "run" and args[1] == "--interp" and "--" not in args:
-            argv = [_cxx.build(), "run", "-O0", args[2], "--", *args[3:]]
-        else:
-            argv = _cxx.cli_args(*args)
+        argv = _cxx.cli_args(*cmd)
     return subprocess.run(argv, capture_output=True, text=True, timeout=120, env=ENV)
 
 
@@ -44,7 +39,7 @@ test_count = len(glob.glob(os.path.join(HERE, "test_*.py")))
 check("lang/tests/      %d test files" % test_count in readme,
       "README test count is stale (runner has %d files)" % test_count)
 check("OWNER/BRAT" not in readme, "README CI badge still uses a placeholder")
-check("git clone https://github.com/Globalysimn/brat.git brat && cd brat" in readme,
+check("git clone https://github.com/denionis23/brat.git brat && cd brat" in readme,
       "README clone command does not match the repository")
 check("./lang/cxx/bin/brat-cxx run hello.brat" in readme,
       "README must provide a direct native quick start")
@@ -68,7 +63,7 @@ check(p.returncode == 0, "check newcomer exit=%d out=%s" % (p.returncode, (p.std
 check("%d error(s)" % 0 in p.stdout, "check newcomer wants 0 error(s) have %r" % p.stdout[-400:])
 check("%d type error(s)" % 0 in p.stdout, "check newcomer wants 0 type error(s) have %r" % p.stdout[-400:])
 
-p = run(CLI, "run", "--interp", NEWCOMER)
+p = run(CLI, "run", "-O0", NEWCOMER)
 check(p.returncode == 0, "run newcomer exit=%d err=%s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
 for want in ["requests: 7 skipped: 1 bytes: 1843",
              "10.0.0.3: 2 hits, 129 bytes, 2 errors",
@@ -135,30 +130,30 @@ with open(FIX, "w", encoding="utf-8", newline="\n") as fh:
         '10.0.0.5 - - [10/Oct/2026:12:00:04 +0000] "GET /index.html HTTP/1.1" 200 512 "-" "curl/8.0"\n'
         "garbage line here\n")
 
-p = run(CLI, "run", "--interp", LOGSTAT, "--", FIX)
+p = run(CLI, "run", "-O0", LOGSTAT, "--", FIX)
 check(p.returncode == 0, "run logstat exit=%d err=%s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
 for want in ["requests: 5", "bad lines: 1", "bytes: 1216",
              "  200: 3", "  401: 1", "  404: 1", "  /index.html: 2"]:
     check(want in p.stdout, "logstat wants %r have %r" % (want, p.stdout[-600:]))
 
-p = run(CLI, "run", "--interp", LOGSTAT, FIX)
+p = run(CLI, "run", "-O0", LOGSTAT, "--", FIX)
 check("requests: 5" in p.stdout, "logstat no-separator wants the report have %r" % p.stdout[-600:])
 
-p = run(CLI, "run", "--interp", LOGSTAT, os.path.join(TMP, "no-such.log"))
+p = run(CLI, "run", "-O0", LOGSTAT, "--", os.path.join(TMP, "no-such.log"))
 check(p.returncode == 1, "logstat missing file wants exit=1 have %d" % p.returncode)
 check("cannot read" in (p.stdout + p.stderr), "logstat missing file wants the message have %r" % (p.stdout + p.stderr)[-300:])
 
 UW = os.path.join(TMP, "uw.brat")
 with open(UW, "w", encoding="utf-8", newline="\n") as fh:
     fh.write("fn main() -> i64 {\n  let v = 5\n  print(unwrap(v))\n  return 0\n}\n")
-p = run(CLI, "run", "--interp", UW)
+p = run(CLI, "run", "-O0", UW)
 check(p.returncode == 1, "unwrap typed wants exit=1 have %d" % p.returncode)
 check("`unwrap` wants Option or Result, got i64" in p.stderr, "unwrap static check have %r" % p.stderr[-300:])
 
 UW_DYN = os.path.join(TMP, "uw_dyn.brat")
 with open(UW_DYN, "w", encoding="utf-8", newline="\n") as fh:
     fh.write("fn main() {\n  let v = 5\n  print(unwrap(v))\n}\n")
-p = run(CLI, "run", "--interp", UW_DYN)
+p = run(CLI, "run", "-O0", UW_DYN)
 check(p.returncode == 1, "unwrap dyn wants exit=1 have %d" % p.returncode)
 check("unwrap of i64 (want Ok/Err/Some)" in p.stderr, "unwrap wants the type have %r" % p.stderr[-300:])
 

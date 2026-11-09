@@ -41,15 +41,15 @@ fn main() -> i64 {
 }
 ''')
 
-    interp = run(_cxx.cli_args("run", "--interp", source))
-    assert interp.returncode == 0 and interp.stdout == "csv ok\n", interp.stdout + interp.stderr
+    run_o0 = run(_cxx.cli_args("run", "-O0", source))
+    assert run_o0.returncode == 0 and run_o0.stdout == "csv ok\n", run_o0.stdout + run_o0.stderr
 
     exe = os.path.join(TMP, "csv-native")
     built = run([native, "build", source, "-o", exe])
     assert built.returncode == 0, built.stdout + built.stderr
     result = run([exe])
     assert (result.returncode, result.stdout, result.stderr) == \
-           (interp.returncode, interp.stdout, ""), result.stdout + result.stderr
+           (run_o0.returncode, run_o0.stdout, ""), result.stdout + result.stderr
 
     emitted = run([native, "cc", source])
     assert emitted.returncode == 0, emitted.stderr

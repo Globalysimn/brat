@@ -5,7 +5,7 @@ parser walks the tree recursively, so an unbounded depth was a stack overflow --
 a SIGSEGV, on a file that had already tokenised and parsed -- and both front ends
 fell at the same input, which is why the differential tests never saw it.
 
-The bound is `MAX_TREE_DEPTH` in `parser.py` / `kMaxTreeDepth` in `parser.cpp`:
+The bound is `MAX_TREE_DEPTH` in `parser.cpp` / `kMaxTreeDepth` in `parser.cpp`:
 far above hand-written code, far under the stack. This file pins four things:
 
   * a chain past the bound is refused by both front ends, with identical
@@ -55,7 +55,7 @@ def write(name, src):
 
 def both_checks(path):
     """(python rc, text, cxx rc, text, cxx text without the type-error tail)."""
-    py = run(_cxx.cli_args("check", "--py", path))
+    py = run(_cxx.cli_args("check", path))
     cx = run([CXX, "check", path])
     ptext = py.stdout + py.stderr
     ctext = cx.stdout + cx.stderr
@@ -102,8 +102,8 @@ def main():
         fail("chain_900", "build: %s" % ((b.stdout + b.stderr)[-400:] if b else "timeout"))
     else:
         nat = run([exe])
-        interp = run(_cxx.run_args(ok))
-        for tag, r in (("native", nat), ("interpreter", interp)):
+        run_o0 = run(_cxx.run_args(ok))
+        for tag, r in (("native", nat), ("-O0", run_o0)):
             if r is None or r.returncode != 0 or r.stdout.strip() != "900":
                 fail("chain_900", "%s %r/%r, want rc 0 and '900'"
                      % (tag, None if r is None else r.returncode,

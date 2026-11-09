@@ -1,8 +1,8 @@
-"""The checker gate on `run --interp`, bindgen of constants, function pointers and inline arrays,
+"""The checker gate on `run -O0`, bindgen of constants, function pointers and inline arrays,
 and the iterative runtime walkers on very deep values.
 
 Verifies:
-  - `brat run --interp` runs the type/borrow/capability gate by default,
+  - `brat run -O0` runs the type/borrow/capability gate by default,
     `--no-check` bypasses it for low-level runtime-guard tests, `"--"` forwards
     argv flags untouched, and `--trace-lines` emits source line numbers on
     uncaught native runtime crashes, with identical C through both CLI doors.
@@ -10,7 +10,7 @@ Verifies:
     fn-ptr typedefs, fn-ptr struct fields, nested inline structs, and
     `--inline-arrays` fixed-size C struct array fields (`Elem[N]`), proven via
     `_Static_assert` + `brat ffi verify` and marshaled end-to-end across both
-    native and `--interp` backends.
+    native and `-O0` backends.
   - Iterative heap-stack runtime walkers (`vrelease`, `vprint_f`,
     `vsprint_len_q`, `vsprint_q`, `veq`, `vcmp_`, `_brepr`, `_eq_deep`, `_ncmp`)
     handle 150,000-deep drops under a 256 KB native stack limit with zero leaks
@@ -55,11 +55,11 @@ def run_cli(args, env=None):
 
 
 def test_interp_gate_and_trace_lines():
-    # 1. `brat run --interp` rejects type errors, move violations, and missing capabilities by default.
+    # 1. `brat run -O0` rejects type errors, move violations, and missing capabilities by default.
     bad_ty = write("bad_ty.brat", "fn add(a: i64, b: i64) -> i64 { return a + b }\nprint(add(1, \"x\"))\n")
-    r_ty = run_cli(["run", "--interp", bad_ty])
+    r_ty = run_cli(["run", "-O0", bad_ty])
     check(r_ty.returncode != 0 and "i64" in (r_ty.stdout + r_ty.stderr),
-          "interp gate must reject type mismatch: %r" % (r_ty.stdout + r_ty.stderr))
+          "run_o0 gate must reject type mismatch: %r" % (r_ty.stdout + r_ty.stderr))
 
     bad_mv = write("bad_mv.brat",
                    "fn eat(move v: vec[i64]) -> i64 { return len(v) }\n"
@@ -69,9 +69,9 @@ def test_interp_gate_and_trace_lines():
                    "  print(xs)\n"
                    "  return a\n"
                    "}\n")
-    r_mv = run_cli(["run", "--interp", bad_mv])
+    r_mv = run_cli(["run", "-O0", bad_mv])
     check(r_mv.returncode != 0 and "moved" in (r_mv.stdout + r_mv.stderr),
-          "interp gate must reject use-after-move: %r" % (r_mv.stdout + r_mv.stderr))
+          "run_o0 gate must reject use-after-move: %r" % (r_mv.stdout + r_mv.stderr))
 
     bad_cap = write("bad_cap.brat",
                     "fn add(a: i64, b: i64) -> i64 { return a + b }\n"
@@ -83,9 +83,9 @@ def test_interp_gate_and_trace_lines():
                     "  }\n"
                     "  return s\n"
                     "}\n")
-    r_cap = run_cli(["run", "--interp", bad_cap])
+    r_cap = run_cli(["run", "-O0", bad_cap])
     check(r_cap.returncode != 0 and "par for" in (r_cap.stdout + r_cap.stderr),
-          "interp gate must reject impure par for effect violation: %r" % (r_cap.stdout + r_cap.stderr))
+          "run_o0 gate must reject impure par for effect violation: %r" % (r_cap.stdout + r_cap.stderr))
 
     bad_race = write("bad_race.brat",
                      "fn main() -> i64 {\n"
@@ -95,27 +95,26 @@ def test_interp_gate_and_trace_lines():
                      "  }\n"
                      "  return shared\n"
                      "}\n")
-    r_race = run_cli(["run", "--interp", bad_race])
+    r_race = run_cli(["run", "-O0", bad_race])
     check(r_race.returncode != 0 and "spawn" in (r_race.stdout + r_race.stderr),
-          "interp gate must reject spawn write race: %r" % (r_race.stdout + r_race.stderr))
+          "run_o0 gate must reject spawn write race: %r" % (r_race.stdout + r_race.stderr))
 
     # 2. `--no-check` still enforces FFI type safety; flags after `--` pass through to `args()`.
     bad_ffi = write("bad_ffi.brat", "extern fn nope(x: u128) -> i64;\nprint(1)\n")
-    r_gated = run_cli(["run", "--interp", bad_ffi])
+    r_gated = run_cli(["run", "-O0", bad_ffi])
     check(r_gated.returncode != 0 and "unsupported FFI type" in (r_gated.stdout + r_gated.stderr),
           "gated run should fail static FFI check")
-    r_nocheck = run_cli(["run", "--interp", "--no-check", "--unsafe-ffi", bad_ffi])
+    r_nocheck = run_cli(["run", "-O0", "--no-check", "--unsafe-ffi", bad_ffi])
     check(r_nocheck.returncode != 0 and "u128" in (r_nocheck.stdout + r_nocheck.stderr),
           "--no-check must still reject unsupported FFI type u128: %r" % (r_nocheck.stdout + r_nocheck.stderr))
 
     argv_src = write("argv_pass.brat", "print(args())\n")
-    r_argv = run_cli(["run", "--interp", argv_src, "--", "--no-check", "--trace-lines"])
+    r_argv = run_cli(["run", "-O0", argv_src, "--", "--no-check", "--trace-lines"])
     check(r_argv.returncode == 0 and "'--no-check'" in r_argv.stdout and "'--trace-lines'" in r_argv.stdout,
           "flags after `--` must reach args(): %r" % r_argv.stdout)
 
-    # 3. `--trace-lines` stamps `.brat` line numbers on uncaught native crashes,
-    #    clears line state across caught `try/catch`, and is byte-identical
-    #    through the Python CLI and native CLI.
+    # 3. `--trace-lines` stamps `.brat` line numbers on uncaught native crashes
+    #    and clears line state across caught `try/catch`.
     crash_src = write("trace_crash.brat",
                       "fn ok_catch() -> i64 {\n"
                       "  try {\n"
@@ -134,12 +133,10 @@ def test_interp_gate_and_trace_lines():
                       "  print(boom(10))\n"
                       "  return 0\n"
                       "}\n")
-    cli_c = run_cli(["emit-c", "--trace-lines", crash_src],
-                    env={"BRAT_CXX": CXX, "BRAT_NO_NATIVE_CLI": "1"}).stdout
     cxx_c = subprocess.run([CXX, "emit-c", "--trace-lines", crash_src],
                            capture_output=True, text=True, check=True).stdout
-    check(cli_c == cxx_c and "#define BRAT_TRACE_DEFAULT 1" in cli_c,
-          "Python CLI and native CLI must emit byte-identical --trace-lines C")
+    check("#define BRAT_TRACE_DEFAULT 1" in cxx_c,
+          "--trace-lines must define BRAT_TRACE_DEFAULT 1 in emitted C")
 
     r_tr = run_cli(["run", "--trace-lines", crash_src])
     check(r_tr.returncode != 0 and r_tr.stdout == "42\n" and "div by zero" in r_tr.stderr
@@ -149,7 +146,7 @@ def test_interp_gate_and_trace_lines():
     r_notr = run_cli(["run", crash_src])
     check(r_notr.returncode != 0 and "at line " not in r_notr.stderr,
           "default build without --trace-lines must have zero line-trace suffix: %r" % r_notr.stderr)
-    print("ok: --interp gate + --trace-lines")
+    print("ok: -O0 gate + --trace-lines")
 
 
 def test_bindgen_and_inline_arrays():
@@ -227,7 +224,7 @@ def test_bindgen_and_inline_arrays():
     vf_dwarf = run_cli(["ffi", gen_brat, "--object", shlib])
     check(vf_dwarf.returncode == 0, "ffi DWARF failed: %r" % (vf_dwarf.stdout + vf_dwarf.stderr))
 
-    # End-to-end execution across native C AND `--interp` (`ctypes` marshaling of `Elem[N]` + nested struct + fn ptr)!
+    # End-to-end execution across native C AND `-O0` (`ctypes` marshaling of `Elem[N]` + nested struct + fn ptr)!
     app = write("use_pkt.brat",
                 "import pkt_gen\n"
                 "fn mul_add(a: i32, b: i32) -> i32 { return a * b + 1 }\n"
@@ -254,10 +251,10 @@ def test_bindgen_and_inline_arrays():
     env_lib = dict(os.environ)
     env_lib["LD_LIBRARY_PATH"] = TMP
     rn = subprocess.run([exe], capture_output=True, text=True, env=env_lib, timeout=60)
-    ri = run_cli(["run", "--interp", "--unsafe-ffi", app], env={"LD_LIBRARY_PATH": TMP})
+    ri = run_cli(["run", "-O0", "--unsafe-ffi", app], env={"LD_LIBRARY_PATH": TMP})
     want = "true\n16\n240\n2\n10\n20\n[11, 12, 13, 14]\n122\n110\n43\n"
     check(rn.returncode == 0 and rn.stdout == want, "native inline-array FFI output mismatch: %r (err=%r)" % (rn.stdout, rn.stderr))
-    check(ri.returncode == 0 and ri.stdout == want, "interp inline-array FFI output mismatch: %r (err=%r)" % (ri.stdout, ri.stderr))
+    check(ri.returncode == 0 and ri.stdout == want, "run_o0 inline-array FFI output mismatch: %r (err=%r)" % (ri.stdout, ri.stderr))
     print("ok: bindgen constants/fnptrs/nested structs + Elem[N] FFI")
 
 
@@ -307,7 +304,7 @@ def test_iterative_walkers_and_tsan():
 
     rn_deep = subprocess.run([deep_exe], capture_output=True, text=True, preexec_fn=limit_stack, timeout=60)
     rn_asan = subprocess.run([deep_asan_exe], capture_output=True, text=True, timeout=60)
-    ri_deep = run_cli(["run", "--interp", deep_src])
+    ri_deep = run_cli(["run", "-O0", deep_src])
     want_deep = "150000\n42\n3002\ntrue\nfalse\n"
     check(rn_deep.returncode == 0 and rn_deep.stdout == want_deep,
           "deep_iter native (256KB stack) failed: rc=%d out=%r err=%r"
@@ -316,7 +313,7 @@ def test_iterative_walkers_and_tsan():
           "deep_iter ASan+LSan failed: rc=%d out=%r err=%r"
           % (rn_asan.returncode, rn_asan.stdout, rn_asan.stderr))
     check(ri_deep.returncode == 0 and ri_deep.stdout == want_deep,
-          "deep_iter --interp (depth=1500 > Python 1000 limit) failed: rc=%d out=%r err=%r"
+          "deep_iter -O0 (depth=1500 > Python 1000 limit) failed: rc=%d out=%r err=%r"
           % (ri_deep.returncode, ri_deep.stdout, ri_deep.stderr))
 
     # 2. ThreadSanitizer (`-fsanitize=thread`) concurrency regression suite:
@@ -410,12 +407,12 @@ def test_iterative_walkers_and_tsan():
     if sys.platform.startswith("linux") and _shutil.which("setarch"):
         tsan_cmd = ["setarch", _plat.machine(), "-R", tsan_exe]
     rn_tsan = subprocess.run(tsan_cmd, capture_output=True, text=True, env=env_tsan, timeout=120)
-    ri_tsan = run_cli(["run", "--interp", "--unsafe-ffi", tsan_brat])
+    ri_tsan = run_cli(["run", "-O0", "--unsafe-ffi", tsan_brat])
     check(rn_tsan.returncode == 0 and "ThreadSanitizer" not in rn_tsan.stderr,
           "TSan detected a race or failure: rc=%d out=%r err=%r"
           % (rn_tsan.returncode, rn_tsan.stdout, rn_tsan.stderr))
     check(rn_tsan.stdout == ri_tsan.stdout,
-          "TSan native output != interp output: %r vs %r" % (rn_tsan.stdout, ri_tsan.stdout))
+          "TSan native output != run_o0 output: %r vs %r" % (rn_tsan.stdout, ri_tsan.stdout))
     print("ok: iterative walkers + 256KB stack + TSan clean")
 
 

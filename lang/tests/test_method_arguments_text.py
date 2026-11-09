@@ -17,7 +17,6 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-COMPARE_PYTHON = False
 
 STR_METH = (
     "chars", "contains", "copy", "ends_with", "index_of", "lines", "lower",
@@ -90,13 +89,6 @@ for name, (recv, methods) in RECEIVERS.items():
     for line in nat_lines:
         calls += 1
         assert not BAD_TEXT.search(line), "%s shows bad diagnostic: %r" % (name, line[:200])
-    if COMPARE_PYTHON:
-        py = subprocess.run(_cxx.cli_args("run", "--interp", path),
-                            capture_output=True, text=True, timeout=300)
-        assert py.returncode == 0, "%s interp: %s" % (name, py.stderr[-400:])
-        py_lines = py.stdout.splitlines()
-        assert nat_lines == py_lines, "%s differs from interp: %r" % (
-            name, next((a, b) for a, b in zip(nat_lines, py_lines) if a != b))
 
 assert calls == 1571, calls
 

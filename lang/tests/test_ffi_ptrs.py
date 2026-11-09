@@ -10,7 +10,7 @@ What this file pins, one assertion per claim:
 * A window over elements built in the program (`slice_struct_of`) is writable
   and its stores land where the program can see them.
 * `extern packed struct` really is packed: one byte, then an int, at the offsets
-  the header has, in the interpreter and native build, and the proof says so by
+  the header has, in the -O0 build and native build, and the proof says so by
   compiling `_Static_assert`s against the header.
 * `u8`/`u16` are widths at the ABI, so a header's `unsigned char` matches `u8`
   and a value of 256 is refused before it reaches C.
@@ -113,12 +113,8 @@ WANT = "7\n1.5\n7\n3\n20\n60\n6\n99\n5\n7\n1234\n1234\n"
 
 
 def run(args, **kw):
-    if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+    if args and args[0] in ("build", "run", "emit-c", "dist") and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
-    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
-        i = args.index("--interp") + 1
-        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     p = subprocess.run(_cxx.cli_args(*(args)), capture_output=True, text=True,
                        timeout=600, **kw)
     return p.returncode, p.stdout, p.stderr
@@ -156,9 +152,9 @@ def main():
     assert rc != 0, out + err
     assert "packed" in (out + err), out + err
 
-    rc, out, err = run(["run", "--interp", prog])
+    rc, out, err = run(["run", "-O0", prog])
     assert rc == 0, out + err
-    assert out == WANT, "interp:\n%r\nwant:\n%r" % (out, WANT)
+    assert out == WANT, "run_o0:\n%r\nwant:\n%r" % (out, WANT)
 
     exe = os.path.join(TMP, "ptrs.bin")
     rc, out, err = run(["build", prog, "-o", exe])
@@ -176,7 +172,7 @@ fn main() -> i64 {
   return 0
 }
 ''')
-    rc, out, err = run(["run", "--interp", bad])
+    rc, out, err = run(["run", "-O0", bad])
     assert rc != 0, out + err
     assert "read-only" in (out + err), out + err
 
@@ -188,7 +184,7 @@ fn main() -> i64 {
   return 0
 }
 ''')
-    rc, out, err = run(["run", "--interp", wide])
+    rc, out, err = run(["run", "-O0", wide])
     assert rc != 0, out + err
     assert "u8" in (out + err), out + err
 

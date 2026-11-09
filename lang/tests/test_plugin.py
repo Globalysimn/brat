@@ -76,10 +76,10 @@ want = "42\n2.5\n0.5\nhi from plugin\n10\n99\n2\n"
 env = dict(os.environ, LD_LIBRARY_PATH=TMP)
 path = write("ok.brat", OK)
 
-interp = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True,
                         timeout=120, env=env)
-check(interp.returncode == 0 and interp.stdout == want,
-      "run rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr))
+check(run_o0.returncode == 0 and run_o0.stdout == want,
+      "run rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 
 exe = os.path.join(TMP, "ok.exe")
 built = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", path, "-o", exe), capture_output=True,
@@ -91,7 +91,7 @@ check(native.returncode == 0 and native.stdout == want,
 
 def runtime_fail(name, src, text):
     path = write(name + ".brat", src)
-    r = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True, text=True,
+    r = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True, text=True,
                        timeout=120, env=env)
     out = r.stdout + r.stderr
     check(r.returncode != 0 and text in out, "%s run: rc=%d %r" % (name, r.returncode, out))
@@ -143,7 +143,7 @@ def static_fail(name, src, text):
         out = r.stdout + r.stderr
         check(r.returncode != 0 and text in out,
               "%s %s: rc=%d %r" % (name, cmd, r.returncode, out))
-    r = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path), capture_output=True,
+    r = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path), capture_output=True,
                        text=True, timeout=120, env=env)
     out = r.stdout + r.stderr
     check(r.returncode != 0 and "refusing to run" in out,
@@ -258,7 +258,6 @@ static void *worker_fn(void *arg) {
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     vargs_set(argc, argv);
-    g_pool_n = 1;
     Val h = vlib_open(vstr(argv[1]));
     if (verr_pending()) return 3;
     g_sym = vlib_sym(h, vstr("pause_echo"));

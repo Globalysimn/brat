@@ -15,7 +15,7 @@ import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-TMP = _scratch.mkdtemp(prefix="brat-audit-")
+TMP = _scratch.mkdtemp(prefix="brat-cli-diag-")
 BIN = _cxx.build()
 
 
@@ -242,4 +242,4 @@ lsp_run = subprocess.run([BIN, "lsp"], input=lsp_in, capture_output=True, timeou
 assert lsp_run.returncode == 0 and b'"id":2' in lsp_run.stdout, (
     lsp_run.returncode, lsp_run.stdout[:300], lsp_run.stderr[:300])
 
-print("AUDIT FIXES ALL GREEN")
+print("CLI DIAGNOSTICS ALL GREEN")

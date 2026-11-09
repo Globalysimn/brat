@@ -146,11 +146,11 @@ fn main() -> i64 {
 '''
 path = write("use.brat", PROG)
 
-interp = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path),
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                         capture_output=True, text=True, timeout=300)
 want_out = "3.0\n2.0\n12.0\n3\n"
-check(interp.returncode == 0 and interp.stdout == want_out,
-      "interp: rc=%d out=%r err=%r" % (interp.returncode, interp.stdout, interp.stderr))
+check(run_o0.returncode == 0 and run_o0.stdout == want_out,
+      "run_o0: rc=%d out=%r err=%r" % (run_o0.returncode, run_o0.stdout, run_o0.stderr))
 
 exe = os.path.join(TMP, "use.exe")
 built = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", path, "-o", exe),
@@ -165,15 +165,6 @@ plain = subprocess.run(_cxx.cli_args("bindgen", rust_path),
                        capture_output=True, text=True, timeout=120)
 check(plain.stdout == WANT, "stdout form: %r" % plain.stdout)
 
-# The Python CLI is the fallback when the C++ binary is not built, and the one
-# a fresh checkout starts with. It must write the same bytes; it used to die
-# with a NameError on `ffi`, which the native binary hid from this file.
-py_only = subprocess.run(_cxx.cli_args("bindgen", rust_path),
-                         capture_output=True, text=True, timeout=120,
-                         env=dict(os.environ, BRAT_NO_NATIVE_CLI="1"))
-check(py_only.returncode == 0 and py_only.stdout == WANT,
-      "python bindgen: rc=%d out=%r err=%r" % (py_only.returncode, py_only.stdout, py_only.stderr[-400:]))
-
 # A file with no FFI surface is not an error: the block is empty and the
 # skip comment says why.
 empty = write("empty.rs", '''struct Inner { a: i32 }\n''')
@@ -184,7 +175,7 @@ check(r.returncode == 0 and "// skipped Inner: not #[repr(C)]" in r.stdout,
 
 # A top-level `const` is itself a regression: it emitted a file-scope Val that
 # functions could not read, so `const Circle = 0` from bindgen was unusable in
-# C even though the interpreter accepted it.
+# C even though the -O0 build accepted it.
 CONST = '''const N: i64 = 5
 const M: f64 = 1.5
 
@@ -196,16 +187,16 @@ fn main() -> i64 {
 }
 '''
 path = write("const.brat", CONST)
-interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True,
+run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True,
                         text=True, timeout=300)
-check(interp.returncode == 0 and interp.stdout == "5\n1.5\n10\n",
-      "const interp: %r" % (interp.stdout + interp.stderr))
+check(run_o0.returncode == 0 and run_o0.stdout == "5\n1.5\n10\n",
+      "const run_o0: %r" % (run_o0.stdout + run_o0.stderr))
 exe = os.path.join(TMP, "const.exe")
 built = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", path, "-o", exe),
                        capture_output=True, text=True, timeout=600)
 check(built.returncode == 0, "const build: %r" % (built.stdout + built.stderr))
 native = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-check(native.returncode == 0 and native.stdout == interp.stdout,
-      "const native: %r vs %r" % (native.stdout, interp.stdout))
+check(native.returncode == 0 and native.stdout == run_o0.stdout,
+      "const native: %r vs %r" % (native.stdout, run_o0.stdout))
 
 print("BINDGEN RUST ALL GREEN (%d asserts)" % n)

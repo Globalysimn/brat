@@ -8,7 +8,7 @@ so the window has to carry the element width.
 `slice_of_ptr(p, n, kind)` takes `"i64"`, `"i32"`, `"f64"`, `"f32"` and `"u8"`,
 steps by that width, and stays range-checked in every kind: an `i32` store
 outside `-2^31..2^31-1` and a `u8` store outside `0..255` are refused rather
-than truncated. Same program, interpreter and native routes, same output.
+than truncated. Same program, -O0 and native routes, same output.
 """
 import _cxx
 import _scratch
@@ -100,13 +100,13 @@ def main():
     with open(prog, "w", encoding="utf-8") as f:
         f.write(PROGRAM.replace("LIB", lib))
 
-    # 1. Interpreter: ctypes with the declared width and stride.
-    p = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", prog),
+    # 1. Unoptimized (-O0): ctypes with the declared width and stride.
+    p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", prog),
                        capture_output=True, text=True, timeout=300)
-    check(p.returncode == 0, "interp rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
-    check(p.stdout == WANT, "interp:\nwant %r\ngot  %r" % (WANT, p.stdout))
+    check(p.returncode == 0, "run_o0 rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
+    check(p.stdout == WANT, "run_o0:\nwant %r\ngot  %r" % (WANT, p.stdout))
 
-    # 2. Python CLI native build.
+    # 2. CLI native build.
     exe = os.path.join(TMP, "kinds.exe")
     b = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", prog, "-o", exe),
                        capture_output=True, text=True, timeout=600)

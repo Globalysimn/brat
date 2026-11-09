@@ -160,11 +160,7 @@ def emit_c_file(path, flags=(), env=None):
 
 
 def sx(node):
-    """The reference s-expression printer, used by the two tree-oracle tests.
-
-    Same bytes as `lang/engine/brat/parser.py`'s `dump`, rebuilt here so a test
-    can compare against any Python value, not only a parsed file.
-    """
+    """Canonical s-expression printer matching `brat-cxx ast` output."""
     if isinstance(node, tuple):
         return "(" + " ".join(sx(x) for x in node) + ")"
     if isinstance(node, list):
@@ -233,24 +229,8 @@ _CLI_SUBS = {
 
 
 def cli_args(*args):
-    """Build native `brat-cxx` argv, translating retired flags before `--`."""
-    out = [build()]
-    seen_sep = False
-    for a in args:
-        if isinstance(a, bytes):
-            out.append(a)
-            continue
-        s = str(a)
-        if not seen_sep and s == "--":
-            seen_sep = True
-            out.append(s)
-        elif not seen_sep and s == "--interp":
-            out.append("-O0")
-        elif not seen_sep and s == "--py":
-            continue
-        else:
-            out.append(s)
-    return out
+    """Build native `brat-cxx` argv."""
+    return [build(), *(a if isinstance(a, bytes) else str(a) for a in args)]
 
 
 def run_args(first, *rest):

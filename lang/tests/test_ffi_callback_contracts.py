@@ -71,7 +71,7 @@ def diagnostics(cmd):
 
 
 def both_checkers(path):
-    return {"py": diagnostics(_cxx.cli_args("check", "--py", path)),
+    return {"py": diagnostics(_cxx.cli_args("check", path)),
             "cxx": diagnostics([CXX, "check", path])}
 
 
@@ -105,7 +105,7 @@ REFUSALS = {
 # contract -- refusing it would make the default useless. The build is not
 # asserted here because *this program does not build for a second reason*, one
 # that has nothing to do with callbacks: a function reading a top-level `let` is
-# accepted by both checkers, runs in the interpreter, and produces no working
+# accepted by both checkers, runs in the -O0 build, and produces no working
 # binary from either emitter (LEDGER, "Open", 2026-10-30).
 CHECK_ONLY = {
     "same_thread_may_touch_state": '''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64, v: i64) -> i64

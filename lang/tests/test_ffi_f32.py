@@ -85,13 +85,13 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         f.write(PROGRAM.replace("LIB", lib))
 
-    # 1. The interpreter: ctypes c_float in, out, and inside a struct.
-    p = subprocess.run(_cxx.cli_args("run", "--interp", "--unsafe-ffi", path),
+    # 1. The -O0 build: ctypes c_float in, out, and inside a struct.
+    p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                        capture_output=True, text=True, timeout=300)
-    check(p.returncode == 0, "interp rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
-    check(p.stdout == WANT, "interp stdout:\nwant %r\ngot  %r" % (WANT, p.stdout))
+    check(p.returncode == 0, "run_o0 rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))
+    check(p.stdout == WANT, "run_o0 stdout:\nwant %r\ngot  %r" % (WANT, p.stdout))
 
-    # 2. The Python CLI build: the same program through native C.
+    # 2. The CLI build: the same program through native C.
     exe = os.path.join(TMP, "f32.exe")
     b = subprocess.run(_cxx.cli_args("build", "--unsafe-ffi", path, "-o", exe),
                        capture_output=True, text=True, timeout=600)
@@ -136,7 +136,7 @@ def main():
     check(bs.returncode != 0, "slice_of_ptr accepted a kind it cannot describe")
     n += 1
 
-    print("F32 FFI ALL GREEN (%d asserts, interpreter + native routes agree)" % n)
+    print("F32 FFI ALL GREEN (%d asserts, -O0 + native routes agree)" % n)
     return 0
 
 

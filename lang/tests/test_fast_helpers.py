@@ -6,12 +6,12 @@ function whose parameters are `i64`/`vec[i64]` in any mix. The result was a
 program `brat check` accepted and `brat build` could not compile, because the
 helper was never written out. The native emitter had the bug, so a program with
 `t += x / 2` in a vector loop failed on the C compiler and passed in the
-interpreter.
+-O0.
 
 This file pins the class, not one operator: for each fast kind it emits the C,
 collects the `bf_*` calls, and requires a definition for every one of them. It
 then builds the program on both backends and compares stdout with the
-interpreter, because a helper that exists but computes something else is the
+-O0, because a helper that exists but computes something else is the
 same bug in a different place.
 """
 import _cxx
@@ -23,7 +23,6 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, "..", "engine")
-BRAT = os.path.join(ENGINE, "brat.py")
 TMP = _scratch.mkdtemp(prefix="brat-fasthelpers-")
 
 CALL = re.compile(r"\b(bf_[A-Za-z0-9_]+)\s*\(")
@@ -113,7 +112,7 @@ def run(cmd, **kw):
 
 
 def emit(path):
-    p = run(_cxx.cli_args("emit-c", path), env=dict(os.environ, BRAT_INTERP="1"))
+    p = run(_cxx.cli_args("emit-c", path), env=dict(os.environ))
     if p.returncode != 0:
         return None
     return p.stdout
@@ -148,9 +147,9 @@ def main():
             print("FAIL %s: native stdout %r, want %r" % (name, got, want))
             bad += 1
             continue
-        interp = run(_cxx.run_args(path)).stdout
-        if interp != want:
-            print("FAIL %s: interp stdout %r, want %r" % (name, interp, want))
+        run_o0 = run(_cxx.run_args(path)).stdout
+        if run_o0 != want:
+            print("FAIL %s: run_o0 stdout %r, want %r" % (name, run_o0, want))
             bad += 1
 
     if bad:

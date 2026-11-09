@@ -109,7 +109,7 @@ jobs:
         run: |
           ./bin/brat run examples/hello.brat
           ./bin/brat run examples/json_arena.brat
-          python3 lang/tests/test_agreement.py --native-only
+          python3 lang/tests/test_agreement.py
           python3 lang/tests/run_all.py -j "$(sysctl -n hw.ncpu)" \
             test_cxx_frontend.py \
             test_cxx_checker.py \

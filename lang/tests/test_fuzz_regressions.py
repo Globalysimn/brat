@@ -44,8 +44,8 @@ def main():
         "build refused a warnings-only program:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
 
     # (2) same output on both backends
-    ri = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True, timeout=120)
-    assert ri.returncode == 0 and ri.stdout == WANT, "interp rc=%d out=%r" % (ri.returncode, ri.stdout)
+    ri = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, timeout=120)
+    assert ri.returncode == 0 and ri.stdout == WANT, "run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
     print("FUZZ REGRESSIONS ALL GREEN (2 cases, 2 backends)")

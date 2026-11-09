@@ -18,10 +18,10 @@ def write(name, text):
 
 
 def expect_both(path, tag, stdout):
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True,
                             text=True, timeout=120)
-    assert interp.returncode == 0 and interp.stdout == stdout, \
-        "run: rc=%d out=%r" % (interp.returncode, interp.stdout + interp.stderr)
+    assert run_o0.returncode == 0 and run_o0.stdout == stdout, \
+        "run: rc=%d out=%r" % (run_o0.returncode, run_o0.stdout + run_o0.stderr)
     exe = os.path.join(TMP, tag + ".exe")
     built = subprocess.run(_cxx.cli_args("build", path, "-o", exe),
                            capture_output=True, text=True, timeout=300)
@@ -32,10 +32,10 @@ def expect_both(path, tag, stdout):
 
 
 def expect_runtime_fail(path, text):
-    interp = subprocess.run(_cxx.cli_args("run", "--interp", path), capture_output=True,
+    run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True,
                             text=True, timeout=120)
-    out = interp.stdout + interp.stderr
-    assert interp.returncode != 0 and text in out, "run: rc=%d out=%r" % (interp.returncode, out)
+    out = run_o0.stdout + run_o0.stderr
+    assert run_o0.returncode != 0 and text in out, "run: rc=%d out=%r" % (run_o0.returncode, out)
     exe = os.path.join(TMP, "rt.exe")
     built = subprocess.run(_cxx.cli_args("build", path, "-o", exe),
                            capture_output=True, text=True, timeout=300)

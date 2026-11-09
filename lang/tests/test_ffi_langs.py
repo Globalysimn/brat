@@ -48,12 +48,8 @@ def write(name, text):
 
 
 def cli(*args, timeout=600):
-    if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+    if args and args[0] in ("build", "run", "emit-c", "dist") and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
-    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
-        i = args.index("--interp") + 1
-        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     return subprocess.run(_cxx.cli_args(*(list(args))), capture_output=True,
                           text=True, timeout=timeout)
 
@@ -131,16 +127,16 @@ def main():
     check(r.returncode == 0, "cc: %r" % r.stderr)
 
     prog = write("use.brat", BRAT_USE.replace('"LIB"', '"%s"' % lib))
-    interp = cli("run", "--interp", prog)
-    check(interp.returncode == 0, "brat interp: %r" % (interp.stdout + interp.stderr))
-    check(interp.stdout == WANT, "brat interp: %r" % interp.stdout)
+    run_o0 = cli("run", "-O0", prog)
+    check(run_o0.returncode == 0, "brat run_o0: %r" % (run_o0.stdout + run_o0.stderr))
+    check(run_o0.stdout == WANT, "brat run_o0: %r" % run_o0.stdout)
     exe = os.path.join(TMP, "use.exe")
     b = cli("build", prog, "-o", exe)
     check(b.returncode == 0, "brat build: %r" % (b.stdout + b.stderr))
     native = subprocess.run([exe], capture_output=True, text=True, timeout=120)
-    check(native.stdout == interp.stdout, "native %r vs interp %r"
-          % (native.stdout, interp.stdout))
-    print("langs ok: brat is the reference (%r)" % interp.stdout.replace("\n", " "))
+    check(native.stdout == run_o0.stdout, "native %r vs run_o0 %r"
+          % (native.stdout, run_o0.stdout))
+    print("langs ok: brat is the reference (%r)" % run_o0.stdout.replace("\n", " "))
 
     # Python: generated, loaded, called, compared
     out = os.path.join(TMP, "langs_bind.py")
@@ -242,7 +238,7 @@ fn main() -> i64 {
                          "-c", cfile, "-o", os.path.join(TMP, "export.o")],
                         capture_output=True, text=True, timeout=600)
     check(cc.returncode == 0, "emitted C is not warning-clean: %r" % cc.stderr[:800])
-    run = cli("run", "--interp", epath)
+    run = cli("run", "-O0", epath)
     check(run.stdout == "42\n", "export fn program: %r" % run.stdout)
     print("langs ok: emitted C survives -Wall -Wextra -Werror")
 

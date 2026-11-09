@@ -14,7 +14,7 @@ that compiles, links and corrupts the next stack slot:
 * `vmove` marked its source through a plain store, which is a dead store the
   optimizer may delete; it now goes through a volatile lvalue.
 * the build passed `-O2` and no `-fwrapv`, so the native answer on an
-  overflowing i64 was the optimizer's opinion rather than the interpreter's.
+  overflowing i64 was the optimizer's opinion rather than unoptimized (-O0).
 
 Checked here: both front ends and both backends, plus the refusals.
 """
@@ -121,7 +121,7 @@ fn main() -> i64 {
 
 MOVE_WANT = "payload\nsecond\n"
 
-# Integer overflow wraps in the interpreter, so it must wrap in the native build
+# Integer overflow wraps in the -O0 build, so it must wrap in the native build
 # (`-fwrapv`), not depend on what the optimizer makes of undefined behaviour.
 OVERFLOW = '''fn acc(n: i64) -> i64 {
   let mut t = 0
@@ -159,12 +159,8 @@ PROJECTION_WANT = "aa-long-string-aaaaaaaaaaaaaaaa\nbb-long\n"
 
 def run(args, **kw):
     kw.setdefault("env", CXX_ENV)
-    if args and args[0] in ("build", "run", "emit-c", "dist") \
-            and "--interp" not in args:
+    if args and args[0] in ("build", "run", "emit-c", "dist") and "--unsafe-ffi" not in args:
         args = [args[0], "--unsafe-ffi"] + list(args[1:])
-    elif args and args[0] == "run" and "--interp" in args and "--unsafe-ffi" not in args:
-        i = args.index("--interp") + 1
-        args = list(args[:i]) + ["--unsafe-ffi"] + list(args[i:])
     return subprocess.run(_cxx.cli_args(*(args)), capture_output=True,
                           text=True, timeout=600, **kw)
 
@@ -184,8 +180,8 @@ def build_lib():
     return lib, write("widths.h", HEADER)
 
 
-def interp(prog):
-    p = run(["run", "--interp", prog])
+def run_o0(prog):
+    p = run(["run", "-O0", prog])
     assert p.returncode == 0, p.stdout + p.stderr
     return p.stdout
 
@@ -236,7 +232,7 @@ def main():
     assert p.stdout == out, "the CLI doors disagree on the extern declarations"
 
     # and both backends agree on the values
-    assert interp(widths) == WIDTHS_WANT, interp(widths)
+    assert run_o0(widths) == WIDTHS_WANT, run_o0(widths)
     assert native(widths, "widths.bin") == WIDTHS_WANT
 
     # a struct through a callback, and through a variadic tail
@@ -244,10 +240,10 @@ def main():
     # the call is bound to a temp: inlined per field it would run three times
     assert out.count("apply_pt(brat_cb_mk") == 1, out
     assert native(structs, "structs.bin") == STRUCTS_NATIVE_WANT
-    # This used to be the interpreter's one hole -- ctypes has no path for a record
+    # This used to be unoptimized (-O0) one hole -- ctypes has no path for a record
     # coming back out of a Python callback. It now compiles a C trampoline for
     # exactly that shape, so both backends must print the same bytes.
-    assert interp(structs) == STRUCTS_NATIVE_WANT
+    assert run_o0(structs) == STRUCTS_NATIVE_WANT
 
     # the header proves the widths we just emitted
     p = run(["ffi", widths, "--header", header])
@@ -260,7 +256,7 @@ def main():
     assert p.returncode != 0, "a double/float mismatch must be refused"
 
     # the runtime marker and the wrap-around
-    assert interp(move) == MOVE_WANT
+    assert run_o0(move) == MOVE_WANT
     assert native(move, "move.bin") == MOVE_WANT
     crt_dir = os.path.join(ROOT, "lang", "engine", "crt")
     crt_parts = [os.path.join(ROOT, "lang", "engine", "crt.h")] + [
@@ -273,7 +269,7 @@ def main():
     body = crt[crt.index("BFN Val vmove(volatile Val *src)"):]
     body = body[:body.index("}\n") + 2]
     assert "src->tag = V_MOVED;" in body, body
-    assert interp(overflow) == OVERFLOW_WANT
+    assert run_o0(overflow) == OVERFLOW_WANT
     assert native(overflow, "overflow.bin") == OVERFLOW_WANT
 
     # a width the ladder does not know is refused, not guessed
@@ -339,12 +335,12 @@ fn main() -> i64 {
     csp_want = "42\n-4\n3.75\nfalse\ntext\n15\n8\n-1\n"
     py_check = subprocess.run(_cxx.cli_args("check", csp), capture_output=True,
                               text=True, timeout=120,
-                              env=dict(os.environ, BRAT_NO_NATIVE_CLI="1"))
+                              env=dict(os.environ))
     assert py_check.returncode == 0, py_check.stdout + py_check.stderr
     native_check = subprocess.run([CXX, "check", csp], capture_output=True, text=True,
                                   timeout=120, env=CXX_ENV)
     assert native_check.returncode == 0, native_check.stdout + native_check.stderr
-    assert interp(csp) == csp_want, interp(csp)
+    assert run_o0(csp) == csp_want, run_o0(csp)
     assert native(csp, "cspell.bin") == csp_want
 
     unsupported_slots = {
@@ -358,7 +354,7 @@ fn main() -> i64 {
         path = write(label + ".brat", decl + "fn main() -> i64 { return 0 }\n")
         for cmd, env in (
                 (_cxx.cli_args("check", path),
-                 dict(os.environ, BRAT_NO_NATIVE_CLI="1")),
+                 dict(os.environ)),
                 ([CXX, "check", path], CXX_ENV)):
             got = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
             assert got.returncode != 0 and "unsupported FFI type" in (got.stdout + got.stderr), \
@@ -367,7 +363,7 @@ fn main() -> i64 {
 
     # a projection move is counted, not leaked
     proj = write("projection.brat", PROJECTION)
-    assert interp(proj) == PROJECTION_WANT, interp(proj)
+    assert run_o0(proj) == PROJECTION_WANT, run_o0(proj)
     assert native(proj, "projection.bin") == PROJECTION_WANT
     pc = os.path.join(TMP, "projection.c")
     with open(pc, "w", encoding="utf-8") as f:
@@ -450,11 +446,11 @@ fn main() -> i64 {
 }
 """
     # 65535 is where a signed reading would show up: `u16` must not go through i32
-    # sign-extension, and the interpreter and the native build must agree.
+    # sign-extension, and the -O0 build and the native build must agree.
     want = "-1\n-5\n-766\n65535\n2\n3\n4\n"
     narrow = write("narrow_use.brat", NARROW_USE)
-    assert interp(narrow) == want, "interp: %r" % interp(narrow)
-    assert native(narrow, "narrow.exe") == want, "native disagrees with the interpreter"
+    assert run_o0(narrow) == want, "run_o0: %r" % run_o0(narrow)
+    assert native(narrow, "narrow.exe") == want, "native disagrees with the -O0 build"
     print("ffiw ok: fixed-width C types bind at their true width, both backends")
 
     # `_Bool` is a distinct one-byte ABI type, represented by BRAT `bool`.
@@ -478,9 +474,9 @@ struct Flags { _Bool on; int n; };
         + 'fn main() -> i64 { print(flag(true)); print(flag(false)); return 0 }\n')
     assert run(["ffi", "--header", BOOL_HDR, bfile]).returncode == 0, \
         "the `_Bool` binding must be proven by the compiler"
-    bi = run(["run", "--interp", bfile])
+    bi = run(["run", "-O0", bfile])
     assert bi.returncode == 0 and bi.stdout == "false\ntrue\n", \
-        "interpreter bool FFI: %r" % (bi.stdout + bi.stderr)
+        "-O0 bool FFI: %r" % (bi.stdout + bi.stderr)
     bexe = os.path.join(TMP, "bool.exe")
     bb = run(["build", bfile, "--header", BOOL_HDR, "-o", bexe])
     assert bb.returncode == 0, bb.stdout + bb.stderr
