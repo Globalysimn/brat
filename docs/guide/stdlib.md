@@ -209,7 +209,7 @@ fn flag(name: str) -> bool
 Wraps the runtime's `O_NOFOLLOW` confined file and directory primitives. By
 default, paths are confined to the program's module root; set `BRAT_FILES=1`
 (`true`, `yes`, `on`) when running a trusted program that needs unrestricted host
-filesystem access. `mkdir_all` creates intermediate directories without following
+filesystem access. `exists` tests regular files while `is_dir` tests directories; `mkdir_all` creates intermediate directories without following
 symlinks under confinement, `list_dir` returns entry names in deterministic
 byte-sorted order (excluding `"."` and `".."`), and `write_atomic` writes a
 sibling temp file and renames it into place. `open_read` / `read_line` / `close`

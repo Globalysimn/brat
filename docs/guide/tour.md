@@ -1,7 +1,7 @@
 # Language Tour
 
-Build the native compiler with `make -j2` from the repository root. You need a
-C++20 compiler and a C compiler; Python is not required.
+Build the compiler from the repository root with `make -j4` (requires a C++20
+compiler and a C11 compiler).
 
 ```sh
 ./lang/cxx/bin/brat-cxx check file.brat
@@ -80,8 +80,11 @@ fn main() -> i64 {
 }
 ```
 
-See [ownership.md](ownership.md) for the exact place rules and checker limits,
-or run `./bin/brat explain E0382` to inspect any diagnostic code in the terminal.
+Moving a struct field (`move p.x`) marks `p.x` moved statically while leaving
+other fields like `p.y` usable (unlike Rust partial moves, the parent slot keeps
+a counted reference at run time rather than becoming partially uninitialized).
+See [ownership.md](ownership.md) for branch rules, `try`/`catch` cleanup, and
+checker limits, or run `./bin/brat explain E0382` in the terminal.
 
 ## 4. Errors as values, `Option[T]` and `Result[T, E]`
 

@@ -1,10 +1,10 @@
 # Security Policy
 
-BRAT is experimental software. Passing `brat-cxx check` does not prove memory
-safety, data-race freedom or host isolation. Do not execute untrusted BRAT
-source files, packages, compiler inputs or dynamic plugins with host privileges
-or live credentials. Isolate untrusted workloads with an OS sandbox, container,
-separate UID and kernel resource limits (`rlimit`, cgroups, seccomp).
+BRAT is experimental single-author software. `brat-cxx check` catches local
+ownership, type, and concurrency mistakes, not hostile code execution. Do not
+run untrusted `.brat` sources, packages, compiler inputs, or dynamic plugins
+with host privileges or live credentials; isolate untrusted workloads in an OS
+container or sandbox (`rlimit`, cgroups, mount namespaces, seccomp).
 
 ## Trust boundaries
 
@@ -21,9 +21,12 @@ separate UID and kernel resource limits (`rlimit`, cgroups, seccomp).
    into a non-moving, demand-paged slab pool (`64 KiB` chunks) capped by
    `BRAT_PIN_BUDGET_BYTES` (default `67108864`, 64 MiB; `0` disables the cap,
    allowing unbounded pinning, which is unsafe for untrusted inputs).
-   Reaching the budget raises a catchable runtime error (`string pin limit
-   exceeded`) without invalidating already-issued pointers. Foreign code still
-   must not retain borrowed string pointers after the owner is freed.
+   Strings returned to C from `export fn` or callbacks and strings written via
+   `ptr_write_str` / `ptr_write_struct` share the same deduplicated
+   `BRAT_PIN_BUDGET_BYTES` cap. Reaching the cap raises a catchable runtime
+   error (`string pin limit exceeded`) without invalidating already-issued
+   pointers. Foreign code still must not retain borrowed input string pointers
+   after the call returns.
 3. **Filesystem and SQLite confinement.** Unless `BRAT_FILES=1` (or `true`,
    `yes`, `on`) is set in the environment, built-in file operations (`read_file`,
    `write_file`, `fs_rename`, `fs_remove`) and `sql_open` confine relative paths

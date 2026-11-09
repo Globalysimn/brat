@@ -30,7 +30,7 @@ pool deadlock or oversubscription.
 
 ## Execution and determinism
 
-- **Runtime (`vparfor` in `crt/conc.h`):** allocates an `N`-slot result array,
+`vparfor` (`crt/conc.h`) allocates an `N`-slot result array,
   submits one task per element writing exclusively to slot `i`, waits with
   `vjoin_all()` (propagating the first worker error if one occurs), and folds
   slots `0..N-1` sequentially with `op`.

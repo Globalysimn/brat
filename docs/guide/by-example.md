@@ -1,8 +1,6 @@
 # BRAT by Example
 
-Ten self-contained programs covering the parts of BRAT you actually reach for in
-a tool or service, plus the sharp questions people ask first when evaluating a
-reference-counted language without lifetime annotations.
+Ten self-contained programs covering common tasks in BRAT.
 
 Every `brat run` and `brat check` block on this page is compiled and checked in
 CI by `lang/tests/test_docs_examples.py`.
@@ -291,7 +289,7 @@ touched a: page:a -> page:c -> page:b
 ## 6. Linear-time regular expressions (Pike VM)
 
 Built-in `re_match`, `re_find`, `re_captures`, and `re_replace` run on a
-non-backtracking Thompson/Pike VM in `crt/regex.h`, so pathological inputs do
+non-backtracking Thompson/Pike VM in `crt/ops_str.h`, so pathological inputs do
 not go exponential. Note `\{4\}`: unescaped `{4}` inside `"..."` would
 interpolate the integer `4`:
 

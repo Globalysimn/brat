@@ -18,34 +18,24 @@ Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CP
 | `dyn_records(100k)` (`map` + `str` concat + RC drops) | n/a | 0.017 s | 0.020 s | 0.047 s |
 | `json_roundtrip(5k)` (`std.json` parse + stringify) | n/a | 0.039 s | 0.010 s | 0.067 s |
 
-Performance follows value representation:
+Performance tracks value representation (implementation details are in
+[ARCHITECTURE.md](../design/ARCHITECTURE.md)):
 
-- **Unboxed `i64`, `f64`, `bool`, and `vec[i64]`/`vec[f64]` kernels** compile to
-  raw C scalar functions (`int64_t` / `double`). Tight arithmetic loops match
-  `gcc -O2` (`0.126 s` vs `0.126 s`). Self-recursive scalar kernels (`fib(35)`)
-  keep the remaining recursion budget in a register across internal calls and
-  amortize stack-floor probes to 64-frame intervals (`0.050 s` vs unchecked C's
-  `0.024 s` and Go's `0.055 s`).
-- **Nominal `struct` values** use a canonical declaration-order `BShape` layout
-  regardless of field order at the literal site, lowering statically typed field
-  loads and stores directly to constant-slot accesses (`vstruct_slot_ptr` /
-  `vstruct_slot_set`) with a gradual-typing fallback when an unshaped `map`
-  arrives via `Dyn`. At `-O2`, multi-level Escape Analysis + Scalar
-  Replacement of Aggregates (SRA) decomposes non-escaping, unaliased local
-  `struct` bindings (including `.copy()` value copies) directly into unboxed C
-  scalars or local `Val` slots (`0.141 s` vs `0.134 s` in `gcc -O2` across 50M
-  nested `Body { pos: Vec3, vel: Vec3 }` steps; inspect with
-  `brat-cxx cc -O2 --why-opt`).
-- **Dynamic records, maps and strings** use 16-byte tagged `Val` values with
-  14-byte inline SSO strings, SWAR ASCII scanning, in-place `rc == 1` buffer
-  growth across chained `s = s + ...` concatenations (`0.031 s` on 200k chained
-  appends), constant-key shaped maps (`vmap_shaped`) backed by small-container
-  freelists, and 4-way inline caches (`BFieldIC`) on constant-key indexing
-  (`0.020 s` on 100,000 map allocations + string concatenations + drops).
-- **`std.json`** delegates RFC 8259 parsing and serialization to a direct C
-  scanner/emitter in `crt/sql_proc.h`, finishing 5,000 nested object roundtrips
-  in `0.010 s` (`0.039 s` in Go `encoding/json`, `0.067 s` in CPython's C `json`
-  module).
+- Annotated `i64`, `f64`, `bool`, and `vec[i64]`/`vec[f64]` functions compile to
+  unboxed C scalar signatures (`int64_t` / `double`), matching `gcc -O2` on
+  tight loops (`0.126 s` vs `0.126 s`). Recursive scalar functions (`fib(35)`)
+  keep the remaining recursion budget in a register and check the stack floor
+  every 64 frames (`0.050 s` vs `0.024 s` in unchecked C and `0.055 s` in Go).
+- Declared `struct` types use fixed declaration-order field slots, and `-O2`
+  scalar replacement splits non-escaping local structs (including `.copy()`)
+  into C locals (`0.141 s` vs `0.134 s` in `gcc -O2`; inspect with
+  `brat-cxx emit-c -O2 --why-opt`).
+- Dynamic maps and strings use 16-byte `Val` tags with 14-byte inline SSO,
+  in-place growth on unique (`rc == 1`) strings across `s = s + ...` (`0.031 s`
+  for 200k appends), and inline caches on constant map keys (`0.020 s` for 100k
+  records).
+- `std.json` parses and formats RFC 8259 directly in C (`0.010 s` for 5k nested
+  roundtrips vs `0.039 s` in Go `encoding/json`).
 
 ## Recursion budget (2000 frames)
 

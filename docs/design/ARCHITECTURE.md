@@ -58,17 +58,17 @@ native compilation or execution pipeline.
 `crt.h` pulls in five modular C11 headers (`core.h`, `ops_str.h`, `conc.h`,
 `sql_proc.h`, `net_tls.h`), gated by `BRAT_CRT_MASK`:
 
-- **`Val` (16 bytes on 64-bit):** 1-byte tag/SSO/immortal header plus either up
-  to 14 inline UTF-8 bytes + NUL (SSO) or an 8-byte aligned payload (`int64_t`,
+- `Val` (16 bytes on 64-bit): 1-byte tag/SSO/immortal header plus either up to
+  14 inline UTF-8 bytes + NUL (SSO) or an 8-byte aligned payload (`int64_t`,
   `double`, or heap pointer).
-- **Heap objects (`VStr`, `Vec`, `Map`, `Tag`, `Clos`):** intrusive `BHead`
-  header storing reference count (atomic only when `BRAT_CRT_MT` is enabled,
-  plain non-atomic increments/decrements in single-threaded programs) and arena
-  origin bit.
-- **`arena` blocks:** thread-local 64 KiB bump-allocated chunks reset in bulk on
+- Heap objects (`VStr`, `Vec`, `Map`, `Tag`, `Clos`): intrusive `BHead` header
+  storing reference count (atomic only when `BRAT_CRT_MT` is active, plain
+  non-atomic increments/decrements in single-threaded programs) and arena origin
+  bit.
+- `arena` blocks: thread-local 64 KiB bump-allocated chunks reset in bulk on
   block exit (`defer`), with 4-chunk (256 KiB) per-thread reuse and ASan
   poisoning/unpoisoning hooks.
-- **Unwinding:** value-based thread-local error channel (`verr_pending` /
+- Unwinding: value-based thread-local error channel (`verr_pending` /
   `verr_take`), never `setjmp`/`longjmp` or C++ exceptions across C frames.
 
 ## Test suite (`lang/tests/`)

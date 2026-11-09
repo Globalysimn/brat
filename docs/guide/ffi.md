@@ -54,22 +54,21 @@ Check a program's `extern` declarations against a C header and compiled library:
 
 Verification runs four checks:
 
-1. **Header signature match:** parameter count, variadic tail, GPR vs XMM
+1. Header signature match: parameter count, variadic tail, integer vs float
    register class (`i32` != `f32`, `i64` != `f64`), mutability (`str` matches
    `const char *`, never writable `char *`), and nested callback signatures.
-2. **Compiler layout assertions:** `emit.cpp` emits compile-time
+2. Layout assertions: emitted C includes compile-time
    `_Static_assert(sizeof(...) == N)` and `_Static_assert(offsetof(...) == M)`
-   for every `extern struct` and field, catching packing or target data-model
-   mismatches with zero runtime overhead.
-3. **Static binary and DWARF inspection (`--object`):** `ffi_object.cpp` reads
-   ELF, Mach-O 64 and PE/COFF x64 symbol tables plus DWARF v2-v5 type DIEs
-   directly from `.o`, `.a`, `.so`, `.dylib` and `.dll` files without calling
-   `dlopen`.
-4. **Embedded binary audit (`--bin`):** every compiled executable embeds a
-   `BRATFFI1` contract section recording its `extern` declarations, layouts and
-   the SHA-256 of the header used to prove them (surviving `strip`). Run
-   `brat-cxx ffi --bin ./prog` or `brat-cxx ffi prog.brat --header api.h --bin
-   ./prog` in release pipelines to detect post-build drift.
+   for every `extern struct` and field, catching packing or data-model drift at
+   C compile time.
+3. Object and DWARF inspection (`--object`): reads ELF, Mach-O 64, and PE/COFF
+   x64 symbol tables plus DWARF v2-v5 type DIEs directly from `.o`, `.a`, `.so`,
+   `.dylib`, and `.dll` files without `dlopen`.
+4. Post-build binary audit (`--bin`): compiled binaries embed a `BRATFFI1`
+   section recording their `extern` declarations, struct layouts, and header
+   SHA-256 (preserved across `strip`). Run `brat-cxx ffi --bin ./prog` or
+   `brat-cxx ffi prog.brat --header api.h --bin ./prog` in release builds to
+   catch header drift.
 
 ## 3. Generating bindings (`bindgen`) and exporting shared libraries
 
@@ -124,20 +123,24 @@ fn main() -> i64 {
   long heap strings (`>= 15` bytes) point to their owned buffer (returning
   `ptr_of_str(local)` is rejected statically), while inline SSO strings (`<= 14`
   bytes) are interned in a demand-paged slab pool bounded by
-  `BRAT_PIN_BUDGET_BYTES` (default 64 MiB).
+  `BRAT_PIN_BUDGET_BYTES` (default 64 MiB). Strings returned to C from
+  `export fn` or callbacks (directly or inside an `extern struct`) and strings
+  written via `ptr_write_str` / `ptr_write_struct` are deduplicated and pinned
+  under the same `BRAT_PIN_BUDGET_BYTES` cap so ownership of the temporary BRAT
+  value can be released without dangling pointers.
 
 ## 5. Typed slices, structs behind pointers and `errno`
 
-- **Checked windows:** `slice_of_ptr(p, len, kind)` wraps C memory without
-  copying for `kind` in `"u8"`, `"i32"`, `"i64"`, `"f32"`, `"f64"`. Both index
-  bounds and element value ranges are checked on `slice_get` / `slice_set`.
-- **Struct pointers:** `ptr_read_struct(p, "Node")` and `ptr_write_struct(p, val,
-  "Node")` copy `extern struct` values to and from foreign addresses; `p[i]`
-  indexes `ptr[Node]` directly; `slice_of_struct(p, n, "Node")` builds a
-  read-only struct window.
-- **`errno` suffix:** `extern fn fopen(path: str, mode: str) -> ptr errno`
-  converts a `NULL` pointer return (or `-1` on `i32`/`i64`) into a catchable BRAT
-  error containing `strerror(errno)`.
+- `slice_of_ptr(p, len, kind)` wraps C memory without copying for `kind` in
+  `"u8"`, `"i32"`, `"i64"`, `"f32"`, `"f64"`. Both index bounds and element
+  value ranges are checked on `slice_get` and `slice_set`.
+- `ptr_read_struct(p, "Node")` and `ptr_write_struct(p, val, "Node")` copy
+  `extern struct` values to and from foreign addresses; `p[i]` indexes
+  `ptr[Node]` directly; `slice_of_struct(p, n, "Node")` builds a read-only
+  struct window.
+- Adding `errno` after a return type (`extern fn fopen(path: str, mode: str) -> ptr errno`)
+  turns a `NULL` pointer return (or `-1` on `i32`/`i64`) into a catchable BRAT
+  error carrying `strerror(errno)`.
 
 ## 6. Effects and callback contracts
 
@@ -183,5 +186,5 @@ any in-flight worker-thread `call` on `h` finishes. Dynamic `call` checks BRAT
 argument types against the literal signature string, not against C headers;
 supplying the wrong C signature is undefined behavior.
 
-See `lang/examples/sqlite_ffi.brat` (`test_ffi_sqlite.py`) for a complete
+See `examples/sqlite_ffi.brat` (`test_ffi_sqlite.py`) for a complete
 header-verified `libsqlite3` CLI built directly on `extern` declarations.

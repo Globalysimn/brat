@@ -108,18 +108,17 @@ tarballs, or entries in a static JSON index file) vendored straight into
 
 Operational rules:
 
-- **Deterministic resolution:** version constraints compare dotted integers
-  (`=`, `>`, `>=`, `<`, `<=` joined by `,`, e.g. `>=1.0,<2.0`) against
-  `$BRAT_INDEX` or `./brat-index.json`. Dependency graphs above 64 packages,
-  cycles, and case-insensitive path collisions are rejected.
-- **Atomic staging:** archives are capped at 16 MiB, checked against lowercase
-  64-hex SHA-256 digests before extraction, and swapped into `vendor/` +
-  `brat.lock` atomically with rollback on failure.
-- **Local index publishing:** `pkg publish owner/name@ver file.brat` copies the
-  artifact into `.brat-packages/<owner>/` beside `$BRAT_INDEX` (default
-  `./brat-index.json`) and records its `file://` URI and SHA-256 digest in that
-  index file.
-- **Verified C packages:** a package with `brat.pkg.json` can ship `c_sources`
-  and `c_headers`. During `pkg add`/`install`, BRAT compiles the C library,
-  proves all `.brat` `extern` declarations against its DWARF debug info, and
-  records a `.bratbind` manifest so consumers never need `--unsafe-ffi`.
+- Version constraints compare dotted integers (`=`, `>`, `>=`, `<`, `<=` joined
+  by `,`, e.g. `>=1.0,<2.0`) against `$BRAT_INDEX` or `./brat-index.json`.
+  Dependency graphs above 64 packages, cycles, and case-insensitive path
+  collisions are rejected.
+- Archives are capped at 16 MiB, checked against lowercase 64-hex SHA-256
+  digests before extraction, and swapped into `vendor/` + `brat.lock` atomically
+  with rollback on failure.
+- `pkg publish owner/name@ver file.brat` copies the artifact into
+  `.brat-packages/<owner>/` beside `$BRAT_INDEX` (default `./brat-index.json`)
+  and records its `file://` URI and SHA-256 digest in that index file.
+- A package with `brat.pkg.json` can include `c_sources` and `c_headers`.
+  During `pkg add` or `install`, `brat` compiles the C sources, checks all
+  `.brat` `extern` declarations against the resulting DWARF debug info, and
+  writes a `.bratbind` manifest so downstream users do not need `--unsafe-ffi`.
