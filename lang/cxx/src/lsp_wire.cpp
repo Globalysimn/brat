@@ -646,9 +646,23 @@ private:
             heap_buf.assign(p_ + start, len);
             cstr = heap_buf.c_str();
         }
-        char *endp = nullptr;
-        const double dv = std::strtod(cstr, &endp);
-        if (!endp || static_cast<size_t>(endp - cstr) != len) return 0;
+        if (std::memchr(cstr, ',', len) != nullptr) return 0;
+        char dp[8];
+        std::snprintf(dp, sizeof dp, "%.1f", 1.5);
+        size_t dplen = (dp[0] == '1' && std::strlen(dp) >= 3) ? (std::strlen(dp) - 2) : 1;
+        double dv = 0.0;
+        if (!(dp[1] == '.' && dplen == 1)) {
+            std::string loc(cstr, len);
+            size_t dot = loc.find('.');
+            if (dot != std::string::npos) loc.replace(dot, 1, dp + 1, dplen);
+            char *endp = nullptr;
+            dv = std::strtod(loc.c_str(), &endp);
+            if (!endp || static_cast<size_t>(endp - loc.c_str()) != loc.size()) return 0;
+        } else {
+            char *endp = nullptr;
+            dv = std::strtod(cstr, &endp);
+            if (!endp || static_cast<size_t>(endp - cstr) != len) return 0;
+        }
         const uint32_t idx = alloc_node(JKind::Float, static_cast<uint32_t>(start));
         nodes_[idx].raw_len = static_cast<uint32_t>(len);
         nodes_[idx].num.f64 = dv;

@@ -1,4 +1,4 @@
-// std.crypto — FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, timing-safe eq & CSPRNG
+// std.crypto: SHA-256, HMAC-SHA256, constant-time equality, and CSPRNG
 
 fn bytes_to_hex(bs) -> str {
   let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
@@ -10,21 +10,7 @@ fn bytes_to_hex(bs) -> str {
 }
 
 fn bit_xor_byte(a: i64, b: i64) -> i64 {
-  let mut x = a
-  let mut y = b
-  let mut res = 0
-  let mut bit = 1
-  let mut k = 0
-  while k < 8 {
-    let ba = x % 2
-    let bb = y % 2
-    res = res + (ba + bb - 2 * ba * bb) * bit
-    x = x / 2
-    y = y / 2
-    bit = bit * 2
-    k = k + 1
-  }
-  return res
+  return (a ^ b) & 255
 }
 
 pub fn sha256(data) -> Result[vec[i64], str] {

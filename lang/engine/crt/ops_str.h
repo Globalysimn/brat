@@ -1948,6 +1948,7 @@ BFN void vbase_set(const char *b) {
     if (!b || !*b) return;
     char res[4096];
     const char *rp = _vrealpath(b, res);
+    if (!rp && vbase_ready) return;
     const char *use = rp ? rp : b;
     strncpy(vbase_g, use, sizeof vbase_g - 1);
     vbase_g[sizeof vbase_g - 1] = 0;
@@ -2049,13 +2050,35 @@ static int _vfiles_free(void) {
     return 0;
 }
 
+BFN int _vunder_base(const char *path, const char **rel_out) {
+    size_t bl = strlen(vbase_g);
+    if (bl == 0) return 0;
+#if defined(_WIN32)
+    if (_strnicmp(path, vbase_g, bl) != 0) return 0;
+#else
+    if (strncmp(path, vbase_g, bl) != 0) return 0;
+#endif
+    if (vbase_g[bl - 1] == '/') {
+        if (rel_out) *rel_out = path + bl;
+        return 1;
+    }
+    if (path[bl] == 0) {
+        if (rel_out) *rel_out = path + bl;
+        return 1;
+    }
+    if (path[bl] == '/') {
+        if (rel_out) *rel_out = path + bl + 1;
+        return 1;
+    }
+    return 0;
+}
+
 BFN const char *vconfine(const char *p) {
     if (_vfiles_free()) return p;
     if (!p) return NULL;
     if (!vbase_ready || !vbase_g[0]) return NULL; /* base must be set first */
 
     static BTLS char res[8192];
-    size_t bl = strlen(vbase_g);
     int rn = _vis_abs_path(p) ? snprintf(res, sizeof res, "%s", p)
                               : snprintf(res, sizeof res, "%s/%s", vbase_g, p);
     if (rn < 0 || (size_t)rn >= sizeof res) return NULL;
@@ -2139,11 +2162,7 @@ BFN const char *vconfine(const char *p) {
         }
 #endif
     }
-#if defined(_WIN32)
-    if (_strnicmp(res, vbase_g, bl) == 0 && (res[bl] == '/' || res[bl] == 0)) return res;
-#else
-    if (strncmp(res, vbase_g, bl) == 0 && (res[bl] == '/' || res[bl] == 0)) return res;
-#endif
+    if (_vunder_base(res, NULL)) return res;
     return NULL;
 }
 
@@ -2170,8 +2189,7 @@ static int _vhandle_confined(HANDLE h) {
     if (WideCharToMultiByte(CP_UTF8, 0, ws, -1, target, sizeof target, NULL, NULL) <= 0)
         return 0;
     _vslash_norm(target);
-    size_t bl = strlen(vbase_g);
-    return _strnicmp(target, vbase_g, bl) == 0 && (target[bl] == '/' || target[bl] == 0);
+    return _vunder_base(target, NULL);
 }
 
 static HANDLE _vwin_open_parent_confined(const wchar_t *wpath, int *escaped) {
@@ -2250,8 +2268,7 @@ static int _vfd_confined(int fd) {
     (void)fd;
     return 0;
 #endif
-    size_t bl = strlen(vbase_g);
-    return strncmp(target, vbase_g, bl) == 0 && (target[bl] == '/' || target[bl] == 0);
+    return _vunder_base(target, NULL);
 #endif
 }
 
@@ -2261,9 +2278,9 @@ static int _vfd_confined(int fd) {
  * between `vconfine()` and the leaf syscall fails closed with `ELOOP`. */
 static int _vopen_parent_confined(const char *rp, char *leaf_out, size_t leaf_cap, int *escaped) {
     if (escaped) *escaped = 0;
-    size_t bl = strlen(vbase_g);
-    if (strncmp(rp, vbase_g, bl) != 0 || rp[bl] != '/' || rp[bl + 1] == 0) {
-        errno = (rp[bl] == 0) ? EISDIR : EACCES;
+    const char *cur = NULL;
+    if (!_vunder_base(rp, &cur) || !*cur) {
+        errno = (cur && !*cur) ? EISDIR : EACCES;
         return -1;
     }
     int dfd = open(vbase_g, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -2277,7 +2294,6 @@ static int _vopen_parent_confined(const char *rp, char *leaf_out, size_t leaf_ca
         errno = EACCES;
         return -1;
     }
-    const char *cur = rp + bl + 1;
     for (;;) {
         while (*cur == '/') cur++;
         const char *sl = strchr(cur, '/');

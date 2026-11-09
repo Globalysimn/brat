@@ -2104,8 +2104,8 @@ BFN Val vfs_mkdir_all(Val p) {
             return verr_os(rp);
         }
     } else {
-        size_t bl = strlen(vbase_g);
-        if (strncmp(rp, vbase_g, bl) != 0 || (rp[bl] != '/' && rp[bl] != 0))
+        const char *cur = NULL;
+        if (!_vunder_base(rp, &cur))
             return verr("path outside the program directory");
         int dfd = open(vbase_g, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (dfd < 0) return (errno == ELOOP || errno == EMLINK) ? verr("path escaped during open") : verr_os(rp);
@@ -2113,7 +2113,6 @@ BFN Val vfs_mkdir_all(Val p) {
             close(dfd);
             return verr("path escaped during open");
         }
-        const char *cur = rp[bl] ? (rp + bl + 1) : "";
         while (*cur) {
             while (*cur == '/') cur++;
             if (!*cur) break;

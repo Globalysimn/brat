@@ -50,7 +50,7 @@ CASES = [
   print(ch.recv())
   return 0
 }
-''', ["`ch`: 2 receive(s) but only 1 send(s) — `recv` waits forever"]),
+''', ["`ch`: 2 receive(s) but only 1 send(s); `recv` waits forever"]),
     ("helper_hides_the_receive", '''fn drain(ch) -> i64 {
   return ch.recv()
 }

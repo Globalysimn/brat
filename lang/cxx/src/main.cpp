@@ -125,8 +125,8 @@ FILE *g_report = stdout;
 
 // A snippet is an aid, not a dump. Generated programs carry lines with tens of
 // thousands of terms, and echoing one verbatim buries the message it belongs to
-// (and can be megabytes). Both front ends cut at the same width (`SNIPPET_MAX`
-// in UTF-8 codepoints) so long lines are clipped cleanly.
+// (and can be megabytes). Snippets are clipped cleanly at `kSnippetMax`
+// UTF-8 codepoints.
 static constexpr size_t kSnippetMax = 200;
 
 static size_t utf8_sequence_len(const std::string &text, size_t i) {

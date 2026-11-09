@@ -1,4 +1,4 @@
-// std.time — wall/monotonic clocks & exact Hinnant Euclidean proleptic Gregorian calendar
+// std.time: wall/monotonic clocks and proleptic Gregorian calendar
 
 pub fn now_ms() -> i64 {
   return time_ms()

@@ -798,6 +798,11 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
             if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
             else { dup2(devnull, STDIN_FILENO); close(devnull); }
         }
+        if (err_p[1] == STDOUT_FILENO && out_p[1] != STDOUT_FILENO) {
+            int m = fcntl(err_p[1], F_DUPFD_CLOEXEC, 3);
+            if (m < 0) _exit(126);
+            err_p[1] = m;
+        }
         if (out_p[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
         else dup2(out_p[1], STDOUT_FILENO);
         if (err_p[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
@@ -985,7 +990,7 @@ BFN void vraise_errno(const char *fn) {
 }
 
 BFN_HOT Val vstr_of(Val v) {
-    if (v.tag == V_STR) return v.sso ? v : vstr(v.as.str);
+    if (v.tag == V_STR) return vrc_inc(v);
     if (v.tag == V_INT) {
         uint64_t mag = (v.as.ival < 0) ? (0ULL - (uint64_t)v.as.ival) : (uint64_t)v.as.ival;
         char tmp[24];
@@ -1807,15 +1812,9 @@ static int _bjson_parse_num(_BJsonIn *in, Val *out) {
         *out = vint(iv);
         return 1;
     }
-    char sbuf[128];
-    char *nbuf = nlen < sizeof sbuf ? sbuf : (char *)malloc(nlen + 1);
-    if (!nbuf) vfatal_oom();
-    memcpy(nbuf, in->s + start, nlen);
-    nbuf[nlen] = 0;
-    char *ep = NULL;
-    double dv = strtod(nbuf, &ep);
-    int ok = (ep == nbuf + nlen) && isfinite(dv);
-    if (nbuf != sbuf) free(nbuf);
+    int ok = 0;
+    double dv = _bstrtod_c((const char *)in->s + start, nlen, &ok);
+    ok = ok && isfinite(dv);
     if (!ok) {
         _bjson_err(in, start, "number out of f64 range");
         return 0;

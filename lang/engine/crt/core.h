@@ -250,6 +250,7 @@ static const char _vclosure_env_type[] = "__brat_closure_env";
 static int vclosure_env_map(const Map *m) { return m && m->type == _vclosure_env_type; }
 
 static int BRAT_UNUSED g_pool_n = 0;
+static int BRAT_UNUSED g_ext_mt = 0;
 #if !defined(_WIN32)
 typedef pthread_mutex_t bmutex_t;
 #define BMUTEX_INIT PTHREAD_MUTEX_INITIALIZER
@@ -275,11 +276,11 @@ static BStripeLock BRAT_UNUSED _brat_stripes[64] = { BSTRIPE_16_, BSTRIPE_16_, B
 #elif !(BRAT_CRT_MASK & BRAT_CRT_MT)
 #define _BRAT_MT() 0
 #elif defined(__GNUC__) || defined(__clang__)
-#define _BRAT_MT() (__builtin_expect(__atomic_load_n(&g_pool_n, __ATOMIC_ACQUIRE) != 0, 0))
+#define _BRAT_MT() (__builtin_expect((__atomic_load_n(&g_pool_n, __ATOMIC_ACQUIRE) | __atomic_load_n(&g_ext_mt, __ATOMIC_ACQUIRE)) != 0, 0))
 #elif defined(_MSC_VER)
-#define _BRAT_MT() (InterlockedOr((volatile LONG *)&g_pool_n, 0) != 0)
+#define _BRAT_MT() ((InterlockedOr((volatile LONG *)&g_pool_n, 0) | InterlockedOr((volatile LONG *)&g_ext_mt, 0)) != 0)
 #else
-#define _BRAT_MT() (g_pool_n != 0)
+#define _BRAT_MT() ((g_pool_n | g_ext_mt) != 0)
 #endif
 #if defined(__GNUC__) || defined(__clang__)
 #define BRAT_LIKELY(x_) (__builtin_expect(!!(x_), 1))
@@ -580,8 +581,11 @@ BFN char *vstr_pin(Val v) {
 }
 
 static void *balloc(size_t n);
+static void vfatal_oom(void);
 static BTLS int barena_depth = 0;
+typedef struct BLitExtra { const char *src; BHead *hdr; struct BLitExtra *next; } BLitExtra;
 static struct { const char *src; BHead *hdr; } _vlit_cache[512];
+static BLitExtra *_vlit_extra = 0;
 static int _vlit_n = 0;
 static bmutex_t _vlit_mu = BMUTEX_INIT;
 static int _vlit_count(void) {
@@ -633,6 +637,15 @@ static Val vlit_slow(const char *s, size_t n) {
             return v;
         }
     }
+    for (BLitExtra *ex = _vlit_extra; ex; ex = ex->next) {
+        if (ex->src == s) {
+            char *existing = (char *)(ex->hdr + 1);
+            BMUTEX_UNLOCK(&_vlit_mu);
+            free(hdr);
+            Val v; v.tag = V_STR; v.sso = 0; v.imm = 1; v.as.str = existing;
+            return v;
+        }
+    }
     if (_vlit_n < 512) {
         _vlit_cache[_vlit_n].src = s;
         _vlit_cache[_vlit_n].hdr = hdr;
@@ -641,6 +654,13 @@ static Val vlit_slow(const char *s, size_t n) {
 #else
         _vlit_n++;
 #endif
+    } else {
+        BLitExtra *node = (BLitExtra *)malloc(sizeof(BLitExtra));
+        if (!node) vfatal_oom();
+        node->src = s;
+        node->hdr = hdr;
+        node->next = _vlit_extra;
+        _vlit_extra = node;
     }
     BMUTEX_UNLOCK(&_vlit_mu);
     Val v; v.tag = V_STR; v.sso = 0; v.imm = 1; v.as.str = p;
@@ -650,6 +670,32 @@ BFN_HOT Val vlit(const char *s) {
     size_t n = strlen(s);
     if (n <= BRAT_SSO_MAX) return vstr_sso(s, n);
     return vlit_slow(s, n);
+}
+BFN double _bstrtod_c(const char *s, size_t n, int *ok_out) {
+    if (memchr(s, ',', n) != NULL) { if (ok_out) *ok_out = 0; return 0.0; }
+    char dp[8];
+    snprintf(dp, sizeof dp, "%.1f", 1.5);
+    size_t dplen = (dp[0] == '1' && strlen(dp) >= 3) ? (strlen(dp) - 2) : 1;
+    int need_dp = !(dp[1] == '.' && dplen == 1);
+    const char *dot = need_dp ? (const char *)memchr(s, '.', n) : NULL;
+    size_t blen = dot ? (n - 1 + dplen) : n;
+    char sbuf[128];
+    char *buf = (blen < sizeof sbuf) ? sbuf : (char *)malloc(blen + 1);
+    if (!buf) { if (ok_out) *ok_out = 0; return 0.0; }
+    if (dot) {
+        size_t pre = (size_t)(dot - s);
+        memcpy(buf, s, pre);
+        memcpy(buf + pre, dp + 1, dplen);
+        memcpy(buf + pre + dplen, dot + 1, n - pre - 1);
+    } else {
+        memcpy(buf, s, n);
+    }
+    buf[blen] = 0;
+    char *ep = NULL;
+    double v = strtod(buf, &ep);
+    if (ok_out) *ok_out = (ep == buf + blen);
+    if (buf != sbuf) free(buf);
+    return v;
 }
 
 static void vfatal_oom(void) {
@@ -998,6 +1044,18 @@ BFN_HOT void bvec_recycle(BHead *h) {
     }
 #endif
     free(h);
+}
+BFN void _btls_pool_drain(void);
+BFN void brat_mt_enable(void) {
+    if (_BRAT_MT()) return;
+    _btls_pool_drain();
+#if defined(__GNUC__) || defined(__clang__)
+    __atomic_store_n(&g_ext_mt, 1, __ATOMIC_RELEASE);
+#elif defined(_MSC_VER)
+    InterlockedExchange((volatile LONG *)&g_ext_mt, 1);
+#else
+    g_ext_mt = 1;
+#endif
 }
 BFN void _btls_pool_drain(void) {
 #if !BRAT_HAS_SANITIZER
@@ -1566,7 +1624,7 @@ BFN_HOT uint64_t vcstr_hash(const char *s, size_t n) {
     return h ? h : 1ULL;
 }
 
-BFN_HOT uint64_t vkey_hash(Val k) {
+static uint64_t vkey_hash_d(Val k, int depth) {
     uint64_t h = 1469598103934665603ULL;
     switch (k.tag) {
     case V_STR:
@@ -1608,12 +1666,18 @@ BFN_HOT uint64_t vkey_hash(Val k) {
     case V_TAG: {
         const char *ts = k.as.tv->tag;
         h = vcstr_hash(ts, strlen(ts)) ^ ((uint64_t)k.as.tv->len * 0x9e3779b97f4a7c15ULL);
-        h ^= h >> 33; return h;
+        if (depth < BRAT_MAX_VALUE_DEPTH) {
+            for (bint i = 0; i < k.as.tv->len; i++) {
+                h ^= vkey_hash_d(k.as.tv->items[i], depth + 1) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            }
+        }
+        h ^= h >> 33; return h ? h : 1ULL;
     }
     default:
         h ^= (uint64_t)k.tag; h *= 1099511628211ULL; return h;
     }
 }
+BFN_HOT uint64_t vkey_hash(Val k) { return vkey_hash_d(k, 0); }
 
 BFN_HOT void map_slot_put_raw(Map *m, int32_t pos, uint64_t h) {
     uint32_t tag = (uint32_t)(h >> 32) | 1u;
@@ -1712,17 +1776,27 @@ BFN void map_unshape(Map *m) {
     if (m->len > 4) map_idx_rebuild(m);
 }
 
-/* Equality as a map sees it: every NaN is the same key (see vkey_hash), and
-   everything else is `veq`. `veq` itself keeps IEEE: `nan == nan` is false. */
-BFN_HOT bint vmap_key_same(Val a, Val b) {
+/* Map keys preserve scalar types and treat NaNs as one key, including inside
+   tags. Expression equality keeps IEEE semantics: `nan == nan` is false. */
+static bint vmap_key_same_d(Val a, Val b, int depth) {
     if (a.tag != b.tag) return 0;
     if (a.sso && b.sso) return memcmp(&a, &b, sizeof(Val)) == 0;
     if (a.tag == V_INT) return a.as.ival == b.as.ival;
     if (a.tag == V_BOOL) return a.as.b == b.as.b;
     if (a.tag == V_FLOAT)
         return (a.as.fval != a.as.fval && b.as.fval != b.as.fval) || a.as.fval == b.as.fval;
+    if (a.tag == V_TAG) {
+        Vec *ta = a.as.tv, *tb = b.as.tv;
+        if (ta == tb) return 1;
+        if (!ta || !tb || ta->len != tb->len || depth >= BRAT_MAX_VALUE_DEPTH) return 0;
+        if (ta->tag != tb->tag && strcmp(ta->tag, tb->tag) != 0) return 0;
+        for (bint i = 0; i < ta->len; i++)
+            if (!vmap_key_same_d(ta->items[i], tb->items[i], depth + 1)) return 0;
+        return 1;
+    }
     return veq(a, b);
 }
+BFN_HOT bint vmap_key_same(Val a, Val b) { return vmap_key_same_d(a, b, 0); }
 BFN_HOT bint map_find_h(Map *m, Val k, uint64_t h) {
     if (m->shape || !m->slots) {
         if (m->hashes) {
@@ -2091,21 +2165,20 @@ BFN_HOT Val vclosure0(bint code) {
 BFN void vec_push_all(Vec *dst, Vec *src) {
     for (bint i = 0; i < src->len; i++) vec_push(dst, vrc_inc(src->items[i]));
 }
-/* A vector or a struct cannot be a map key: its hash would be over storage the
-   program can reach and change. The refusal has to happen before any lock is
-   taken, because `vraise` builds a `Val` (vvec, vec_push, vstr) and `vec_push`
-   takes `_brat_ctr_lock` -- raising from inside the lock deadlocks on it. That
-   was a real hang: `m[[1,2]] = 5` stopped forever in `vec_push`. */
-BFN bint vmap_key_bad(Val k) {
-    return k.tag == V_VEC || k.tag == V_STRUCT;
+/* Reject mutable containers, closures, and tags wrapping them before acquiring
+   the map stripe lock. Unhashable keys yield an `err` value rather than raising. */
+static bint vmap_key_bad_d(Val k, int depth) {
+    if (k.tag == V_VEC || k.tag == V_STRUCT) return 1;
+    if (k.tag == V_TAG) {
+        Vec *tv = k.as.tv;
+        if (!tv || !tv->tag || strcmp(tv->tag, "closure") == 0 || depth >= BRAT_MAX_VALUE_DEPTH)
+            return 1;
+        for (bint i = 0; i < tv->len; i++)
+            if (vmap_key_bad_d(tv->items[i], depth + 1)) return 1;
+    }
+    return 0;
 }
-/* A key a map cannot hold answers like a reserved one did: with an err value,
-   not by raising. `test_forge.py` pins that shape for `$type` -- a caught error
-   is a value in this language -- and raising here was worse than useless
-   anyway: `vraise` allocates, and the map held `_brat_ctr_lock`, so the
-   program hung forever with no message at all. */
-/* Set when a map literal or store sees an unhashable key so the emitter can
-   turn `{[1, 2]: 3}` into an error value after construction. */
+BFN bint vmap_key_bad(Val k) { return vmap_key_bad_d(k, 0); }
 BFN bint vmap_bad_seen(Map *m) {
     if (m->bad_key) { vrc_dec(vstruct(m)); return 1; }
     return 0;
@@ -2185,6 +2258,7 @@ BFN void map_set_v(Map *m, Val k, Val v) {
             }
         }
     }
+    if (m->used >= INT32_MAX) vfatal_oom();
     bint pos = m->used;
     m->keys[pos] = k; m->vals[pos] = v; m->hashes[pos] = h;
     m->used++; m->len++;
@@ -2206,6 +2280,8 @@ BFN_HOT Val *map_get(Map *m, const char *k) {
     return at >= 0 ? &m->vals[at] : 0;
 }
 BFN_HOT Val *map_get_ic(Map *m, const char *k, BFieldIC *ic) {
+    size_t kl = 0;
+    int have_kl = 0;
     if (ic) {
         const BShape *sh = m->shape;
         if (sh) {
@@ -2219,13 +2295,16 @@ BFN_HOT Val *map_get_ic(Map *m, const char *k, BFieldIC *ic) {
                 Val kv = m->keys[sl];
                 if (kv.tag == V_STR) {
                     const char *ks = vstr_c(&kv);
-                    if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0))
+                    if (ks == k) return &m->vals[sl];
+                    kl = strlen(k);
+                    have_kl = 1;
+                    if (vstr_len_fast(&kv) == kl && ks[0] == k[0] && memcmp(ks, k, kl) == 0)
                         return &m->vals[sl];
                 }
             }
         }
     }
-    bint at = map_find_cstr(m, k, strlen(k));
+    bint at = map_find_cstr(m, k, have_kl ? kl : strlen(k));
     if (at < 0) {
         if (ic && m->shape) {
             unsigned w = (unsigned)(ic->next & 3u);
@@ -2504,7 +2583,7 @@ static void *_blib_open_raw(const char *raw_path, char *errbuf, size_t errcap) {
     int has_sep = (strchr(raw_path, '/') != NULL);
 #endif
     const char *load_path = raw_path;
-    if (has_sep && vbase_ready) {
+    if (has_sep) {
         const char *cp = vconfine(raw_path);
         if (!cp) {
             snprintf(errbuf, errcap, "path outside the program directory");

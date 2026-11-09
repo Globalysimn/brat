@@ -302,6 +302,8 @@ static void *stripe_worker(void *arg) {
 
 int main(int argc, char **argv) {
     assert(argc == 2);
+    vargs_set(argc, argv);
+    brat_mt_enable();
     g_so_path = argv[1];
 
     pthread_t pt[4];

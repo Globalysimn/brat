@@ -257,6 +257,7 @@ static void *worker_fn(void *arg) {
 
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
+    vargs_set(argc, argv);
     g_pool_n = 1;
     Val h = vlib_open(vstr(argv[1]));
     if (verr_pending()) return 3;

@@ -1,4 +1,4 @@
-// std.sqlite — confined & parameterized SQLite3 database bindings
+// std.sqlite: confined parameterized SQLite3 bindings
 
 pub fn open(path: str) -> Result[i64, str] {
   return sql_open(path)

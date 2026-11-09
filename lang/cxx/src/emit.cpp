@@ -614,7 +614,7 @@ const std::set<std::string> HEAP_METHODS = {
     "split_once", "lines", "chars", "slice", "map", "filter", "keys", "vals",
     "items", "entries", "values", "recv", "send", "parse_int", "parse_float",
     "rev", "pop", "del", "zip", "chunks", "enumerate",
-    "min", "max", "first", "last", "get", "find", "set",
+    "min", "max", "first", "last", "get", "find", "set", "sort_by",
 };
 
 // Builtins that hand back a fresh value the caller owns: a new vector, a new
@@ -2921,7 +2921,7 @@ const std::set<std::string> PART_RESULT = {};
 // Methods that mutate the receiver and hand it back: the result is owned exactly
 // when the receiver was. `m.keys().sort()` is a container with no other name,
 // `s.sort()` is `s`, and dropping that freed a live vector.
-const std::set<std::string> SELF_RESULT = {"sort", "sort_by"};
+const std::set<std::string> SELF_RESULT = {"sort"};
 
 const std::set<std::string> FRESH_RESULT = {
     "split", "split_once", "join", "upper", "lower", "trim", "replace", "repeat",
@@ -2929,7 +2929,7 @@ const std::set<std::string> FRESH_RESULT = {
     "vals", "sum", "index_of", "starts_with", "ends_with", "contains", "has",
     "get_or", "parse_int", "parse_float", "rev", "fold", "any", "all", "map",
     "filter", "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
-    "is_some", "is_none", "min", "max", "first", "last", "get", "find", "set"};
+    "is_some", "is_none", "min", "max", "first", "last", "get", "find", "set", "sort_by"};
 // True when evaluating `e` can raise: it calls something, indexes/projects,
 // unwraps `?`, or divides.
 static bool may_raise(const Expr &e) {
@@ -4559,16 +4559,14 @@ V Emitter::ex_mcall(const Expr &e) {
         obj_owned = mk_var(obj->a);
         obj = obj_owned.get();
     }
-    if (meth == "sort_by" && args.size() == 1) return ex_hof(*obj, meth, args[0], nullptr);
+    if (meth == "sort_by" && args.size() == 1 && !user_meths.count(meth))
+        return ex_hof(*obj, meth, args[0], nullptr);
     if (obj->k == EK::Call && obj->kids.empty() && !obj->a.empty() &&
         obj->a.find('.') == std::string::npos && obj->a[0] >= 'A' && obj->a[0] <= 'Z' &&
         !sym.count(obj->a) && !(cap && cap->second.count(obj->a))) {
-        // `Type.make(x)`: an `impl` function that does not take `self`. The bare
-        // uppercase name parses as a zero-argument call, so name_path() below
-        // does not see a path. Only rewrite when the `impl` declares the name
-        // and wants no receiver, or `Red.code()` would stop dispatching on the
-        // variant. Both checkers accept the call, so failing here is a backend
-        // disagreement (F-033).
+        // `Type.make(x)`: an `impl` function without `self`. Only rewrite when
+        // the `impl` declares the name without a receiver so unit enum variants
+        // like `Red.code()` still construct the variant and dispatch on it.
         auto it = fns.find(obj->a + "." + meth);
         if (it != fns.end() && !it->second.ctor && it->second.decl) {
             // ex_dotted() emits this under the `meth:` key the body is defined
@@ -4659,8 +4657,11 @@ V Emitter::ex_mcall(const Expr &e) {
         if (recv.empty()) return res;
         std::string t = new_tmp("c");
         res.pre.push_back("Val " + t + " = (" + res.val + ");");
-        res.pre.push_back((PART_RESULT.count(meth) ? "vdrop_recv_part(" : "vdrop_recv(") + recv +
-                          ", " + t + ");");
+        if (meth == "sort_by")
+            res.pre.push_back("vrc_dec(" + recv + ");");
+        else
+            res.pre.push_back((PART_RESULT.count(meth) ? "vdrop_recv_part(" : "vdrop_recv(") + recv +
+                              ", " + t + ");");
         res.val = t;
         return res;
     };
@@ -4668,17 +4669,17 @@ V Emitter::ex_mcall(const Expr &e) {
     if (!recv.empty()) call_cleanup.push_back(recv);
     auto pop_recv = [&]() { call_cleanup.resize(recv_cstart); };
     try {
-        if ((meth == "map" || meth == "filter") && args.size() == 1) {
+        if ((meth == "map" || meth == "filter") && args.size() == 1 && !user_meths.count(meth)) {
             V r = ex_mapfilter(*obj, meth, args[0], &o);
             pop_recv();
             return done(std::move(r));
         }
-        if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1) {
+        if ((meth == "any" || meth == "all" || meth == "find") && args.size() == 1 && !user_meths.count(meth)) {
             V r = ex_hof(*obj, meth, args[0], nullptr, &o);
             pop_recv();
             return done(std::move(r));
         }
-        if (meth == "fold" && args.size() == 2) {
+        if (meth == "fold" && args.size() == 2 && !user_meths.count(meth)) {
             V r = ex_hof(*obj, meth, args[1], args[0], &o);
             pop_recv();
             return done(std::move(r));
@@ -4913,7 +4914,7 @@ V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, con
     if (meth == "any") return {pre, cat("vpred(", o.val, ", ", fnv, ", \"any\")")};
     if (meth == "all") return {pre, cat("vpred(", o.val, ", ", fnv, ", \"all\")")};
     if (meth == "find") return {pre, cat("vpred(", o.val, ", ", fnv, ", \"find\")")};
-    return {pre, cat("vsort_by(", o.val, ", ", fnv, ")")};
+    return {pre, cat("vsort_by(", keep(obj, o.val), ", ", fnv, ")")};
 }
 
 V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *arg,
@@ -8636,7 +8637,13 @@ void Emitter::emit_prelude_tables() {
     ln("  ", "const char *rkey = NULL;");
     ln("  ", "if (obj.tag == V_STRUCT) rkey = obj.as.map->type;");
     ln("  ", "else if (obj.tag == V_TAG) rkey = obj.as.tv->tag;");
-    ln("  ", "else return vbuiltin(obj, meth, a);");
+    ln("  ", "else {");
+    if (user_meths.count("map") || user_meths.count("filter")) {
+        ln("    ", "if (obj.tag == V_VEC && a->len == 1 && (!strcmp(meth, \"map\") || !strcmp(meth, \"filter\")))");
+        ln("      ", "return vmap_with(obj, vrc_inc(VARG(a, 0)), meth);");
+    }
+    ln("    ", "return vbuiltin(obj, meth, a);");
+    ln("  ", "}");
     ln("  ", "BMethFn fn = NULL;");
     ln("  ", "int _mhit = 0;");
     ln("  ", "if (ic) {");
@@ -8684,6 +8691,7 @@ void Emitter::emit_prelude_tables() {
            "const char *meth) {");
     ln("  ", "Vec *w = vvec_of_m(obj, meth);");
     ln("  ", "if (verr_pending()) { vrc_dec(fn); return vunwind; }");
+    ln("  ", "vrc_inc(obj);");
     ln("  ", "Vec *o = meth[0] == 'm' ? vvec_cap(w->len) : vvec();");
     ln("  ", "Val _ob[1]; BStackVec _osv; VSTACK_VEC_INIT(_osv, _ob, 1);");
     ln("  ", "_osv.vec.len = 1;");
@@ -8692,7 +8700,7 @@ void Emitter::emit_prelude_tables() {
     ln("    ", "_ob[0] = _cur;");
     ln("    ", "Val r = vcall_any(fn, &_osv.vec);");
     ln("    ", "if (verr_pending()) {");
-    ln("      ", "vrc_dec(_cur); vrc_dec(fn); vrc_dec(vvecv(o));");
+    ln("      ", "vrc_dec(_cur); vrc_dec(fn); vrc_dec(vvecv(o)); vrc_dec(obj);");
     ln("      ", "return r;");
     ln("    ", "}");
     ln("    ", "if (meth[0] == 'm') vec_push(o, r);");
@@ -8700,6 +8708,7 @@ void Emitter::emit_prelude_tables() {
     ln("    ", "vrc_dec(_cur);");
     ln("  ", "}");
     ln("  ", "vrc_dec(fn);");
+    ln("  ", "vrc_dec(obj);");
     ln("  ", "return vvecv(o);");
     ln("", "}");
 }
@@ -8876,6 +8885,7 @@ void Emitter::emit_main_open() {
     ln("  ", "vargs_set(argc, argv);");
     ln("  ", "bdepth_init();");
     ln("  ", cat("vbase_set(\"", cstr_path(base), "\");"));
+    if (!cb_wrappers.empty()) ln("  ", "brat_mt_enable();");
     ln("  ", "Vec *_a = vvec();");
     ln("  ", "bexit_track_args(_a);");
     std::set<std::string> names;
@@ -9659,6 +9669,7 @@ std::string Emitter::emit_program() {
         }
         const std::string cb_head = cat("brat_cb_", cb.name, "(", joined, ")");
         ln("", cat(ffi_decl_named(cb.ret_ann, cb_head), " {"));
+        ln("  ", "brat_mt_enable();");
         ln("  ", "Vec *_a = vvec();");
         for (const auto &p : pushes) ln("  ", p);
         ln("  ", "vcb_check(vnil());");
@@ -9667,6 +9678,7 @@ std::string Emitter::emit_program() {
         // so a wrapper that skips this leaks a Vec per callback invocation.
         ln("  ", "vrc_dec(vvecv(_a));");
         ln("  ", "vcb_check(_r);");
+        ln("  ", "if (vdfsp == 0) { free(vdfr); vdfr = NULL; vdfcap = 0; }");
         if (!ret || *ret == "none") {
             ln("  ", "(void)_r;");
         } else if (*ret == "bool") {
@@ -9811,6 +9823,7 @@ std::string Emitter::emit_program() {
         ln("  ", cat("Val _r = ", cfn("fn:" + exname), "(NULL, _a);"));
         ln("  ", "vargs_drop(_a);");
         ln("  ", "vcb_check(_r);");
+        ln("  ", "if (vdfsp == 0) { free(vdfr); vdfr = NULL; vdfcap = 0; }");
         if (!ret || *ret == "none") {
             ln("  ", "vrc_dec(_r);");
         } else if (*ret == "str") {
@@ -9906,7 +9919,7 @@ std::string Emitter::emit_program() {
                 line.find("vjson_stringify") != std::string::npos)
                 mask |= 0x400u;
         }
-        if (!externs.empty() || !exported.empty())
+        if (!externs.empty() || !exported.empty() || !cb_wrappers.empty())
             mask |= 0x100u;
         crt_mask = mask;
         if (mask_idx < out.size())

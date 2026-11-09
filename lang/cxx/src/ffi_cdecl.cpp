@@ -522,6 +522,11 @@ bool preprocess_header_cc(const std::string &path,
         setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
+        if (err_pipe[1] == STDOUT_FILENO && out_pipe[1] != STDOUT_FILENO) {
+            int m = fcntl(err_pipe[1], F_DUPFD_CLOEXEC, 3);
+            if (m < 0) _exit(126);
+            err_pipe[1] = m;
+        }
         if (out_pipe[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
         else dup2(out_pipe[1], STDOUT_FILENO);
         if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);

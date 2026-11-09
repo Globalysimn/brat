@@ -397,6 +397,70 @@ CASES["sort_by_keys_stable"] = ('''fn main() -> i64 {
 }
 ''', "['a1', 'bb2', 'cc3']\n3\n")
 
+CASES["hof_receiver_reassigned"] = ('''let mut ga = [1, 2, 3]
+let mut gb = [1, 2, 3, 4]
+let mut gc = [1, 2, 3]
+let mut gd = [1, 2, 3]
+let mut ge = [2, 4, 6]
+let mut gg = ["aa" + str(1), "bb" + str(2), "cc" + str(3)]
+let mut gh = ["cc" + str(3), "a" + str(1), "bb" + str(2)]
+fn main() -> i64 {
+  let m = ga.map(fn(x) { ga = []; return x * 10 })
+  print(m, len(ga))
+  let f = gb.filter(fn(x) { gb = []; return x % 2 == 0 })
+  print(f, len(gb))
+  let s = gc.fold(0, fn(acc, x) { gc = []; return acc + x })
+  print(s, len(gc))
+  print(gd.any(fn(x) { gd = []; return x == 2 }), len(gd))
+  print(ge.all(fn(x) { ge = []; return x % 2 == 0 }), len(ge))
+  print(gg.find(fn(x) { gg = []; return x == "bb2" }), len(gg))
+  let sorted = gh.sort_by(fn(x) { gh = []; return len(x) })
+  print(sorted, len(gh))
+  let mut caught = false
+  try {
+    let empty: vec[i64] = [];
+    ["bb" + str(1), "a" + str(2)].sort_by(fn(x) { return empty[0] })
+  } catch err {
+    caught = true
+  }
+  print(caught)
+  return 0
+}
+''', "[10, 20, 30] 0\n[2, 4] 0\n6 0\ntrue 0\ntrue 0\nbb2 0\n['a1', 'cc3', 'bb2'] 0\ntrue\n")
+
+CASES["user_impl_shadows_hof"] = ('''struct Bag {
+  base: i64
+}
+impl Bag {
+  fn map(self, f) -> i64 { return self.base + f(1) }
+  fn filter(self, f) -> i64 { return self.base + f(2) }
+  fn fold(self, init: i64, f) -> i64 { return self.base + f(init, 3) }
+  fn any(self, f) -> i64 { return self.base + f(4) }
+  fn all(self, f) -> i64 { return self.base + f(5) }
+  fn find(self, f) -> i64 { return self.base + f(6) }
+}
+fn main() -> i64 {
+  let b = Bag { base: 100 }
+  let id = fn(x) { return x }
+  print(b.map(id), b.filter(id), b.fold(10, fn(a, x) { return a + x }))
+  print(b.any(id), b.all(id), b.find(id))
+  print([3, 1, 2].map(fn(x) { return x + 1 }))
+  print([3, 1, 2].filter(fn(x) { return x > 1 }))
+  print([3, 1, 2].fold(0, fn(a, x) { return a + x }))
+  print([3, 1, 2].any(fn(x) { return x == 2 }), [3, 1, 2].all(fn(x) { return x > 0 }), [3, 1, 2].find(fn(x) { return x == 1 }))
+  print([3, 1, 2].sort_by(fn(x) { return x }))
+  return 0
+}
+''', "101 102 113\n104 105 106\n[4, 2, 3]\n[3, 2]\n6\ntrue true 1\n[1, 2, 3]\n")
+
+CASES["vlit_overflow_cached"] = (
+    'fn pick() -> str {\n  let mut s = ""\n  for k in 0..3 {\n'
+    + "\n".join('    s = "literal_overflow_test_entry_number_%04d"' % i for i in range(540))
+    + '\n  }\n  return s\n}\nfn main() -> i64 { print(pick()); return 0 }\n',
+    "literal_overflow_test_entry_number_0539\n",
+)
+
+
 
 def build(src, name):
     path = os.path.join(TMP, name + ".brat")

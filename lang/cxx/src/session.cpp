@@ -15,14 +15,14 @@ const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK:
 
 std::string need_send(const std::string &name, int recv, int send) {
     return "`" + name + "`: " + std::to_string(recv) + " receive(s) but only " +
-           std::to_string(send) + " send(s) — `recv` waits forever (hint: send as many " +
+           std::to_string(send) + " send(s); `recv` waits forever (hint: send as many " +
            "values as you receive, or `close` the channel)";
 }
 
 std::string need_recv(const std::string &name, int send, int cap, int recv) {
     return "`" + name + "`: " + std::to_string(send) + " value(s) sent into a queue of " +
            std::to_string(cap) + " and only " + std::to_string(recv) +
-           " received — `send` blocks once the queue is full (hint: receive more, or "
+           " received; `send` blocks once the queue is full (hint: receive more, or "
            "make the channel larger)";
 }
 

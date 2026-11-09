@@ -77,12 +77,16 @@ def main():
         "set_vec": '  let mut m = {"a": 1}\n  print(m.set([1, 2], 3))',
         "get_or_vec": '  let m = {"a": 1}\n  print(m.get_or([1, 2], 7))',
         "literal_vec": '  let m = {[1, 2]: 3}\n  print(m)',
+        "get_tag_vec": '  let m = {"a": 1}\n  print(m.get(Ok([1, 2])))',
+        "set_tag_map": '  let mut m = {"a": 1}\n  print(m.set(Some({"k": 1}), 3))',
+        "get_closure": '  let m = {"a": 1}\n  let f = fn(x) { return x }\n  print(m.get(f))',
+        "store_tag_vec": '  let mut m = {"a": 1}\n  m[Ok([1, 2])] = 5\n  print(m)',
     }
     # A bare `m[k] = v` throws its value away -- the same shape `test_forge.py`
     # pins for `$type` -- so the observable result there is an unchanged map,
     # not a message. What must not happen is a hang, a CPython TypeError, or a
     # store that half-happened.
-    quiet = {"store_vec", "store_struct"}
+    quiet = {"store_vec", "store_struct", "store_tag_vec"}
     for name, body in sorted(cases.items()):
         out = backends(write(name + ".brat", body), name)
         assert "TypeError" not in out, "%s: a Python error escaped: %r" % (name, out)
@@ -132,6 +136,21 @@ def main():
                 '  print(m)')
     out = backends(nan, "nan")
     assert out == "true\n1\nfalse\n{nan: 2}\n", "nan: %r" % (out,)
+
+    tag_hash = write("tag_hash.brat",
+                     '  let a = "nan".parse_float()?\n'
+                     '  let b = "nan".parse_float()?\n'
+                     '  let mut m = {}\n'
+                     '  m[Ok(1)] = "int"\n'
+                     '  m[Ok(1.0)] = "flt"\n'
+                     '  m[Ok(a)] = "nan1"\n'
+                     '  m[Ok(b)] = "nan2"\n'
+                     '  print(len(m), m[Ok(1)], m[Ok(1.0)], m[Ok(a)])\n'
+                     '  let mut big = {}\n'
+                     '  for i in 0..2000 { big[Some(i)] = i * 2 }\n'
+                     '  print(len(big), big[Some(0)], big[Some(1999)])')
+    out = backends(tag_hash, "tag_hash")
+    assert out == "3 int flt nan2\n2000 0 3998\n", "tag_hash: %r" % (out,)
 
     print("map keys: one sentence, both backends, no hang; scalar literal keys readable")
 

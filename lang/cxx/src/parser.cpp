@@ -2723,6 +2723,15 @@ private:
         }
         if (t.find('.') != std::string::npos || t.find('e') != std::string::npos
             || t.find('E') != std::string::npos) {
+            char dp[8];
+            std::snprintf(dp, sizeof dp, "%.1f", 1.5);
+            size_t dplen = (dp[0] == '1' && std::char_traits<char>::length(dp) >= 3) ? (std::char_traits<char>::length(dp) - 2) : 1;
+            if (!(dp[1] == '.' && dplen == 1)) {
+                std::string loc = t;
+                size_t dot = loc.find('.');
+                if (dot != std::string::npos) loc.replace(dot, 1, dp + 1, dplen);
+                return mk_float(std::strtod(loc.c_str(), nullptr));
+            }
             return mk_float(std::strtod(t.c_str(), nullptr));
         }
         uint64_t v = 0;

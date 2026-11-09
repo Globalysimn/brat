@@ -755,33 +755,28 @@ BFN size_t vfloat_prefix(const char *p) {
 }
 BFN Val vparse_float(Val s) {
     if (s.tag != V_STR) { vraise("no method parse_float"); return vunwind; }
-    char *e;
     const char *p = vstr_c(&s);
     const char *end = p + vstr_len_fast(&s);
     while (p < end && vis_space(*p)) p++;
-    size_t n = vfloat_prefix(p);
+    size_t rem = (size_t)(end - p);
+    char sbuf[128];
+    char *tmp = (rem < sizeof sbuf) ? sbuf : (char *)malloc(rem + 1);
+    if (!tmp) vfatal_oom();
+    memcpy(tmp, p, rem);
+    tmp[rem] = 0;
+    size_t n = (memchr(tmp, 0, rem) == NULL) ? vfloat_prefix(tmp) : 0;
     const char *tail = p + n;
     while (tail < end && vis_space(*tail)) tail++;
     Vec *a = vvec();
-    if (n == 0 || tail != end) { vec_push(a, vstr("not a float")); return vtagv("err", a); }
-    char probe[8];
-    snprintf(probe, sizeof probe, "%.1f", 1.5);
-    char dp = probe[1];
-    double v;
-    if (dp != '.' && memchr(p, '.', n) != NULL) {
-        char sbuf[128];
-        char * copy = (n < sizeof sbuf) ? sbuf : (char *)malloc(n + 1);
-        if (!copy) vfatal_oom();
-        memcpy(copy, p, n);
-        copy[n] = 0;
-        for (size_t i = 0; i < n; i++) {
-            if (copy[i] == '.') copy[i] = dp;
-        }
-        v = strtod(copy, &e);
-        if (copy != sbuf) free(copy);
-    } else {
-        v = strtod(p, &e);
+    if (n == 0 || tail != end) {
+        if (tmp != sbuf) free(tmp);
+        vec_push(a, vstr("not a float"));
+        return vtagv("err", a);
     }
+    int ok = 0;
+    double v = _bstrtod_c(tmp, n, &ok);
+    if (tmp != sbuf) free(tmp);
+    if (!ok) { vec_push(a, vstr("not a float")); return vtagv("err", a); }
     vec_push(a, vfloat(v));
     return vtagv("ok", a);
 }
@@ -1040,14 +1035,13 @@ BFN Val vcall_any(Val fn, Vec *a);
 BFN Val vfold(Val obj, Val init, Val fn) {
     Vec *w = vvec_of_m(obj, "fold");
     if (verr_pending()) { vrc_dec(init); vrc_dec(fn); return vunwind; }
+    vrc_inc(obj);
     Val acc = init;
     Val ab[2];
     BStackVec sv;
     VSTACK_VEC_INIT(sv, ab, 2);
     sv.vec.len = 2;
     for (bint i = 0; i < w->len; i++) {
-        /* The callback may change the vector it is folding, so the element it
-           reads is held here and the length is re-read every step. */
         Val item = vrc_inc(w->items[i]);
         ab[0] = acc;
         ab[1] = item;
@@ -1056,49 +1050,57 @@ BFN Val vfold(Val obj, Val init, Val fn) {
         if (verr_pending()) {
             vrc_dec(acc);
             vrc_dec(fn);
+            vrc_dec(obj);
             return vunwind;
         }
         vrc_dec(acc);
         acc = next;
     }
     vrc_dec(fn);
+    vrc_dec(obj);
     return acc;
 }
 BFN Val vpred(Val obj, Val fn, const char *meth) {
     Vec *w = vvec_of_m(obj, meth);
     if (verr_pending()) { vrc_dec(fn); return vunwind; }
+    vrc_inc(obj);
     Val ab[1];
     BStackVec sv;
     VSTACK_VEC_INIT(sv, ab, 1);
     sv.vec.len = 1;
     for (bint i = 0; i < w->len; i++) {
-        /* The callback may change the vector it is searching, so the element
-           handed to it is held for the whole step and `find` returns that same
-           reference instead of reading the slot again after the call. */
         Val item = vrc_inc(w->items[i]);
         ab[0] = item;
         Val r = vcall_any(fn, &sv.vec);
         if (verr_pending()) {
             vrc_dec(item);
             vrc_dec(fn);
+            vrc_dec(obj);
             return vunwind;
         }
         int ok = vis_true(r);
         vrc_dec(r);
         if (meth[0] == 'a' && meth[1] == 'n' && ok) {
             vrc_dec(item);
-            vrc_dec(fn); return vbool(1);
+            vrc_dec(fn);
+            vrc_dec(obj);
+            return vbool(1);
         }
         if (meth[0] == 'a' && meth[1] == 'l' && !ok) {
             vrc_dec(item);
-            vrc_dec(fn); return vbool(0);
+            vrc_dec(fn);
+            vrc_dec(obj);
+            return vbool(0);
         }
         if (meth[0] == 'f' && ok) {
-            vrc_dec(fn); return item;
+            vrc_dec(fn);
+            vrc_dec(obj);
+            return item;
         }
         vrc_dec(item);
     }
     vrc_dec(fn);
+    vrc_dec(obj);
     if (meth[0] == 'f') return vnil();
     return vbool(meth[1] == 'l' ? 1 : 0);
 }
@@ -1202,7 +1204,7 @@ static int vsortby_q(const void *pa, const void *pb) {
 }
 BFN Val vsort_by(Val v, Val fn) {
     Vec *w = vvec_of_m(v, "sort_by");
-    if (verr_pending()) { vrc_dec(fn); return vunwind; }
+    if (verr_pending()) { vrc_dec(v); vrc_dec(fn); return vunwind; }
     bint n = w->len;
     Val ab[1];
     BStackVec sv;
@@ -1215,7 +1217,7 @@ BFN Val vsort_by(Val v, Val fn) {
             ab[0] = only;
             Val k0 = vcall_any(fn, one);
             vrc_dec(only);
-            if (verr_pending()) { vrc_dec(fn); return vunwind; }
+            if (verr_pending()) { vrc_dec(v); vrc_dec(fn); return vunwind; }
             vrc_dec(k0);
         }
         vrc_dec(fn);
@@ -1223,9 +1225,6 @@ BFN Val vsort_by(Val v, Val fn) {
     }
     _VSortEntry *ents = (_VSortEntry *)malloc((size_t)n * sizeof(_VSortEntry));
     if (!ents) vfatal_oom();
-    /* The elements are held here, not borrowed from the vector, because the key
-       callback runs user code: it can empty the container, and the slots this
-       sort then wrote back were freed memory. */
     for (bint i = 0; i < n; i++) {
         ents[i].item = vrc_inc(w->items[i]);
         ents[i].key = vnil();
@@ -1241,17 +1240,20 @@ BFN Val vsort_by(Val v, Val fn) {
     if (verr_pending()) {
         for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
         free(ents);
+        vrc_dec(v);
         return vunwind;
     }
     qsort(ents, (size_t)n, sizeof(_VSortEntry), vsortby_q);
     if (verr_pending()) {
         for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
         free(ents);
+        vrc_dec(v);
         return vunwind;
     }
     if (w->len != n) {
         for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
         free(ents);
+        vrc_dec(v);
         vraise("sort_by: container changed while keys were computed");
         return vunwind;
     }
@@ -1547,6 +1549,11 @@ BFN Val vbuiltin(Val obj, const char *meth, Vec *a) {
         if (!strcmp(meth, "zip")) return vzip(obj, VARG(a, 0));
         if (!strcmp(meth, "chunks")) return vchunks(obj, VARG(a, 0));
         if (!strcmp(meth, "pos")) return vpos(obj, VARG(a, 0));
+        if (!strcmp(meth, "any")) return vpred(obj, vrc_inc(VARG(a, 0)), "any");
+        if (!strcmp(meth, "all")) return vpred(obj, vrc_inc(VARG(a, 0)), "all");
+        if (!strcmp(meth, "find")) return vpred(obj, vrc_inc(VARG(a, 0)), "find");
+        if (!strcmp(meth, "fold")) return vfold(obj, vrc_inc(VARG(a, 0)), vrc_inc(VARG(a, 1)));
+        if (!strcmp(meth, "sort_by")) return vsort_by(vrc_inc(obj), vrc_inc(VARG(a, 0)));
     }
 #if (BRAT_CRT_MASK & BRAT_CRT_CONC)
     if (obj.tag == V_INT) {

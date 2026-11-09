@@ -108,28 +108,37 @@ fn main() -> i64 {
 
 
 def test_brat_files_off():
-    src = ('fn main() -> i64 {\n'
-           '  print(write_file("../escaped.txt", "x"))\n  return 0\n}\n')
-    path = write('fs_off.brat', src)
-    escaped = os.path.join(os.path.dirname(TMP), 'escaped.txt')
+    sub = os.path.join(TMP, 'fs_sub')
+    os.makedirs(sub, exist_ok=True)
+    path = os.path.join(sub, 'fs_off.brat')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('fn main() -> i64 {\n  print(write_file("../escaped.txt", "x"))\n  return 0\n}\n')
+    escaped = os.path.join(TMP, 'escaped.txt')
     for value, allow in (('0', False), ('1no', False), (' YES ', True)):
+        if os.path.exists(escaped):
+            os.unlink(escaped)
         env = dict(ENV)
         env['BRAT_FILES'] = value
-        exe = os.path.join(TMP, 'fs_off_' + value)
-        rc, out = cli(['build', path, '-o', exe], env=env)
+        exe = os.path.join(sub, 'fs_off_' + value.strip())
+        rc, out = cli(['build', path, '-o', exe], env=env, cwd=sub)
         if rc != 0:
             check(False, 'brat_files_off: build failed (%r)' % out[:200])
             return
         r = subprocess.run([exe], capture_output=True, text=True, env=env,
-                           cwd=TMP, timeout=120)
-        ri, oi = cli(['run', '--interp', path], env=env)
+                           cwd=sub, timeout=120)
+        if os.path.exists(escaped):
+            ex_after_exe = True
+            os.unlink(escaped)
+        else:
+            ex_after_exe = False
+        ri, oi = cli(['run', '-O0', path], env=env, cwd=sub)
         expected = "Ok(" if allow else "Err("
         check(expected in r.stdout and expected in oi and r.stdout == oi,
               'brat_files: BRAT_FILES=%r diverged, got %r / %r'
               % (value, r.stdout, oi))
-        check(os.path.exists(escaped) == allow,
-              'brat_files: BRAT_FILES=%r outside file exists=%r' %
-              (value, os.path.exists(escaped)))
+        check(ex_after_exe == allow and os.path.exists(escaped) == allow,
+              'brat_files: BRAT_FILES=%r outside file exists=%r/%r' %
+              (value, ex_after_exe, os.path.exists(escaped)))
         if os.path.exists(escaped):
             os.unlink(escaped)
 
@@ -486,13 +495,136 @@ def test_fast_shortcircuit_And_or_multi_source_borrow():
           'multi-source borrow escape must be rejected (%r)' % out_c)
 
 
+def test_deployed_base_and_crt_guards():
+    bdir = os.path.join(TMP, 'build_origin')
+    ddir = os.path.join(TMP, 'deploy_target')
+    os.makedirs(bdir, exist_ok=True)
+    os.makedirs(ddir, exist_ok=True)
+    bsrc = os.path.join(bdir, 'app.brat')
+    with open(bsrc, 'w', encoding='utf-8') as f:
+        f.write('fn main() -> i64 {\n  print(read_file("local.txt"))\n  print(read_file("../secret.txt"))\n  return 0\n}\n')
+    dexe = os.path.join(ddir, 'app')
+    rc, out = cli(['build', bsrc, '-o', dexe])
+    check(rc == 0, 'deployed build failed: %r' % out[:200])
+    shutil.rmtree(bdir)
+    with open(os.path.join(ddir, 'local.txt'), 'w', encoding='utf-8') as f:
+        f.write('hello-deploy')
+    with open(os.path.join(TMP, 'secret.txt'), 'w', encoding='utf-8') as f:
+        f.write('top-secret')
+    r = subprocess.run([dexe], capture_output=True, text=True, cwd=ddir, env=ENV, timeout=60)
+    check(r.returncode == 0 and "Ok('hello-deploy')" in r.stdout and "Err(" in r.stdout,
+          'deployed vbase_set failed: rc=%d out=%r' % (r.returncode, r.stdout + r.stderr))
+
+    c_src = r'''
+#define BRAT_CRT_MASK 0xFFFFu
+#include "crt.h"
+#include <locale.h>
+BFN Val vcall_any(Val fn, Vec *a) { (void)fn; (void)a; return vnil(); }
+int main(void) {
+    /* 1. Uninitialized vbase_ready must fail closed on relative lib_open */
+    Val bad_lib = vlib_open(vlit("./nonexistent_plugin.so"));
+    if (bad_lib.tag != V_TAG || strcmp(bad_lib.as.tv->tag, "err") != 0) return 11;
+    /* 2. Root base directory confinement */
+    vbase_set("/");
+    const char *cp = vconfine("/tmp");
+    if (!cp || strncmp(cp, "/", 1) != 0) return 12;
+    /* 3. Dual-pipe proc_run when STDOUT_FILENO (1) is closed in parent */
+    setenv("BRAT_EXEC", "1", 1);
+    int saved_out = dup(STDOUT_FILENO);
+    close(STDOUT_FILENO);
+    Vec *args = vvec();
+    vec_push(args, vlit("-c"));
+    vec_push(args, vlit("printf out_msg; printf err_msg >&2"));
+    Val pr = vproc_run_to(vlit("/bin/sh"), vvecv(args), vint(5000));
+    dup2(saved_out, STDOUT_FILENO);
+    close(saved_out);
+    if (pr.tag != V_TAG || strcmp(pr.as.tv->tag, "ok") != 0) return 13;
+    Map *pm = pr.as.tv->items[0].as.map;
+    Val *so = map_get(pm, "out");
+    Val *se = map_get(pm, "err");
+    if (!so || !se || strcmp(vstr_c(so), "out_msg") != 0 || strcmp(vstr_c(se), "err_msg") != 0) return 14;
+    /* 4. Locale-independent float & JSON parsing */
+    setlocale(LC_NUMERIC, "de_DE.UTF-8");
+    setlocale(LC_NUMERIC, "fr_FR.UTF-8");
+    int ok = 0;
+    if (_bstrtod_c("1.5", 3, &ok) != 1.5 || !ok) return 15;
+    if (_bstrtod_c("1,5", 3, &ok) != 0.0 || ok) return 16;
+    Val pf = vparse_float(vlit("2.25"));
+    if (pf.tag != V_TAG || strcmp(pf.as.tv->tag, "ok") != 0 || pf.as.tv->items[0].as.fval != 2.25) return 17;
+    Val pfc = vparse_float(vlit("2,25"));
+    if (pfc.tag != V_TAG || strcmp(pfc.as.tv->tag, "err") != 0) return 18;
+    Val jp = vjson_parse(vlit("[1.5, -0.25]"));
+    if (jp.tag != V_TAG || strcmp(jp.as.tv->tag, "ok") != 0) return 19;
+    printf("crt-guards-ok\n");
+    return 0;
+}
+'''
+    cf = os.path.join(TMP, 'crt_guards.c')
+    cexe = os.path.join(TMP, 'crt_guards')
+    with open(cf, 'w', encoding='utf-8') as f:
+        f.write(c_src)
+    cc = subprocess.run(['cc', '-std=gnu11', '-O1', '-I', ENGINE, cf, '-o', cexe,
+                         '-lpthread', '-ldl', '-lm'], capture_output=True, text=True)
+    check(cc.returncode == 0, 'crt_guards compile failed: %r' % (cc.stderr or '')[-300:])
+    if cc.returncode == 0:
+        cr = subprocess.run([cexe], capture_output=True, text=True, timeout=60)
+        check(cr.returncode == 0 and cr.stdout == 'crt-guards-ok\n',
+              'crt_guards failed: rc=%d out=%r err=%r' % (cr.returncode, cr.stdout, cr.stderr))
+
+    # Foreign-thread callback MT safety
+    cb_c = os.path.join(TMP, 'mt_cb_driver.c')
+    with open(cb_c, 'w', encoding='utf-8') as f:
+        f.write('#include <pthread.h>\n'
+                '#include <stdint.h>\n'
+                'typedef int64_t (*cb_fn)(int64_t);\n'
+                'static void *worker(void *arg) { cb_fn fn = (cb_fn)arg; for (int i = 0; i < 100; i++) fn(i); return 0; }\n'
+                'int64_t run_foreign_threads(cb_fn fn) {\n'
+                '  pthread_t th[4];\n'
+                '  for (int i = 0; i < 4; i++) pthread_create(&th[i], 0, worker, (void *)fn);\n'
+                '  for (int i = 0; i < 4; i++) pthread_join(th[i], 0);\n'
+                '  return 400;\n'
+                '}\n')
+    cb_h = os.path.join(TMP, 'mt_cb_driver.h')
+    with open(cb_h, 'w', encoding='utf-8') as f:
+        f.write('#include <stdint.h>\nint64_t run_foreign_threads(int64_t (*fn)(int64_t));\n')
+    cb_brat = write('mt_cb.brat',
+                    'extern fn run_foreign_threads(cb: fn(i64) -> i64 thread(any)) -> i64\n'
+                    'fn on_item(x: i64) -> i64 {\n'
+                    '  let tmp = [x, x + 1]\n'
+                    '  let copy = tmp.copy()\n'
+                    '  return copy[0]\n'
+                    '}\n'
+                    'fn main() -> i64 {\n'
+                    '  let n = run_foreign_threads("on_item")\n'
+                    '  print(n)\n'
+                    '  return 0\n'
+                    '}\n')
+    emitted = subprocess.run(_cxx.cli_args('emit-c', '--unsafe-ffi', cb_brat), capture_output=True, text=True, timeout=120)
+    rc_e, out_e = emitted.returncode, emitted.stdout
+    check(rc_e == 0, 'mt_cb emit-c failed: %r' % out_e[:200])
+    if rc_e == 0:
+        cb_gen_c = os.path.join(TMP, 'mt_cb_gen.c')
+        cb_exe = os.path.join(TMP, 'mt_cb_exe')
+        with open(cb_gen_c, 'w', encoding='utf-8') as f:
+            f.write(out_e[out_e.index('#define'):] if '#define' in out_e else out_e)
+        cc_mt = subprocess.run(['cc', '-std=gnu11', '-O1', '-fsanitize=address,undefined', '-I', ENGINE,
+                                cb_gen_c, cb_c, '-o', cb_exe, '-lpthread', '-ldl', '-lm'],
+                               capture_output=True, text=True)
+        check(cc_mt.returncode == 0, 'mt_cb cc failed: %r' % (cc_mt.stderr or '')[-300:])
+        if cc_mt.returncode == 0:
+            rmt = subprocess.run([cb_exe], capture_output=True, text=True, timeout=60)
+            check(rmt.returncode == 0 and rmt.stdout == '400\n',
+                  'mt_cb failed: rc=%d out=%r err=%r' % (rmt.returncode, rmt.stdout, rmt.stderr[-400:]))
+
+
 def main():
     for fn in (test_trigraph, test_arena_gate, test_brat_files_off,
                test_vnorm_cap, test_vlong_range, test_mcp_body_cap, test_fetch_url_file_scheme,
                test_unsafe_is_not_a_switch, test_write_file_symlink_escape,
                test_read_file_nul_rejected, test_env_get_credentials_refused,
                test_os_bytes_argv_env, test_os_bytes_egress,
-               test_fast_shortcircuit_And_or_multi_source_borrow):
+               test_fast_shortcircuit_And_or_multi_source_borrow,
+               test_deployed_base_and_crt_guards):
         try:
             fn()
         except Exception as e:  # noqa: BLE001
