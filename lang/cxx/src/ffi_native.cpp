@@ -40,6 +40,7 @@
 #endif
 #else
 #include <dlfcn.h>
+#include <fcntl.h>
 #if defined(__linux__) && defined(__GLIBC__)
 #include <link.h>
 #endif
@@ -1131,6 +1132,8 @@ static bool write_temp_probe_c(const char *prefix, const std::string &body, std:
 #else
     int pfd[2];
     if (pipe(pfd) != 0) return false;
+    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
         close(pfd[0]);
@@ -1140,9 +1143,11 @@ static bool write_temp_probe_c(const char *prefix, const std::string &body, std:
     if (pid == 0) {
         setpgid(0, 0);
         close(pfd[0]);
-        dup2(pfd[1], STDOUT_FILENO);
-        dup2(pfd[1], STDERR_FILENO);
-        close(pfd[1]);
+        if (pfd[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
+        else dup2(pfd[1], STDOUT_FILENO);
+        if (pfd[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
+        else dup2(pfd[1], STDERR_FILENO);
+        if (pfd[1] > 2) close(pfd[1]);
         std::vector<char *> cargv;
         std::vector<std::string> copy = argv;
         for (auto &s : copy) cargv.push_back(s.data());

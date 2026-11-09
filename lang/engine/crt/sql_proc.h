@@ -3,7 +3,6 @@
 #if !defined(_WIN32)
 typedef struct _BSqlApi {
     int ready;
-    int (*open)(const char *, void **);
     int (*open_v2)(const char *, void **, int, const char *);
     int (*busy_timeout)(void *, int);
     int (*close_v2)(void *);
@@ -102,7 +101,6 @@ static int _bsql_init(void) {
         BMUTEX_UNLOCK(&_bsql_mu);
         return 0;
     }
-    *(void **)&_bsql.open = dlsym(h, "sqlite3_open");
     *(void **)&_bsql.open_v2 = dlsym(h, "sqlite3_open_v2");
     *(void **)&_bsql.busy_timeout = dlsym(h, "sqlite3_busy_timeout");
     *(void **)&_bsql.close_v2 = dlsym(h, "sqlite3_close_v2");
@@ -127,7 +125,7 @@ static int _bsql_init(void) {
     *(void **)&_bsql.free_mem = dlsym(h, "sqlite3_free");
     *(void **)&_bsql.errmsg = dlsym(h, "sqlite3_errmsg");
     *(void **)&_bsql.changes = dlsym(h, "sqlite3_changes");
-    if ((!_bsql.open && !_bsql.open_v2) || !_bsql.open_v2 || !_bsql.set_authorizer ||
+    if (!_bsql.open_v2 || !_bsql.set_authorizer ||
         !_bsql.busy_timeout || !_bsql.close_v2 || !_bsql.prepare_v2 ||
         !_bsql.bind_int64 || !_bsql.bind_double || !_bsql.bind_text || !_bsql.bind_null ||
         !_bsql.step || !_bsql.column_count || !_bsql.column_name || !_bsql.column_type ||
@@ -261,10 +259,6 @@ BFN Val vsql_open(Val pv) {
      * 0x01000000 = NOFOLLOW (never pass SQLITE_OPEN_URI). */
     int sflags = 0x00000002 | 0x00000004 | 0x00008000 | (confined ? 0x01000000 : 0);
     int orc = _bsql.open_v2(use_path, &db, sflags, NULL);
-    if (orc == 21 /* SQLITE_MISUSE on pre-3.31 SQLite */ && confined) {
-        if (db) { _bsql.close_v2(db); db = NULL; }
-        orc = _bsql.open_v2(use_path, &db, 0x00000002 | 0x00000004 | 0x00008000, NULL);
-    }
     if (orc != 0 || !db) {
         const char *em = db ? _bsql.errmsg(db) : "sqlite3_open_v2 failed";
         Val r = (confined && em && strstr(em, "symbolic link"))
@@ -431,6 +425,11 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
     }
     Vec *pv = paramv.as.vec;
     for (bint i = 0; i < pv->len; i++) {
+        if (i >= 0x7ffffffe) {
+            _bsql.finalize(stmt);
+            _vsql_release(slot);
+            return verr("too many sqlite parameters");
+        }
         Val el = pv->items[i];
         int idx = (int)(i + 1);
         int brc = 0;
@@ -481,7 +480,22 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
             Map *row = vmap("");
             for (int c = 0; c < ncols; c++) {
                 const char *cname = _bsql.column_name(stmt, c);
-                size_t cnlen = cname ? strlen(cname) : 0;
+                if (!cname) cname = "";
+                size_t cnlen = strlen(cname);
+                if (!utf8_valid(cname, (bint)cnlen)) {
+                    vrc_dec(vstruct(row));
+                    _bsql.finalize(stmt);
+                    _vsql_release(slot);
+                    vrc_dec(vvecv(rows));
+                    return verr("invalid utf-8 in sqlite column name");
+                }
+                if (cnlen == 5 && memcmp(cname, "$type", 5) == 0) {
+                    vrc_dec(vstruct(row));
+                    _bsql.finalize(stmt);
+                    _vsql_release(slot);
+                    vrc_dec(vvecv(rows));
+                    return verr("map key \"$type\" is reserved");
+                }
                 int cty = _bsql.column_type(stmt, c);
                 Val cv = vnil();
                 size_t cell_cost = cnlen + 32;
@@ -539,7 +553,7 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
                     return verr("sql_query exceeded result size limit");
                 }
                 total_bytes += cell_cost;
-                map_set(row, cname ? cname : "", cv);
+                map_set_v(row, cnlen ? vstrn(cname, (bint)cnlen) : vstr_sso("", 0), cv);
             }
             vec_push(rows, vstruct(row));
         } else if (s == 101 /* SQLITE_DONE */) {
@@ -674,6 +688,15 @@ static char *_vbytes_to_cstr(Vec *v) {
     return s;
 }
 
+#if !defined(_WIN32)
+static int _vpipe_cloexec(int p[2]) {
+    if (pipe(p) != 0) return -1;
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    fcntl(p[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+}
+#endif
+
 BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     if (cmd.tag != V_STR || vstr_empty(cmd)) return verr("proc_run wants non-empty command string");
     if (vstr_has_nul(&cmd)) return verr("embedded NUL in command string");
@@ -710,16 +733,12 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     return verr("proc_run unsupported on this platform");
 #else
     int out_p[2] = {-1, -1}, err_p[2] = {-1, -1}, ex_p[2] = {-1, -1};
-    if (pipe(out_p) != 0) return verr_os("pipe");
-    if (pipe(err_p) != 0) { close(out_p[0]); close(out_p[1]); return verr_os("pipe"); }
-    if (pipe(ex_p) != 0) {
+    if (_vpipe_cloexec(out_p) != 0) return verr_os("pipe");
+    if (_vpipe_cloexec(err_p) != 0) { close(out_p[0]); close(out_p[1]); return verr_os("pipe"); }
+    if (_vpipe_cloexec(ex_p) != 0) {
         close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
         return verr_os("pipe");
     }
-    fcntl(out_p[0], F_SETFD, FD_CLOEXEC);
-    fcntl(err_p[0], F_SETFD, FD_CLOEXEC);
-    fcntl(ex_p[0], F_SETFD, FD_CLOEXEC);
-    fcntl(ex_p[1], F_SETFD, FD_CLOEXEC);
     char **cargv = (char **)calloc((size_t)av->len + 2, sizeof(char *));
     if (!cargv) {
         close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
@@ -774,10 +793,15 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
         close(out_p[0]);
         close(err_p[0]);
         close(ex_p[0]);
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); if (devnull > 2) close(devnull); }
-        dup2(out_p[1], STDOUT_FILENO);
-        dup2(err_p[1], STDERR_FILENO);
+        int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (devnull >= 0) {
+            if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
+            else { dup2(devnull, STDIN_FILENO); close(devnull); }
+        }
+        if (out_p[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
+        else dup2(out_p[1], STDOUT_FILENO);
+        if (err_p[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
+        else dup2(err_p[1], STDERR_FILENO);
         if (out_p[1] > 2) close(out_p[1]);
         if (err_p[1] > 2) close(err_p[1]);
         const char *prog = cargv[0];

@@ -163,21 +163,26 @@ BFN Val vsplit_once(Val s, Val sep) {
 BFN Val vparse_int(Val s) {
     if (s.tag != V_STR) { vraise("no method parse_int"); return vunwind; }
     const char *p = vstr_c(&s);
-    while (vis_space(*p)) p++;
+    const char *end = p + vstr_len_fast(&s);
+    while (p < end && vis_space(*p)) p++;
     const char *q = p;
-    if (*q == '+' || *q == '-') q++;
-    if (!(*q >= '0' && *q <= '9')) { Vec *a = vvec(); vec_push(a, vstr("not a number")); return vtagv("err", a); }
+    if (q < end && (*q == '+' || *q == '-')) q++;
+    if (!(q < end && *q >= '0' && *q <= '9')) {
+        Vec *a = vvec();
+        vec_push(a, vstr("not a number"));
+        return vtagv("err", a);
+    }
     uint64_t acc = 0;
     int over = 0;
-    while (*q >= '0' && *q <= '9') {
+    while (q < end && *q >= '0' && *q <= '9') {
         unsigned d = (unsigned)(*q - '0');
         if (acc > (UINT64_MAX - d) / 10ULL) over = 1;
         else acc = acc * 10ULL + d;
         q++;
     }
-    while (vis_space(*q)) q++;
+    while (q < end && vis_space(*q)) q++;
     Vec *a = vvec();
-    if (*q) { vec_push(a, vstr("not a number")); return vtagv("err", a); }
+    if (q != end) { vec_push(a, vstr("not a number")); return vtagv("err", a); }
     /* -2^63 is the one magnitude a negative number may have and a positive one may not. */
     if (over || acc > ((*p == '-') ? (1ULL << 63) : (1ULL << 63) - 1)) {
         vec_push(a, vstr("number out of range"));
@@ -238,17 +243,17 @@ BFN Val vtagof(Val v) {
     for (int i = 0; i < seen; i++) {
         if (strcmp(_vtagof_cache[i].name, name) == 0) return _vtagof_cache[i].v;
     }
-    Val s = vstr(name);
-    if (!s.sso && s.as.str) { ((BHead *)s.as.str - 1)->rc = -1; s.imm = 1; }
     BMUTEX_LOCK(&_vtagof_mu);
-    if (_vtagof_n < 512) {
-        for (int i = 0; i < _vtagof_n; i++) {
-            if (strcmp(_vtagof_cache[i].name, name) == 0) {
-                Val hit = _vtagof_cache[i].v;
-                BMUTEX_UNLOCK(&_vtagof_mu);
-                return hit;
-            }
+    for (int i = 0; i < _vtagof_n; i++) {
+        if (strcmp(_vtagof_cache[i].name, name) == 0) {
+            Val hit = _vtagof_cache[i].v;
+            BMUTEX_UNLOCK(&_vtagof_mu);
+            return hit;
         }
+    }
+    Val s = vstr(name);
+    if (_vtagof_n < 512) {
+        if (!s.sso && s.as.str) { ((BHead *)s.as.str - 1)->rc = -1; s.imm = 1; }
         _vtagof_cache[_vtagof_n].name = name;
         _vtagof_cache[_vtagof_n].v = s;
 #if defined(__GNUC__) || defined(__clang__)
@@ -393,39 +398,49 @@ BFN bint vsprint_len_q(Val v, bint q) {
 
 BFN bint vsprint_len(Val v) { return vsprint_len_q(v, 0); }
 BFN void vlogv(const char *lvl, Vec *a) {
-    bint total = 0, i;
+    size_t total = 0;
+    bint i;
     for (i = 0; i < a->len; i++) {
-        if (i) total += 1;
-        total += vsprint_len(a->items[i]);
+        if (i) {
+            if (total >= (size_t)BRAT_MAX_STR) { vraise("out of memory"); return; }
+            total += 1;
+        }
+        bint sl = vsprint_len(a->items[i]);
         if (verr_pending()) return;
+        if (sl < 0 || (size_t)sl > (size_t)BRAT_MAX_STR - total) {
+            vraise("out of memory");
+            return;
+        }
+        total += (size_t)sl;
     }
     char *buf = (char *)malloc(total + 1);
     if (!buf) vfatal_oom();
-    bint n = 0;
+    size_t n = 0;
     for (i = 0; i < a->len; i++) {
         if (i) buf[n++] = ' ';
-        n += vsprint(a->items[i], buf + n);
+        n += (size_t)vsprint(a->items[i], buf + n);
     }
     buf[n] = 0;
-    
+    BRAT_PRINT_LOCK();
     printf("{\"ts\": %.7f, \"lvl\": \"%s\", \"msg\": \"", vtime(), lvl);
-    for (char *p = buf; *p; p++) {
-        if (*p == '"' || *p == '\\') { putchar('\\'); putchar(*p); }
-        else if (*p == '\n') printf("\\n");
-        else if (*p == '\r') printf("\\r");
-        else if (*p == '\t') printf("\\t");
-        else if ((unsigned char)*p < 0x20) printf("\\u%04x", (unsigned char)*p);
-        else putchar((unsigned char)*p);
+    for (size_t j = 0; j < n; j++) {
+        unsigned char ch = (unsigned char)buf[j];
+        if (ch == '"' || ch == '\\') { putchar('\\'); putchar(ch); }
+        else if (ch == '\n') printf("\\n");
+        else if (ch == '\r') printf("\\r");
+        else if (ch == '\t') printf("\\t");
+        else if (ch < 0x20) printf("\\u%04x", ch);
+        else putchar(ch);
     }
     printf("\"}\n");
     fflush(stdout);
+    BRAT_PRINT_UNLOCK();
     free(buf);
 }
 BFN Val vpush(Val v, Val x) {
     Vec *w = vvec_of_m(v, "push");
     if (verr_pending()) { vrc_dec(x); return vunwind; }
-    vec_push(w, x);
-    return vint(w->len);
+    return vint(vec_push_len(w, x));
 }
 BFN Val vpop(Val v) {
     Vec *w = vvec_of_m(v, "pop");
@@ -441,7 +456,7 @@ BFN Val vfirst(Val v) {
     if (verr_pending()) return vunwind;
     BRAT_CTR_LOCK_OBJ(w);
     if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
-    Val r = w->items[0];
+    Val r = vrc_inc(w->items[0]);
     BRAT_CTR_UNLOCK_OBJ(w);
     return r;
 }
@@ -450,7 +465,7 @@ BFN Val vlast(Val v) {
     if (verr_pending()) return vunwind;
     BRAT_CTR_LOCK_OBJ(w);
     if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
-    Val r = w->items[w->len - 1];
+    Val r = vrc_inc(w->items[w->len - 1]);
     BRAT_CTR_UNLOCK_OBJ(w);
     return r;
 }
@@ -461,18 +476,22 @@ static int vcmp_q(const void *pa, const void *pb) {
 BFN Val vsort(Val v) {
     Vec *w = vvec_of_m(v, "sort");
     if (verr_pending()) return vunwind;
-    if (vmixed(w)) { vraise("type error in <"); return vunwind; }
+    BRAT_CTR_LOCK_OBJ(w);
+    if (vmixed(w)) { BRAT_CTR_UNLOCK_OBJ(w); vraise("type error in <"); return vunwind; }
     if (w->len > 1) {
         qsort(w->items, (size_t)w->len, sizeof(Val), vcmp_q);
-        if (verr_pending()) return vunwind;
+        if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
     }
+    BRAT_CTR_UNLOCK_OBJ(w);
     return v;
 }
 BFN Val vrev(Val v) {
     Vec *w = vvec_of_m(v, "rev");
     if (verr_pending()) return vunwind;
     Vec *o = vvec();
-    for (bint i = w->len - 1; i >= 0; i--) vec_push(o, vrc_inc(w->items[i]));
+    BRAT_CTR_LOCK_OBJ(w);
+    for (bint i = w->len - 1; i >= 0; i--) vec_push_raw(o, vrc_inc(w->items[i]));
+    BRAT_CTR_UNLOCK_OBJ(w);
     return vvecv(o);
 }
 BFN Val vins(Val v, Val i, Val x) {
@@ -525,17 +544,20 @@ BFN Val vdel_at(Val v, Val i) {
 BFN Val vslice(Val v, Val a, Val b) {
     Vec *w = vvec_of_m(v, "slice");
     if (verr_pending()) return vunwind;
-    bint n = w->len, x = 0, y = 0;
+    bint x = 0, y = 0;
     if (!vmeth_int(a, "slice", &x)) return vunwind;
     if (!vmeth_int(b, "slice", &y)) return vunwind;
+    Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(w);
+    bint n = w->len;
     if (x < 0) x = (x < -n) ? 0 : x + n;
     if (x < 0) x = 0;
     if (x > n) x = n;
     if (y < 0) y = (y < -n) ? 0 : y + n;
     if (y < 0) y = 0;
     if (y > n) y = n;
-    Vec *o = vvec();
-    for (bint i = x; i < y; i++) vec_push(o, vrc_inc(w->items[i]));
+    for (bint i = x; i < y; i++) vec_push_raw(o, vrc_inc(w->items[i]));
+    BRAT_CTR_UNLOCK_OBJ(w);
     return vvecv(o);
 }
 BFN Val vsum(Val v) {
@@ -544,49 +566,59 @@ BFN Val vsum(Val v) {
     uint64_t acc = 0;
     double dl = 0;
     int isf = 0;
+    BRAT_CTR_LOCK_OBJ(w);
     for (bint i = 0; i < w->len; i++) {
         Val x = w->items[i];
         if (x.tag == V_INT || x.tag == V_BOOL) acc += (uint64_t)x.as.ival;
         else if (x.tag == V_FLOAT) { dl += x.as.fval; isf = 1; }
-        else { vraise("sum of non-numeric"); return vunwind; }
+        else { BRAT_CTR_UNLOCK_OBJ(w); vraise("sum of non-numeric"); return vunwind; }
     }
+    BRAT_CTR_UNLOCK_OBJ(w);
     if (isf) return vfloat(dl + (double)(bint)acc);
     return vint((bint)acc);
 }
 BFN Val vmin(Val v) {
     Vec *w = vvec_of_m(v, "min");
     if (verr_pending()) return vunwind;
-    if (vmixed(w)) { vraise("type error in <"); return vunwind; }
-    if (!w->len) return vnil();
+    BRAT_CTR_LOCK_OBJ(w);
+    if (vmixed(w)) { BRAT_CTR_UNLOCK_OBJ(w); vraise("type error in <"); return vunwind; }
+    if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
     Val r = w->items[0];
     for (bint i = 1; i < w->len; i++) {
         if (vcmp(w->items[i], r) < 0) r = w->items[i];
-        if (verr_pending()) return vunwind;
+        if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
     }
+    r = vrc_inc(r);
+    BRAT_CTR_UNLOCK_OBJ(w);
     return r;
 }
 BFN Val vmax(Val v) {
     Vec *w = vvec_of_m(v, "max");
     if (verr_pending()) return vunwind;
-    if (vmixed(w)) { vraise("type error in <"); return vunwind; }
-    if (!w->len) return vnil();
+    BRAT_CTR_LOCK_OBJ(w);
+    if (vmixed(w)) { BRAT_CTR_UNLOCK_OBJ(w); vraise("type error in <"); return vunwind; }
+    if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
     Val r = w->items[0];
     for (bint i = 1; i < w->len; i++) {
         if (vcmp(w->items[i], r) > 0) r = w->items[i];
-        if (verr_pending()) return vunwind;
+        if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
     }
+    r = vrc_inc(r);
+    BRAT_CTR_UNLOCK_OBJ(w);
     return r;
 }
 BFN Val venum(Val v) {
     Vec *w = vvec_of_m(v, "enumerate");
     if (verr_pending()) return vunwind;
     Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(w);
     for (bint i = 0; i < w->len; i++) {
         Vec *p = vvec();
-        vec_push(p, vint(i));
-        vec_push(p, vrc_inc(w->items[i]));
-        vec_push(o, vvecv(p));
+        vec_push_raw(p, vint(i));
+        vec_push_raw(p, vrc_inc(w->items[i]));
+        vec_push_raw(o, vvecv(p));
     }
+    BRAT_CTR_UNLOCK_OBJ(w);
     return vvecv(o);
 }
 BFN Val vmap_get_or(Val m, Val k, Val d) {
@@ -610,33 +642,50 @@ BFN_HOT Val vmap_get_or_ic(Val m, const char *k, Val d, BFieldIC *ic) {
 BFN Val vmap_items(Val m) {
     if (m.tag != V_STRUCT) { vraise("items of non-map"); return vunwind; }
     Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     for (bint i = 0; i < m.as.map->used; i++) {
         if (m.as.map->keys[i].tag == V_MOVED) continue;
         Vec *p = vvec();
-        vec_push(p, vrc_inc(m.as.map->keys[i]));
-        vec_push(p, vrc_inc(m.as.map->vals[i]));
-        vec_push(o, vvecv(p));
+        vec_push_raw(p, vrc_inc(m.as.map->keys[i]));
+        vec_push_raw(p, vrc_inc(m.as.map->vals[i]));
+        vec_push_raw(o, vvecv(p));
     }
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return vvecv(o);
 }
 BFN Val vmap_vals(Val m) {
     if (m.tag != V_STRUCT) { vraise("vals of non-map"); return vunwind; }
     Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     for (bint i = 0; i < m.as.map->used; i++)
-        if (m.as.map->keys[i].tag != V_MOVED) vec_push(o, vrc_inc(m.as.map->vals[i]));
+        if (m.as.map->keys[i].tag != V_MOVED) vec_push_raw(o, vrc_inc(m.as.map->vals[i]));
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return vvecv(o);
 }
 BFN Val vcopy(Val v) {
     if (v.tag == V_VEC) {
         Vec *o = vvec();
-        for (bint i = 0; i < v.as.vec->len; i++) vec_push(o, vrc_inc(v.as.vec->items[i]));
+        BRAT_CTR_LOCK_OBJ(v.as.vec);
+        for (bint i = 0; i < v.as.vec->len; i++) vec_push_raw(o, vrc_inc(v.as.vec->items[i]));
+        BRAT_CTR_UNLOCK_OBJ(v.as.vec);
         return vvecv(o);
     }
     if (v.tag == V_STRUCT) {
-        Map *m = vmap(v.as.map->type);
-        for (bint i = 0; i < v.as.map->used; i++)
-            if (v.as.map->keys[i].tag != V_MOVED)
-                map_set_v(m, vrc_inc(v.as.map->keys[i]), vrc_inc(v.as.map->vals[i]));
+        Map *src = v.as.map;
+        Map *m = vmap(src->type);
+        Vec *snap = vvec();
+        BRAT_CTR_LOCK_OBJ(src);
+        for (bint i = 0; i < src->used; i++) {
+            if (src->keys[i].tag != V_MOVED) {
+                vec_push_raw(snap, vrc_inc(src->keys[i]));
+                vec_push_raw(snap, vrc_inc(src->vals[i]));
+            }
+        }
+        BRAT_CTR_UNLOCK_OBJ(src);
+        for (bint i = 0; i + 1 < snap->len; i += 2)
+            map_set_v(m, snap->items[i], snap->items[i + 1]);
+        snap->len = 0;
+        vrc_dec(vvecv(snap));
         return vstruct(m);
     }
     if (v.tag == V_STR) return vrc_inc(v);
@@ -708,13 +757,31 @@ BFN Val vparse_float(Val s) {
     if (s.tag != V_STR) { vraise("no method parse_float"); return vunwind; }
     char *e;
     const char *p = vstr_c(&s);
-    while (vis_space(*p)) p++;
+    const char *end = p + vstr_len_fast(&s);
+    while (p < end && vis_space(*p)) p++;
     size_t n = vfloat_prefix(p);
     const char *tail = p + n;
-    while (vis_space(*tail)) tail++;
+    while (tail < end && vis_space(*tail)) tail++;
     Vec *a = vvec();
-    if (n == 0 || *tail) { vec_push(a, vstr("not a float")); return vtagv("err", a); }
-    double v = strtod(p, &e);
+    if (n == 0 || tail != end) { vec_push(a, vstr("not a float")); return vtagv("err", a); }
+    char probe[8];
+    snprintf(probe, sizeof probe, "%.1f", 1.5);
+    char dp = probe[1];
+    double v;
+    if (dp != '.' && memchr(p, '.', n) != NULL) {
+        char sbuf[128];
+        char * copy = (n < sizeof sbuf) ? sbuf : (char *)malloc(n + 1);
+        if (!copy) vfatal_oom();
+        memcpy(copy, p, n);
+        copy[n] = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (copy[i] == '.') copy[i] = dp;
+        }
+        v = strtod(copy, &e);
+        if (copy != sbuf) free(copy);
+    } else {
+        v = strtod(p, &e);
+    }
     vec_push(a, vfloat(v));
     return vtagv("ok", a);
 }
@@ -723,13 +790,29 @@ BFN Val vzip(Val a, Val b) {
     if (verr_pending()) return vunwind;
     if (b.tag != V_VEC) { vraise("method `zip`: bad argument"); return vunwind; }
     Vec *y = b.as.vec;
-    bint n = x->len < y->len ? x->len : y->len;
     Vec *o = vvec();
+    unsigned sx = BSTRIPE_IDX(x), sy = BSTRIPE_IDX(y);
+    if (_BRAT_MT()) {
+        if (sx == sy) {
+            BMUTEX_LOCK(&_brat_stripes[sx].mu);
+        } else if (sx < sy) {
+            BMUTEX_LOCK(&_brat_stripes[sx].mu);
+            BMUTEX_LOCK(&_brat_stripes[sy].mu);
+        } else {
+            BMUTEX_LOCK(&_brat_stripes[sy].mu);
+            BMUTEX_LOCK(&_brat_stripes[sx].mu);
+        }
+    }
+    bint n = x->len < y->len ? x->len : y->len;
     for (bint i = 0; i < n; i++) {
         Vec *p = vvec();
-        vec_push(p, vrc_inc(x->items[i]));
-        vec_push(p, vrc_inc(y->items[i]));
-        vec_push(o, vvecv(p));
+        vec_push_raw(p, vrc_inc(x->items[i]));
+        vec_push_raw(p, vrc_inc(y->items[i]));
+        vec_push_raw(o, vvecv(p));
+    }
+    if (_BRAT_MT()) {
+        BMUTEX_UNLOCK(&_brat_stripes[sx].mu);
+        if (sx != sy) BMUTEX_UNLOCK(&_brat_stripes[sy].mu);
     }
     return vvecv(o);
 }
@@ -740,13 +823,15 @@ BFN Val vchunks(Val v, Val n) {
     if (!vmeth_int(n, "chunks", &k)) return vunwind;
     if (k <= 0) { vraise("chunks wants n > 0"); return vunwind; }
     Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(w);
     for (bint i = 0; i < w->len; ) {
         bint end = (w->len - i > k) ? (i + k) : w->len;
         Vec *p = vvec();
-        for (bint j = i; j < end; j++) vec_push(p, vrc_inc(w->items[j]));
-        vec_push(o, vvecv(p));
+        for (bint j = i; j < end; j++) vec_push_raw(p, vrc_inc(w->items[j]));
+        vec_push_raw(o, vvecv(p));
         i = end;
     }
+    BRAT_CTR_UNLOCK_OBJ(w);
     return vvecv(o);
 }
 
@@ -758,18 +843,22 @@ BFN void vjprint_d(Val v, int d) {
     case V_BOOL: printf(v.as.b ? "true" : "false"); break;
     case V_INT: printf(BINT_FMT, (bint)v.as.ival); break;
     case V_FLOAT: printf("%s", vfmt_double(v.as.fval)); break;
-    case V_STR:
+    case V_STR: {
+        const char *p = vstr_c(&v);
+        size_t slen = vstr_len_fast(&v);
         printf("\"");
-        for (const char *p = vstr_c(&v); *p; p++) {
-            if (*p == '"' || *p == '\\') { putchar('\\'); putchar(*p); }
-            else if (*p == '\n') printf("\\n");
-            else if (*p == '\r') printf("\\r");
-            else if (*p == '\t') printf("\\t");
-            else if ((unsigned char)*p < 0x20) printf("\\u%04x", (unsigned char)*p);
-            else putchar((unsigned char)*p);
+        for (size_t j = 0; j < slen; j++) {
+            unsigned char ch = (unsigned char)p[j];
+            if (ch == '"' || ch == '\\') { putchar('\\'); putchar(ch); }
+            else if (ch == '\n') printf("\\n");
+            else if (ch == '\r') printf("\\r");
+            else if (ch == '\t') printf("\\t");
+            else if (ch < 0x20) printf("\\u%04x", ch);
+            else putchar(ch);
         }
         printf("\"");
         break;
+    }
     case V_VEC:
         printf("[");
         for (i = 0; i < v.as.vec->len; i++) { if (i) printf(", "); vjprint_d(v.as.vec->items[i], d + 1); }
@@ -849,12 +938,14 @@ BFN void vjson_str(const char *s) {
 }
 
 BFN void vfieldset(Val s, const char *k, Val v) {
-    Val *o;
-    if (s.tag != V_STRUCT || !(o = map_get(s.as.map, k))) { vraise("bad field set"); return; }
-    BRAT_CTR_LOCK_OBJ(s.as.map);
+    if (s.tag != V_STRUCT) { vrelease1(v); vraise("bad field set"); return; }
+    Map *m = s.as.map;
+    BRAT_CTR_LOCK_OBJ(m);
+    Val *o = map_get(m, k);
+    if (!o) { BRAT_CTR_UNLOCK_OBJ(m); vrelease1(v); vraise("bad field set"); return; }
     Val old = *o;
     *o = v;
-    BRAT_CTR_UNLOCK_OBJ(s.as.map);
+    BRAT_CTR_UNLOCK_OBJ(m);
     vrelease1(old);
 }
 BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic);
@@ -890,13 +981,13 @@ BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic) {
                 return;
             }
         } else {
+            BRAT_CTR_LOCK_OBJ(m);
             bint sl = ic->slots[0];
             if (!ic->shapes[0] && sl >= 0 && sl < m->used) {
                 Val kv = m->keys[sl];
                 if (kv.tag == V_STR) {
                     const char *ks = vstr_c(&kv);
                     if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
-                        BRAT_CTR_LOCK_OBJ(m);
                         Val old = m->vals[sl];
                         m->vals[sl] = v;
                         BRAT_CTR_UNLOCK_OBJ(m);
@@ -905,10 +996,30 @@ BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic) {
                     }
                 }
             }
+            bint at = map_find_cstr(m, k, strlen(k));
+            if (at < 0) {
+                BRAT_CTR_UNLOCK_OBJ(m);
+                vrelease1(v);
+                vraise("bad field set");
+                return;
+            }
+            ic->shapes[0] = 0;
+            ic->slots[0] = at;
+            Val old = m->vals[at];
+            m->vals[at] = v;
+            BRAT_CTR_UNLOCK_OBJ(m);
+            vrelease1(old);
+            return;
         }
     }
+    BRAT_CTR_LOCK_OBJ(m);
     bint at = map_find_cstr(m, k, strlen(k));
-    if (at < 0) { vrelease1(v); vraise("bad field set"); return; }
+    if (at < 0) {
+        BRAT_CTR_UNLOCK_OBJ(m);
+        vrelease1(v);
+        vraise("bad field set");
+        return;
+    }
     if (ic) {
         if (m->shape) {
             unsigned w = (unsigned)(ic->next & 3u);
@@ -920,7 +1031,6 @@ BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic) {
             ic->slots[0] = at;
         }
     }
-    BRAT_CTR_LOCK_OBJ(m);
     Val old = m->vals[at];
     m->vals[at] = v;
     BRAT_CTR_UNLOCK_OBJ(m);
@@ -973,7 +1083,7 @@ BFN Val vpred(Val obj, Val fn, const char *meth) {
             vrc_dec(fn); return vbool(0);
         }
         if (meth[0] == 'f' && ok) {
-            Val found = w->items[i];
+            Val found = vrc_inc(w->items[i]);
             vrc_dec(fn); return found;
         }
     }

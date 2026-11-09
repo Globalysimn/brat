@@ -1886,10 +1886,7 @@ static int build_one(const char *arg0, const std::string &file,
         args.push_back("-shared");
         if (pkind != "windows") args.push_back("-fPIC");
     }
-    // `-fwrapv` is what makes the native build agree with the interpreter on
-    // integer overflow. Signed overflow is undefined in C: without the flag the
-    // answer is the optimizer's, and an i64 sum that wraps is only "correct"
-    // until the next compiler version notices the loop bound cannot overflow.
+    // Pass `-fwrapv` so signed i64 overflow has defined two's-complement semantics.
     args.insert(args.end(), {"-std=gnu11", "-O2", "-fwrapv", "-I", engine.string()});
     if (debug_info) args.push_back("-g");
     if (!debug_info && !zig && target.empty() && link_flags.empty()) {

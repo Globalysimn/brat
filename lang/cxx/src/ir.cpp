@@ -10,13 +10,9 @@
 namespace ir {
 namespace {
 
-//
-// An interval over i64 with wrapping arithmetic, the way both backends define
-// `+`, `-` and `*`: `((int64_t)((uint64_t)a + (uint64_t)b))`. When the exact
-// range of a result leaves i64 the value wraps, so the interval of the wrapped
-// result is not the interval of the exact result; the pass answers "unknown"
-// there instead of pretending. A missed proof costs nothing, a wrong one
-// deletes a check that fires.
+// Interval domain over i64 with two's-complement wrapping (`+`, `-`, `*`).
+// If an exact interval exceeds `[INT64_MIN, INT64_MAX]`, return top rather than
+// unsoundly clamping a wrapped result.
 
 struct IV {
     bool top = true;

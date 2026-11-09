@@ -27,6 +27,7 @@
 #else
 #include <cerrno>
 #include <csignal>
+#include <fcntl.h>
 #include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -506,6 +507,10 @@ bool preprocess_header_cc(const std::string &path,
         err = "pipe failed";
         return false;
     }
+    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out_pipe[1], F_SETFD, FD_CLOEXEC);
+    fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
         close(out_pipe[0]); close(out_pipe[1]);
@@ -517,8 +522,10 @@ bool preprocess_header_cc(const std::string &path,
         setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
-        dup2(out_pipe[1], STDOUT_FILENO);
-        dup2(err_pipe[1], STDERR_FILENO);
+        if (out_pipe[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
+        else dup2(out_pipe[1], STDOUT_FILENO);
+        if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
+        else dup2(err_pipe[1], STDERR_FILENO);
         close(out_pipe[1]);
         close(err_pipe[1]);
         std::vector<char *> cargv;

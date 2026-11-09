@@ -213,11 +213,7 @@ bool ffi_int_result(const std::string &t) {
     return s.count(t) > 0;
 }
 
-// One table for the whole FFI boundary. Two ladders that disagree (a
-// declaration saying `int64_t`, a call site saying `short`) is how an ABI bug
-// is born -- it compiles, links and
-// corrupts the next stack slot. A width that is not here is refused instead of
-// being spelled as a machine word.
+// Single mapping from BRAT FFI scalar names to C types; unknown widths are rejected.
 static const std::map<std::string, std::string> &ffi_scalar_c() {
     static const std::map<std::string, std::string> t = {
         {"bool", "_Bool"},
@@ -350,7 +346,8 @@ std::optional<std::string> container_tmp(const std::string &val) {
 // call: a container literal's temp is a `Vec *`, released by the code that built
 // it, and `vdrop_temp` takes a `Val`.
 std::optional<std::string> owned_temp(const Expr &e, const std::string &val) {
-    if (e.k == EK::Call || e.k == EK::MCall || e.k == EK::Closure)
+    if (e.k == EK::Call || e.k == EK::MCall || e.k == EK::Closure ||
+        e.k == EK::Idx || e.k == EK::Field || e.k == EK::Quest)
         return (!val.empty() && val[0] == '_') ? std::optional<std::string>(val) : std::nullopt;
     // `"a" + "b" == "ab"`: the `+` binds its result to a temp, and the comparison
     // that consumes it is the end of its life -- nobody else names it. Only `+`:
@@ -617,6 +614,7 @@ const std::set<std::string> HEAP_METHODS = {
     "split_once", "lines", "chars", "slice", "map", "filter", "keys", "vals",
     "items", "entries", "values", "recv", "send", "parse_int", "parse_float",
     "rev", "pop", "del", "zip", "chunks", "enumerate",
+    "min", "max", "first", "last", "get", "find", "set",
 };
 
 // Builtins that hand back a fresh value the caller owns: a new vector, a new
@@ -637,7 +635,7 @@ const std::set<std::string> HEAP_CALLS = {
     "re_find", "re_captures", "re_replace",
     "strerror", "ptr_read_str", "ptr_read_struct",
     "tcp_listen", "tcp_connect", "tcp_accept", "tcp_close",
-    "tcp_recv", "tcp_send", "sbuf", "sbuf_str", "chan"};
+    "tcp_recv", "tcp_send", "sbuf", "sbuf_str", "chan", "tagof"};
 
 bool must_return(const StmtList &body) {
     if (body.empty() || body.back() == nullptr) return false;
@@ -755,6 +753,7 @@ struct Emitter {
     std::map<std::string, std::string> var_structs;
     std::deque<FnDecl> sra_fns;
     std::deque<StmtP> shadow_top_stmts;
+    std::map<const Stmt *, std::string> local_stmt_files;
     bool shadows_done = false;
     bool sra_done = false;
     int sra_seq = 0;
@@ -774,9 +773,13 @@ struct Emitter {
     std::string new_tmp(const char *p = "t") { tmp++; return cat("_", p, tmp); }
     void ln(const std::string &ind, const std::string &s) { out.push_back(ind + s); }
     std::string lookup_stmt_file(const Stmt *s) const {
-        if (s && stmt_files) {
-            auto it = stmt_files->find(s);
-            if (it != stmt_files->end() && !it->second.empty()) return it->second;
+        if (s) {
+            auto lit = local_stmt_files.find(s);
+            if (lit != local_stmt_files.end() && !lit->second.empty()) return lit->second;
+            if (stmt_files) {
+                auto it = stmt_files->find(s);
+                if (it != stmt_files->end() && !it->second.empty()) return it->second;
+            }
         }
         return !cur_src_file.empty() ? cur_src_file : root_src_file;
     }
@@ -873,9 +876,8 @@ struct Emitter {
     bool all_bool(const Expr &e);
     bool print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand, const std::string &kind,
                   const std::set<std::string> &intvars, const std::set<std::string> &vecvars = {});
-    // `returned`, when given, collects one entry per `return`: true when the
-    // value is float. A `f64` fast path that never returns one is refused below,
-    // so `fn a(x: f64) -> f64 { return 3 }` prints `3` on both backends.
+    // `returned`, when non-null, records whether each `return` expression is a
+    // float so `f64` fast paths do not alter integer return tags when unannotated.
     bool int_body(const StmtList &body, const std::map<std::string, FnEntry> &cand, const std::string &kind,
                   std::set<std::string> intvars, const std::set<std::string> &vecvars,
                   std::vector<bool> *returned = nullptr);
@@ -1010,7 +1012,7 @@ struct Emitter {
     void st_ptr_setidx(const std::string &elem, const Stmt &s, const std::string &ind);
     void emit_block(const StmtList &body, const std::string &ind);
     void drop_alias_temps(const StmtList &body, const std::string &ind);
-    void emit_defer(const Expr &e, const std::string &ind);
+    void emit_defer(const Expr &e, const std::string &ind, int line = 0);
     void emit_loop_exit(const std::string &k, const std::string &ind);
     std::string var_ref(const std::string &name);
     std::optional<std::string> place_root(const Expr &e);
@@ -2005,7 +2007,7 @@ std::string Emitter::fx(const Expr &e) {
 
 std::set<std::string> Emitter::may_fail() {
     std::function<bool(const Expr &)> touches = [&](const Expr &e) {
-        if (e.k == EK::Quest || e.k == EK::Idx) return true;
+        if (e.k == EK::Quest || e.k == EK::Idx || e.k == EK::Field) return true;
         if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) return true;
         if (e.k == EK::Call && (e.a == "raise" || e.a == "unwrap" || e.a == "unwrap_or" ||
                                 e.a == "assert" || e.a == "exit"))
@@ -2911,9 +2913,10 @@ static std::pair<std::string, std::vector<std::string>> parse_sig(const Expr &no
     return {ret, params};
 }
 
-// Methods that answer with a part of the receiver (an element): the part is lifted
-// out of the container before the temporary receiver is released.
-const std::set<std::string> PART_RESULT = {"min", "max", "first", "last", "get", "find"};
+// Builtin element-returning methods increment the element's reference count in
+// the runtime (`vfirst`/`vlast`/`vmin`/`vmax`/`vmap_get*`/`vpred`), so callers
+// receive an owned value and never borrow into a container slot.
+const std::set<std::string> PART_RESULT = {};
 
 // Methods that mutate the receiver and hand it back: the result is owned exactly
 // when the receiver was. `m.keys().sort()` is a container with no other name,
@@ -2926,12 +2929,13 @@ const std::set<std::string> FRESH_RESULT = {
     "vals", "sum", "index_of", "starts_with", "ends_with", "contains", "has",
     "get_or", "parse_int", "parse_float", "rev", "fold", "any", "all", "map",
     "filter", "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
-    "is_some", "is_none"};
-// True when evaluating `e` can raise: it calls something, or it divides. The
-// emitter uses this to check between a failing operand and the operator that
-// would otherwise read the placeholder value it left behind.
+    "is_some", "is_none", "min", "max", "first", "last", "get", "find", "set"};
+// True when evaluating `e` can raise: it calls something, indexes/projects,
+// unwraps `?`, or divides.
 static bool may_raise(const Expr &e) {
-    if (e.k == EK::Call || e.k == EK::MCall) return true;
+    if (e.k == EK::Call || e.k == EK::MCall ||
+        e.k == EK::Idx || e.k == EK::Field || e.k == EK::Quest)
+        return true;
     if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) return true;
     for (const auto &kid : e.kids)
         if (kid && may_raise(*kid)) return true;
@@ -2968,7 +2972,7 @@ static bool dec_able(const Expr &e, const std::set<std::string> &heap) {
         // was). Asked of the union, so a name only has to be in one of them.
         return heap.count(e.b) || HEAP_METHODS.count(e.b) || FRESH_RESULT.count(e.b);
     case EK::Field:
-        return !e.kids.empty() && dec_able(*e.kids[0], heap);
+        return true;
     case EK::Idx:
         // `a[i]` hands back a reference the holder owns (see vat_owned).
         return true;
@@ -3076,7 +3080,6 @@ V Emitter::ex(const Expr &e) {
         return ex_struct(e);
     case EK::Field: {
         V a = ex(*e.kids[0]);
-        std::string t = new_tmp("f");
         std::string fname = clit(e.b);
         std::string bail = err_bail();
         const bool owned = dec_able(*e.kids[0], heap_returns());
@@ -3088,25 +3091,21 @@ V Emitter::ex(const Expr &e) {
         std::string st = infer_expr_struct(e.kids[0].get(), var_structs);
         int slot = !st.empty() ? struct_field_slot(st, e.b) : -1;
         std::string drop_recv = owned ? cat("vdrop_temp(", recv, "); ") : std::string();
+        std::string v = new_tmp("v");
         if (slot >= 0) {
+            std::string t = new_tmp("f");
             int sid = canonical_struct_shape(st);
             a.pre.push_back(cat("Val *", t, " = vstruct_slot_ptr(", recv, ", &_shp[", sid, "], ",
                                 slot, ", \"", fname, "\");"));
             a.pre.push_back(cat("if (!", t, ") { ", drop_recv, bail, " }"));
+            a.pre.push_back(cat("Val ", v, " = vstruct_slot_read(", recv, ", ", t, ");"));
         } else {
-            a.pre.push_back(cat("if ((", recv, ").tag != V_STRUCT) { ", drop_recv, "vraise(\"no field ",
-                                fname, "\"); ", bail, " }"));
-            a.pre.push_back(cat("Val *", t, " = map_get_ic((", recv, ").as.map, \"", fname, "\", ",
+            a.pre.push_back(cat("Val ", v, " = vfield_map_get_ic(", recv, ", \"", fname, "\", ",
                                 next_fic(), ");"));
-            a.pre.push_back(cat("if (!", t, ") { ", drop_recv, "vraise(\"no field ", fname, "\"); ", bail, " }"));
+            a.pre.push_back(cat("if (bverr_unlikely()) { ", drop_recv, bail, " }"));
         }
-        if (owned) {
-            std::string v = new_tmp("v");
-            a.pre.push_back("Val " + v + " = vrc_inc(*" + t + ");");
-            a.pre.push_back("vdrop_temp(" + recv + ");");
-            return {a.pre, v};
-        }
-        return {a.pre, cat("(*", t, ")")};
+        if (owned) a.pre.push_back("vdrop_temp(" + recv + ");");
+        return {a.pre, v};
     }
     case EK::Idx: {
         if (std::string pe = ptr_elem(*e.kids[0]); !pe.empty())
@@ -4203,7 +4202,7 @@ V Emitter::part_of_temp(const V &a, const Expr &src, const std::string &open,
     std::optional<std::string> t = owned_temp(src, a.val);
     if (!t) {
         if (src.k == EK::Call || src.k == EK::MCall ||
-            src.k == EK::Idx || src.k == EK::Quest) {
+            src.k == EK::Idx || src.k == EK::Field || src.k == EK::Quest) {
             std::string hold = new_tmp("h");
             std::string r = new_tmp("a");
             std::vector<std::string> pre = a.pre;
@@ -4246,7 +4245,7 @@ V Emitter::borrow_builtin(const std::string &c_name, const ExprList &args) {
             cargs.push_back(h);
             drops.push_back(h);
         } else if ((arg->k == EK::Call || arg->k == EK::MCall ||
-                    arg->k == EK::Idx || arg->k == EK::Quest) &&
+                    arg->k == EK::Idx || arg->k == EK::Field || arg->k == EK::Quest) &&
                    dec_able(*arg, heap)) {
             std::string h = new_tmp("h");
             pre.push_back(cat("Val ", h, " = (", av.val, ");"));
@@ -4647,11 +4646,11 @@ V Emitter::ex_mcall(const Expr &e) {
         return {pre, tr};
     }
     V o = ex(*obj);
-    // `"a,b".split(",")` builds a container nothing else names: the receiver is
-    // released once the call returns, or every chain leaks its first link.
+    // `"a,b".split(",")` or `a[0].push(3)` builds or fetches a receiver nothing
+    // else names: release it once the call returns unless the method returns the
+    // receiver itself (`SELF_RESULT`).
     std::string recv;
-    if ((FRESH_RESULT.count(meth) || PART_RESULT.count(meth) || user_meths.count(meth)) &&
-        dec_able(*obj, heap_returns())) {
+    if (!SELF_RESULT.count(meth) && dec_able(*obj, heap_returns())) {
         recv = new_tmp("r");
         o.pre.push_back("Val " + recv + " = (" + o.val + ");");
         o.val = recv;
@@ -5515,20 +5514,22 @@ std::string Emitter::keep(const Expr &e, const std::string &val) {
     return cat("vrc_inc(", val, ")");
 }
 
-// An operand that becomes the value of `&&`, `||` or `or` has to arrive owned. A call hands back a
-// reference of its own and a bool or number holds none; anything else is borrowed.
 std::string Emitter::own_operand(const Expr &e, const std::string &val) {
-    if (is_imm_expr(e) || e.k == EK::Call) return val;
+    if (is_imm_expr(e)) return val;
+    if (e.k == EK::Call && dec_able(e, heap_returns())) return val;
     return keep(e, val);
 }
 
-// A condition only asks whether a value is true. `a && b` and `x or y` hand back one of their
-// operands as a reference of their own, which the test releases.
+// A condition only asks whether a value is true. Drop any temporary heap value
+// built to test the condition (`&&`/`||`/`or`, `xs[0]`, `p.s`, `f()`).
 std::string Emitter::truth(const Expr &e, const std::string &val, std::vector<std::string> &lines) {
-    if (!yields_operand(e)) return cat("vis_true(", val, ")");
+    if (is_imm_expr(e) || (!yields_operand(e) && !dec_able(e, heap_returns())))
+        return cat("vis_true(", val, ")");
+    const std::string tv = new_tmp("tv");
     const std::string ok = new_tmp("ok");
-    lines.push_back(cat("int ", ok, " = vis_true(", val, ");"));
-    lines.push_back(cat("vdrop_temp(", val, ");"));
+    lines.push_back(cat("Val ", tv, " = (", val, ");"));
+    lines.push_back(cat("int ", ok, " = vis_true(", tv, ");"));
+    lines.push_back(cat("vdrop_temp(", tv, ");"));
     return ok;
 }
 
@@ -5580,17 +5581,13 @@ Own Emitter::own_of(const Expr &e) {
         // payload -- a struct, a vector, a string -- allocated for the whole run.
         return Own::Owned;
     case EK::Field:
-        return Own::Borrow;   // read out of a struct: aliases it
+        return Own::Owned;    // `s.f` hands back its own reference
     case EK::Idx:
         return Own::Owned;    // `a[i]` hands back its own reference (vat_owned)
     case EK::Call:
     case EK::MCall:
-        // `Ok(x)`/`Err(x)`/`Some(x)` build a fresh tag on the spot, so its
-        // argument vector belongs to whoever holds the tag. Treating it as a
-        // copy left that vector, and every container inside it, allocated.
         if (e.k == EK::Call && (e.a == "Ok" || e.a == "Err" || e.a == "Some")) return Own::Owned;
-        // A callee that hands back a container or a string transfers a
-        // reference: arguments were shared before the call.
+        if (e.k == EK::MCall && SELF_RESULT.count(e.b)) return Own::Owned;
         return dec_able(e, heap_returns()) ? Own::Owned : Own::Copy;
     }
     return Own::Owned;
@@ -5619,16 +5616,8 @@ void Emitter::emit_drop(const std::string &name, const std::string &ind) {
     ln(ind, cat(sym[name].cn, " = vnil();"));
 }
 
-// Release every owned local at the single exit point. A `return` inside a
-// `match` arm jumps straight to the exit label, over the drop the end of the arm
-// emits; that drop is then dead code, and the value it was written for -- a
-// payload alias, a temporary tag -- leaked. Releasing here covers every path, and
-// releasing twice is harmless: a binding dropped on the way out is `vnil()` first.
-// `at_return` is a path that leaves through a `return`, and `skip` is the
-// binding it hands to the caller. A name one `return` transfers is shared for the
-// whole frame, so the exit drops skipped it on every other path too and whatever
-// it still held leaked -- `path_norm` built `out`, answered `"."` on an early
-// branch, and lost it.
+// Release owned locals at function exit. `at_return` marks an explicit `return`
+// path and `skip` names the binding transferred to the caller on that path.
 void Emitter::emit_fn_drops(const std::string &ind, const std::string &skip,
                             bool at_return, const Names &keep) {
     if (!at_return && skip.empty() && keep.empty() && frame_arr_n > 0) {
@@ -6088,7 +6077,7 @@ void Emitter::emit_loop_exit(const std::string &k, const std::string &ind) {
     ln(ind, k + ";");
 }
 
-void Emitter::emit_defer(const Expr &e, const std::string &ind) {
+void Emitter::emit_defer(const Expr &e, const std::string &ind, int line) {
     if (fin == "__fin_top" && dfb.empty()) return;
     int code = fn_code(cat("clo:", clos.size()));
     std::set<std::string> outer;
@@ -6103,11 +6092,13 @@ void Emitter::emit_defer(const Expr &e, const std::string &ind) {
     for (const auto &n : reads)
         if (visible.count(n)) capnames.insert(n);
     for (const auto &n : outer) capnames.insert(n);
+    const std::string sfile = !cur_src_file.empty() ? cur_src_file : root_src_file;
     Stmt &syn = synth.emplace_back();
     syn.k = SK::Expr;
+    syn.line = line > 0 ? line : 1;
     syn.e1 = clone(e);
-    clos.push_back({&no_params(), StmtList{&syn}, capnames, false,
-                    !cur_src_file.empty() ? cur_src_file : root_src_file});
+    if (!sfile.empty()) local_stmt_files[&syn] = sfile;
+    clos.push_back({&no_params(), StmtList{&syn}, capnames, false, sfile});
     std::string cm = new_tmp("m");
     std::string cb = new_tmp("cb");
     std::vector<std::string> pre = {cat("Map *", cm, " = vclosure_env_new(", capnames.size(), ");")};
@@ -6408,7 +6399,8 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             }
             if (drop.empty() &&
                 (e.kids[1]->k == EK::Call || e.kids[1]->k == EK::MCall ||
-                 e.kids[1]->k == EK::Idx || e.kids[1]->k == EK::Quest) &&
+                 e.kids[1]->k == EK::Idx || e.kids[1]->k == EK::Field ||
+                 e.kids[1]->k == EK::Quest) &&
                 rhs_owned) {
                 std::string h = new_tmp("h");
                 ln(ind, cat("Val ", h, " = (", v.val, ");"));
@@ -6450,8 +6442,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         if (global_binding) own = Own::Copy;
         std::string cn = var_def(tgt, own);
         assigned.insert(tgt);
-        // A store must not land when the RHS raised: the target keeps its old
-        // value and the enclosing try sees the error, as in the interpreter.
+        // Do not overwrite the target binding if evaluating the RHS raised an error.
         if (self_concat || release || may_raise(e)) {
             std::string tmp = new_tmp("v");
             ln(ind, cat("Val ", tmp, " = (", v.val, ");"));
@@ -6478,55 +6469,88 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             return;
         }
         V b = ex(*s.e1);
-        V i = ex(*s.e2);
-        V v = ex(*s.e3);
         for (auto &p : b.pre) ln(ind, p);
-        for (auto &p : i.pre) ln(ind, p);
-        for (auto &p : v.pre) ln(ind, p);
-        // `m["a"]["b"] = 1` indexes into a temporary row; that reference is
-        // nobody's once the store is done, so it is held in a temp and
-        // released (`vat_owned` made every index read an owned value).
-        if (dec_able(*s.e1, heap_returns())) {
-            std::string r = new_tmp("r");
+        const bool b_owned = dec_able(*s.e1, heap_returns());
+        std::string r = b.val;
+        if (b_owned || may_raise(*s.e1)) {
+            r = new_tmp("r");
             ln(ind, cat("Val ", r, " = (", b.val, ");"));
-            ln(ind, cat("vset_at(", r, ", ", keep(*s.e2, i.val), ", ", keep(*s.e3, v.val), ");"));
-            ln(ind, cat("vdrop_temp(", r, ");"));
-        } else {
-            ln(ind, cat("vset_at(", b.val, ", ", keep(*s.e2, i.val), ", ", keep(*s.e3, v.val), ");"));
+            if (may_raise(*s.e1)) {
+                emit_err_check(ind, b_owned ? std::vector<std::string>{r} : std::vector<std::string>{});
+            }
         }
+        const size_t cstart = call_cleanup.size();
+        if (b_owned) call_cleanup.push_back(r);
+        V i, v;
+        std::string ik;
+        try {
+            i = ex(*s.e2);
+            for (auto &p : i.pre) ln(ind, p);
+            ik = new_tmp("ik");
+            ln(ind, cat("Val ", ik, " = (", keep(*s.e2, i.val), ");"));
+            if (may_raise(*s.e2)) emit_err_check(ind, {ik});
+            call_cleanup.push_back(ik);
+            v = ex(*s.e3);
+            call_cleanup.resize(cstart);
+        } catch (...) {
+            call_cleanup.resize(cstart);
+            throw;
+        }
+        for (auto &p : v.pre) ln(ind, p);
+        std::string vv = new_tmp("vv");
+        ln(ind, cat("Val ", vv, " = (", keep(*s.e3, v.val), ");"));
+        if (may_raise(*s.e3)) {
+            std::vector<std::string> d3 = {vv, ik};
+            if (b_owned) d3.push_back(r);
+            emit_err_check(ind, d3);
+        }
+        ln(ind, cat("vset_at(", r, ", ", ik, ", ", vv, ");"));
+        if (b_owned) ln(ind, cat("vdrop_temp(", r, ");"));
         emit_err_check(ind);
         if (s.e1->k == EK::Var) assigned.insert(s.e1->a);
         return;
     }
     case SK::SetField: {
         V b = ex(*s.e1);
-        V v = ex(*s.e2);
         for (auto &p : b.pre) ln(ind, p);
+        const bool b_owned = dec_able(*s.e1, heap_returns());
+        std::string r = b.val;
+        if (b_owned || may_raise(*s.e1)) {
+            r = new_tmp("r");
+            ln(ind, "Val " + r + " = (" + b.val + ");");
+            if (may_raise(*s.e1)) {
+                emit_err_check(ind, b_owned ? std::vector<std::string>{r} : std::vector<std::string>{});
+            }
+        }
+        const size_t cstart = call_cleanup.size();
+        if (b_owned) call_cleanup.push_back(r);
+        V v;
+        try {
+            v = ex(*s.e2);
+            call_cleanup.resize(cstart);
+        } catch (...) {
+            call_cleanup.resize(cstart);
+            throw;
+        }
         for (auto &p : v.pre) ln(ind, p);
+        std::string vv = new_tmp("vv");
+        ln(ind, cat("Val ", vv, " = (", keep(*s.e2, v.val), ");"));
+        if (may_raise(*s.e2)) {
+            std::vector<std::string> d2 = {vv};
+            if (b_owned) d2.push_back(r);
+            emit_err_check(ind, d2);
+        }
         std::string st = infer_expr_struct(s.e1.get(), var_structs);
         int slot = !st.empty() ? struct_field_slot(st, s.a) : -1;
-        // Same receiver rule as a field read: `v[0].x = 5` stores through a
-        // reference nobody owns, so it is held and released like `m[k][j] = v`.
-        if (dec_able(*s.e1, heap_returns())) {
-            std::string r = new_tmp("r");
-            ln(ind, "Val " + r + " = (" + b.val + ");");
-            if (slot >= 0) {
-                int sid = canonical_struct_shape(st);
-                ln(ind, cat("vstruct_slot_set(", r, ", &_shp[", sid, "], ", slot, ", \"",
-                            clit(s.a), "\", ", keep(*s.e2, v.val), ");"));
-            } else {
-                ln(ind, cat("vfieldset_ic(", r, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ",
-                            next_fic(), ");"));
-            }
-            ln(ind, "vdrop_temp(" + r + ");");
-        } else if (slot >= 0) {
+        if (slot >= 0) {
             int sid = canonical_struct_shape(st);
-            ln(ind, cat("vstruct_slot_set(", b.val, ", &_shp[", sid, "], ", slot, ", \"",
-                        clit(s.a), "\", ", keep(*s.e2, v.val), ");"));
+            ln(ind, cat("vstruct_slot_set(", r, ", &_shp[", sid, "], ", slot, ", \"",
+                        clit(s.a), "\", ", vv, ");"));
         } else {
-            ln(ind, cat("vfieldset_ic(", b.val, ", \"", s.a, "\", ", keep(*s.e2, v.val), ", ",
+            ln(ind, cat("vfieldset_ic(", r, ", \"", s.a, "\", ", vv, ", ",
                         next_fic(), ");"));
         }
+        if (b_owned) ln(ind, "vdrop_temp(" + r + ");");
         emit_err_check(ind);
         return;
     }
@@ -6980,7 +7004,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         return;
     }
     case SK::Defer:
-        emit_defer(*s.e1, ind);
+        emit_defer(*s.e1, ind, s.line);
         return;
     case SK::Fn:
     case SK::ExportFn: {
@@ -7160,6 +7184,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     fin = cat("__fin_", cn);
     const int fn_line = (!body.empty() && body[0]->line > 0) ? body[0]->line : 1;
     if (positional) {
+        emit_dbg_loc(fn_line, cur_src_file);
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
         ln("  ", "(void)cap;");
         ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
@@ -8481,17 +8506,24 @@ void Emitter::run_shadow_disambig() {
     }
     if (!top_exe.empty()) {
         std::vector<StmtP> cloned_top;
+        std::vector<std::string> old_files;
         cloned_top.reserve(top_exe.size());
-        for (const Stmt *s : top_exe) cloned_top.push_back(clone_stmt(*s));
+        old_files.reserve(top_exe.size());
+        for (const Stmt *s : top_exe) {
+            cloned_top.push_back(clone_stmt(*s));
+            old_files.push_back(lookup_stmt_file(s));
+        }
         ShadowRenamer sr;
         std::map<std::string, std::string> renames;
         std::set<std::string> seen = global_lets;
         sr.walk_block(cloned_top, renames, seen, false);
         if (sr.changed) {
             top_exe.clear();
-            for (auto &sp : cloned_top) {
-                shadow_top_stmts.push_back(std::move(sp));
-                top_exe.push_back(shadow_top_stmts.back().get());
+            for (size_t i = 0; i < cloned_top.size(); ++i) {
+                shadow_top_stmts.push_back(std::move(cloned_top[i]));
+                const Stmt *np = shadow_top_stmts.back().get();
+                if (!old_files[i].empty()) local_stmt_files[np] = old_files[i];
+                top_exe.push_back(np);
             }
         }
     }
@@ -8857,12 +8889,8 @@ void Emitter::emit_main_open() {
     };
     for (const Stmt *s : top_exe) scan(*s);
     dfb_locals = names;
-    // A script's top-level `let` is a binding like any other: it owns what it
-    // holds. Naming them Copy was harmless while nothing released them, but it
-    // meant a script leaked every heap value it bound at exit -- `let a =
-    // args()` in syslib.brat left a vector behind on every run.
-    // SK::LetTmp is the same binding with a name the parser made up (`_m2`
-    // becomes `@m2`), so both kinds count.
+    // Track top-level script `let` / `LetTmp` bindings as Owned so their heap
+    // values are released at exit.
     std::set<std::string> script_lets;
     for (const Stmt *s : top_exe)
         if (s->k == SK::Let || s->k == SK::LetTmp) script_lets.insert(s->a);
@@ -8888,10 +8916,7 @@ void Emitter::emit_main_close() {
         ln("  ", "if (verr_pending()) { fprintf(stderr, \"unhandled: \"); vprint_err(verr_take()); "
                 "fprintf(stderr, \"\\n\"); return 1; }");
     } else {
-        // `_a` is the empty argument vector every main is given. A script has
-        // no user `main` to hand it to and the release used to sit in the
-        // branch above, so script mode leaked one Vec per run -- the 152 bytes
-        // LeakSanitizer kept reporting for lang/examples/map.brat.
+        // Release `_a` in script mode (no user `main` consumes it).
         ln("  ", "vrc_dec(vvecv(_a));");
     }
     if (move_rt) emit_scope_drops("  ");
@@ -10467,8 +10492,8 @@ V Emitter::ex_call(const Expr &e) {
     if (name.find('.') != std::string::npos) return ex_dotted(name, args);
     if (args.empty() && !name.empty() && name[0] >= 'A' && name[0] <= 'Z' &&
         (sym.count(name) || (cap && cap->second.count(name)))) {
-        // A bare uppercase name parses as a zero-arg call; when it names a
-        // local binding it reads the binding, as the interpreter does.
+        // Bare uppercase identifiers parse as zero-arg calls; resolve to local
+        // or captured bindings when one is in scope.
         ExprP var = mk_var(name);
         return ex(*var);
     }

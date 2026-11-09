@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -269,6 +270,10 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
         if (err_pipe[1] >= 0) close(err_pipe[1]);
         return result;
     }
+    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out_pipe[1], F_SETFD, FD_CLOEXEC);
+    fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
     const pid_t pid = fork();
     if (pid < 0) {
         result.launch_error = std::string("cannot start native command: ") + std::strerror(errno);
@@ -279,14 +284,19 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
         setpgid(0, 0);
         close(out_pipe[0]);
         close(err_pipe[0]);
-        if (dup2(out_pipe[1], STDOUT_FILENO) < 0 || dup2(err_pipe[1], STDERR_FILENO) < 0)
-            _exit(126);
-        close(out_pipe[1]);
-        close(err_pipe[1]);
-        const int null_fd = open("/dev/null", O_RDONLY);
+        if (out_pipe[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
+        else if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
+        else if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
+        if (out_pipe[1] > 2) close(out_pipe[1]);
+        if (err_pipe[1] > 2) close(err_pipe[1]);
+        const int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (null_fd >= 0) {
-            (void)dup2(null_fd, STDIN_FILENO);
-            close(null_fd);
+            if (null_fd == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
+            else {
+                (void)dup2(null_fd, STDIN_FILENO);
+                close(null_fd);
+            }
         }
         if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
         std::vector<char *> argv;
@@ -472,12 +482,13 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
     ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
 
+    std::atomic<bool> too_large_flag{false};
     auto drain_pipe = [&](HANDLE rd, std::string &dst) {
         std::array<char, 8192> buf {};
         DWORD got = 0;
         while (ReadFile(rd, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr) && got > 0) {
             if (dst.size() > kMaxToolOutput || got > kMaxToolOutput - dst.size()) {
-                result.too_large = true;
+                too_large_flag.store(true, std::memory_order_relaxed);
                 if (job) TerminateJobObject(job, 1);
                 else TerminateProcess(pi.hProcess, 1);
                 break;
@@ -498,10 +509,11 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
     }
-    CloseHandle(out_rd);
-    CloseHandle(err_rd);
     if (t_out.joinable()) t_out.join();
     if (t_err.joinable()) t_err.join();
+    CloseHandle(out_rd);
+    CloseHandle(err_rd);
+    result.too_large = too_large_flag.load(std::memory_order_relaxed);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);

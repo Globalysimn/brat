@@ -57,6 +57,9 @@
 #ifndef FILE_NAME_NORMALIZED
 #define FILE_NAME_NORMALIZED 0x0
 #endif
+#ifndef ERROR_CANT_ACCESS_FILE
+#define ERROR_CANT_ACCESS_FILE 1920L
+#endif
 #else
 #include <pthread.h>
 #include <sys/socket.h>
@@ -361,6 +364,8 @@ BFN Vec *vvec_cap(bint cap);
 BFN_HOT Val vvecv(Vec *v);
 BFN_HOT Val vclosure0(bint code);
 BFN void vec_push(Vec *v, Val x);
+BFN void vec_push_raw(Vec *v, Val x);
+BFN bint vec_push_len(Vec *v, Val x);
 typedef Val (*BMethFn)(Map *, Vec *);
 typedef struct {
     const char *tns[BPIC_WAYS];
@@ -1358,28 +1363,43 @@ BFN void *vhead_of(Val v) {
     }
 }
 BFN void vdrop_recv(Val recv, Val result);
-/* `first`, `min`, `pop`, `get` and `x[i]` answer with a part of the receiver, not
- * with a new value. The slot holding it is cleared before the receiver goes, so
- * the reference the container kept moves to the result instead of dying with it:
- * counting it again would leak, and releasing the container as it stands would
- * free the value the caller now holds. */
+/* Drop a temporary container after extracting `result` from it. Steal the
+ * container's own reference only when `recv` is uniquely owned on the heap and
+ * directly holds `result`; otherwise retain `result` before releasing `recv`. */
 BFN void vdrop_recv_part(Val recv, Val result) {
     void *h = vhead_of(result);
-    Vec *items = 0;
+    void *rh = vhead_of(recv);
+    int stole = 0;
     if (!h) {
         vdrop_recv(recv, result);
         return;
     }
-    if (recv.tag == V_VEC) items = recv.as.vec ? recv.as.vec : 0;
-    else if (recv.tag == V_TAG) items = recv.as.tv;
-    if (items) {
-        for (bint i = 0; i < items->len; i++)
-            if (vhead_of(items->items[i]) == h) { items->items[i] = vnil(); break; }
-    } else if (recv.tag == V_STRUCT && recv.as.map) {
-        Map *m = recv.as.map;
-        for (bint i = 0; i < m->used; i++)
-            if (vhead_of(m->vals[i]) == h) { m->vals[i] = vnil(); break; }
+    if (h == rh) return;
+    BHead *rb = (BHead *)rh;
+    if (rb && rb->rc == 1 && !BIS_ARENA(rb)) {
+        Vec *items = 0;
+        if (recv.tag == V_VEC) items = recv.as.vec;
+        else if (recv.tag == V_TAG) items = recv.as.tv;
+        if (items) {
+            for (bint i = 0; i < items->len; i++) {
+                if (vhead_of(items->items[i]) == h) {
+                    items->items[i] = vnil();
+                    stole = 1;
+                    break;
+                }
+            }
+        } else if (recv.tag == V_STRUCT && recv.as.map && !recv.as.map->inline_vals) {
+            Map *m = recv.as.map;
+            for (bint i = 0; i < m->used; i++) {
+                if (vhead_of(m->vals[i]) == h) {
+                    m->vals[i] = vnil();
+                    stole = 1;
+                    break;
+                }
+            }
+        }
     }
+    if (!stole) vrc_inc(result);
     vdrop_recv(recv, result);
 }
 BFN void vdrop_recv(Val recv, Val result) {
@@ -1392,21 +1412,16 @@ BFN void vdrop_recv(Val recv, Val result) {
     vrc_dec(recv);
 }
 BFN Val vmove(volatile Val *src) {
-    /* The invalidation has to survive the optimizer. A plain store to an object
-     * that is not read again is a dead store, and a move whose source still
-     * reads is a double free waiting for a refcount -- the compiler cannot know
-     * that the tag is a proof, not a value. Both accesses go through a volatile
-     * lvalue, which is the only portable way to say "this write happens". */
+    /* Use volatile accesses so the optimizer cannot dead-store-eliminate
+     * the V_MOVED tag invalidation after the last static read of *src. */
     Val r;
     memcpy(&r, (const void *)src, sizeof r);
     if (r.tag == V_MOVED) vraise("use of moved value");
     src->tag = V_MOVED;
     return r;
 }
-/* Every element of a `vec[i64]` parameter, before a raw body reads one. The
- * Dynamic callers walk the same vector, so a non-int element is a legal
- * program there -- the wrapper's job is to send it down the general path, not to
- * assume what the annotation promised. */
+/* Element-tag checks before dispatching to unboxed vec[i64]/vec[f64] bodies;
+ * dynamic callers with heterogeneous elements fall back to the boxed path. */
 BFN bint vvec_all_int(Vec *v) {
     for (bint i = 0; i < v->len; i++)
         if (v->items[i].tag != V_INT) return 0;
@@ -1791,8 +1806,7 @@ BFN void map_idx_put(Map *m, bint pos, uint64_t h) {
 BFN Val vstruct(Map *m) { Val r; r.tag = V_STRUCT; r.sso = 0; r.imm = (m && BIS_ARENA((BHead *)m - 1)) ? 1u : 0u; r.as.map = m; return r; }
 
 
-BFN void vec_push(Vec *v, Val x) {
-    BRAT_CTR_LOCK_OBJ(v);
+BFN void vec_push_raw(Vec *v, Val x) {
     if (v->len >= v->cap) {
         bint oldcap = v->cap;
         int ina = BIS_ARENA((BHead *)v - 1);
@@ -1809,7 +1823,16 @@ BFN void vec_push(Vec *v, Val x) {
         }
     }
     v->items[v->len++] = x;
+}
+BFN bint vec_push_len(Vec *v, Val x) {
+    BRAT_CTR_LOCK_OBJ(v);
+    vec_push_raw(v, x);
+    bint n = v->len;
     BRAT_CTR_UNLOCK_OBJ(v);
+    return n;
+}
+BFN void vec_push(Vec *v, Val x) {
+    (void)vec_push_len(v, x);
 }
 /* A tag's arguments outlive the block that built them when the tag is returned
  * (Ok/Err from an arena), so an arena-built argument list is moved to the heap.
@@ -1847,7 +1870,12 @@ BFN Val vtagv_lit(const char *tag, Vec *args) {
  * concurrently), so the table has one mutex and a length published with
  * release: a reader either misses a slot or sees it whole, and never reads past
  * the end of the array. */
+typedef struct BTagExtra {
+    char *ptr;
+    struct BTagExtra *next;
+} BTagExtra;
 static struct { const char *src; char *ptr; } _vtag_cache[512];
+static BTagExtra *_vtag_extra = 0;
 static int _vtag_n = 0;
 static bmutex_t _vtag_mu = BMUTEX_INIT;
 static BTLS struct { const char *lit; char *ptr; } _vtag_tls[64];
@@ -1859,8 +1887,13 @@ static int _vtag_count(void) {
 #endif
 }
 static char *_vtag_intern(const char *tag) {
-    unsigned slot = (unsigned)(((uintptr_t)tag >> 3) & 63u);
-    if (_vtag_tls[slot].lit == tag && _vtag_tls[slot].ptr) return _vtag_tls[slot].ptr;
+    unsigned slot = (unsigned)((((uintptr_t)tag >> 3) ^
+                                ((unsigned char)tag[0] * 131u) ^
+                                (tag[0] ? (unsigned char)tag[1] * 17u : 0u)) & 63u);
+    if (_vtag_tls[slot].ptr &&
+        (_vtag_tls[slot].ptr == tag ||
+         (_vtag_tls[slot].ptr[0] == tag[0] && strcmp(_vtag_tls[slot].ptr, tag) == 0)))
+        return _vtag_tls[slot].ptr;
     int n = _vtag_count();
     for (int i = 0; i < n; i++) {
         if (_vtag_cache[i].src == tag || strcmp(_vtag_cache[i].src, tag) == 0) {
@@ -1880,6 +1913,15 @@ static char *_vtag_intern(const char *tag) {
             return hit;
         }
     }
+    for (BTagExtra *ex = _vtag_extra; ex; ex = ex->next) {
+        if (strcmp(ex->ptr, tag) == 0) {
+            char *hit = ex->ptr;
+            BMUTEX_UNLOCK(&_vtag_mu);
+            _vtag_tls[slot].lit = tag;
+            _vtag_tls[slot].ptr = hit;
+            return hit;
+        }
+    }
     char *p = strdup(tag);
     if (!p) vfatal_oom();
     if (_vtag_n < 512) {
@@ -1890,6 +1932,12 @@ static char *_vtag_intern(const char *tag) {
 #else
         _vtag_n++;
 #endif
+    } else {
+        BTagExtra *node = (BTagExtra *)malloc(sizeof(BTagExtra));
+        if (!node) vfatal_oom();
+        node->ptr = p;
+        node->next = _vtag_extra;
+        _vtag_extra = node;
     }
     BMUTEX_UNLOCK(&_vtag_mu);
     _vtag_tls[slot].lit = tag;
@@ -2056,10 +2104,8 @@ BFN bint vmap_key_bad(Val k) {
    is a value in this language -- and raising here was worse than useless
    anyway: `vraise` allocates, and the map held `_brat_ctr_lock`, so the
    program hung forever with no message at all. */
-/* Set when a literal or a store handed a map a key it cannot hold. The emitter
-   asks after building a literal, the way it asks `vmap_has_reserved`, so
-   `{[1, 2]: 3}` is the err value in both backends instead of an empty map
-   here instead of returning an error value. */
+/* Set when a map literal or store sees an unhashable key so the emitter can
+   turn `{[1, 2]: 3}` into an error value after construction. */
 BFN bint vmap_bad_seen(Map *m) {
     if (m->bad_key) { vrc_dec(vstruct(m)); return 1; }
     return 0;
@@ -2270,14 +2316,17 @@ BFN Val vmap_getv(Val m, Val k) {
     if (m.tag != V_STRUCT) { vraise("no method get"); return vunwind; }
     if (vmapkey_reserved(k)) { return vmapkey_err(); }
     if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
-    return o ? *o : vnil();
+    Val r = o ? vrc_inc(*o) : vnil();
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
+    return r;
 }
 BFN_HOT Val vmap_get_ic(Val m, const char *k, BFieldIC *ic) {
     if (m.tag != V_STRUCT) { vraise("no method get"); return vunwind; }
     BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_ic(m.as.map, k, ic);
-    Val r = o ? *o : vnil();
+    Val r = o ? vrc_inc(*o) : vnil();
     BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return r;
 }
@@ -2285,7 +2334,9 @@ BFN Val vmap_has(Val m, Val k) {
     if (m.tag != V_STRUCT) { vraise("no method has"); return vunwind; }
     if (vmapkey_reserved(k)) { return vmapkey_err(); }
     if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return vbool(o != 0);
 }
 BFN_HOT Val vmap_has_ic(Val m, const char *k, BFieldIC *ic) {
@@ -2308,8 +2359,10 @@ BFN_HOT Val vshas_ic(Val m, const char *k, BFieldIC *ic) {
 BFN Val vmap_keys(Val m) {
     if (m.tag != V_STRUCT) { vraise("no method keys"); return vunwind; }
     Vec *o = vvec();
+    BRAT_CTR_LOCK_OBJ(m.as.map);
     for (bint i = 0; i < m.as.map->used; i++)
-        if (m.as.map->keys[i].tag != V_MOVED) vec_push(o, vrc_inc(m.as.map->keys[i]));
+        if (m.as.map->keys[i].tag != V_MOVED) vec_push_raw(o, vrc_inc(m.as.map->keys[i]));
+    BRAT_CTR_UNLOCK_OBJ(m.as.map);
     return vvecv(o);
 }
 BFN Val vmap_del(Val m, Val k) {
@@ -2338,8 +2391,9 @@ BFN Val vmap_setv(Val m, Val k, Val v) {
     if (m.tag != V_STRUCT) { vrc_dec(k); vrc_dec(v); vraise("no method set"); return vunwind; }
     if (vmapkey_reserved(k)) { vrc_dec(k); vrc_dec(v); return vmapkey_err(); }
     if (vmap_key_bad(k)) { vrc_dec(k); vrc_dec(v); return vmap_bad_key_err(); }
+    Val ret = vrc_inc(v);
     map_set_v(m.as.map, k, v);
-    return v;
+    return ret;
 }
 BFN bint vlong(Val v);
 /* The position an index names. A float counts when it is a whole number, so `v[2.0]` works;
@@ -2385,8 +2439,13 @@ BFN Val vset_at(Val m, Val k, Val v) {
         const int whole = vindex_int(k, &i);
         vrc_dec(k);
         if (!whole) { vrc_dec(v); return vunwind; }
-        if (i < 0 || i >= m.as.vec->len) { vrc_dec(v); vraise("index out of range"); return vunwind; }
         BRAT_CTR_LOCK_OBJ(m.as.vec);
+        if (i < 0 || i >= m.as.vec->len) {
+            BRAT_CTR_UNLOCK_OBJ(m.as.vec);
+            vrc_dec(v);
+            vraise("index out of range");
+            return vunwind;
+        }
         Val old = m.as.vec->items[i];
         m.as.vec->items[i] = v;
         BRAT_CTR_UNLOCK_OBJ(m.as.vec);

@@ -969,8 +969,8 @@ std::optional<BorrowNote> undeclared_rel(const std::string &name,
 }
 
 
-// A fn name is a callback, not a value: it is spelled bare only in these argument
-// slots, which both backends turn into a call. Method -> argument index.
+// Bare top-level `fn` names are allowed only in these higher-order callback
+// argument positions (method -> argument index).
 const std::unordered_map<std::string, size_t> HOF_CB_ARG = {
     {"map", 0}, {"filter", 0}, {"any", 0}, {"all", 0}, {"find", 0},
     {"sort_by", 0}, {"fold", 1},

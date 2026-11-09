@@ -426,6 +426,16 @@ BFN const char *vfmt_double(double x) {
             if (strtod(b, NULL) == x) break;
         }
     }
+    char dp_probe[8];
+    snprintf(dp_probe, sizeof dp_probe, "%.1f", 1.5);
+    if (dp_probe[1] != '.' && dp_probe[1] != 0) {
+        size_t dplen = strlen(dp_probe) - 2;
+        char *hit = (dplen > 0) ? strstr(b, dp_probe + 1) : NULL;
+        if (hit && hit[dplen] >= '0' && hit[dplen] <= '9') {
+            *hit = '.';
+            if (dplen > 1) memmove(hit + 1, hit + dplen, strlen(hit + dplen) + 1);
+        }
+    }
     if (!strpbrk(b, ".eEnN")) { strcat(b, ".0"); }
     return b;
 }
@@ -2163,6 +2173,55 @@ static int _vhandle_confined(HANDLE h) {
     size_t bl = strlen(vbase_g);
     return _strnicmp(target, vbase_g, bl) == 0 && (target[bl] == '/' || target[bl] == 0);
 }
+
+static HANDLE _vwin_open_parent_confined(const wchar_t *wpath, int *escaped) {
+    if (escaped) *escaped = 0;
+    wchar_t wpar[4096];
+    size_t n = wcslen(wpath);
+    if (n == 0 || n >= 4096) { errno = EINVAL; return INVALID_HANDLE_VALUE; }
+    memcpy(wpar, wpath, (n + 1) * sizeof(wchar_t));
+    while (n > 0 && (wpar[n - 1] == L'\\' || wpar[n - 1] == L'/')) n--;
+    size_t sep = n;
+    while (sep > 0 && wpar[sep - 1] != L'\\' && wpar[sep - 1] != L'/') sep--;
+    if (sep == 0) {
+        wpar[0] = L'.';
+        wpar[1] = 0;
+    } else if (sep == 3 && wpar[1] == L':') {
+        wpar[3] = 0;
+    } else if (sep == 1) {
+        wpar[1] = 0;
+    } else {
+        wpar[sep - 1] = 0;
+    }
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    HANDLE ph = CreateFileW(wpar, FILE_READ_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            &sa, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (ph == INVALID_HANDLE_VALUE) {
+        DWORD le = GetLastError();
+        if (le == ERROR_CANT_ACCESS_FILE && escaped) *escaped = 1;
+        errno = (le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
+        return INVALID_HANDLE_VALUE;
+    }
+    BY_HANDLE_FILE_INFORMATION pfi;
+    if (GetFileType(ph) != FILE_TYPE_DISK || !GetFileInformationByHandle(ph, &pfi) ||
+        !(pfi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        CloseHandle(ph);
+        errno = ENOTDIR;
+        return INVALID_HANDLE_VALUE;
+    }
+    if ((pfi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !_vhandle_confined(ph)) {
+        CloseHandle(ph);
+        if (escaped) *escaped = 1;
+        errno = EACCES;
+        return INVALID_HANDLE_VALUE;
+    }
+    return ph;
+}
 #endif
 
 static int _vfd_confined(int fd) {
@@ -2272,6 +2331,11 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
     memset(&sa, 0, sizeof sa);
     sa.nLength = sizeof sa;
     sa.bInheritHandle = FALSE;
+    HANDLE ph = INVALID_HANDLE_VALUE;
+    if (!_vfiles_free() && write_mode) {
+        ph = _vwin_open_parent_confined(wpath, escaped);
+        if (ph == INVALID_HANDLE_VALUE) return NULL;
+    }
     DWORD access = (write_mode == 2) ? FILE_APPEND_DATA : (write_mode ? GENERIC_WRITE : GENERIC_READ);
     DWORD disp = write_mode ? OPEN_ALWAYS : OPEN_EXISTING;
     DWORD flags = FILE_ATTRIBUTE_NORMAL;
@@ -2279,8 +2343,11 @@ static FILE *_vopen_confined_stream(const char *rp, int write_mode, size_t max_b
     HANDLE h = CreateFileW(wpath, access,
                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            &sa, disp, flags, NULL);
+    DWORD open_err = GetLastError();
+    if (ph != INVALID_HANDLE_VALUE) CloseHandle(ph);
     if (h == INVALID_HANDLE_VALUE) {
-        errno = (GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND)
+        if (!_vfiles_free() && open_err == ERROR_CANT_ACCESS_FILE && escaped) *escaped = 1;
+        errno = (open_err == ERROR_FILE_NOT_FOUND || open_err == ERROR_PATH_NOT_FOUND)
                 ? ENOENT : EACCES;
         return NULL;
     }

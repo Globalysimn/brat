@@ -81,13 +81,8 @@ struct Chan {
         if (line) lines.push_back(line);
     }
 
-    // The line of the send that finds the queue full, or 0 when no prefix can
-    // block. A straight-line pipe in one scope runs its operations in source
-    // order, so a send arriving with `cap` values already waiting has nobody to
-    // hand its value to: it blocks. Crediting a later receive -- the old rule
-    // was `send <= cap + recv` -- let `chan(1)` with two sends and one receive
-    // pass the checker and then hang, in both backends, forever. Two sides mean
-    // a `spawn`, and a spawn orders nothing: no prefix, nothing said.
+    // Line of the first single-scope `send` that exceeds channel capacity `cap`,
+    // or 0 if operations span multiple tasks (`spawn`) or never overflow `cap`.
     int first_blocking_send() const {
         if (!cap || events.empty() || !known()) return 0;
         const std::string &first = events.front().side;
@@ -146,8 +141,8 @@ using Chans = std::map<std::string, Chan>;
 void collect_expr(const Expr *e, Chans &chans, const std::string &side,
                   const std::string &quant, int line);
 
-// `send` on a closed channel returns an `err`, `close` twice is idempotent, so
-// ordering inside one scope is not a refusal — only the counts are.
+// `send` on a closed channel returns an `err` and `close` is idempotent, so
+// intra-scope ordering does not reject; only send/recv counts do.
 void collect(const View &stmts, Chans &chans, const std::string &side,
              const std::string &quant) {
     for (const Stmt *s : stmts) {

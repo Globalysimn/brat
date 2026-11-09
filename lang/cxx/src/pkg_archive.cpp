@@ -385,8 +385,8 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
         else TerminateProcess(pi.hProcess, 124);
         WaitForSingleObject(pi.hProcess, 5000);
     }
-    CloseHandle(rd);
     if (reader.joinable()) reader.join();
+    CloseHandle(rd);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -407,6 +407,7 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
     int pipefd[2];
     if (pipe(pipefd) != 0) return false;
     fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
     const pid_t pid = fork();
     if (pid < 0) {
         close(pipefd[0]);
@@ -416,11 +417,16 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
     if (pid == 0) {
         setpgid(0, 0);
         close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-        const int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        if (pipefd[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
+        else dup2(pipefd[1], STDOUT_FILENO);
+        if (pipefd[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
+        else dup2(pipefd[1], STDERR_FILENO);
+        if (pipefd[1] > 2) close(pipefd[1]);
+        const int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (devnull >= 0) {
+            if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
+            else { dup2(devnull, STDIN_FILENO); close(devnull); }
+        }
         std::vector<char *> av;
         av.reserve(args.size() + 1);
         for (const auto &a : args) av.push_back(const_cast<char *>(a.c_str()));
@@ -450,8 +456,24 @@ bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::str
         if (pr == 0) {
             int st = 0;
             if (waitpid(pid, &st, WNOHANG) == pid) {
-                exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+                fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+                while (!over_cap) {
+                    const ssize_t dn = read(pipefd[0], buf, sizeof(buf));
+                    if (dn <= 0) break;
+                    total_out += static_cast<size_t>(dn);
+                    if (total_out > (4u << 20)) { over_cap = true; break; }
+                    if (output.size() < 65536) {
+                        const size_t keep = std::min<size_t>(static_cast<size_t>(dn), 65536 - output.size());
+                        output.append(buf, keep);
+                    }
+                }
                 close(pipefd[0]);
+                if (over_cap) {
+                    output = "compiler output exceeded 4 MiB limit";
+                    exit_code = 125;
+                    return true;
+                }
+                exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
                 return exit_code != 127;
             }
             continue;

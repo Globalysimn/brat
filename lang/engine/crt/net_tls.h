@@ -112,9 +112,13 @@ BFN bint vsprint_q(Val v, char *o, bint q);
 
 BFN_HOT Val vfield(Val v, const char *k) {
     if (v.tag == V_STRUCT) {
-        Val *o = map_get(v.as.map, k);
-        if (!o) { vraisef("no field %s\n", k); return vunwind; }
-        return *o;
+        Map *m = v.as.map;
+        BRAT_CTR_LOCK_OBJ(m);
+        Val *o = map_get(m, k);
+        if (!o) { BRAT_CTR_UNLOCK_OBJ(m); vraisef("no field %s\n", k); return vunwind; }
+        Val r = *o;
+        BRAT_CTR_UNLOCK_OBJ(m);
+        return r;
     }
     vraisef("no field %s\n", k); return vunwind;
 }
@@ -125,24 +129,51 @@ BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
         if (ic) {
             const BShape *sh = m->shape;
             if (sh) {
-                if (sh == ic->shapes[0]) return m->vals[ic->slots[0]];
-                if (sh == ic->shapes[1]) return m->vals[ic->slots[1]];
-                if (sh == ic->shapes[2]) return m->vals[ic->slots[2]];
-                if (sh == ic->shapes[3]) return m->vals[ic->slots[3]];
+                bint slot = -1;
+                if (sh == ic->shapes[0]) slot = ic->slots[0];
+                else if (sh == ic->shapes[1]) slot = ic->slots[1];
+                else if (sh == ic->shapes[2]) slot = ic->slots[2];
+                else if (sh == ic->shapes[3]) slot = ic->slots[3];
+                if (slot >= 0) {
+                    BRAT_CTR_LOCK_OBJ(m);
+                    Val r = m->vals[slot];
+                    BRAT_CTR_UNLOCK_OBJ(m);
+                    return r;
+                }
             } else {
+                BRAT_CTR_LOCK_OBJ(m);
                 bint s = ic->slots[0];
                 if (!ic->shapes[0] && s >= 0 && s < m->used) {
                     Val kv = m->keys[s];
                     if (kv.tag == V_STR) {
                         const char *ks = vstr_c(&kv);
-                        if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0))
-                            return m->vals[s];
+                        if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
+                            Val r = m->vals[s];
+                            BRAT_CTR_UNLOCK_OBJ(m);
+                            return r;
+                        }
                     }
                 }
+                bint at = map_find_cstr(m, k, strlen(k));
+                if (at < 0) {
+                    BRAT_CTR_UNLOCK_OBJ(m);
+                    vraisef("no field %s\n", k);
+                    return vunwind;
+                }
+                ic->shapes[0] = 0;
+                ic->slots[0] = at;
+                Val r = m->vals[at];
+                BRAT_CTR_UNLOCK_OBJ(m);
+                return r;
             }
         }
+        BRAT_CTR_LOCK_OBJ(m);
         bint at = map_find_cstr(m, k, strlen(k));
-        if (at < 0) { vraisef("no field %s\n", k); return vunwind; }
+        if (at < 0) {
+            BRAT_CTR_UNLOCK_OBJ(m);
+            vraisef("no field %s\n", k);
+            return vunwind;
+        }
         if (ic) {
             if (m->shape) {
                 unsigned w = (unsigned)(ic->next & 3u);
@@ -154,9 +185,68 @@ BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
                 ic->slots[0] = at;
             }
         }
-        return m->vals[at];
+        Val r = m->vals[at];
+        BRAT_CTR_UNLOCK_OBJ(m);
+        return r;
     }
     vraisef("no field %s\n", k); return vunwind;
+}
+
+BFN_HOT Val vfield_map_get_ic(Val v, const char *k, BFieldIC *ic) {
+    if (v.tag == V_STRUCT) {
+        Map *m = v.as.map;
+        BRAT_CTR_LOCK_OBJ(m);
+        if (ic) {
+            const BShape *sh = m->shape;
+            if (sh) {
+                bint slot = -1;
+                if (sh == ic->shapes[0]) slot = ic->slots[0];
+                else if (sh == ic->shapes[1]) slot = ic->slots[1];
+                else if (sh == ic->shapes[2]) slot = ic->slots[2];
+                else if (sh == ic->shapes[3]) slot = ic->slots[3];
+                if (slot >= 0) {
+                    Val r = vrc_inc(m->vals[slot]);
+                    BRAT_CTR_UNLOCK_OBJ(m);
+                    return r;
+                }
+            } else {
+                bint s = ic->slots[0];
+                if (!ic->shapes[0] && s >= 0 && s < m->used) {
+                    Val kv = m->keys[s];
+                    if (kv.tag == V_STR) {
+                        const char *ks = vstr_c(&kv);
+                        if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
+                            Val r = vrc_inc(m->vals[s]);
+                            BRAT_CTR_UNLOCK_OBJ(m);
+                            return r;
+                        }
+                    }
+                }
+            }
+        }
+        bint at = map_find_cstr(m, k, strlen(k));
+        if (at < 0) {
+            BRAT_CTR_UNLOCK_OBJ(m);
+            vraisef("no field %s", k);
+            return vunwind;
+        }
+        if (ic) {
+            if (m->shape) {
+                unsigned w = (unsigned)(ic->next & 3u);
+                ic->shapes[w] = m->shape;
+                ic->slots[w] = at;
+                ic->next = (unsigned char)((w + 1u) & 3u);
+            } else {
+                ic->shapes[0] = 0;
+                ic->slots[0] = at;
+            }
+        }
+        Val r = vrc_inc(m->vals[at]);
+        BRAT_CTR_UNLOCK_OBJ(m);
+        return r;
+    }
+    vraisef("no field %s", k);
+    return vunwind;
 }
 
 BFN_HOT Val *vstruct_slot_ptr(Val s, const BShape *shp, bint slot, const char *k) {
@@ -170,9 +260,20 @@ BFN_HOT Val *vstruct_slot_ptr(Val s, const BShape *shp, bint slot, const char *k
     return NULL;
 }
 
+BFN_HOT Val vstruct_slot_read(Val s, const Val *slotp) {
+    BRAT_CTR_LOCK_OBJ(s.as.map);
+    Val r = vrc_inc(*slotp);
+    BRAT_CTR_UNLOCK_OBJ(s.as.map);
+    return r;
+}
+
 BFN_HOT Val vstruct_slot_val(Val s, const BShape *shp, bint slot, const char *k) {
-    if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp))
-        return s.as.map->vals[slot];
+    if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp)) {
+        BRAT_CTR_LOCK_OBJ(s.as.map);
+        Val r = s.as.map->vals[slot];
+        BRAT_CTR_UNLOCK_OBJ(s.as.map);
+        return r;
+    }
     return vfield(s, k);
 }
 
@@ -1575,13 +1676,29 @@ BFN Val vfs_rename(Val src, Val dst) {
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, sbuf, -1, ws, 4096) <= 0 ||
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, dbuf, -1, wd, 4096) <= 0)
         return verr("fs_rename failed");
+    HANDLE sph = INVALID_HANDLE_VALUE, dph = INVALID_HANDLE_VALUE;
     if (!_vfiles_free()) {
+        int sesc = 0, desc = 0;
+        sph = _vwin_open_parent_confined(ws, &sesc);
+        if (sph == INVALID_HANDLE_VALUE)
+            return sesc ? verr("path escaped during open") : verr("fs_rename failed");
+        dph = _vwin_open_parent_confined(wd, &desc);
+        if (dph == INVALID_HANDLE_VALUE) {
+            CloseHandle(sph);
+            return desc ? verr("path escaped during open") : verr("fs_rename failed");
+        }
         DWORD sa = GetFileAttributesW(ws), da = GetFileAttributesW(wd);
         if ((sa != INVALID_FILE_ATTRIBUTES && (sa & FILE_ATTRIBUTE_REPARSE_POINT)) ||
-            (da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_REPARSE_POINT)))
+            (da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_REPARSE_POINT))) {
+            CloseHandle(sph);
+            CloseHandle(dph);
             return verr("path escaped during open");
+        }
     }
-    if (!MoveFileExW(ws, wd, MOVEFILE_REPLACE_EXISTING)) {
+    BOOL mv_ok = MoveFileExW(ws, wd, MOVEFILE_REPLACE_EXISTING);
+    if (sph != INVALID_HANDLE_VALUE) CloseHandle(sph);
+    if (dph != INVALID_HANDLE_VALUE) CloseHandle(dph);
+    if (!mv_ok) {
         return verr("fs_rename failed");
     }
 #else
@@ -1632,12 +1749,21 @@ BFN Val vfs_remove(Val p) {
     wchar_t wp[4096];
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0)
         return verr_os(rp);
+    HANDLE ph = INVALID_HANDLE_VALUE;
     if (!_vfiles_free()) {
+        int esc = 0;
+        ph = _vwin_open_parent_confined(wp, &esc);
+        if (ph == INVALID_HANDLE_VALUE)
+            return esc ? verr("path escaped during open") : verr_os(rp);
         DWORD attr = GetFileAttributesW(wp);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            CloseHandle(ph);
             return verr("path escaped during open");
+        }
     }
-    if (!DeleteFileW(wp)) { errno = ENOENT; return verr_os(rp); }
+    BOOL del_ok = DeleteFileW(wp);
+    if (ph != INVALID_HANDLE_VALUE) CloseHandle(ph);
+    if (!del_ok) { errno = ENOENT; return verr_os(rp); }
 #else
     if (_vfiles_free()) {
         if (unlink(rp) != 0) return verr_os(rp);
@@ -1899,6 +2025,24 @@ BFN Val vfs_mkdir_all(Val p) {
                     if (le != ERROR_ALREADY_EXISTS && le != ERROR_ACCESS_DENIED) {
                         errno = (le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES;
                         return verr_os(rp);
+                    }
+                }
+                if (!_vfiles_free()) {
+                    SECURITY_ATTRIBUTES ssa;
+                    memset(&ssa, 0, sizeof ssa);
+                    ssa.nLength = sizeof ssa;
+                    ssa.bInheritHandle = FALSE;
+                    HANDLE sh = CreateFileW(wbuf, FILE_READ_ATTRIBUTES,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                            &ssa, OPEN_EXISTING,
+                                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+                    if (sh != INVALID_HANDLE_VALUE) {
+                        BY_HANDLE_FILE_INFORMATION sfi;
+                        int sesc = GetFileInformationByHandle(sh, &sfi) &&
+                                   ((sfi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+                                    !_vhandle_confined(sh));
+                        CloseHandle(sh);
+                        if (sesc) return verr("path escaped during open");
                     }
                 }
                 wbuf[i] = ch;
@@ -2215,13 +2359,22 @@ BFN Val vfs_remove_dir(Val p) {
         errno = EINVAL;
         return verr_os(rp);
     }
+    HANDLE ph = INVALID_HANDLE_VALUE;
     if (!_vfiles_free()) {
+        int esc = 0;
+        ph = _vwin_open_parent_confined(wp, &esc);
+        if (ph == INVALID_HANDLE_VALUE)
+            return esc ? verr("path escaped during open") : verr_os(rp);
         DWORD attr = GetFileAttributesW(wp);
-        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT))
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            CloseHandle(ph);
             return verr("path escaped during open");
+        }
     }
-    if (!RemoveDirectoryW(wp)) {
-        DWORD le = GetLastError();
+    BOOL rm_ok = RemoveDirectoryW(wp);
+    DWORD le = rm_ok ? 0 : GetLastError();
+    if (ph != INVALID_HANDLE_VALUE) CloseHandle(ph);
+    if (!rm_ok) {
         errno = (le == ERROR_DIR_NOT_EMPTY) ? ENOTEMPTY
               : ((le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES);
         return verr_os(rp);
