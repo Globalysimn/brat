@@ -20,7 +20,7 @@ syntax shortcuts do not ship if they silently miscompile or corrupt memory.
 1. **Close checker and codegen edge cases** as differential and fuzzer tests
    uncover them, keeping `brat-cxx` diagnostics specific and actionable without
    claiming full inter-procedural soundness.
-2. **Broaden macOS and Windows test coverage.** Native `macos-15` (arm64) and
+2. **Broaden macOS and Windows test coverage.** Native `macos-26` (arm64) and
    `windows-2022` (MinGW-w64 LLP64) CI jobs now build `brat-cxx` and verify the
    frontend, ownership/type checkers, C preprocessor + FFI ABI probes and
    portable bundles on every push; expand runtime stdlib test coverage on
