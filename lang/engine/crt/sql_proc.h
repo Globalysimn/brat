@@ -1545,7 +1545,7 @@ BFN unsigned vcp_lower_ctx(unsigned c, unsigned prev, const char *rest) {
     unsigned out = vcp_lower(c);
     if (!out) return 0;
     if (out == 0x3C3) {
-        
+
         int prev_cased = (prev >= 'A' && prev <= 'Z') || (prev >= 0x391 && prev <= 0x3A9)
                       || (prev >= 0x410 && prev <= 0x44F);
         unsigned next = 0;
@@ -1572,7 +1572,7 @@ BFN Val vcase(Val s, int up) {
         bint n = vcp_next(p, &cp);
         const char *rest = p + n;
         if (up && cp == 0xDF) {
-            
+
             if (on + 4 >= (bint)len) { len = len * 2 + 8; o = (char *)bgrow_rc(o, len); }
             o[on++] = 'S'; o[on++] = 'S';
             p += n;

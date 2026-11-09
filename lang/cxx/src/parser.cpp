@@ -1347,7 +1347,7 @@ private:
                          " (params: " + (list.empty() ? "none" : list) + ")");
                 }
                 // An effect on an `i64` is a promise about nothing: the callee
-                // has no address to reach through it. 
+                // has no address to reach through it.
                 std::string ann;
                 for (const auto &p : params)
                     if (p.name == arg_name) ann = p.ann.value_or("");

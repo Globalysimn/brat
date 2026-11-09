@@ -526,8 +526,8 @@ bool preprocess_header_cc(const std::string &path,
         else dup2(out_pipe[1], STDOUT_FILENO);
         if (err_pipe[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
         else dup2(err_pipe[1], STDERR_FILENO);
-        close(out_pipe[1]);
-        close(err_pipe[1]);
+        if (out_pipe[1] > STDERR_FILENO) close(out_pipe[1]);
+        if (err_pipe[1] > STDERR_FILENO) close(err_pipe[1]);
         std::vector<char *> cargv;
         for (auto &s : argv) cargv.push_back(s.data());
         cargv.push_back(nullptr);

@@ -101,8 +101,35 @@ def test_direct_system_header_preprocess_when_available():
         assert chk.returncode == 0, chk.stdout + chk.stderr
 
 
+def test_preprocess_with_closed_standard_fds():
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory() as td:
+        hdr = os.path.join(td, "api.h")
+        with open(hdr, "w", encoding="utf-8") as f:
+            f.write("int add_one(int value);\n")
+        for fds in ((0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2)):
+            out = os.path.join(td, "bindings_" + "".join(map(str, fds)) + ".brat")
+
+            def close_streams():
+                for fd in fds:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+            r = subprocess.run(
+                [CXX, "bindgen", "--preprocess", hdr, "-o", out],
+                capture_output=True, text=True, preexec_fn=close_streams, timeout=40,
+            )
+            assert r.returncode == 0, f"closed {fds}: {r.stderr}"
+            with open(out, encoding="utf-8") as f:
+                assert "extern fn add_one(value: i32) -> i32;" in f.read(), fds
+
+
 if __name__ == "__main__":
     test_user_header_excludes_system_includes_and_resolves_posix_typedefs()
     test_header_only_keeps_sub_typedefs_without_sub_functions()
     test_direct_system_header_preprocess_when_available()
+    test_preprocess_with_closed_standard_fds()
     print("BINDGEN PREPROCESS SYS ALL GREEN")

@@ -1257,7 +1257,7 @@ static Val vadd_slow(Val a, Val b) {
     }
     if ((a.tag == V_INT || a.tag == V_FLOAT) && (b.tag == V_INT || b.tag == V_FLOAT))
         return vfloat(vnum(a) + vnum(b));
-    
+
     if (a.tag == V_VEC && b.tag == V_VEC) {
         Vec *o = vvec();
         vec_push_all(o, a.as.vec);
@@ -1377,7 +1377,7 @@ static Val vmul_slow(Val a, Val b) {
         return vint((bint)((uint64_t)a.as.ival * (uint64_t)b.as.ival));
     if ((a.tag == V_INT || a.tag == V_FLOAT) && (b.tag == V_INT || b.tag == V_FLOAT))
         return vfloat(vnum(a) * vnum(b));
-    
+
     if (a.tag == V_STR && b.tag == V_INT) return vrepeat_n(a, b.as.ival);
     if (a.tag == V_INT && b.tag == V_STR) return vrepeat_n(b, a.as.ival);
     vraise("type error in *"); return vunwind;
@@ -1386,7 +1386,7 @@ BFN Val vdiv(Val a, Val b) {
     a = vnum0(a); b = vnum0(b);
     if (a.tag == V_INT && b.tag == V_INT) {
         if (b.as.ival == 0) { vraise("div by zero"); return vunwind; }
-        
+
         bint x = a.as.ival, y = b.as.ival;
         if (x == BINT_MIN && y == -1) { return vint(BINT_MIN); }
         bint q = x / y;
@@ -1421,7 +1421,7 @@ static Val vmod_slow(Val a, Val b) {
         if (b.as.ival == 0) { vraise("div by zero"); return vunwind; }
         return vint(vmod_int(a.as.ival, b.as.ival));
     }
-    
+
     if ((a.tag == V_INT || a.tag == V_FLOAT) && (b.tag == V_INT || b.tag == V_FLOAT)) {
         double x = vnum(a), y = vnum(b);
         if (y == 0) { vraise("div by zero"); return vunwind; }
@@ -1588,7 +1588,7 @@ BFN bint utf8_cplen(const char *s) {
     if ((c & 0xE0) == 0xC0) need = 2;
     else if ((c & 0xF0) == 0xE0) need = 3;
     else if ((c & 0xF8) == 0xF0) need = 4;
-    
+
     bint have = 1;
     while (have < need && s[have]) have++;
     return have;
@@ -1957,7 +1957,7 @@ BFN void vbase_set(const char *b) {
 BFN void vargs_set(bint c, char **v) {
     vargc_g = c;
     vargv_g = v;
-    
+
     if (!vbase_ready) {
         char tmp[4096];
         const char *src = (c > 0 && v && v[0]) ? v[0] : ".";

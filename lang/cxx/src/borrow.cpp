@@ -2161,7 +2161,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         Decls sub = copy_decl(decl);
         Borrows bs = copy_borrows(borrows);
         // `unsafe` is for raw pointers and FFI; it does not buy a way around
-        // ownership. 
+        // ownership.
         walk_block(wrap(s.body), sub, bs, errs, funcs);
         return;
     }
@@ -2599,7 +2599,7 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
 // pointer, a callback, an `extern struct`, or `none`/absent for void. Anything
 // else is refused here, at `check`, so `check` stays the verdict it claims to
 // be: a program whose signature the emitter cannot spell used to pass `check`
-// and die in `build`. 
+// and die in `build`.
 const std::set<std::string> FFI_SLOTS = {"bool", "i8", "u8", "i16", "u16", "i32", "u32",
                                          "i64", "u64", "usize", "f32", "f64",
                                          "str", "ptr"};

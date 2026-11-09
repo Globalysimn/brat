@@ -322,6 +322,82 @@ CASES["part_in_literal"] = ('''fn main() -> i64 {
 ''', "['a', [2]]\n" * 100)
 
 
+CASES["find_mutates_receiver"] = ('''fn main() -> i64 {
+  let mut values = ["a_long_heap_string_" + str(42), "second_long_heap_str_" + str(7)]
+  let found = values.find(fn(item) {
+    values.pop()
+    return true
+  })
+  print(found)
+  print(len(values))
+  return 0
+}
+''', "a_long_heap_string_42\n1\n")
+
+CASES["filter_mutates_receiver"] = ('''fn main() -> i64 {
+  let mut names = ["x" + str(1), "y" + str(2)]
+  let picked = names.filter(fn(item) {
+    names.pop()
+    return true
+  })
+  print(picked)
+  print(len(names))
+  return 0
+}
+''', "['x1']\n1\n")
+
+CASES["fold_mutates_receiver"] = ('''fn main() -> i64 {
+  let mut items = ["p" + str(1), "q" + str(2)]
+  let total = items.fold(0, fn(acc, item) {
+    items.pop()
+    return acc + 1
+  })
+  print(total)
+  print(len(items))
+  return 0
+}
+''', "1\n1\n")
+
+CASES["map_mutates_receiver"] = ('''fn main() -> i64 {
+  let mut rows = ["r" + str(1), "s" + str(2)]
+  let sized = rows.map(fn(item) {
+    rows.pop()
+    return len(item)
+  })
+  print(sized)
+  print(len(rows))
+  return 0
+}
+''', "[2]\n1\n")
+
+
+CASES["sort_by_mutates_receiver"] = ('''fn main() -> i64 {
+  let mut names = ["alpha_long_heap_name_" + str(1), "beta_long_heap_name_" + str(2)]
+  let mut caught = false
+  try {
+    names.sort_by(fn(item) {
+      names.pop()
+      return item
+    })
+  } catch e {
+    caught = true
+  }
+  print(caught)
+  print(len(names))
+  return 0
+}
+''', "true\n0\n")
+
+CASES["sort_by_keys_stable"] = ('''fn main() -> i64 {
+  let mut words = ["bb" + str(2), "a" + str(1), "cc" + str(3)]
+  let ordered = words.sort_by(fn(item) { return len(item) })
+  print(ordered)
+  print(len(words))
+  return 0
+}
+''', "['a1', 'bb2', 'cc3']\n3\n")
+
+
 def build(src, name):
     path = os.path.join(TMP, name + ".brat")
     with open(path, "w", encoding="utf-8") as f:

@@ -1046,9 +1046,13 @@ BFN Val vfold(Val obj, Val init, Val fn) {
     VSTACK_VEC_INIT(sv, ab, 2);
     sv.vec.len = 2;
     for (bint i = 0; i < w->len; i++) {
+        /* The callback may change the vector it is folding, so the element it
+           reads is held here and the length is re-read every step. */
+        Val item = vrc_inc(w->items[i]);
         ab[0] = acc;
-        ab[1] = w->items[i];
+        ab[1] = item;
         Val next = vcall_any(fn, &sv.vec);
+        vrc_dec(item);
         if (verr_pending()) {
             vrc_dec(acc);
             vrc_dec(fn);
@@ -1068,24 +1072,31 @@ BFN Val vpred(Val obj, Val fn, const char *meth) {
     VSTACK_VEC_INIT(sv, ab, 1);
     sv.vec.len = 1;
     for (bint i = 0; i < w->len; i++) {
-        ab[0] = w->items[i];
+        /* The callback may change the vector it is searching, so the element
+           handed to it is held for the whole step and `find` returns that same
+           reference instead of reading the slot again after the call. */
+        Val item = vrc_inc(w->items[i]);
+        ab[0] = item;
         Val r = vcall_any(fn, &sv.vec);
         if (verr_pending()) {
+            vrc_dec(item);
             vrc_dec(fn);
             return vunwind;
         }
         int ok = vis_true(r);
         vrc_dec(r);
         if (meth[0] == 'a' && meth[1] == 'n' && ok) {
+            vrc_dec(item);
             vrc_dec(fn); return vbool(1);
         }
         if (meth[0] == 'a' && meth[1] == 'l' && !ok) {
+            vrc_dec(item);
             vrc_dec(fn); return vbool(0);
         }
         if (meth[0] == 'f' && ok) {
-            Val found = vrc_inc(w->items[i]);
-            vrc_dec(fn); return found;
+            vrc_dec(fn); return item;
         }
+        vrc_dec(item);
     }
     vrc_dec(fn);
     if (meth[0] == 'f') return vnil();
@@ -1200,8 +1211,10 @@ BFN Val vsort_by(Val v, Val fn) {
     one->len = 1;
     if (n <= 1) {
         if (n == 1) {
-            ab[0] = w->items[0];
+            Val only = vrc_inc(w->items[0]);
+            ab[0] = only;
             Val k0 = vcall_any(fn, one);
+            vrc_dec(only);
             if (verr_pending()) { vrc_dec(fn); return vunwind; }
             vrc_dec(k0);
         }
@@ -1210,27 +1223,40 @@ BFN Val vsort_by(Val v, Val fn) {
     }
     _VSortEntry *ents = (_VSortEntry *)malloc((size_t)n * sizeof(_VSortEntry));
     if (!ents) vfatal_oom();
+    /* The elements are held here, not borrowed from the vector, because the key
+       callback runs user code: it can empty the container, and the slots this
+       sort then wrote back were freed memory. */
     for (bint i = 0; i < n; i++) {
-        ab[0] = w->items[i];
-        Val k = vcall_any(fn, one);
-        if (verr_pending()) {
-            for (bint j = 0; j < i; j++) vrc_dec(ents[j].key);
-            free(ents);
-            vrc_dec(fn);
-            return vunwind;
-        }
-        ents[i].item = w->items[i];
-        ents[i].key = k;
+        ents[i].item = vrc_inc(w->items[i]);
+        ents[i].key = vnil();
         ents[i].idx = i;
     }
+    bint keyed = 0;
+    for (; keyed < n; keyed++) {
+        ab[0] = ents[keyed].item;
+        ents[keyed].key = vcall_any(fn, one);
+        if (verr_pending()) break;
+    }
     vrc_dec(fn);
-    qsort(ents, (size_t)n, sizeof(_VSortEntry), vsortby_q);
     if (verr_pending()) {
-        for (bint i = 0; i < n; i++) vrc_dec(ents[i].key);
+        for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
         free(ents);
         return vunwind;
     }
+    qsort(ents, (size_t)n, sizeof(_VSortEntry), vsortby_q);
+    if (verr_pending()) {
+        for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
+        free(ents);
+        return vunwind;
+    }
+    if (w->len != n) {
+        for (bint i = 0; i < n; i++) { vrc_dec(ents[i].item); vrc_dec(ents[i].key); }
+        free(ents);
+        vraise("sort_by: container changed while keys were computed");
+        return vunwind;
+    }
     for (bint i = 0; i < n; i++) {
+        vrc_dec(w->items[i]);
         w->items[i] = ents[i].item;
         vrc_dec(ents[i].key);
     }

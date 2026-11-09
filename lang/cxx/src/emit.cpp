@@ -932,7 +932,7 @@ struct Emitter {
     bool fraise(const Expr &e);
     // Names whose body can leave an error pending (raise, ?, div, index, unwrap).
     // A fast-path call to one of them needs a verr_pending() check; a call to a
-    // plain arithmetic helper does not. 
+    // plain arithmetic helper does not.
     std::set<std::string> may_fail();
     bool has_rec_call(const Expr &e) const;
     std::string fret_bail() const;
@@ -8688,14 +8688,16 @@ void Emitter::emit_prelude_tables() {
     ln("  ", "Val _ob[1]; BStackVec _osv; VSTACK_VEC_INIT(_osv, _ob, 1);");
     ln("  ", "_osv.vec.len = 1;");
     ln("  ", "for (int64_t i = 0; i < w->len; i++) {");
-    ln("    ", "_ob[0] = w->items[i];");
+    ln("    ", "Val _cur = vrc_inc(w->items[i]);");
+    ln("    ", "_ob[0] = _cur;");
     ln("    ", "Val r = vcall_any(fn, &_osv.vec);");
     ln("    ", "if (verr_pending()) {");
-    ln("      ", "vrc_dec(fn); vrc_dec(vvecv(o));");
+    ln("      ", "vrc_dec(_cur); vrc_dec(fn); vrc_dec(vvecv(o));");
     ln("      ", "return r;");
     ln("    ", "}");
     ln("    ", "if (meth[0] == 'm') vec_push(o, r);");
-    ln("    ", "else { if (vis_true(r)) vec_push(o, vrc_inc(w->items[i])); vrc_dec(r); }");
+    ln("    ", "else { if (vis_true(r)) vec_push(o, vrc_inc(_cur)); vrc_dec(r); }");
+    ln("    ", "vrc_dec(_cur);");
     ln("  ", "}");
     ln("  ", "vrc_dec(fn);");
     ln("  ", "return vvecv(o);");
