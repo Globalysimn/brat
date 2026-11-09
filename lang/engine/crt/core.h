@@ -22,6 +22,14 @@
 #include <time.h>
 #include <math.h>
 #include <errno.h>
+#include <locale.h>
+#if defined(__APPLE__) && defined(__has_include)
+#if __has_include(<xlocale.h>)
+#include <xlocale.h>
+#endif
+#elif defined(__APPLE__)
+#include <xlocale.h>
+#endif
 #if defined(__has_feature)
 #if __has_feature(address_sanitizer)
 #define BRAT_ASAN 1
@@ -284,8 +292,22 @@ static BStripeLock BRAT_UNUSED _brat_stripes[64] = { BSTRIPE_16_, BSTRIPE_16_, B
 #endif
 #if defined(__GNUC__) || defined(__clang__)
 #define BRAT_LIKELY(x_) (__builtin_expect(!!(x_), 1))
+static inline int _brat_load_acq_i32(const int *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
+static inline void _brat_store_rel_i32(int *p, int v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
+static inline uint64_t _brat_load_rlx_u64(const uint64_t *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
+static inline void _brat_store_rlx_u64(uint64_t *p, uint64_t v) { __atomic_store_n(p, v, __ATOMIC_RELAXED); }
+#elif defined(_MSC_VER)
+#define BRAT_LIKELY(x_) (x_)
+static inline int _brat_load_acq_i32(const int *p) { return (int)InterlockedOr((volatile LONG *)p, 0); }
+static inline void _brat_store_rel_i32(int *p, int v) { InterlockedExchange((volatile LONG *)p, (LONG)v); }
+static inline uint64_t _brat_load_rlx_u64(const uint64_t *p) { return (uint64_t)InterlockedOr64((volatile LONG64 *)p, 0); }
+static inline void _brat_store_rlx_u64(uint64_t *p, uint64_t v) { InterlockedExchange64((volatile LONG64 *)p, (LONG64)v); }
 #else
 #define BRAT_LIKELY(x_) (x_)
+static inline int _brat_load_acq_i32(const int *p) { return *p; }
+static inline void _brat_store_rel_i32(int *p, int v) { *p = v; }
+static inline uint64_t _brat_load_rlx_u64(const uint64_t *p) { return *p; }
+static inline void _brat_store_rlx_u64(uint64_t *p, uint64_t v) { *p = v; }
 #endif
 #define BRAT_CTR_LOCK_OBJ(p_)   do { if (_BRAT_MT()) BMUTEX_LOCK(&_brat_stripes[BSTRIPE_IDX(p_)].mu); } while (0)
 #define BRAT_CTR_UNLOCK_OBJ(p_) do { if (_BRAT_MT()) BMUTEX_UNLOCK(&_brat_stripes[BSTRIPE_IDX(p_)].mu); } while (0)
@@ -465,6 +487,7 @@ static uint32_t *_bvpin_ht = NULL;
 static size_t _bvpin_ht_cap = 0;
 static uint32_t _bvpin_count = 0;
 static size_t _bvpin_budget_bytes = 0;
+static size_t _bvpin_lbytes = 0;
 static int _bvpin_inited = 0;
 static bmutex_t _bvpin_mu = BMUTEX_INIT;
 
@@ -535,7 +558,7 @@ BFN char *vstr_pin(Val v) {
         }
         idx = (idx + 1u) & (_bvpin_ht_cap - 1u);
     }
-    size_t next_bytes = ((size_t)_bvpin_count + 1u) * 16u;
+    size_t next_bytes = ((size_t)_bvpin_count + 1u) * 16u + _bvpin_lbytes;
     if (_bvpin_count >= 0x7FFFFFFFu || next_bytes > _bvpin_budget_bytes) {
         BMUTEX_UNLOCK(&_bvpin_mu);
         vraise("string pin limit exceeded");
@@ -580,6 +603,100 @@ BFN char *vstr_pin(Val v) {
     return p;
 }
 
+typedef struct { char *ptr; size_t len; uint64_t hash; } _bvpin_long_ent;
+static _bvpin_long_ent *_bvpin_lvec = NULL;
+static size_t _bvpin_lcount = 0;
+static size_t _bvpin_lcap = 0;
+static uint32_t *_bvpin_lht = NULL;
+static size_t _bvpin_lht_cap = 0;
+
+static int _bvpin_lrehash(size_t new_cap) {
+    uint32_t *nht = (uint32_t *)malloc(new_cap * sizeof(uint32_t));
+    if (!nht) return 0;
+    memset(nht, 0xFF, new_cap * sizeof(uint32_t));
+    for (uint32_t s = 0; s < (uint32_t)_bvpin_lcount; s++) {
+        size_t idx = (size_t)_bvpin_lvec[s].hash & (new_cap - 1u);
+        while (nht[idx] != BVPIN_EMPTY) idx = (idx + 1u) & (new_cap - 1u);
+        nht[idx] = s;
+    }
+    free(_bvpin_lht);
+    _bvpin_lht = nht;
+    _bvpin_lht_cap = new_cap;
+    return 1;
+}
+
+BFN char *vstr_pin_ret(Val v) {
+    if (v.tag != V_STR) return NULL;
+    if (v.sso) return vstr_pin(v);
+    const char *src = v.as.str ? v.as.str : "";
+    size_t n = vstr_len_fast(&v);
+    uint64_t h = _bvpin_hash_bytes(src, n);
+    BMUTEX_LOCK(&_bvpin_mu);
+    if (!_bvpin_inited) {
+        _bvpin_budget_bytes = _bvpin_load_budget();
+        if (!_bvpin_rehash(8192u)) {
+            BMUTEX_UNLOCK(&_bvpin_mu);
+            vfatal_oom();
+        }
+        _bvpin_inited = 1;
+    }
+    if (!_bvpin_lht && !_bvpin_lrehash(256u)) {
+        BMUTEX_UNLOCK(&_bvpin_mu);
+        vraise("string pin limit exceeded");
+        return NULL;
+    }
+    size_t idx = (size_t)h & (_bvpin_lht_cap - 1u);
+    while (_bvpin_lht[idx] != BVPIN_EMPTY) {
+        _bvpin_long_ent *e = &_bvpin_lvec[_bvpin_lht[idx]];
+        if (e->hash == h && e->len == n && memcmp(e->ptr, src, n + 1u) == 0) {
+            BMUTEX_UNLOCK(&_bvpin_mu);
+            return e->ptr;
+        }
+        idx = (idx + 1u) & (_bvpin_lht_cap - 1u);
+    }
+    size_t used = ((size_t)_bvpin_count * 16u) + _bvpin_lbytes;
+    if (_bvpin_lcount >= 0x7FFFFFFFu || n >= _bvpin_budget_bytes || used > _bvpin_budget_bytes - (n + 1u)) {
+        BMUTEX_UNLOCK(&_bvpin_mu);
+        vraise("string pin limit exceeded");
+        return NULL;
+    }
+    if ((_bvpin_lcount + 1u) * 2u >= _bvpin_lht_cap) {
+        if (!_bvpin_lrehash(_bvpin_lht_cap * 2u)) {
+            BMUTEX_UNLOCK(&_bvpin_mu);
+            vraise("string pin limit exceeded");
+            return NULL;
+        }
+        idx = (size_t)h & (_bvpin_lht_cap - 1u);
+        while (_bvpin_lht[idx] != BVPIN_EMPTY) idx = (idx + 1u) & (_bvpin_lht_cap - 1u);
+    }
+    if (_bvpin_lcount >= _bvpin_lcap) {
+        size_t ncap = _bvpin_lcap ? _bvpin_lcap * 2u : 64u;
+        _bvpin_long_ent *nv = (_bvpin_long_ent *)realloc(_bvpin_lvec, ncap * sizeof(*_bvpin_lvec));
+        if (!nv) {
+            BMUTEX_UNLOCK(&_bvpin_mu);
+            vraise("string pin limit exceeded");
+            return NULL;
+        }
+        _bvpin_lvec = nv;
+        _bvpin_lcap = ncap;
+    }
+    char *copy = (char *)malloc(n + 1u);
+    if (!copy) {
+        BMUTEX_UNLOCK(&_bvpin_mu);
+        vraise("string pin limit exceeded");
+        return NULL;
+    }
+    memcpy(copy, src, n + 1u);
+    uint32_t slot = (uint32_t)_bvpin_lcount++;
+    _bvpin_lvec[slot].ptr = copy;
+    _bvpin_lvec[slot].len = n;
+    _bvpin_lvec[slot].hash = h;
+    _bvpin_lbytes += n + 1u;
+    _bvpin_lht[idx] = slot;
+    BMUTEX_UNLOCK(&_bvpin_mu);
+    return copy;
+}
+
 static void *balloc(size_t n);
 static void vfatal_oom(void);
 static BTLS int barena_depth = 0;
@@ -605,11 +722,7 @@ static int _vlit_count(void) {
 #define BRAT_ATTR_NOTHROW
 #endif
 
-#if defined(__GNUC__) || defined(__clang__)
-    return __atomic_load_n(&_vlit_n, __ATOMIC_ACQUIRE);
-#else
-    return _vlit_n;
-#endif
+    return _brat_load_acq_i32(&_vlit_n);
 }
 static Val vlit_slow(const char *s, size_t n) {
     int seen = _vlit_count();
@@ -649,11 +762,7 @@ static Val vlit_slow(const char *s, size_t n) {
     if (_vlit_n < 512) {
         _vlit_cache[_vlit_n].src = s;
         _vlit_cache[_vlit_n].hdr = hdr;
-#if defined(__GNUC__) || defined(__clang__)
-        __atomic_store_n(&_vlit_n, _vlit_n + 1, __ATOMIC_RELEASE);
-#else
-        _vlit_n++;
-#endif
+        _brat_store_rel_i32(&_vlit_n, _vlit_n + 1);
     } else {
         BLitExtra *node = (BLitExtra *)malloc(sizeof(BLitExtra));
         if (!node) vfatal_oom();
@@ -671,31 +780,82 @@ BFN_HOT Val vlit(const char *s) {
     if (n <= BRAT_SSO_MAX) return vstr_sso(s, n);
     return vlit_slow(s, n);
 }
+#if !defined(_WIN32) || defined(_MSC_VER)
+static bmutex_t _bcloc_mu = BMUTEX_INIT;
+static int _bcloc_ready = 0;
+#endif
+#if defined(_MSC_VER)
+static _locale_t _bcloc_val;
+static _locale_t _brat_c_locale(void) {
+    if (!_brat_load_acq_i32(&_bcloc_ready)) {
+        BMUTEX_LOCK(&_bcloc_mu);
+        if (!_bcloc_ready) {
+            _bcloc_val = _create_locale(LC_NUMERIC, "C");
+            _brat_store_rel_i32(&_bcloc_ready, 1);
+        }
+        BMUTEX_UNLOCK(&_bcloc_mu);
+    }
+    return _bcloc_val;
+}
+#elif !defined(_WIN32)
+static locale_t _bcloc_val;
+static locale_t _brat_c_locale(void) {
+    if (!_brat_load_acq_i32(&_bcloc_ready)) {
+        BMUTEX_LOCK(&_bcloc_mu);
+        if (!_bcloc_ready) {
+            _bcloc_val = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+            _brat_store_rel_i32(&_bcloc_ready, 1);
+        }
+        BMUTEX_UNLOCK(&_bcloc_mu);
+    }
+    return _bcloc_val;
+}
+#endif
+static void vfatal_oom(void);
 BFN double _bstrtod_c(const char *s, size_t n, int *ok_out) {
-    if (memchr(s, ',', n) != NULL) { if (ok_out) *ok_out = 0; return 0.0; }
-    char dp[8];
-    snprintf(dp, sizeof dp, "%.1f", 1.5);
-    size_t dplen = (dp[0] == '1' && strlen(dp) >= 3) ? (strlen(dp) - 2) : 1;
-    int need_dp = !(dp[1] == '.' && dplen == 1);
-    const char *dot = need_dp ? (const char *)memchr(s, '.', n) : NULL;
-    size_t blen = dot ? (n - 1 + dplen) : n;
+    if (n == 0 || memchr(s, ',', n) != NULL || memchr(s, 0, n) != NULL) {
+        if (ok_out) *ok_out = 0;
+        return 0.0;
+    }
     char sbuf[128];
+    size_t blen = n;
+#if defined(_WIN32) && !defined(_MSC_VER)
+    const char *dp = localeconv()->decimal_point;
+    size_t dplen = (dp && dp[0]) ? strlen(dp) : 1;
+    const char *dot = (dplen != 1 || dp[0] != '.') ? (const char *)memchr(s, '.', n) : NULL;
+    if (dot) blen = n - 1 + dplen;
+#endif
     char *buf = (blen < sizeof sbuf) ? sbuf : (char *)malloc(blen + 1);
-    if (!buf) { if (ok_out) *ok_out = 0; return 0.0; }
+    if (!buf) vfatal_oom();
+#if defined(_WIN32) && !defined(_MSC_VER)
     if (dot) {
         size_t pre = (size_t)(dot - s);
         memcpy(buf, s, pre);
-        memcpy(buf + pre, dp + 1, dplen);
+        memcpy(buf + pre, dp, dplen);
         memcpy(buf + pre + dplen, dot + 1, n - pre - 1);
-    } else {
+    } else
+#endif
+    {
         memcpy(buf, s, n);
     }
     buf[blen] = 0;
-    char *ep = NULL;
-    double v = strtod(buf, &ep);
-    if (ok_out) *ok_out = (ep == buf + blen);
+    char *end = NULL;
+    errno = 0;
+#if defined(_MSC_VER)
+    _locale_t loc = _brat_c_locale();
+    double v = loc ? _strtod_l(buf, &end, loc) : strtod(buf, &end);
+#elif defined(_WIN32)
+    double v = strtod(buf, &end);
+#else
+    locale_t loc = _brat_c_locale();
+    locale_t prev = loc ? uselocale(loc) : (locale_t)0;
+    double v = strtod(buf, &end);
+    if (loc) uselocale(prev);
+#endif
+    int ok = (end != NULL && (size_t)(end - buf) == blen);
     if (buf != sbuf) free(buf);
-    return v;
+    if (ok_out) *ok_out = ok;
+    return ok ? v : 0.0;
 }
 
 static void vfatal_oom(void) {
@@ -1045,34 +1205,34 @@ BFN_HOT void bvec_recycle(BHead *h) {
 #endif
     free(h);
 }
-BFN void _btls_pool_drain(void);
-BFN void brat_mt_enable(void) {
-    if (_BRAT_MT()) return;
-    _btls_pool_drain();
-#if defined(__GNUC__) || defined(__clang__)
-    __atomic_store_n(&g_ext_mt, 1, __ATOMIC_RELEASE);
-#elif defined(_MSC_VER)
-    InterlockedExchange((volatile LONG *)&g_ext_mt, 1);
-#else
-    g_ext_mt = 1;
-#endif
-}
+static bmutex_t BRAT_UNUSED _bfree_pool_mu = BMUTEX_INIT;
 BFN void _btls_pool_drain(void) {
 #if !BRAT_HAS_SANITIZER
-    if (_BRAT_MT()) return;
-    while (_bmap_free) {
-        BHead *h = _bmap_free;
-        _bmap_free = h->arena_next;
-        free(h);
-    }
+    BMUTEX_LOCK(&_bfree_pool_mu);
+    BHead *ml = _bmap_free;
+    _bmap_free = 0;
     _bmap_free_n = 0;
-    while (_bvec_free) {
-        BHead *h = _bvec_free;
-        _bvec_free = h->arena_next;
-        free(h);
-    }
+    BHead *vl = _bvec_free;
+    _bvec_free = 0;
     _bvec_free_n = 0;
+    BMUTEX_UNLOCK(&_bfree_pool_mu);
+    while (ml) {
+        BHead *nx = ml->arena_next;
+        free(ml);
+        ml = nx;
+    }
+    while (vl) {
+        BHead *nx = vl->arena_next;
+        free(vl);
+        vl = nx;
+    }
 #endif
+}
+BFN void brat_mt_enable(void) {
+    if (!_brat_load_acq_i32(&g_ext_mt)) {
+        _brat_store_rel_i32(&g_ext_mt, 1);
+        _btls_pool_drain();
+    }
 }
 #if (defined(__GNUC__) || defined(__clang__)) && !BRAT_HAS_SANITIZER && !defined(BRAT_RT_SHARED)
 __attribute__((destructor)) static void _btls_pool_dtor(void) { _btls_pool_drain(); }
@@ -1466,7 +1626,7 @@ BFN void vdrop_recv(Val recv, Val result) {
     case V_STR: case V_VEC: case V_STRUCT: case V_TAG: h = vhead_of(recv); break;
     default: return;
     }
-    if (!h || h == vhead_of(result)) return;
+    if (!h || (h == vhead_of(result) && BRC_LOAD((BHead *)h) <= 1)) return;
     vrc_dec(recv);
 }
 BFN Val vmove(volatile Val *src) {
@@ -1553,13 +1713,7 @@ BFN void vclosure_env_set_weak_capture(Val closure, bint slot) {
 
 static bmutex_t _vshp_mu = BMUTEX_INIT;
 BFN_HOT Map *vmap_shaped(BShape *shp, const char *type, const char *const *fnames, bint n) {
-    int rdy;
-#if defined(__GNUC__) || defined(__clang__)
-    rdy = __atomic_load_n(&shp->ready, __ATOMIC_ACQUIRE);
-#else
-    rdy = shp->ready;
-#endif
-    if (!rdy) {
+    if (!_brat_load_acq_i32(&shp->ready)) {
         BMUTEX_LOCK(&_vshp_mu);
         if (!shp->ready) {
             Val *ks = (Val *)malloc(bmul_size(n > 0 ? n : 1, sizeof(Val)));
@@ -1568,11 +1722,7 @@ BFN_HOT Map *vmap_shaped(BShape *shp, const char *type, const char *const *fname
             shp->keys = ks;
             shp->type = type;
             shp->len = n;
-#if defined(__GNUC__) || defined(__clang__)
-            __atomic_store_n(&shp->ready, 1, __ATOMIC_RELEASE);
-#else
-            shp->ready = 1;
-#endif
+            _brat_store_rel_i32(&shp->ready, 1);
         }
         BMUTEX_UNLOCK(&_vshp_mu);
     }
@@ -1630,18 +1780,10 @@ static uint64_t vkey_hash_d(Val k, int depth) {
     case V_STR:
         if (!k.sso && k.as.str) {
             BHead *sh = (BHead *)k.as.str - 1;
-#if defined(__GNUC__) || defined(__clang__)
-            uint64_t ch = __atomic_load_n(&sh->hash, __ATOMIC_RELAXED);
-#else
-            uint64_t ch = sh->hash;
-#endif
+            uint64_t ch = _brat_load_rlx_u64(&sh->hash);
             if (ch) return ch;
             ch = vcstr_hash(k.as.str, (size_t)sh->len);
-#if defined(__GNUC__) || defined(__clang__)
-            __atomic_store_n(&sh->hash, ch, __ATOMIC_RELAXED);
-#else
-            sh->hash = ch;
-#endif
+            _brat_store_rlx_u64(&sh->hash, ch);
             return ch;
         }
         return vcstr_hash(vstr_c(&k), vstr_len_fast(&k));
@@ -1833,12 +1975,12 @@ BFN_HOT bint map_find(Map *m, Val k) {
 }
 BFN_HOT bint map_find_cstr(Map *m, const char *k, size_t kl) {
     if (m->shape || !m->slots) {
-        char c0 = k[0];
+        char c0 = kl ? k[0] : 0;
         for (bint i = 0; i < m->used; i++) {
             Val kv = m->keys[i];
             if (kv.tag == V_STR) {
                 const char *ks = vstr_c(&kv);
-                if (ks == k || (vstr_len_fast(&kv) == kl && ks[0] == c0 && memcmp(ks, k, kl) == 0))
+                if (ks == k || (vstr_len_fast(&kv) == kl && (kl == 0 || (ks[0] == c0 && memcmp(ks, k, kl) == 0))))
                     return i;
             }
         }
@@ -2653,6 +2795,7 @@ BFN Val vlib_open(Val path) {
     void *h;
     BPluginHandle *entry;
     char err[512] = {0};
+    brat_mt_enable();
     if (path.tag != V_STR) { vraise("lib_open: want str"); return vunwind; }
     if (vstr_has_nul(&path)) { vraise("lib_open: embedded NUL in path"); return vunwind; }
     h = _blib_open_raw(vstr_c(&path), err, sizeof err);

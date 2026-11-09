@@ -790,25 +790,30 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     if (pid == 0) {
         extern char **environ;
         setpgid(0, 0);
+#if defined(SIGPIPE)
+        signal(SIGPIPE, SIG_DFL);
+#endif
         close(out_p[0]);
         close(err_p[0]);
         close(ex_p[0]);
+        int *wpipes[3] = {&out_p[1], &err_p[1], &ex_p[1]};
+        for (int wi = 0; wi < 3; wi++) {
+            if (*wpipes[wi] >= 0 && *wpipes[wi] < 3) {
+                int m = fcntl(*wpipes[wi], F_DUPFD_CLOEXEC, 3);
+                if (m < 0) _exit(126);
+                close(*wpipes[wi]);
+                *wpipes[wi] = m;
+            }
+        }
         int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (devnull >= 0) {
             if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
             else { dup2(devnull, STDIN_FILENO); close(devnull); }
         }
-        if (err_p[1] == STDOUT_FILENO && out_p[1] != STDOUT_FILENO) {
-            int m = fcntl(err_p[1], F_DUPFD_CLOEXEC, 3);
-            if (m < 0) _exit(126);
-            err_p[1] = m;
-        }
-        if (out_p[1] == STDOUT_FILENO) fcntl(STDOUT_FILENO, F_SETFD, 0);
-        else dup2(out_p[1], STDOUT_FILENO);
-        if (err_p[1] == STDERR_FILENO) fcntl(STDERR_FILENO, F_SETFD, 0);
-        else dup2(err_p[1], STDERR_FILENO);
-        if (out_p[1] > 2) close(out_p[1]);
-        if (err_p[1] > 2) close(err_p[1]);
+        if (dup2(out_p[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(err_p[1], STDERR_FILENO) < 0) _exit(126);
+        close(out_p[1]);
+        close(err_p[1]);
         const char *prog = cargv[0];
         if (strchr(prog, '/') != NULL) {
             execve(prog, cargv, environ);

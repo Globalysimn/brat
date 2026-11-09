@@ -380,7 +380,7 @@ BFN Val vptr_of_str(Val v) {
 BFN Val vptr_write_str(Val p, Val s) {
     if (!vptr_live(p)) return vunwind;
     if (s.tag != V_STR) { vraise("ptr_write_str wants str"); return vunwind; }
-    char *cs = vstr_pin(s);
+    char *cs = vstr_pin_ret(s);
     if (verr_pending() || !cs) return vunwind;
     *(const char **)p.as.ival = cs;
     return vint(0);
@@ -397,6 +397,13 @@ BFN bint vsprint_len_q(Val v, bint q) {
 }
 
 BFN bint vsprint_len(Val v) { return vsprint_len_q(v, 0); }
+static void _vfmt_ts7(double t, char out[32]) {
+    if (!(t >= 0.0) || !isfinite(t)) { memcpy(out, "0.0000000", 10); return; }
+    uint64_t ticks = (uint64_t)(t * 10000000.0 + 0.5);
+    unsigned long long sec = (unsigned long long)(ticks / 10000000ULL);
+    unsigned frac = (unsigned)(ticks % 10000000ULL);
+    snprintf(out, 32, "%llu.%07u", sec, frac);
+}
 BFN void vlogv(const char *lvl, Vec *a) {
     size_t total = 0;
     bint i;
@@ -421,8 +428,10 @@ BFN void vlogv(const char *lvl, Vec *a) {
         n += (size_t)vsprint(a->items[i], buf + n);
     }
     buf[n] = 0;
+    char tsbuf[32];
+    _vfmt_ts7(vtime(), tsbuf);
     BRAT_PRINT_LOCK();
-    printf("{\"ts\": %.7f, \"lvl\": \"%s\", \"msg\": \"", vtime(), lvl);
+    printf("{\"ts\": %s, \"lvl\": \"%s\", \"msg\": \"", tsbuf, lvl);
     for (size_t j = 0; j < n; j++) {
         unsigned char ch = (unsigned char)buf[j];
         if (ch == '"' || ch == '\\') { putchar('\\'); putchar(ch); }
@@ -837,7 +846,7 @@ BFN void vjprint_d(Val v, int d) {
     case V_NIL: printf("null"); break;
     case V_BOOL: printf(v.as.b ? "true" : "false"); break;
     case V_INT: printf(BINT_FMT, (bint)v.as.ival); break;
-    case V_FLOAT: printf("%s", vfmt_double(v.as.fval)); break;
+    case V_FLOAT: printf("%s", isfinite(v.as.fval) ? vfmt_double(v.as.fval) : "null"); break;
     case V_STR: {
         const char *p = vstr_c(&v);
         size_t slen = vstr_len_fast(&v);
@@ -910,7 +919,9 @@ BFN void vspan_items(Val v) {
 }
 
 BFN void vspan(Val v) {
-    printf("{\"ts\": %.7f, \"span\": [", vtime());
+    char tsbuf[32];
+    _vfmt_ts7(vtime(), tsbuf);
+    printf("{\"ts\": %s, \"span\": [", tsbuf);
     vspan_items(v);
     printf("]}\n");
     fflush(stdout);

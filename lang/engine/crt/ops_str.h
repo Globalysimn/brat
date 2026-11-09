@@ -1,8 +1,7 @@
 
 /* String from an explicit (pointer, length) pair. C buffers carry their own
  * length; trusting strlen there is how a NUL in the middle silently truncates.
- * Rejects NUL and invalid UTF-8 so the byte string means the same thing in both
- * backends. */
+ * Rejects embedded NUL and invalid UTF-8 at the boundary. */
 BFN int utf8_valid(const char *s, bint n) {
     const unsigned char *p = (const unsigned char *)s;
     bint i = 0;
@@ -415,27 +414,43 @@ BFN const char *vfmt_double(double x) {
        out as `12345678901234568.0` here and as `1.2345678901234568e+16` from
        fixed-point formatting (decided by decimal exponent, not by
        precision). */
+    if (isinf(x)) return x < 0 ? "-inf" : "inf";
+#if !defined(_WIN32)
+    locale_t cloc = _brat_c_locale();
+    locale_t prev_loc = cloc ? uselocale(cloc) : (locale_t)0;
+#endif
     for (p = 0; p <= 17; p++) {
         snprintf(b, 48, "%.*e", p, x);
-        if (strtod(b, NULL) == x) break;
+#if defined(_WIN32)
+        const char *dp = localeconv()->decimal_point;
+        if (dp && dp[0] && !(dp[0] == '.' && dp[1] == 0)) {
+            size_t dplen = strlen(dp);
+            char *hit = strstr(b, dp);
+            if (hit) { *hit = '.'; if (dplen > 1) memmove(hit + 1, hit + dplen, strlen(hit + dplen) + 1); }
+        }
+#endif
+        int ok = 0;
+        if (_bstrtod_c(b, strlen(b), &ok) == x && ok) break;
     }
     /* repr()'s fixed range, exactly: zero and [1e-4, 1e16). */
     if (x == 0.0 || (fabs(x) >= 1e-4 && fabs(x) < 1e16)) {
         for (p = 0; p <= 17; p++) {
             snprintf(b, 48, "%.*f", p, x);
-            if (strtod(b, NULL) == x) break;
+#if defined(_WIN32)
+            const char *dp = localeconv()->decimal_point;
+            if (dp && dp[0] && !(dp[0] == '.' && dp[1] == 0)) {
+                size_t dplen = strlen(dp);
+                char *hit = strstr(b, dp);
+                if (hit) { *hit = '.'; if (dplen > 1) memmove(hit + 1, hit + dplen, strlen(hit + dplen) + 1); }
+            }
+#endif
+            int ok = 0;
+            if (_bstrtod_c(b, strlen(b), &ok) == x && ok) break;
         }
     }
-    char dp_probe[8];
-    snprintf(dp_probe, sizeof dp_probe, "%.1f", 1.5);
-    if (dp_probe[1] != '.' && dp_probe[1] != 0) {
-        size_t dplen = strlen(dp_probe) - 2;
-        char *hit = (dplen > 0) ? strstr(b, dp_probe + 1) : NULL;
-        if (hit && hit[dplen] >= '0' && hit[dplen] <= '9') {
-            *hit = '.';
-            if (dplen > 1) memmove(hit + 1, hit + dplen, strlen(hit + dplen) + 1);
-        }
-    }
+#if !defined(_WIN32)
+    if (cloc) uselocale(prev_loc);
+#endif
     if (!strpbrk(b, ".eEnN")) { strcat(b, ".0"); }
     return b;
 }
@@ -2132,8 +2147,8 @@ BFN const char *vconfine(const char *p) {
             struct stat st;
             if (lstat(res, &st) == 0 && S_ISLNK(st.st_mode)) {
                 char lbuf[4096];
-                ssize_t ln = readlink(res, lbuf, sizeof lbuf - 1);
-                if (ln < 0) return NULL;
+                ssize_t ln = readlink(res, lbuf, sizeof lbuf);
+                if (ln <= 0 || (size_t)ln >= sizeof lbuf) return NULL;
                 lbuf[ln] = 0;
                 if (lbuf[0] == '/') {
                     rn = snprintf(res, sizeof res, "%s", lbuf);
@@ -2258,8 +2273,8 @@ static int _vfd_confined(int fd) {
     char proc[64];
     char target[PATH_MAX];
     snprintf(proc, sizeof proc, "/proc/self/fd/%d", fd);
-    ssize_t n = readlink(proc, target, sizeof target - 1);
-    if (n < 0) return 0;
+    ssize_t n = readlink(proc, target, sizeof target);
+    if (n <= 0 || (size_t)n >= sizeof target) return 0;
     target[n] = 0;
 #elif defined(__APPLE__)
     char target[PATH_MAX];

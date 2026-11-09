@@ -402,10 +402,10 @@ typedef in_addr_t bin_addr_t;
 BFN Val _vok_int(bint n) { Vec *a = vvec(); vec_push(a, vint(n)); return vtagv("ok", a); }
 BFN Val _verr_c(const char *m) { Vec *a = vvec(); vec_push(a, vstr(_verror_text(m))); return vtagv("err", a); }
 
-#if (BRAT_CRT_MASK & BRAT_CRT_NET)
-static bmutex_t _vsk_mu = BMUTEX_INIT;
-static void _vsk_lock(void) { BMUTEX_LOCK(&_vsk_mu); }
-static void _vsk_unlock(void) { BMUTEX_UNLOCK(&_vsk_mu); }
+#if (BRAT_CRT_MASK & (BRAT_CRT_NET | BRAT_CRT_TLS))
+static bmutex_t BRAT_UNUSED _vsk_mu = BMUTEX_INIT;
+BFN void _vsk_lock(void) { BMUTEX_LOCK(&_vsk_mu); }
+BFN void _vsk_unlock(void) { BMUTEX_UNLOCK(&_vsk_mu); }
 
 #ifndef _VSK_TIMEOUT_S
 #define _VSK_TIMEOUT_S 30        /* connected sockets have a fixed lifetime */
@@ -420,14 +420,14 @@ typedef struct {
     bint closing;
     uint64_t deadline_ms;
 } VSock;
-static VSock *_vsk;
-static bint _vsk_cap;
-static bint _vsk_len = 1;
-static bint _vsk_free;
-static bint _vsk_next_id = 1;
-static int _vsk_ready = 0;
+static BRAT_UNUSED VSock *_vsk;
+static BRAT_UNUSED bint _vsk_cap;
+static BRAT_UNUSED bint _vsk_len = 1;
+static BRAT_UNUSED bint _vsk_free;
+static BRAT_UNUSED bint _vsk_next_id = 1;
+static BRAT_UNUSED int _vsk_ready = 0;
 
-static uint64_t _vsk_now_ms(void) {
+BFN uint64_t _vsk_now_ms(void) {
 #if defined(_WIN32)
     return (uint64_t)GetTickCount64();
 #else
@@ -438,16 +438,18 @@ static uint64_t _vsk_now_ms(void) {
 }
 
 /* Callers hold the lock. */
-static int _vsk_ensure(void) {
+BFN int _vsk_ensure(void) {
     if (_vsk_ready) return 1;
 #if defined(_WIN32)
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 0;
+#elif defined(SIGPIPE)
+    signal(SIGPIPE, SIG_IGN);
 #endif
     _vsk_ready = 1;
     return 1;
 }
-static int _vsk_init_net(void) {
+BFN int _vsk_init_net(void) {
     _vsk_lock();
     int ok = _vsk_ensure();
     _vsk_unlock();
@@ -458,7 +460,7 @@ static int _vsk_init_net(void) {
  * so a copied stale handle cannot alias the next socket in a reused table
  * slot. Descriptors are marked non-inheritable so child processes spawned by
  * `proc_run` cannot touch them. */
-static void _vsk_confine(bsock_t fd) {
+BFN void _vsk_confine(bsock_t fd) {
 #if defined(_WIN32)
     SetHandleInformation((HANDLE)fd, HANDLE_FLAG_INHERIT, 0);
 #else
@@ -466,14 +468,14 @@ static void _vsk_confine(bsock_t fd) {
     if (fl >= 0) fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
 #endif
 }
-static bint _vsk_find_locked(bint id) {
+BFN bint _vsk_find_locked(bint id) {
     if (id < 1) return -1;
     for (bint i = 1; i < _vsk_len; i++) {
         if (_vsk[i].fd != BSOCK_INVALID && !_vsk[i].closing && _vsk[i].id == id) return i;
     }
     return -1;
 }
-static bint _vsk_put(bsock_t fd) {
+BFN bint _vsk_put(bsock_t fd) {
     bint id = -1;
     _vsk_lock();
     if (_vsk_ensure() && _vsk_next_id >= 1) {
@@ -516,7 +518,7 @@ static bint _vsk_put(bsock_t fd) {
     _vsk_unlock();
     return id;
 }
-static void _vsk_free_locked(bint slot) {
+BFN void _vsk_free_locked(bint slot) {
     _vsk[slot].fd = BSOCK_INVALID;
     _vsk[slot].id = 0;
     _vsk[slot].refs = 0;
@@ -525,14 +527,14 @@ static void _vsk_free_locked(bint slot) {
     _vsk[slot].free_next = _vsk_free;
     _vsk_free = slot;
 }
-static void _vsk_shutdown(bsock_t fd) {
+BFN void _vsk_shutdown(bsock_t fd) {
 #if defined(_WIN32)
     shutdown(fd, SD_BOTH);
 #else
     shutdown(fd, SHUT_RDWR);
 #endif
 }
-static bsock_t _vsk_acquire(bint id, bint *slot_out, uint64_t *deadline_out) {
+BFN bsock_t _vsk_acquire(bint id, bint *slot_out, uint64_t *deadline_out) {
     bsock_t fd = BSOCK_INVALID;
     *slot_out = -1;
     if (deadline_out) *deadline_out = 0;
@@ -549,7 +551,7 @@ static bsock_t _vsk_acquire(bint id, bint *slot_out, uint64_t *deadline_out) {
     _vsk_unlock();
     return fd;
 }
-static int _vsk_release(bint slot) {
+BFN int _vsk_release(bint slot) {
     if (slot < 0) return 0;
     bsock_t close_fd = BSOCK_INVALID;
     int closing = 0;
@@ -566,7 +568,7 @@ static int _vsk_release(bint slot) {
     if (close_fd != BSOCK_INVALID) bsock_close(close_fd);
     return closing;
 }
-static int _vsk_close_id(bint id) {
+BFN int _vsk_close_id(bint id) {
     bsock_t close_fd = BSOCK_INVALID;
     bsock_t shutdown_fd = BSOCK_INVALID;
     int found = 0;
@@ -589,7 +591,7 @@ static int _vsk_close_id(bint id) {
     if (close_fd != BSOCK_INVALID) bsock_close(close_fd);
     return found;
 }
-static int _vsk_slot_id(Val slot, bint *id) {
+BFN int _vsk_slot_id(Val slot, bint *id) {
     if (slot.tag != V_INT) return 0;
     *id = slot.as.ival;
     return 1;
@@ -597,7 +599,7 @@ static int _vsk_slot_id(Val slot, bint *id) {
 
 /* A write to a peer that has gone away must return EPIPE, not kill the process.
  * Linux and Windows take MSG_NOSIGNAL / have no SIGPIPE; macOS needs the socket option. */
-static void _vsk_nosigpipe(bsock_t fd) {
+BFN void _vsk_nosigpipe(bsock_t fd) {
 #if defined(__APPLE__)
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (const char *)&one, sizeof one);
@@ -612,7 +614,7 @@ static void _vsk_nosigpipe(bsock_t fd) {
 #endif
 
 /* Connected sockets only. The listening socket gets no timeout, or an idle server would die. */
-static void _vsk_timeouts(bsock_t fd) {
+BFN void _vsk_timeouts(bsock_t fd) {
 #if defined(_WIN32)
     DWORD ms = _VSK_TIMEOUT_S * 1000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms);
@@ -625,7 +627,7 @@ static void _vsk_timeouts(bsock_t fd) {
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 #endif
 }
-static int _vsk_apply_deadline(bsock_t fd, uint64_t deadline, int receive) {
+BFN int _vsk_apply_deadline(bsock_t fd, uint64_t deadline, int receive) {
     uint64_t now = _vsk_now_ms();
     if (!deadline || now >= deadline) return 0;
     uint64_t left = deadline - now;
@@ -643,14 +645,14 @@ static int _vsk_apply_deadline(bsock_t fd, uint64_t deadline, int receive) {
     return setsockopt(fd, SOL_SOCKET, opt, &tv, sizeof tv) == 0;
 #endif
 }
-static int _vsk_timed_out(void) {
+BFN int _vsk_timed_out(void) {
 #if defined(_WIN32)
     return WSAGetLastError() == WSAETIMEDOUT;
 #else
     return errno == EAGAIN || errno == EWOULDBLOCK;
 #endif
 }
-static int _vsk_connect_timeout(bsock_t fd, const struct sockaddr *addr,
+BFN int _vsk_connect_timeout(bsock_t fd, const struct sockaddr *addr,
 #if defined(_WIN32)
                                 int addrlen) {
 #else
@@ -745,7 +747,7 @@ static int _vsk_connect_timeout(bsock_t fd, const struct sockaddr *addr,
 
 /* "host:port". Returns 0 for anything malformed: a host that does not fit is
  * refused, not cut short; the port must be decimal digits giving 1..65535. */
-static int _vhost_port(const char *c, char *host, size_t hcap, int *port) {
+BFN int _vhost_port(const char *c, char *host, size_t hcap, int *port) {
     const char *colon = strrchr(c, ':');
     if (!colon || colon == c) return 0;
     size_t hl = (size_t)(colon - c);
@@ -764,7 +766,7 @@ static int _vhost_port(const char *c, char *host, size_t hcap, int *port) {
     *port = (int)v;
     return 1;
 }
-#endif /* BRAT_CRT_NET */
+#endif /* BRAT_CRT_NET | BRAT_CRT_TLS */
 
 static const char _vsbuf_type[] = "__brat_sbuf";
 
@@ -2582,7 +2584,14 @@ typedef struct _BOsslApi {
     int (*SSL_read)(void *, void *, int);
     int (*SSL_get_error)(const void *, int);
     int (*SSL_shutdown)(void *);
+    void *(*SSL_CTX_get_cert_store)(const void *);
     int (*X509_VERIFY_PARAM_set1_ip_asc)(void *, const char *);
+    void *(*BIO_new_mem_buf)(const void *, int);
+    int (*BIO_free)(void *);
+    void *(*PEM_read_bio_X509)(void *, void **, void *, void *);
+    void (*X509_free)(void *);
+    int (*X509_STORE_add_cert)(void *, void *);
+    void (*ERR_clear_error)(void);
 } BOsslApi;
 static BOsslApi _bossl;
 static bmutex_t _bossl_mu = BMUTEX_INIT;
@@ -2624,7 +2633,14 @@ static int _bossl_init(void) {
     *(void **)&_bossl.SSL_read = dlsym(hssl, "SSL_read");
     *(void **)&_bossl.SSL_get_error = dlsym(hssl, "SSL_get_error");
     *(void **)&_bossl.SSL_shutdown = dlsym(hssl, "SSL_shutdown");
+    *(void **)&_bossl.SSL_CTX_get_cert_store = dlsym(hssl, "SSL_CTX_get_cert_store");
     *(void **)&_bossl.X509_VERIFY_PARAM_set1_ip_asc = dlsym(hcry, "X509_VERIFY_PARAM_set1_ip_asc");
+    *(void **)&_bossl.BIO_new_mem_buf = dlsym(hcry, "BIO_new_mem_buf");
+    *(void **)&_bossl.BIO_free = dlsym(hcry, "BIO_free");
+    *(void **)&_bossl.PEM_read_bio_X509 = dlsym(hcry, "PEM_read_bio_X509");
+    *(void **)&_bossl.X509_free = dlsym(hcry, "X509_free");
+    *(void **)&_bossl.X509_STORE_add_cert = dlsym(hcry, "X509_STORE_add_cert");
+    *(void **)&_bossl.ERR_clear_error = dlsym(hcry, "ERR_clear_error");
     if (!_bossl.TLS_client_method || !_bossl.SSL_CTX_new || !_bossl.SSL_CTX_free ||
         !_bossl.SSL_CTX_set_default_verify_paths || !_bossl.SSL_CTX_load_verify_locations ||
         (!_bossl.SSL_CTX_set_options && !_bossl.SSL_CTX_ctrl) ||
@@ -2658,15 +2674,44 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
         memmove(host, host + 1, hlen - 2);
         host[hlen - 2] = 0;
     }
+    if (!_vsk_init_net()) return _verr_c("network init failed");
     const char *ca_raw = vstr_c(&ca_file);
-    char ca_conf[8192];
-    ca_conf[0] = 0;
+    char *ca_pem = NULL;
+    size_t ca_pem_len = 0;
     if (ca_raw[0] != 0) {
         const char *rp = vconfine_val(&ca_file);
         if (!rp) return _verr_c("path outside the program directory");
-        snprintf(ca_conf, sizeof ca_conf, "%s", rp);
+        int escaped = 0;
+        FILE *cf = _vopen_confined_stream(rp, 0, 0, &escaped, NULL);
+        if (!cf) return _verr_c(escaped ? "path escaped during open" : "failed to load CA file");
+        size_t pcap = 4096;
+        ca_pem = (char *)malloc(pcap);
+        if (!ca_pem) { fclose(cf); vfatal_oom(); }
+        for (;;) {
+            if (ca_pem_len + 4096 > pcap) {
+                if (pcap >= (4u << 20)) {
+                    free(ca_pem); fclose(cf);
+                    return _verr_c("CA file exceeds 4 MB");
+                }
+                pcap *= 2;
+                char *nb = (char *)realloc(ca_pem, pcap);
+                if (!nb) { free(ca_pem); fclose(cf); vfatal_oom(); }
+                ca_pem = nb;
+            }
+            size_t got = fread(ca_pem + ca_pem_len, 1, 4096, cf);
+            ca_pem_len += got;
+            if (got < 4096) {
+                int bad = ferror(cf);
+                fclose(cf);
+                if (bad || ca_pem_len == 0) {
+                    free(ca_pem);
+                    return _verr_c("failed to load CA file");
+                }
+                break;
+            }
+        }
     }
-    if (!_bossl_init()) return _verr_c("OpenSSL libssl unavailable");
+    if (!_bossl_init()) { free(ca_pem); return _verr_c("OpenSSL libssl unavailable"); }
     char port_s[16];
     snprintf(port_s, sizeof port_s, "%d", port);
     struct addrinfo hints;
@@ -2674,8 +2719,10 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port_s, &hints, &res) != 0 || !res)
+    if (getaddrinfo(host, port_s, &hints, &res) != 0 || !res) {
+        free(ca_pem);
         return _verr_c("DNS resolution failed");
+    }
     bsock_t fd = BSOCK_INVALID;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         bsock_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -2683,21 +2730,36 @@ BFN Val vhttps_request_raw(Val addr, Val server_name, Val wire, Val ca_file) {
         _vsk_confine(s);
         _vsk_nosigpipe(s);
         _vsk_timeouts(s);
-        if (connect(s, ai->ai_addr, ai->ai_addrlen) == 0) { fd = s; break; }
+        if (_vsk_connect_timeout(s, ai->ai_addr, ai->ai_addrlen) == 0) { fd = s; break; }
         bsock_close(s);
     }
     freeaddrinfo(res);
-    if (fd == BSOCK_INVALID) return _verr_c("TLS TCP connect failed");
+    if (fd == BSOCK_INVALID) { free(ca_pem); return _verr_c("TLS TCP connect failed"); }
     void *ctx = _bossl.SSL_CTX_new(_bossl.TLS_client_method());
-    if (!ctx) { bsock_close(fd); return _verr_c("SSL_CTX_new failed"); }
+    if (!ctx) { free(ca_pem); bsock_close(fd); return _verr_c("SSL_CTX_new failed"); }
     if (_bossl.SSL_CTX_set_options)
         _bossl.SSL_CTX_set_options(ctx, 0x80 /* SSL_OP_IGNORE_UNEXPECTED_EOF */);
     else
         _bossl.SSL_CTX_ctrl(ctx, 32 /* SSL_CTRL_OPTIONS */, 0x80, NULL);
-    if (ca_conf[0] != 0) {
-        struct stat ca_st;
-        if (lstat(ca_conf, &ca_st) != 0 || !S_ISREG(ca_st.st_mode) ||
-            _bossl.SSL_CTX_load_verify_locations(ctx, ca_conf, NULL) != 1) {
+    if (ca_pem != NULL) {
+        int loaded = 0;
+        if (_bossl.SSL_CTX_get_cert_store && _bossl.BIO_new_mem_buf && _bossl.BIO_free &&
+            _bossl.PEM_read_bio_X509 && _bossl.X509_free && _bossl.X509_STORE_add_cert) {
+            void *store = _bossl.SSL_CTX_get_cert_store(ctx);
+            void *bio = store ? _bossl.BIO_new_mem_buf(ca_pem, (int)ca_pem_len) : NULL;
+            if (bio) {
+                void *x509 = NULL;
+                while ((x509 = _bossl.PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+                    if (_bossl.X509_STORE_add_cert(store, x509) == 1) loaded++;
+                    _bossl.X509_free(x509);
+                }
+                if (_bossl.ERR_clear_error) _bossl.ERR_clear_error();
+                _bossl.BIO_free(bio);
+            }
+        }
+        free(ca_pem);
+        ca_pem = NULL;
+        if (loaded <= 0) {
             _bossl.SSL_CTX_free(ctx); bsock_close(fd);
             return _verr_c("failed to load CA file");
         }
