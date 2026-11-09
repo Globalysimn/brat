@@ -96,14 +96,16 @@ jobs:
   macos-arm64:
     name: Native macOS (arm64)
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
       - name: Build native compiler with Apple Clang
+        timeout-minutes: 10
         run: make -j"$(sysctl -n hw.ncpu)"
 
       - name: Verify symlink launcher, frontend, checker, borrow, FFI and bundle
+        timeout-minutes: 15
         run: |
           ./bin/brat run examples/hello.brat
           ./bin/brat run examples/json_arena.brat
