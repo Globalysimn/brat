@@ -50,9 +50,9 @@ ok=42ms failed=1
 bad input: expected string key at byte 1
 ```
 
-Function signatures stay flat — no `'a` lifetime parameters or `Arc<Mutex<T>>`
-type puzzles — while `brat-cxx check` still catches local use-after-move,
-iterator invalidation, `arena` escapes, and unsynchronized `spawn` writes before
+Function signatures stay flat without `'a` lifetime parameters or `Arc<Mutex<T>>`
+wrappers, while `brat-cxx check` catches local use-after-move, iterator
+invalidation, `arena` escapes, and unsynchronized `spawn` writes before
 generating C:
 
 ```brat check
@@ -109,38 +109,34 @@ when your program actually touches them) and do not depend on `brat-cxx` or
 Python. Python 3 is used only to run the repository test harness
 (`lang/tests/run_all.py`) and benchmark script (`scripts/bench.py`).
 
-## What is actually unusual here
-
-Every language tutorial shows `if`, `for`, and `fib`, which have worked fine
-since ALGOL 60. The parts of BRAT worth inspecting are the trade-offs:
+## Key design trade-offs
 
 1. **Ownership checks without lifetime contagion.** Heap values (`str`, `vec`,
    `map`, closures) are deterministically reference-counted, with `move`
-   transfers and lexical `arena { ... }` bump regions for request-scoped trash.
-   `borrow.cpp` tracks places (`x`, `x.f`, `x[i]`) inside each function and
-   across `move`/`ref`/`mut` call boundaries. You pay one non-atomic refcount
-   bump in single-threaded code and zero `'a` annotations in return.
-2. **C headers are treated as rumors until proven.** `brat build` refuses to
-   compile `extern fn` declarations unless you pass `--header` (which checks
-   widths, mutability, and emits `_Static_assert(sizeof/offsetof)` probes),
-   `--object` (which reads ELF/Mach-O/PE symbol tables and DWARF v2–v5 type DIEs
-   without `dlopen`), a SHA-256 `.bratbind` manifest, or sign the `--unsafe-ffi`
-   waiver yourself.
-3. **Readable C11 output with dead-runtime surgery.** Instead of pulling in LLVM,
+   transfers and lexical `arena { ... }` bump regions for request-scoped scratch
+   data. `borrow.cpp` tracks places (`x`, `x.f`, `x[i]`) inside each function and
+   across `move`/`ref`/`mut` call boundaries. Single-threaded code uses plain
+   non-atomic reference counts and keeps function and struct definitions free of
+   lifetime parameters.
+2. **Verified C FFI by default.** `brat build` refuses to compile `extern fn`
+   declarations unless you pass `--header` (which checks widths, mutability, and
+   emits `_Static_assert(sizeof/offsetof)` probes), `--object` (which reads
+   ELF/Mach-O/PE symbol tables and DWARF v2-v5 type DIEs without `dlopen`), a
+   SHA-256 `.bratbind` manifest, or explicit `--unsafe-ffi`.
+3. **Readable C11 output with dead-runtime pruning.** Instead of linking LLVM,
    `emit.cpp` lowers annotated `i64`/`f64` kernels to unboxed C scalars and
    patches a `BRAT_CRT_MASK` bitmask at the top of the emitted C file so unused
-   HTTP, TLS, SQLite, regex, and thread-pool code disappears at the C
-   preprocessor stage.
-4. **Batteries in one ~4.5 MB binary.** `std.json` (RFC 8259 in C), `std.sqlite`,
+   HTTP, TLS, SQLite, regex, and thread-pool code is stripped by the C
+   preprocessor.
+4. **Single-binary toolchain and stdlib.** `std.json` (RFC 8259 in C), `std.sqlite`,
    `std.http`, `std.crypto`, `std.csv`, linear-time Pike-VM regexes,
    deterministic `par for` folds, lockfile vendoring (`pkg`), `fmt`, `test`,
-   `lsp`, and `mcp` ship in `./bin/brat`.
+   `lsp`, and `mcp` ship in `./bin/brat` (~4.5 MB).
 
 ## Benchmarks
 
-Microbenchmarks mostly measure how hard the author stared at `perf stat`, so
-[`scripts/bench.py`](scripts/bench.py) is a single plain-Python script you can
-read and re-run locally with `make bench`.
+[`scripts/bench.py`](scripts/bench.py) runs all workloads from source; reproduce
+locally with `make bench`.
 
 Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CPython 3.14.2):
 
@@ -170,20 +166,19 @@ Where BRAT wins and where it pays tax:
   14-byte inline SSO, and `std.json` runs directly in C (`0.010 s` vs Go
   `encoding/json`'s `0.039 s`).
 
-## Anti-features and who should use something else
+## Non-goals and when to use another tool
 
-BRAT is experimental single-author software, not a drop-in replacement for
-production-hardened toolchains. Read [limits](docs/guide/limits.md) before
-betting your weekend on it:
+BRAT is experimental single-author software, not a replacement for mature
+production toolchains. Read [limits](docs/guide/limits.md) for details:
 
-- **Kernel, embedded, or freestanding code → use C, Zig, or Rust.** Compiled
+- **Kernel, embedded, or freestanding code: use C, Zig, or Rust.** Compiled
   programs link `libc` and `libm`. There is no `no_std` mode and no inline
   assembly.
-- **Mathematically sound aliasing proofs → use Rust.** `brat-cxx check` is
+- **Full inter-procedural aliasing proofs: use Rust.** `brat-cxx check` is
   intra-procedural: it catches local move/borrow mistakes, iterator mutation,
   and direct `spawn` races, but it does not track lifetimes across arbitrary
   container graphs or opaque C pointers.
-- **Unsigned 64-bit arithmetic in pure BRAT → write C via `extern fn`.** Inside
+- **Unsigned 64-bit arithmetic in pure BRAT: call C via `extern fn`.** Inside
   BRAT, all integers are signed `i64` with two's-complement wrapping, `0x`/`0b`/`0o`
   literals, and `&`, `|`, `^`, `~`, `<<`, arithmetic `>>`. Unsigned widths
   (`u8`..`u64`, `usize`) exist only at FFI boundaries.
@@ -193,12 +188,13 @@ betting your weekend on it:
   `arena { ... }` block. Build long-lived graphs and LRU lists with integer
   indices into a `vec` (shown in [BRAT by Example](docs/guide/by-example.md)).
 - **Hostile multi-tenant sandboxing.** `O_NOFOLLOW` path confinement, env
-  denylists, and SQLite defensive mode are seatbelts against footguns, not a
-  VM boundary. Put untrusted code in a container.
+  denylists, and SQLite defensive mode guard against accidental path traversal
+  and secret leaks, not untrusted code execution. Run untrusted workloads inside
+  an OS container.
 
 ## Documentation
 
-| Start here | Reference | Under the hood |
+| Start here | Reference | Internals |
 |---|---|---|
 | [Language Tour](docs/guide/tour.md) | [Standard Library (`std.*`)](docs/guide/stdlib.md) | [Compiler & Runtime Architecture](docs/design/ARCHITECTURE.md) |
 | [BRAT by Example](docs/guide/by-example.md) | [CLI, Env & Error Codes](docs/guide/cli.md) | [Bump Arenas (`arena`)](docs/design/ARENA.md) |

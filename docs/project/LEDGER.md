@@ -10,7 +10,7 @@ absence of memory errors, data races or sandbox escapes.
   `x.f`, `x[i]`) within a single function and checks call boundaries against
   declared `move`, `ref` and `mut` modes. Projection moves (`move p.f`) copy a
   counted reference rather than emptying the parent slot, reference cycles built
-  outside the direct container-insert check are not garbage-collected, and
+  across opaque function boundaries are not garbage-collected, and
   mutations performed through opaque foreign pointers are invisible unless
   annotated with `writes(p)`. See [ownership](../guide/ownership.md).
 - **Raw pointer and `ptr_of_str` lifetimes.** Static escape analysis rejects

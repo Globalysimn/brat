@@ -60,10 +60,10 @@ BRAT splits the job down the middle:
 - Heap values carry a deterministic reference count (non-atomic on a single
   thread; upgraded to atomic ops only when concurrency is compiled in).
 - `borrow.cpp` runs an intra-procedural dataflow pass over places (`x`, `x.f`,
-  `x[i]`). That catches the bugs people write every afternoon — reading `x`
-  after `move x`, mutating a vector while iterating over it, returning a
-  pointer into a dead local, or letting a `ref` escape into an unjoined `spawn`
-  — while keeping every struct definition free of `'a`.
+  `x[i]`). That catches common local bugs (reading `x` after `move x`, mutating
+  a vector while iterating over it, returning a pointer into a dead local, or
+  letting a `ref` escape into an unjoined `spawn`) while keeping struct
+  definitions free of `'a`.
 
 ---
 
@@ -130,23 +130,22 @@ binary cache and `crt.h` precompiled headers.
 
 ## Why does `brat build` refuse `extern fn puts(s: str) -> i32` by default?
 
-Because handwritten FFI declarations lie constantly — someone writes `i64`
-where C wrote `int`, drops `const`, or upgrades `libfoo` on Tuesday and
-discovers the ABI drift via `SIGSEGV` on Friday.
+Handwritten FFI declarations drift easily: writing `i64` where C wrote `int`,
+dropping `const`, or upgrading a shared library without updating prototypes
+turns into silent stack or heap corruption at run time.
 
 `brat build` requires one of four proofs:
 
-1. `--header stdio.h` — parses the C header, verifies argument count, integer
+1. `--header stdio.h`: parses the C header, verifies argument count, integer
    widths, signedness, and pointer mutability, and emits compile-time
    `_Static_assert(sizeof(...) == ...)` / `offsetof(...)` checks into the C11
    unit.
-2. `--object libfoo.a` (or `.o`/`.so`/`.dylib`/`.dll`) — parses ELF, Mach-O, or
-   PE/COFF headers plus DWARF v2–v5 `.debug_info` DIEs directly (never calling
+2. `--object libfoo.a` (or `.o`/`.so`/`.dylib`/`.dll`): parses ELF, Mach-O, or
+   PE/COFF headers plus DWARF v2-v5 `.debug_info` DIEs directly (never calling
    `dlopen`, so static constructors cannot execute during `brat check`).
 3. A `.bratbind` manifest produced by `brat bindgen`, pinned by SHA-256 of the
    originating header.
-4. `--unsafe-ffi` — an explicit flag on the command line admitting you are on
-   your own.
+4. `--unsafe-ffi`: explicit opt-out flag on the command line.
 
 ---
 
@@ -155,7 +154,7 @@ discovers the ABI drift via `SIGSEGV` on Friday.
 Strings are **immutable, NUL-clean UTF-8** in memory:
 
 - Strings of **14 bytes or fewer** live inline inside the 16-byte `Val` value
-  (Small String Optimization — zero heap allocation, zero refcount traffic).
+  (Small String Optimization, avoiding heap allocation and refcount updates).
 - Longer strings are reference-counted heap buffers with cached byte and
   code-point metadata (`SWAR` ASCII fast paths keep pure-ASCII indexing $O(1)$).
 - `len(s)`, `s[i]`, and `s.slice(a, b)` count **Unicode scalar values (code
@@ -218,15 +217,15 @@ dichotomy in CLI and service glue code:
 
 ---
 
-## Why aren't top-level `fn` names first-class values?
+## Why aren't top-level `fn` names runtime values?
 
 Direct top-level functions compile straight to static C functions (often with
 unboxed `int64_t` / `double` signatures), without synthesizing a heap closure
 object or uniform `Val(Val*, int)` trampoline for every function in the
 program. You can pass bare `fn` names directly to collection higher-order
-methods (`[1, 2, 3].map(double)`); when you actually want a heap value to store
-in a variable or map, write `fn(x) { return double(x) }` so the boxing cost is
-visible.
+methods (`[1, 2, 3].map(double)`); when you want a heap closure to store in a
+variable or map, write `fn(x) { return double(x) }` so the allocation is
+explicit.
 
 ---
 

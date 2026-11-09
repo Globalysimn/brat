@@ -42,7 +42,7 @@ so `check.cpp` rejects at compile time:
 
 To promote a value out of an arena onto the reference-counted heap, call
 `own(x)`. `own(x)` suspends the active thread-local arena while deep-copying `x`
-(for example, `return Err(own("bad record {n}"))`). At `-O1`/`-O2`, non-escaping
+(for example, `return Err(own("bad record {n}"))`). At `-O2`, non-escaping
 local `struct` bindings inside an `arena` block are scalarized by SRA without
 allocating a `Map` in the arena at all; passing a whole `struct` to `own(s)`
 marks `s` as escaping so `own(s)` deep-copies the full aggregate, while

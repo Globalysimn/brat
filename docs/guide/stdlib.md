@@ -12,7 +12,7 @@ program does not reference them.
 
 ---
 
-## `std.json` — RFC 8259 JSON parser and serializer
+## `std.json`: RFC 8259 JSON parser and serializer
 
 Backed directly by the C scanner/serializer in `crt/sql_proc.h`. JSON objects
 become `map` values, arrays become `vec`, `null` becomes `None`, and numbers
@@ -47,7 +47,7 @@ fn main() -> i64 {
 
 ---
 
-## `std.bytes` — Byte vectors, hex, and Base64
+## `std.bytes`: Byte vectors, hex, and Base64
 
 Binary payloads are represented as `vec[i64]` with elements in `0..255`.
 `to_hex`, `from_hex`, `to_base64`, `from_base64`, and `to_str` return
@@ -89,7 +89,7 @@ fn main() -> i64 {
 
 ---
 
-## `std.cli` — Command-line flags and subcommands
+## `std.cli`: Command-line flags and subcommands
 
 Stateless helpers over `args()` (or any `vec[str]`). Both `--flag value` and
 `--flag=value` are recognized; `--` stops option scanning. `opt_int` returns
@@ -123,7 +123,7 @@ sync,a.txt,b.txt
 
 ---
 
-## `std.crypto` — SHA-256, HMAC-SHA256, and CSPRNG
+## `std.crypto`: SHA-256, HMAC-SHA256, and CSPRNG
 
 Hash and random functions return `Result[..., str]`. `sha256` / `hmac_sha256`
 accept either `str` or `vec[i64]` (`0..255`). `constant_time_eq` compares strings
@@ -158,7 +158,7 @@ true true
 
 ---
 
-## `std.csv` — RFC 4180 CSV parser and serializer
+## `std.csv`: RFC 4180 CSV parser and serializer
 
 Handles quoted fields, embedded commas/newlines, and doubled `""` escapes.
 `parse` returns `Result[vec[vec[str]], str]`; `dump` serializes rows with `\n`
@@ -187,7 +187,7 @@ db-2 -> say "hi"
 
 ---
 
-## `std.env` — Environment variables
+## `std.env`: Environment variables
 
 Reads process environment variables subject to the runtime credential denylist
 (`*_TOKEN`, `*_SECRET`, `*_KEY`, `*_PASSWORD`, cloud credentials) and
@@ -204,7 +204,7 @@ fn flag(name: str) -> bool
 
 ---
 
-## `std.fs` — Confined filesystem helpers
+## `std.fs`: Confined filesystem helpers
 
 Wraps the runtime's `O_NOFOLLOW` confined file and directory primitives. By
 default, paths are confined to the program's module root; set `BRAT_FILES=1`
@@ -239,7 +239,7 @@ fn stdin_line() -> Result[Option[str], str]
 
 ---
 
-## `std.path` — Pure path manipulation
+## `std.path`: Pure path manipulation
 
 Pure lexical operations (no disk touches), normalizing `.` and `..` segments
 consistently across slash styles.
@@ -275,7 +275,7 @@ var/cache/index.tar.idx | rel: cache/index.tar.gz
 
 ---
 
-## `std.time` — Clocks, Hinnant calendar math, and ISO-8601 UTC
+## `std.time`: Clocks, Hinnant calendar math, and ISO-8601 UTC
 
 `now_ms` and `unix_sec` read wall-clock UTC; `now_mono_ns` reads `CLOCK_MONOTONIC`
 for benchmarking and timeouts. Calendar conversions use Howard Hinnant's
@@ -314,7 +314,7 @@ true true 1.25s
 
 ---
 
-## `std.sqlite` — Embedded SQLite3
+## `std.sqlite`: Embedded SQLite3
 
 Opens `:memory:` or confined file databases (`SQLITE_OPEN_NOFOLLOW`, defensive
 mode, disabled `TRUSTED_SCHEMA`, authorizer blocking arbitrary `ATTACH`).
@@ -333,7 +333,7 @@ fn scalar_int(db: i64, sql: str, params) -> Result[i64, str]
 
 ---
 
-## `std.http` — HTTP/1.1 & HTTPS client and server
+## `std.http`: HTTP/1.1 & HTTPS client and server
 
 Includes pure URL/query/wire parsers plus TCP/OpenSSL client requests,
 keep-alive connection pools, redirect following (`get_follow`), and blocking or
@@ -388,7 +388,7 @@ api.example.com 8443 /v1/items a b Created
 
 ---
 
-## `std.proc` — Subprocess execution (`execvp`, no shell)
+## `std.proc`: Subprocess execution (`execve`, no shell)
 
 Spawns child processes directly via `fork`/`execvp` (never `/bin/sh -c`), so
 argument strings are not subject to shell injection. Disabled by default;

@@ -27,7 +27,7 @@ exact same subcommands and flags.
 Build-time FFI flags accepted by `build` and `run`:
 
 - `--header <h.h>` (repeatable), `-I <dir>` / `-I<dir>`, `-D <macro>` / `-D<macro>`, `--target <triple>`
-- `--object <lib.o|.a|.so|.dylib|.dll>` (repeatable; inspects symbol tables + DWARF v2–v5 without `dlopen`)
+- `--object <lib.o|.a|.so|.dylib|.dll>` (repeatable; inspects symbol tables + DWARF v2-v5 without `dlopen`)
 - `--abi-matrix` (probe struct layouts across LP64, LLP64, and ILP32 target widths)
 - `--unsafe-ffi` (explicit opt-out allowing unverified `extern` declarations to compile)
 
@@ -86,7 +86,7 @@ Build-time FFI flags accepted by `build` and `run`:
 Run `./bin/brat explain E0382` (or `--json`) at any time to see a runnable
 before/after example in your terminal.
 
-### Ownership and lifetime (`E03xx` – `E05xx`)
+### Ownership and lifetime (`E03xx` - `E05xx`)
 
 | Code | Summary | Typical cause & fix |
 |---|---|---|

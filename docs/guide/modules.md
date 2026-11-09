@@ -86,11 +86,11 @@ signatures and runnable examples live in [Standard Library Reference](stdlib.md)
 | `std.csv` | RFC 4180 quoted-field `parse` and `dump` |
 | `std.time` | Epoch/monotonic clocks (`now_ms`, `now_mono_ns`, `unix_sec`, `sleep`), Hinnant civil calendar math, ISO-8601 UTC parse/format |
 | `std.env` | Denylist-filtered `get`, `get_bytes`, `get_or`, `has`, boolean `flag` |
-| `std.proc` | Shell-free `execvp` subprocess execution (`run`, `run_timeout`, `status`, `output`; gated by `BRAT_EXEC`) |
+| `std.proc` | Shell-free `execve` subprocess execution (`run`, `run_timeout`, `status`, `output`; gated by `BRAT_EXEC`) |
 
 ## 3. Lockfile package manager (`brat pkg`)
 
-BRAT has no mandatory central package registry to go down on a Tuesday. Packages
+BRAT does not depend on a central package registry. Packages
 are `.tar.gz` archives (local files, HTTPS URLs, GitHub `owner/repo@ref`
 tarballs, or entries in a static JSON index file) vendored straight into
 `./vendor/` and pinned by SHA-256 in `brat.lock`:

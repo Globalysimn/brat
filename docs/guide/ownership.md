@@ -112,14 +112,15 @@ borrow liveness to scope exit (`defer free(move p)` allows reading `p` in the
 body while rejecting a second `free(move p)`), and `try`/`catch` propagates any
 move that could occur before an error inside `try` into `catch`.
 
-## Reference-cycle prevention at run time
+## Static reference-cycle rejection
 
 Because heap containers use reference counting without a cycle collector,
-container mutations (`v[i] = x`, `v.push(x)`, `v.ins(i, x)`, `m.set(k, x)`)
-maintain an owner-parent forest (`child -> parent`) and reject insertions that
-would close a cycle (`v.push(v)`, or `a.push(b); b.push(a)`). Graphs that need
-cycles must represent edges as integer indices into a vector or allocate nodes
-inside an `arena` block.
+`capability.cpp` tracks intra-function ownership edges across container writes
+(`v[i] = x`, `v.push(x)`, `v.ins(i, x)`, `m.set(k, x)`, `m[k] = x`) and rejects
+mutations that close a local cycle (`v.push(v)`, or `a["next"] = b; b["prev"] = a`).
+Cycles constructed across opaque function boundaries are not caught at run time;
+represent long-lived cyclic graphs with integer indices into a vector or build
+short-lived graphs inside an `arena` block.
 
 ## Thread sharing and channel sessions
 

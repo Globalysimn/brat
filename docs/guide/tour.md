@@ -87,7 +87,7 @@ or run `./bin/brat explain E0382` to inspect any diagnostic code in the terminal
 
 `Ok(v)`, `Err(e)`, `Some(v)` and `None` are built-in tagged values, typed as
 `Result[T, E]` and `Option[T]` when annotated (or left dynamic in unannotated
-functions). `?` unwraps `Ok(v)` / `Some(v)` — returning `Err(e)` early from
+functions). `?` unwraps `Ok(v)` / `Some(v)`, returning `Err(e)` early from
 `-> Result[T, E]` functions and unwinding to `try` / `catch` otherwise;
 `unwrap_or(x, fallback)` (or `x.unwrap_or(fb)`) evaluates `fallback` lazily only
 on `Err`/`None`; `or` provides a fallback for `None` without swallowing `Err`.
@@ -156,11 +156,12 @@ check`.
 
 ## 6. Closures and callbacks
 
-Closures (`fn(x) { ... }`) capture outer bindings by shallow copy and are
-first-class values. Named top-level functions (`fn double(x: i64) -> i64`) are
-not first-class values (`let f = double` is an error): pass them directly as
-callbacks (`[1, 2, 3].map(double)`) to `map`, `filter`, `fold`, `any`, `all`,
-`find` and `sort_by`, or wrap them in `let f = fn(x) { return double(x) }`.
+Closures (`fn(x) { ... }`) capture outer bindings by shallow copy and can be
+stored in variables or containers. Named top-level functions
+(`fn double(x: i64) -> i64`) are not runtime values (`let f = double` is an
+error): pass them directly as callbacks (`[1, 2, 3].map(double)`) to `map`,
+`filter`, `fold`, `any`, `all`, `find` and `sort_by`, or wrap them in
+`let f = fn(x) { return double(x) }`.
 
 ## 7. Memory and `arena` blocks
 

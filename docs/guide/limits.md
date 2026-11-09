@@ -30,7 +30,7 @@ Performance follows value representation:
   regardless of field order at the literal site, lowering statically typed field
   loads and stores directly to constant-slot accesses (`vstruct_slot_ptr` /
   `vstruct_slot_set`) with a gradual-typing fallback when an unshaped `map`
-  arrives via `Dyn`. At `-O1` and `-O2`, multi-level Escape Analysis + Scalar
+  arrives via `Dyn`. At `-O2`, multi-level Escape Analysis + Scalar
   Replacement of Aggregates (SRA) decomposes non-escaping, unaliased local
   `struct` bindings (including `.copy()` value copies) directly into unboxed C
   scalars or local `Val` slots (`0.141 s` vs `0.134 s` in `gcc -O2` across 50M
@@ -133,12 +133,12 @@ fn main() -> i64 {
 7
 ```
 
-## Named functions are callbacks, not first-class values
+## Named functions are callbacks, not runtime values
 
 A top-level `fn` name can be passed directly to `map`, `filter`, `fold`, `any`,
 `all`, `find` and `sort_by` (or as `"fn_name"` to a C callback parameter), but
 cannot be stored in a variable. Use a `fn(x) { ... }` closure when you need a
-first-class function value:
+stored function value:
 
 ```brat check
 fn double(x: i64) -> i64 {

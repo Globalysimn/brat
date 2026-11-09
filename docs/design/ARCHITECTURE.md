@@ -35,10 +35,10 @@ native compilation or execution pipeline.
    `--unsafe-ffi`. `--object` inspects ELF, Mach-O and PE/COFF symbol tables and
    DWARF v2-v5 DIEs directly without `dlopen`.
 5. **IR optimization and C11 emission (`ir.cpp`, `emit.cpp`, `lsp.cpp`).**
-   - At `-O1` and `-O2`, `emit.cpp` runs multi-level Escape Analysis + Scalar
+   - At `-O2`, `emit.cpp` runs multi-level Escape Analysis + Scalar
      Replacement of Aggregates (`run_sra`), decomposing non-escaping, unaliased
-     local `struct` bindings into scalar or `Val` locals before `compute_fast()`
-     and `ir.cpp` (interval, bitwise known-bits and Granger congruence analysis
+     local `struct` bindings into scalar or `Val` locals before `compute_fast()`,
+     while `-O1` and `-O2` run `ir.cpp` (interval, bitwise known-bits and Granger congruence analysis
      proving division/shift/index checks redundant; inspectable via `--why-opt`).
    - Annotated numeric kernels (`i64`, `f64`, `bool`, `vec[i64]`, `vec[f64]`)
      emit unboxed C scalar functions alongside boxed `Val` entry wrappers. Heap-allocated nominal

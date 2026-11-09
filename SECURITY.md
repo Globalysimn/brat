@@ -20,7 +20,7 @@ separate UID and kernel resource limits (`rlimit`, cgroups, seccomp).
    (`<= 14` bytes) have no heap buffer of their own, so `ptr_of_str` interns them
    into a non-moving, demand-paged slab pool (`64 KiB` chunks) capped by
    `BRAT_PIN_BUDGET_BYTES` (default `67108864`, 64 MiB; `0` disables the cap,
-   meaning unlimited pinning — not recommended for untrusted inputs).
+   allowing unbounded pinning, which is unsafe for untrusted inputs).
    Reaching the budget raises a catchable runtime error (`string pin limit
    exceeded`) without invalidating already-issued pointers. Foreign code still
    must not retain borrowed string pointers after the owner is freed.

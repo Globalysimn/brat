@@ -127,7 +127,7 @@ Functions whose parameters are `i64`, `f64`, `bool`, `vec[i64]` or `vec[f64]`
 and whose body uses arithmetic, comparisons, loops and calls to compatible
 numeric functions compile to unboxed C scalar functions (`int64_t`, `double`,
 `bool`, raw `Vec *` item access) paired with a tag-checking boxed wrapper for
-dynamic callers. At `-O1` and `-O2`, non-escaping, unaliased local `struct`
+dynamic callers. At `-O2`, non-escaping, unaliased local `struct`
 bindings (including nested structs) are decomposed by Scalar Replacement of
 Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
 
@@ -137,7 +137,7 @@ Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
   evaluated at the call site and must form a trailing suffix of the parameter
   list.
 - Closures (`let f = fn(x) { return x + 1 }`) capture outer bindings by shallow
-  copy. Named `fn` declarations are not first-class values; they may be called
+  copy. Named `fn` declarations are not runtime values; they may be called
   directly, passed as callbacks to built-in higher-order `vec` methods, or named
   by string literal in C FFI callback parameters.
 - `trait Name { fn m(self) -> i64 }` declares method signatures; `impl Name for
@@ -243,8 +243,8 @@ Aggregates (SRA) into local scalars or `Val` slots without heap allocation.
 1. `brat-cxx check` is an intra-function static checker, not a formal proof of
    memory safety or race freedom.
 2. Heap objects are freed deterministically by reference counting (or bulk
-   `arena` reset); container insertions check and refuse parent-pointer cycles at
-   run time.
+   `arena` reset); intra-function container reference cycles are rejected
+   statically by `capability.cpp`.
 3. Values and call stacks are bounded at 2,000 levels by default
    (`BRAT_RECURSION_BUDGET`, plus a 256 KiB thread stack-floor check on Linux,
    macOS and Windows 8+).
