@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Globalysimn/brat.git",
+    "url": "https://github.com/denionis23/brat.git",
     "directory": "editors/vscode"
   },
   "engines": {

@@ -1,6 +1,6 @@
 # BRAT
 
-[![CI](https://github.com/Globalysimn/brat/actions/workflows/ci.yml/badge.svg)](https://github.com/Globalysimn/brat/actions/workflows/ci.yml)
+[![CI](https://github.com/denionis23/brat/actions/workflows/ci.yml/badge.svg)](https://github.com/denionis23/brat/actions/workflows/ci.yml)
 
 BRAT is an experimental ahead-of-time compiled language for CLI tools, network
 services, data pipelines, and C-heavy glue code that have outgrown scripting
@@ -86,7 +86,7 @@ You need `make`, a C++20 compiler (`g++` or `clang++`), and a C compiler (`cc`,
 `gcc`, `clang`, or `$BRAT_CC`). Build time on a 4-core laptop is ~15 seconds:
 
 ```sh
-git clone https://github.com/Globalysimn/brat.git brat && cd brat
+git clone https://github.com/denionis23/brat.git brat && cd brat
 make -j4
 printf 'print(40 + 2)\n' > hello.brat
 ./lang/cxx/bin/brat-cxx run hello.brat

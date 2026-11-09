@@ -49,7 +49,7 @@ platform limitations.
 
 ## Reporting defects
 
-Report defects via GitHub Issues (`https://github.com/Globalysimn/brat/issues`)
+Report defects via GitHub Issues (`https://github.com/denionis23/brat/issues`)
 until a dedicated private advisory channel is set up. Include the commit hash,
 operating system, C/C++ compiler versions, exact command line and a minimal
 non-destructive reproducer. Avoid publishing weaponized exploit payloads in
