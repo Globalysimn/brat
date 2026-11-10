@@ -1,7 +1,7 @@
 """Telemetry timestamps are wall clock in both backends.
 
 `log.info` writes a JSON line with a `ts` field, and `time_ms()` returns epoch
-milliseconds. A clock that starts at zero — CPU time since process start — is
+milliseconds. A clock that starts at zero - CPU time since process start - is
 the wrong clock: logs from two processes cannot be ordered, and a timestamp is
 not comparable with anything outside the program.
 """

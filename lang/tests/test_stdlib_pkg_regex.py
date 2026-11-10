@@ -200,7 +200,7 @@ eb = subprocess.run(_cxx.cli_args("ffi", brat_p, "--header", hdr_p, "--emit-bind
                     capture_output=True, text=True, timeout=30)
 check(eb.returncode == 0 and os.path.isfile(bind_p), "emit-bind failed: " + eb.stderr)
 
-# Package contains ONLY portable source + .bratbind — NO precompiled .o!
+# Package contains ONLY portable source + .bratbind - NO precompiled .o!
 tgz_p = os.path.join(TMP, "hashx-0.2.0.tar.gz")
 with tarfile.open(tgz_p, "w:gz") as tf:
     for fn in ("brat.pkg.json", "hashx.h", "hashx.c", "hashx.brat", "hashx.bri", "hashx.bratbind"):

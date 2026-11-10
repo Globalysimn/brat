@@ -240,7 +240,7 @@ assert chk_stream.returncode != 0 and "arena" in (chk_stream.stdout + chk_stream
 esc_bad = os.path.join(td, "escape_ptr.brat")
 with open(esc_bad, "w", encoding="utf-8") as f:
     f.write('''fn bad() -> ptr {
-    let s = "hello world — heap string longer than 14 bytes!"
+    let s = "hello world - heap string longer than 14 bytes!"
     return ptr_of_str(s)
 }
 fn main() -> i64 { return 0 }

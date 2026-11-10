@@ -33,7 +33,7 @@ Current checker boundaries and operational limits in `brat-cxx` and `crt.h`:
   accidental secret dumps in logs but cannot guess custom variable names. Set
   `BRAT_ENV_DENY_ALL=1` or `BRAT_ENV_ALLOW` when running with sensitive
   environments.
-- Platform test matrix: Linux x86-64 runs all 174 test suites plus
+- Platform test matrix: Linux x86-64 runs all 175 test suites plus
   ASan/UBSan/LSan on every push. Native macOS arm64 (`macos-26`) and Windows
   x86-64 (`windows-2022`, MinGW-w64 LLP64) CI jobs build `brat-cxx` and run
   frontend, checker, borrow, module, `bindgen`/`ffi --preprocess`, and `bundle`

@@ -209,7 +209,7 @@ def main():
             print("  ERROR in %s: %r" % (fn.__name__, e))
 
     if FAILED:
-        print("\nINJECT FAILED — %d problem(s), %d ok:" % (len(FAILED), n))
+        print("\nINJECT FAILED - %d problem(s), %d ok:" % (len(FAILED), n))
         for f in FAILED:
             print("  - %s" % f)
         sys.exit(1)

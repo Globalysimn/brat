@@ -6,7 +6,6 @@
 //     prints or spawns depends on the thread order;
 //   * the body must have no effects either, and must not write a place that
 //     lives outside the loop.
-// The messages are byte-identical to the reference implementation.
 #pragma once
 
 #include <string>

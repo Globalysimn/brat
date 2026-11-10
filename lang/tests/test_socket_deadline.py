@@ -1,6 +1,4 @@
 """Socket deadlines bound the whole connected-socket lifetime in both runtimes."""
-import contextlib
-import io
 import os
 import shutil
 import socket
@@ -98,20 +96,6 @@ def run_native(native, port):
     assert (result.returncode, result.stdout, result.stderr) == (0, EXPECTED, ""), \
         (result.stdout, result.stderr)
 
-
-def run_interpreter(port):
-    sys.path.insert(0, ENGINE)
-    from brat import runtime
-
-    original_timeout = runtime._SOCK_TIMEOUT
-    runtime._SOCK_TIMEOUT = 1.0
-    output = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(output):
-            runtime.run(PROGRAM % port, base=ROOT)
-    finally:
-        runtime._SOCK_TIMEOUT = original_timeout
-    assert output.getvalue() == EXPECTED, output.getvalue()
 
 
 def run_connect_timeout(native):

@@ -96,7 +96,7 @@ rn = subprocess.run([leak_exe], capture_output=True, text=True, timeout=30,
 check(rn.returncode == 0, "ASan/LSan detected leak: %s" % rn.stderr)
 
 
-# FFI Ladder L1 — `.o`/`.a`/`.so` + DWARF symbol & ABI size proof
+# FFI Ladder L1 - `.o`/`.a`/`.so` + DWARF symbol & ABI size proof
 l1_dir = os.path.join(TMP, "l1")
 os.makedirs(l1_dir, exist_ok=True)
 good_h = os.path.join(l1_dir, " sensor.h".strip())

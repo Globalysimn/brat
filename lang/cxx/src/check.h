@@ -147,7 +147,7 @@ std::string normalize_abi_type(const std::optional<std::string> &text);
 std::optional<std::pair<std::vector<std::string>, std::string>>
 callback_signature(const std::string &text);
 
-// Diagnostics in emission order, duplicates dropped like the reference does.
+// Diagnostics in emission order with duplicates suppressed.
 std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extra,
                                 const std::map<std::string, Ty> &extra_consts = {},
                                 const std::map<std::string, std::map<std::string, Ty>> &extra_structs = {});

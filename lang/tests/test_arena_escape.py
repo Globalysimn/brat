@@ -1,4 +1,4 @@
-"""Escape rules for `arena { }` blocks (typer.py).
+"""Escape rules for `arena { }` blocks.
 
 Each rule has a program that must be rejected with a message naming it. Programs
 that keep arena values inside their block, or pass only scalars out, must check

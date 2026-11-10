@@ -3,7 +3,7 @@
 Three rules are tested literally, because each is a real failure mode of MCP
 servers in the wild: tool failures come back as `isError: true` results (the
 agent can see them and correct), protocol faults come back as JSON-RPC errors,
-and stdout carries nothing but protocol — one stray print and the session dies.
+and stdout carries nothing but protocol - one stray print and the session dies.
 """
 import _cxx
 import _scratch

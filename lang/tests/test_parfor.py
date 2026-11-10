@@ -116,7 +116,7 @@ def write(name, src):
 
 
 def both(path):
-    """(-O0 output, native output) — building the native one on demand."""
+    """(-O0 output, native output) - building the native one on demand."""
     run_o0 = run(_cxx.cli_args("run", "-O0", path))
     if run_o0.returncode not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) and run_o0.stderr:
         raise SystemExit("run failed:\n" + run_o0.stdout + run_o0.stderr)

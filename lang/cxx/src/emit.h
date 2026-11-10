@@ -17,9 +17,9 @@ struct EmitError : std::runtime_error {
 };
 
 // `prog` is a flattened module set; `base` is the directory `vbase_set` reports.
-// `opt` is 0 or 1: 0 emits what S3 emitted, byte for byte, and runs no pass; 1
-// runs the interval pass over the i64 fast-path functions and drops the checks
-// it proves dead. `proofs`, when not null, collects one entry per dropped check.
+// `opt` selects optimization level (0 = baseline C emission, 1 = interval
+// check elision, 2 = relational check elision + SRA). `proofs`, when non-null,
+// records one entry per elided check.
 std::string emit_program(const std::vector<StmtP> &prog, const std::string &base, int opt = 0,
                          std::vector<ir::Proof> *proofs = nullptr,
                          const std::string &target = "",

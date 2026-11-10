@@ -1,15 +1,4 @@
-"""Resource bounds that must be the same in both backends.
-
-`chan(cap)` is a bounded queue. The C runtime preallocates `cap` slots, the
--O0 grows a list, so `chan(100000000)` was a 2.4 GB `calloc` in C —
-`vfatal_oom`, SIGABRT, exit 134 — and a perfectly working channel in Python. One
-cap for both (`BRAT_MAX_CHAN_CAP`, 1 048 576 slots) turns the shape into an
-`err` value in either backend, which is what a program can handle.
-
-The same class of bound is why `run_all.py` never trusts a size a program asks
-for: this file pins the cap, the working case below it, and that a memory budget
-still refuses a large allocation through the error channel rather than aborting.
-"""
+"""Resource bounds on channel capacities (`BRAT_MAX_CHAN_CAP`) and regex memory."""
 import _cxx
 import _scratch
 import os

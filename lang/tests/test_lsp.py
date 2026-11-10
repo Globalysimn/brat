@@ -1,8 +1,8 @@
 """`brat lsp`: the server speaks the protocol, and the protocol survives abuse.
 
 The client here is a real client: Content-Length framing over pipes, the same
-bytes an editor sends. Assertions are literal — capability numbers, diagnostic
-codes and lines, symbol names, jump targets — because a language server that is
+bytes an editor sends. Assertions are literal - capability numbers, diagnostic
+codes and lines, symbol names, jump targets - because a language server that is
 "roughly right" is worse than none: it shows the wrong line with confidence.
 """
 import _scratch
@@ -138,7 +138,7 @@ check(names == [("twice", 12, 0), ("main", 12, 4)], "symbols: %r" % (names,))
 
 d = c.request("textDocument/definition", {
     "textDocument": {"uri": uri}, "position": {"line": 5, "character": 10}})
-# `fn twice` — the name starts at column 3, the `t` of twice
+# `fn twice` - the name starts at column 3, the `t` of twice
 check(d["result"] == {"uri": uri,
                       "range": {"start": {"line": 0, "character": 3},
                                 "end": {"line": 0, "character": 8}}},
@@ -384,7 +384,7 @@ c.notify("textDocument/didOpen", {"textDocument": {
     "uri": "file://" + main_path, "languageId": "brat", "version": 1, "text": text}})
 msg = c.wait_notification("textDocument/publishDiagnostics")
 check(msg["params"]["diagnostics"] == [], "module clean: %r" % msg["params"])
-# `  print(shapes.area(3))` — `area` occupies columns 15..19
+# `  print(shapes.area(3))` - `area` occupies columns 15..19
 d = c.request("textDocument/definition", {
     "textDocument": {"uri": "file://" + main_path},
     "position": {"line": 3, "character": 17}})

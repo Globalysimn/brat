@@ -784,7 +784,7 @@
       "out": "-9223372036854775808\n-9223372036854775808\n9223372036854775807\n0\nfalse\n-9223372036854775808\n",
       "asan": false,
       "from": "divergence-2026-10-30",
-      "note": "An integer literal is an i64, so it wraps before anything reads it: the interpreter kept the bignum and answered True to `x > 0`."
+      "note": "An integer literal is an i64 and wraps in two's complement before comparison."
     },
     {
       "name": "f64_repr_at_1e16",
@@ -814,7 +814,7 @@
       "out": "1\n1\ntwo\n2\nx\ny\n",
       "asan": false,
       "from": "divergence-2026-10-30",
-      "note": "A tagged map is a record: `p[\"x\"]` reads the field. The interpreter refused every index read on a tagged map."
+      "note": "A tagged map is a record: `p[\"x\"]` reads the field."
     },
     {
       "name": "struct_missing_field_by_index",
@@ -834,7 +834,7 @@
       "out": "fn\nfn\n[fn, [fn]]\nfn\n{'k': fn}\n2\nclosure\n",
       "asan": false,
       "from": "conformance-2026-10-30",
-      "note": "A closure prints as `fn` in both backends: `print`, `str()`, inside a vec, `{}` interpolation and a map value. It used to print the interpreter's own representation of the value."
+      "note": "A closure prints as `fn` in `print`, `str()`, inside a vec, `{}` interpolation, and map values."
     },
     {
       "name": "digit_separators",
@@ -854,7 +854,7 @@
       "out": "E type error in <\nE type error in >=\nE type error in <\ntrue\nfalse\ntrue\ntrue\ntrue\ntrue\ntrue\nfalse\n",
       "asan": false,
       "from": "conformance-2026-10-30",
-      "note": "Ordering is one rule at every level: a cross-class comparison inside a vec, a tag or a map is `type error in <` (the operator the program wrote). The native side used to answer with the tag enum and the interpreter with a Python `TypeError`."
+      "note": "Ordering uses one rule at every level: a cross-class comparison inside a vec, tag, or map raises `type error in <`."
     },
     {
       "name": "order_sort_min_class",
@@ -884,7 +884,7 @@
       "out": "true\nx\n['a', 'b', 'c', 'd', 'e', 'f', 'g']\n1\n1\n1\n['a', 'b', 'c', '', 'd']\n[]\n['']\nErr('not a number')\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "Whitespace for `trim`, `split()` and the `parse_*` methods is the six ASCII characters space, tab, newline, vertical tab, form feed and carriage return; `lines` breaks on `\\n`, `\\r\\n` and `\\r` only. The interpreter used Python's Unicode definitions (NBSP, U+2028, U+0085, ...) while the native runtime used three different ASCII sets."
+      "note": "Whitespace for `trim`, `split()`, and `parse_*` is the six ASCII whitespace characters; `lines` splits on `\\n`, `\\r\\n`, and `\\r`."
     },
     {
       "name": "split_empty_sep",
@@ -924,7 +924,7 @@
       "out": "Err('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nErr('not a float')\nOk(100000.0)\nOk(-inf)\nOk(inf)\nOk(-0.0005)\nOk(5.0)\nOk(0.5)\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "`parse_float` accepts digits `0-9`, an optional fraction and exponent, and `inf`, `infinity` and `nan` in any case. The interpreter accepted Arabic-Indic digits; the native runtime accepted signed hex floats and `nan(...)`."
+      "note": "`parse_float` accepts ASCII digits `0-9`, an optional fraction and exponent, and `inf`, `infinity`, and `nan` in any case."
     },
     {
       "name": "depth_budget",
@@ -934,7 +934,7 @@
       "out": "E recursion too deep\nE recursion too deep\nfalse\nfalse\nE recursion too deep\nE recursion too deep\ndone\n",
       "asan": false,
       "from": "conformance-2026-10-30",
-      "note": "Values nest to BRAT_MAX_VALUE_DEPTH (2000) for print, str and comparison, and past it both backends stop with `recursion too deep`. The interpreter used to answer `w == None` with that error (the native side short-circuits on class) and used to print a 2200-deep value that C refuses to walk."
+      "note": "Values nest up to BRAT_MAX_VALUE_DEPTH (2000) for print, str, and comparison, raising `recursion too deep` beyond that limit."
     },
     {
       "name": "caught_error_frame_function",
@@ -944,7 +944,7 @@
       "out": "a\nb\nc\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+      "note": "A runtime error that escapes a user function and is caught further up unwinds the callee's frame cleanly."
     },
     {
       "name": "caught_error_frame_method",
@@ -954,7 +954,7 @@
       "out": "a\nb\nc\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+      "note": "A runtime error that escapes a user function and is caught further up unwinds the callee's frame cleanly."
     },
     {
       "name": "caught_error_frame_local",
@@ -964,7 +964,7 @@
       "out": "100\n101\n102\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "A runtime error that escapes a user function and is caught further up must take the callee's frame with it. The interpreter kept the frame on its environment stack for plain functions, methods and `Type.fn` calls, so the callee's parameters and locals shadowed the caller's variables for the rest of the scope."
+      "note": "A runtime error that escapes a user function and is caught further up unwinds the callee's frame cleanly."
     },
     {
       "name": "ownership_of_logical_operands",
@@ -994,7 +994,7 @@
       "out": "20\n20\n30\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\nb\nb\nc\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n[10, 7, 30]\n[10, 7, 30]\n[10, 7, 7]\nindex must be int\nindex must be int\nindex must be int\nindex must be int\nindex out of range\nindex out of range\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "An index is an integer or a float with a whole value. The native read truncated `v[1.5]` to `v[1]`, took NaN and infinity through an undefined float-to-int cast, and the interpreter accepted a bool and leaked CPython's `cannot convert float NaN to integer`."
+      "note": "An index must be an integer or a finite float with an exact integral value."
     },
     {
       "name": "operator_type_errors",
@@ -1004,7 +1004,7 @@
       "out": "type error in /\ntype error in /\ndiv by zero\ntype error in /\ntype error in %\ndiv by zero\nnan\n0.5\nin of non-container\ntrue\nfalse\ntrue\ntrue\nno key []\nno key [1, 2]\n",
       "asan": false,
       "from": "audit-2026-11",
-      "note": "The interpreter answered `/` and `%` on the wrong types with CPython's `unsupported operand type(s)` or, for a zero divisor, `div by zero` before looking at the types; `inf % 1` was `math domain error`; `in` with a non-string left of a string leaked CPython's text; a vector as a map key was `unhashable map key` for a read where the native answer is `no key`."
+      "note": "Arithmetic `/` and `%`, `in` on strings, and map key lookups report consistent runtime diagnostics."
     }
   ]
 }

@@ -199,7 +199,7 @@ unwinds.
 Top-level functions compile directly to static C functions (often with unboxed
 `int64_t` or `double` parameters) without generating a closure object or uniform
 boxing wrapper for every function. Bare `fn` names work directly with collection
-methods (`[1, 2, 3].map(double)`); when you want a first-class closure value to
+methods (`[1, 2, 3].map(double)`); when you want a closure value to
 store in a variable or container, write `fn(x) { return double(x) }`.
 
 ---

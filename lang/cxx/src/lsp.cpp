@@ -1247,7 +1247,7 @@ bool incremental_analyze_fast(std::string &new_text, LineIndex &new_lines,
     }
 
     // Filter `cached_borrow_all` & `cached_type_all` to ONLY symbols referenced in `fn_slice`
-    // (0–5 entries instead of thousands in a 50k+ LOC file -> avoids O(F) map deep-copies!).
+    // (typically 0..5 entries instead of copying the full module signature tables).
     std::map<std::string, std::vector<ParamMode>> slim_borrow;
     Sigs slim_type;
     {

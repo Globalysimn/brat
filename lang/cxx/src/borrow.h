@@ -1,9 +1,7 @@
 // Intraprocedural ownership and borrow checker.
 //
-// The contract is the same bytes on the same files, not "roughly the same
-// rules", so the shape of this header follows the reference: a per-file table
-// of function parameter modes, and a list of diagnostics with an optional note
-// pointing at the line that caused them.
+// Tracks per-file function parameter modes, active borrows, moves, and
+// diagnostics with optional source-line notes.
 #pragma once
 
 #include <cstdint>

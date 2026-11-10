@@ -1,26 +1,4 @@
-"""Parse diagnostics: the two front ends must print the same line, the same way.
-
-README says the C++ front end has "the same tree, the same diagnostics, the same
-C". For ownership and type errors that was already true and covered by
-`test_cxx_borrow.py` and friends. For *syntax* errors it was not:
-
-    py : file:4: error: stuck at ')' at line 4   + "  |   print(k)"
-    cxx: file: bad expression start ')' at line 4
-
-so a tool that greps `: error: ` (the documented shape, `diag.py`) saw the
-Python diagnostic and missed the C++ one, and a reader lost the source snippet.
-Two line numbers also disagreed, for two independent reasons:
-
-  * the C++ EOF token carried the line *after* the trailing newline, while the
-    Python side reports `c.t[-1].line` — the last real token;
-  * the Python `stuck at` message paired the offending token's text with
-    `eline(c)`, the line of the *current* token, which a `Name {` lookahead may
-    already have advanced past.
-
-Each case below is one of those shapes, plus the ordinary ones that must keep
-working. Output is compared byte for byte after the temp path is replaced, so
-wording, line number, `: error: ` prefix and snippet are all pinned.
-"""
+"""Parse diagnostic formatting, line numbers, `: error: ` prefix, and source snippets."""
 import _cxx
 import _scratch
 import os

@@ -213,7 +213,7 @@ lang/cxx/src/    C++20 compiler, checker, C11 emitter, and CLI tools (26 .cpp fi
 lang/engine/     crt.h and crt/*.h modular C11 runtime headers
 lang/std/        12 standard-library modules and .bri interfaces
 lang/examples/   64 runnable feature programs
-lang/tests/      174 test files; run_all.py drives local and sharded CI runs
+lang/tests/      175 test files; run_all.py drives local and sharded CI runs
 scripts/         runtime and compile-time benchmark runner (make bench)
 editors/vscode/  VS Code syntax grammar and brat-cxx lsp client
 docs/            guides, stdlib/CLI manuals, and design notes

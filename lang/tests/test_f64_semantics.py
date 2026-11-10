@@ -3,7 +3,7 @@
 Two divergences, both found by differential fuzzing rather than by the corpus:
 
   * In an `f64` fast function the emitter printed a float literal through
-    `%.17g`, which turns `1e10` into `10000000000` — an *integer* constant in C.
+    `%.17g`, which turns `1e10` into `10000000000` - an *integer* constant in C.
     `1e10 * 1e10` then multiplied two int64s and wrapped (7.76e18) while the
     -O0 multiplied two doubles (1e20). The literal now keeps its point.
     Integer literals keep theirs off: `1 / 2` inside an `f64` function is integer

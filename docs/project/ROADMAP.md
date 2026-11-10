@@ -29,6 +29,6 @@ syntax shortcuts do not ship if they silently miscompile or corrupt memory.
    and `.bratbind` manifests so multi-file BRAT + C libraries build without
    `--unsafe-ffi` or external build scripts.
 4. **Expand sanitizer, 32-bit (`ILP32`) and fuzzing coverage** across `-O0`,
-   `-O1` and `-O2` emitted C across all 174 native test suites.
+   `-O1` and `-O2` emitted C across all 175 native test suites.
 
 See [LEDGER.md](LEDGER.md) for current technical limitations and known risks.

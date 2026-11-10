@@ -147,7 +147,7 @@ int main(void) {
     assert(sizeof(BStripeLock) >= 64);
     assert(!_BRAT_MT());
 
-    /* Vec.inl[2] SBO — 0..2 items stay inline (`v->items == v->inl`) */
+    /* Vec.inl[2] SBO - 0..2 items stay inline (`v->items == v->inl`) */
     Vec *v = vvec();
     assert(v->cap == 2);
     assert(v->items == v->inl);
@@ -264,7 +264,7 @@ static Vec *g_vecs[16];
 
 static void *plugin_worker(void *arg) {
     (void)arg;
-    /* Note: g_pool_n is STILL 0 here — proves `_brat_plugin_lock` is unconditional! */
+    /* Note: g_pool_n is STILL 0 here - proves `_brat_plugin_lock` is unconditional! */
     for (int i = 0; i < 40; i++) {
         Val p = vstr(g_so_path);
         Val nm = vstr("plug_twice");

@@ -293,7 +293,7 @@ alternate C compiler executable, and `BRAT_CC_TIMEOUT_MS` (default `120000`, max
 
 ## Platform status
 
-Linux x86-64 runs the full 174-file test suite (GCC and Clang, 8-way sharded) and
+Linux x86-64 runs the full 175-file test suite (GCC and Clang, 8-way sharded) and
 ASan/UBSan/LSan checks in CI on every push. Native macOS arm64 (`macos-26`, Apple
 Clang) and Windows x86-64 (`windows-2022`, MinGW-w64 LLP64) CI jobs build
 `brat-cxx`, verify the frontend/checker/borrow/module suites, exercise `bindgen

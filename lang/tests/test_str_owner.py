@@ -5,7 +5,7 @@ plain `malloc` buffer with no `BHead` in front of it, while the emitter treats
 every string binding as droppable. `let s = "a,b".split(",").join("-")` therefore
 dropped a pointer that had no header: under AddressSanitizer that is a SEGV inside
 `vrc_dec`, and without a sanitizer it is a free of a pointer the allocator does not
-know — a crash waiting for the right program.
+know - a crash waiting for the right program.
 
 Every case here binds the result to a name (so the scope exit drops it), stores one
 in a container (so releasing the container drops it), and returns one from a

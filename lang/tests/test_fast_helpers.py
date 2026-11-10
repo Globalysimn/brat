@@ -1,7 +1,7 @@
 """Fast-path helpers: every `bf_*` the emitted C calls must also be defined.
 
 `bf_idiv`/`bf_imod` used to be requested only for a `kind == "i64"` fast
-function, while the emitter also emits the call inside an `i64v` function — a
+function, while the emitter also emits the call inside an `i64v` function - a
 function whose parameters are `i64`/`vec[i64]` in any mix. The result was a
 program `brat check` accepted and `brat build` could not compile, because the
 helper was never written out. The native emitter had the bug, so a program with

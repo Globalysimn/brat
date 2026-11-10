@@ -147,7 +147,7 @@ def test_mem03_mem04_ptr_of_str_borrow_and_pin_ring():
     check_both_reject(
         td,
         "ptr_mut_while_borrowed",
-        'let mut s = "hello world — heap string longer than sso limit!"\n'
+        'let mut s = "hello world - heap string longer than sso limit!"\n'
         'let p = ptr_of_str(s)\n'
         's = "overwritten"\n'
         'print(str_from_ptr(p, 5))\n',

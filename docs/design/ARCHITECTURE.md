@@ -73,7 +73,7 @@ native compilation or execution pipeline.
 
 ## Test suite (`lang/tests/`)
 
-All 174 test files in `lang/tests/` execute natively against `brat-cxx`:
+All 175 test files in `lang/tests/` execute natively against `brat-cxx`:
 
 - `test_agreement.py` (`make test-native`) verifies all 109 corpus programs in
   `lang/tests/corpus/agreement.json` directly against `brat-cxx`.

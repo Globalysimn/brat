@@ -113,13 +113,13 @@ public:
     bool exact_int32(uint32_t idx, int &out) const;
     int int_or(uint32_t idx, int fallback = 0) const;
 
-    // Zero-copy string_view! Points either directly into `src_` or into `arena_`.
+    // Unescaped string view pointing into `src_` or `arena_`.
     std::string_view str_view(uint32_t idx) const;
 
-    // Raw JSON slice from input buffer (e.g., to echo `"id"` verbatim without re-formatting!).
+    // Raw JSON slice from input buffer (used to echo `"id"` verbatim).
     std::string_view raw_json_slice(uint32_t idx) const;
 
-    // Object key lookup (linear over flat tape nodes: L1 cache hot for 2..10 LSP keys!).
+    // Linear object key lookup over flat tape nodes.
     uint32_t get(uint32_t obj_idx, std::string_view key) const;
 
 private:
@@ -170,7 +170,7 @@ public:
         need_comma_ = false;
     }
 
-    // Fast path for compile-time ASCII literal keys (no escaping needed!).
+    // Fast path for compile-time ASCII literal keys.
     template <size_t N>
     void key_lit(const char (&lit)[N]) {
         comma_if_needed();
