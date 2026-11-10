@@ -2,6 +2,7 @@
 // Preserves deterministic check and declaration ordering for `warns` and `errs`.
 #include "borrow.h"
 
+#include "builtins.h"
 #include "capability.h"
 #include "plugin.h"
 #include "caps.h"
@@ -60,11 +61,6 @@ std::set<std::string> builtin_heads() {
 }
 
 const std::set<std::string> BUILTIN_HEADS = builtin_heads();
-const std::set<std::string> MUTATORS = {"push", "pop", "sort", "sort_by", "ins", "del", "set"};
-const std::set<std::string> COPY_ANNS = {"i8", "u8", "i16", "u16", "i32", "u32",
-                                         "i64", "u64", "usize", "isize", "f32", "f64", "bool"};
-const std::set<std::string> TYPE_WORDS = {"i8", "u8", "i16", "u16", "i32", "u32",
-                                          "i64", "u64", "usize", "isize", "f32", "f64", "bool", "str"};
 
 // A handle that is taken away by a consuming builtin: closing a socket twice is
 // a use of a moved value, not a runtime guess.
@@ -84,8 +80,8 @@ bool ends_with(const std::string &s, const std::string &p) {
     return s.size() >= p.size() && s.compare(s.size() - p.size(), p.size(), p) == 0;
 }
 
-bool has(const std::set<std::string> &set, const std::optional<std::string> &v) {
-    return v && set.count(*v) > 0;
+bool has_copy_ann(const std::optional<std::string> &v) {
+    return v && is_copy_scalar_ann(*v);
 }
 
 
@@ -241,7 +237,7 @@ Decl bare_decl() { return Decl{}; }
 Decl param_decl(const Param &p) {
     Decl d;
     d.mut = p.mode == Mode::Mut;
-    d.copy = has(COPY_ANNS, p.ann);
+    d.copy = has_copy_ann(p.ann);
     d.ann = p.ann;
     d.param = true;
     d.mode = p.mode;
@@ -346,27 +342,7 @@ bool paths_conflict(const std::string &p, const std::string &q) {
 
 
 std::string trim_ann(const std::string &raw) {
-    size_t b = raw.find_first_not_of(" \t\r\n");
-    size_t z = raw.find_last_not_of(" \t\r\n");
-    return (b == std::string::npos) ? std::string() : raw.substr(b, z - b + 1);
-}
-
-std::string unwrap_adt_ann(const std::string &raw) {
-    std::string a = trim_ann(raw);
-    if (starts_with(a, "Option[") && ends_with(a, "]"))
-        return trim_ann(a.substr(7, a.size() - 8));
-    if (starts_with(a, "Result[") && ends_with(a, "]")) {
-        std::string inner = a.substr(7, a.size() - 8);
-        int depth = 0;
-        for (size_t i = 0; i < inner.size(); i++) {
-            if (inner[i] == '[' || inner[i] == '(') depth++;
-            else if (inner[i] == ']' || inner[i] == ')') depth--;
-            else if (inner[i] == ',' && depth == 0)
-                return trim_ann(inner.substr(0, i));
-        }
-        return trim_ann(inner);
-    }
-    return a;
+    return trim_type_ann(raw);
 }
 
 std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
@@ -498,7 +474,7 @@ std::optional<std::string> infer_expr_ann(const Expr *e, const Decls &decl,
 
 bool expr_is_copy_slot(const Expr *e, const Decls &decl, const FnTable *funcs = nullptr) {
     auto a = infer_expr_ann(e, decl, funcs);
-    return a && COPY_ANNS.count(*a) > 0;
+    return a && is_copy_scalar_ann(*a);
 }
 
 bool elem_copy(const Decls &decl, const Expr *base);
@@ -552,34 +528,8 @@ bool elem_copy(const Decls &decl, const Expr *base) {
     }
     const Decl *d = decl.find(base->a);
     if (!d || !d->ann) return false;
-    std::string a = *d->ann;
-    // strip surrounding spaces, as `ann.strip()` does
-    size_t b = a.find_first_not_of(" \t\r\n");
-    size_t z = a.find_last_not_of(" \t\r\n");
-    a = (b == std::string::npos) ? std::string() : a.substr(b, z - b + 1);
-    if (starts_with(a, "vec[") && ends_with(a, "]")) {
-        a = a.substr(4, a.size() - 5);
-        size_t bb = a.find_first_not_of(" \t\r\n");
-        size_t zz = a.find_last_not_of(" \t\r\n");
-        a = (bb == std::string::npos) ? std::string() : a.substr(bb, zz - bb + 1);
-    } else if (starts_with(a, "map[") && ends_with(a, "]")) {
-        std::string inner = a.substr(4, a.size() - 5);
-        size_t comma = std::string::npos;
-        int depth = 0;
-        for (size_t i = 0; i < inner.size(); i++) {
-            char c = inner[i];
-            if (c == '[' || c == '(') depth++;
-            else if ((c == ']' || c == ')') && depth > 0) depth--;
-            else if (c == ',' && depth == 0) { comma = i; break; }
-        }
-        a = (comma == std::string::npos) ? inner : inner.substr(comma + 1);
-        size_t bb = a.find_first_not_of(" \t\r\n");
-        size_t zz = a.find_last_not_of(" \t\r\n");
-        a = (bb == std::string::npos) ? std::string() : a.substr(bb, zz - bb + 1);
-    } else {
-        return false;
-    }
-    return COPY_ANNS.count(a) > 0;
+    const std::string el = container_elem_ann(*d->ann);
+    return !el.empty() && is_copy_scalar_ann(el);
 }
 
 // Locals whose storage `e` aliases, so `let y = e` borrows them. Only container
@@ -947,7 +897,7 @@ std::optional<BorrowNote> undeclared_rel(const std::string &name,
                                          const Decls *decl = nullptr,
                                          const FnTable *funcs = nullptr) {
     if (node && CUT_PARTS.count(node)) return std::nullopt;
-    if (TYPE_WORDS.count(name)) {
+    if (is_copy_scalar_ann(name) || name == "str") {
         return BorrowNote{0, "help: `" + name + "` is a type name for annotations (`let n: " +
                                  name + " = ...`), not a value"};
     }
@@ -1281,7 +1231,7 @@ std::optional<std::string> mutate_kind(const std::string &meth, FnTable &funcs) 
     auto it = funcs.umeth.find(meth);
     if (it != funcs.umeth.end()) return it->second ? std::optional<std::string>("mut self")
                                                    : std::nullopt;
-    return MUTATORS.count(meth) ? std::optional<std::string>("builtin") : std::nullopt;
+    return is_vec_map_mutator(meth) ? std::optional<std::string>("builtin") : std::nullopt;
 }
 
 bool alias_place_conflict(const std::string &root, const std::string &path, Decls &decl,
@@ -2185,7 +2135,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         d.srcs = srcs;
         d.konst = s.konst;
         d.alias = srcs.size() == 1 && place.has_value();
-        bool ann_copy = has(COPY_ANNS, s.ann);
+        bool ann_copy = has_copy_ann(s.ann);
         d.copy = ann_copy || is_copy_expr(e, decl, funcs);
         d.pinned = ann_copy;
         d.ann = s.ann ? s.ann : infer_expr_ann(e, decl, &funcs);
@@ -2356,7 +2306,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
                 std::string el = trim_ann(ia->substr(4, ia->size() - 5));
                 if (!el.empty()) {
                     iter_d.ann = el;
-                    iter_d.copy = COPY_ANNS.count(el) > 0;
+                    iter_d.copy = is_copy_scalar_ann(el);
                 }
             }
         }
@@ -2783,7 +2733,7 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
             for (const FnDecl &f : node->fns) {
                 if (f.params.empty() || f.params[0].name != "self") continue;
                 bool is_self_mut = f.params[0].mode == Mode::Mut;
-                if (MUTATORS.count(f.name.value_or("")) && !is_self_mut) continue;
+                if (is_vec_map_mutator(f.name.value_or("")) && !is_self_mut) continue;
                 bool &slot = funcs.umeth[f.name.value_or("")];
                 slot = slot || is_self_mut;
             }
@@ -2835,15 +2785,11 @@ static std::vector<size_t> extern_borrows_indices(const ExternDecl &ext) {
 
 FnTable pub_sigs(const std::vector<StmtP> &body,
                  const std::set<std::string> &exp_fns) {
-    static const std::set<std::string> copy_rets = {
-        "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "isize",
-        "f32", "f64",
-    };
     FnTable out;
     for (const auto &sp : body) {
         if (sp->k == SK::Extern) {
             out.sigs[sp->ext.name] = fn_modes(sp->ext.params);
-            if (sp->ext.ret && copy_rets.count(*sp->ext.ret)) out.scalar_ret.insert(sp->ext.name);
+            if (sp->ext.ret && is_copy_scalar_ann(*sp->ext.ret)) out.scalar_ret.insert(sp->ext.name);
             else if (sp->ext.owned) out.owned_ret.insert(sp->ext.name);
             auto bix = extern_borrows_indices(sp->ext);
             if (!bix.empty()) out.borrows_ret[sp->ext.name] = std::move(bix);
@@ -2865,7 +2811,7 @@ FnTable pub_sigs(const std::vector<StmtP> &body,
             if (in.fns[0].ret) out.fn_rets[fnm] = *in.fns[0].ret;
         } else if (in.k == SK::Extern) {
             out.sigs[in.ext.name] = fn_modes(in.ext.params);
-            if (in.ext.ret && copy_rets.count(*in.ext.ret)) out.scalar_ret.insert(in.ext.name);
+            if (in.ext.ret && is_copy_scalar_ann(*in.ext.ret)) out.scalar_ret.insert(in.ext.name);
             else if (in.ext.owned) out.owned_ret.insert(in.ext.name);
             auto bix = extern_borrows_indices(in.ext);
             if (!bix.empty()) out.borrows_ret[in.ext.name] = std::move(bix);
@@ -3039,21 +2985,14 @@ void ffi_signatures(const std::vector<StmtP> &body, Errs &errs) {
             // ownership pass would chase an owned value that has no storage --
             // `-> move i64` was reported as "leaked owned pointer", a leak that
             // cannot exist. Refuse the declaration instead of inventing a leak.
-            auto is_copy = [](const std::optional<std::string> &t) {
-                if (!t) return false;
-                static const std::set<std::string> k = {
-                    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-                    "usize", "isize", "f32", "f64", "bool"};
-                return k.count(*t) > 0;
-            };
             for (const Param &p : e.params) {
-                if (p.mode != Mode::Move || !is_copy(p.ann)) continue;
+                if (p.mode != Mode::Move || !has_copy_ann(p.ann)) continue;
                 errs.line = line;
                 errs.note("`move` on `" + *p.ann + "` for parameter `" + p.name +
                           "` of extern fn `" + e.name +
                           "`: a scalar is copied, there is nothing to own (drop the mode)");
             }
-            if (e.owned && is_copy(e.ret)) {
+            if (e.owned && has_copy_ann(e.ret)) {
                 errs.line = line;
                 errs.note("`-> move` on `" + *e.ret + "` as the result of extern fn `" +
                           e.name + "`: a scalar is copied, there is nothing to own "
@@ -3120,20 +3059,10 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
             if (!bix.empty()) funcs.borrows_ret[node->ext.name] = std::move(bix);
             // An owned result the declaration already refused must not also
             // become a phantom leak.
-            {
-                static const std::set<std::string> copies = {
-                    "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-                    "usize", "isize", "f32", "f64", "bool"};
-                if (node->ext.ret && copies.count(*node->ext.ret))
-                    funcs.scalar_ret.insert(node->ext.name);
-            }
-            if (node->ext.owned) {
-                static const std::set<std::string> copies = {
-                    "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-                    "usize", "isize", "f32", "f64", "bool"};
-                if (!(node->ext.ret && copies.count(*node->ext.ret)))
-                    funcs.owned_ret.insert(node->ext.name);
-            }
+            if (has_copy_ann(node->ext.ret))
+                funcs.scalar_ret.insert(node->ext.name);
+            else if (node->ext.owned)
+                funcs.owned_ret.insert(node->ext.name);
         } else if (node->k == SK::Enum) {
             auto &ef = funcs.struct_fields["__enum__:" + node->a];
             size_t slot = 0;
@@ -3167,7 +3096,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
             bool is_mut = !f.params.empty() && f.params[0].name == "self" &&
                           f.params[0].mode == Mode::Mut;
             std::string name = f.name.value_or("");
-            if (MUTATORS.count(name) && !is_mut) {
+            if (is_vec_map_mutator(name) && !is_mut) {
                 errs.line = node->line > 0 ? node->line : sp->line;
                 errs.note("method name " + name + " is reserved (built-in mutator)");
             }

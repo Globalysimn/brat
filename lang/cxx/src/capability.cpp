@@ -1,5 +1,7 @@
 #include "capability.h"
 
+#include "builtins.h"
+
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -7,28 +9,18 @@
 
 namespace {
 
-using View = std::vector<const Stmt *>;
+using View = StmtView;
+using ::stmt_view;
+using ::stmt_else_of;
 
-const std::set<std::string> kInsert{"push", "ins", "set"};
-const std::set<std::string> kPtrWrite{"ptr_write_i64", "ptr_write_f64", "ptr_write_f32",
-                                      "ptr_write_u8", "ptr_write_str", "ptr_write_ptr",
-                                      "ptr_write_struct", "slice_set", "fill"};
-const std::set<std::string> kPtrRead{"ptr_read_i64", "ptr_read_f64", "ptr_read_f32",
-                                     "ptr_read_u8", "ptr_read_str", "ptr_read_ptr",
-                                     "ptr_read_struct"};
+constexpr View (*view)(const std::vector<StmtP> &) = &stmt_view;
+constexpr View (*else_of)(const Stmt &) = &stmt_else_of;
+
 const std::set<std::string> kPtrAliasCalls{"ptr_offset", "slice_of", "slice_of_ptr",
                                            "slice_of_struct"};
 const std::set<std::string> kResourceClose{"tcp_close", "lib_close"};
-const std::set<std::string> kMutate{"pop", "sort", "sort_by", "del", "clear"};
 const std::set<std::string> kNumOps{"-", "*", "/", "%", "&", "|", "^", "<<", ">>",
                                     "==", "!=", "<", ">", "<=", ">=", "&&", "||"};
-const std::set<std::string> kScalarCalls{"own", "len", "is_ok", "is_err", "is_some", "is_none",
-                                         "is_vec", "is_str", "is_map", "is_bool", "is_int",
-                                         "is_float", "__stag_is", "__shas", "ptr_is_null",
-                                         "ptr_read_i64", "ptr_read_f64", "ptr_read_f32",
-                                         "re_match"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
-                          SK::ExternStruct, SK::ExportFn};
 
 std::string cycle_msg(const std::string &value, const std::string &container) {
     return "reference cycle: `" + value + "` goes into `" + container +
@@ -59,19 +51,6 @@ std::string unjoined_msg(const std::string &name) {
            "` is touched inside `spawn` in a function that returns without "
            "`join_all()` (hint: call `join_all()` before returning, or use "
            "`scope { ... }`)";
-}
-
-View view(const std::vector<StmtP> &body) {
-    View out;
-    out.reserve(body.size());
-    for (const auto &s : body) out.push_back(s.get());
-    return out;
-}
-
-View else_of(const Stmt &s) {
-    if (!s.els) return {};
-    if (s.els->k == SK::Block) return view(s.els->body);
-    return {s.els.get()};
 }
 
 std::string root(const Expr *e) {
@@ -164,7 +143,7 @@ void non_own_vars(const Expr *e, std::set<std::string> &acc) {
         if (kNumOps.count(e->a)) return;
         break;
     case EK::Call:
-        if (kScalarCalls.count(e->a)) return;
+        if (is_scalar_only_builtin(e->a)) return;
         break;
     case EK::Var:
         if (!e->a.empty()) acc.insert(e->a);
@@ -250,7 +229,7 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
                 if (it != fns->end()) fs = &it->second;
             }
             if (!r.empty()) {
-                if (kInsert.count(n->b) || kMutate.count(n->b) || (fs && fs->mut_idx.count(0))) {
+                if (is_cap_mutator(n->b) || (fs && fs->mut_idx.count(0))) {
                     out.write.insert(r);
                     if (!n->kids.empty() && is_nested_place(n->kids[0].get()))
                         out.nested_write.insert(r);
@@ -283,7 +262,7 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
                     }
                 }
             }
-        } else if (n->k == EK::Call && kPtrWrite.count(n->a)) {
+        } else if (n->k == EK::Call && (is_ptr_write_builtin(n->a) || n->a == "fill")) {
             if (!n->kids.empty()) {
                 std::string ar = root(n->kids[0].get());
                 if (!ar.empty()) {
@@ -291,7 +270,7 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
                     out.ptr_touch.insert(ar);
                 }
             }
-        } else if (n->k == EK::Call && kPtrRead.count(n->a)) {
+        } else if (n->k == EK::Call && is_ptr_read_builtin(n->a)) {
             if (!n->kids.empty()) {
                 std::string ar = root(n->kids[0].get());
                 if (!ar.empty()) {
@@ -380,19 +359,14 @@ void declared_expr(const Expr *e, std::set<std::string> &out) {
 
 using StructFields = std::map<std::string, std::map<std::string, std::string>>;
 
-const std::set<std::string> kAcyclicScalars{
-    "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64",
-    "usize", "isize", "f32", "f64", "str", "none"};
-
 std::string trim_type(const std::string &s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+    return trim_type_ann(s);
 }
 
 bool is_acyclic_type(const std::string &raw, const std::set<std::string> &acyc_structs) {
-    std::string t = trim_type(raw);
-    if (kAcyclicScalars.count(t) > 0 || acyc_structs.count(t) > 0) return true;
+    std::string t = trim_type_ann(raw);
+    if (is_copy_scalar_ann(t) || t == "str" || t == "none" || acyc_structs.count(t) > 0)
+        return true;
     if (t.size() > 8 && t.rfind("Option[", 0) == 0 && t.back() == ']') {
         return is_acyclic_type(t.substr(7, t.size() - 8), acyc_structs);
     }
@@ -439,21 +413,7 @@ std::set<std::string> compute_acyclic_structs(const StructFields &sf) {
 }
 
 std::string unwrap_cap_adt(const std::string &raw) {
-    std::string a = trim_type(raw);
-    if (a.size() > 8 && a.rfind("Option[", 0) == 0 && a.back() == ']')
-        return trim_type(a.substr(7, a.size() - 8));
-    if (a.size() > 8 && a.rfind("Result[", 0) == 0 && a.back() == ']') {
-        std::string inner = a.substr(7, a.size() - 8);
-        int depth = 0;
-        for (size_t i = 0; i < inner.size(); i++) {
-            if (inner[i] == '[' || inner[i] == '(') depth++;
-            else if (inner[i] == ']' || inner[i] == ')') depth--;
-            else if (inner[i] == ',' && depth == 0)
-                return trim_type(inner.substr(0, i));
-        }
-        return trim_type(inner);
-    }
-    return a;
+    return unwrap_adt_ann(raw);
 }
 
 std::optional<std::string> infer_cap_type(const Expr *e,
@@ -487,7 +447,7 @@ std::optional<std::string> infer_cap_type(const Expr *e,
         }
         return std::nullopt;
     case EK::Call:
-        if (kScalarCalls.count(e->a) || e->a == "str") return std::string("i64");
+        if (is_scalar_only_builtin(e->a) || e->a == "str") return std::string("i64");
         if (e->a == "Some" && e->kids.size() == 1) {
             auto in = infer_cap_type(e->kids[0].get(), vars, sf);
             if (in && !in->empty()) return "Option[" + *in + "]";
@@ -669,7 +629,7 @@ std::vector<InsEdge> inserts(const Stmt &s, const FnSummaries *fns = nullptr) {
     for (const Expr *n : nodes) {
         if (!n) continue;
         if (n->k == EK::MCall) {
-            if (kInsert.count(n->b) && n->kids.size() >= 2) {
+            if (is_insert_mutator(n->b) && n->kids.size() >= 2) {
                 const Expr *value =
                     n->b == "set" ? n->kids.back().get() : n->kids[1].get();
                 out.push_back({"", n->kids[0].get(), value});
@@ -1351,7 +1311,7 @@ std::vector<BorrowDiag> sharing_check(
     for (const auto &sp : body) {
         const Stmt *node = sp.get();
         while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
-        if (kDecls.count(node->k)) {
+        if (is_decl_stmt(node->k)) {
             if (node->k == SK::Fn || node->k == SK::ExportFn || node->k == SK::Impl) {
                 for (const auto &f : node->fns) {
                     Owner own;

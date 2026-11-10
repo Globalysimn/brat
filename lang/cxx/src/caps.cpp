@@ -1,5 +1,7 @@
 #include "caps.h"
 
+#include "builtins.h"
+
 #include <algorithm>
 #include <map>
 #include <optional>
@@ -10,20 +12,9 @@
 
 namespace {
 
-using View = std::vector<const Stmt *>;
-
-View view(const std::vector<StmtP> &body) {
-    View out;
-    out.reserve(body.size());
-    for (const auto &s : body) out.push_back(s.get());
-    return out;
-}
-
-View else_of(const Stmt &s) {
-    if (!s.els) return {};
-    if (s.els->k == SK::Block) return view(s.els->body);
-    return {s.els.get()};
-}
+using View = StmtView;
+constexpr View (*view)(const std::vector<StmtP> &) = &stmt_view;
+constexpr View (*else_of)(const Stmt &) = &stmt_else_of;
 
 // True when control cannot fall out of the body at the bottom: the same rule as
 // `always_exits` in the ownership pass. A branch that returns does not join into
@@ -56,13 +47,6 @@ std::vector<Mode> modes_of(const FnDecl &f) {
 // paths meeting at a join keep the weaker one: a branch that only reads cannot
 // talk a place out of a write that happens on the other branch.
 enum Cap { kNone = 0, kRead = 1, kMoved = 2, kWrite = 3, kTop = 4 };
-
-const std::set<std::string> kCopyAnns{"i8", "u8", "i16", "u16", "i32", "u32",
-                                      "i64", "u64", "usize", "isize", "f32", "f64", "bool"};
-const std::set<std::string> kMutators{"push", "pop", "sort", "sort_by", "ins",
-                                      "del", "set", "clear"};
-const std::set<SK> kDecls{SK::Fn,        SK::Impl,   SK::Trait, SK::Enum,
-                          SK::Struct,    SK::Extern, SK::ExternStruct, SK::ExportFn};
 
 int join(int a, int b) {
     if (a == b) return a;
@@ -275,26 +259,8 @@ bool elem_copy(const State &st, const Expr *base) {
     if (base->k != EK::Var) return false;
     auto it = st.anns.find(base->a);
     if (it == st.anns.end()) return false;
-    std::string a = it->second;
-    if (a.size() > 5 && a.rfind("vec[", 0) == 0 && a.back() == ']') {
-        a = a.substr(4, a.size() - 5);
-    } else if (a.rfind("map[", 0) == 0 && a.back() == ']') {
-        std::string inner = a.substr(4, a.size() - 5);
-        size_t comma = std::string::npos;
-        int depth = 0;
-        for (size_t i = 0; i < inner.size(); i++) {
-            char c = inner[i];
-            if (c == '[' || c == '(') depth++;
-            else if ((c == ']' || c == ')') && depth > 0) depth--;
-            else if (c == ',' && depth == 0) { comma = i; break; }
-        }
-        a = comma == std::string::npos ? inner : inner.substr(comma + 1);
-    } else {
-        return false;
-    }
-    a.erase(0, a.find_first_not_of(" \t"));
-    while (!a.empty() && (a.back() == ' ' || a.back() == '\t')) a.pop_back();
-    return kCopyAnns.count(a) > 0;
+    const std::string el = container_elem_ann(it->second);
+    return !el.empty() && is_copy_scalar_ann(el);
 }
 
 // A move of `p` cannot happen while something inside `p` has been moved out.
@@ -435,37 +401,13 @@ struct Walk {
     int index = 0;
     int cur = 0;                                      // line of the current statement
 
-    static std::string trim_ann(const std::string &raw) {
-        size_t b = raw.find_first_not_of(" \t\r\n");
-        size_t z = raw.find_last_not_of(" \t\r\n");
-        return b == std::string::npos ? std::string() : raw.substr(b, z - b + 1);
-    }
-
-    static std::string unwrap_adt_ann(const std::string &raw) {
-        std::string a = trim_ann(raw);
-        if (a.size() > 8 && a.rfind("Option[", 0) == 0 && a.back() == ']')
-            return trim_ann(a.substr(7, a.size() - 8));
-        if (a.size() > 8 && a.rfind("Result[", 0) == 0 && a.back() == ']') {
-            std::string inner = a.substr(7, a.size() - 8);
-            int depth = 0;
-            for (size_t i = 0; i < inner.size(); i++) {
-                if (inner[i] == '[' || inner[i] == '(') depth++;
-                else if (inner[i] == ']' || inner[i] == ')') depth--;
-                else if (inner[i] == ',' && depth == 0)
-                    return trim_ann(inner.substr(0, i));
-            }
-            return trim_ann(inner);
-        }
-        return a;
-    }
-
     std::string infer_ann(const State &st, const Expr *e) const {
         while (e && e->k == EK::Move && !e->kids.empty())
             e = e->kids[0].get();
         if (e == nullptr) return "";
         if (e->k == EK::Quest) {
             if (e->kids.empty()) return "";
-            return unwrap_adt_ann(infer_ann(st, e->kids[0].get()));
+            return ::unwrap_adt_ann(infer_ann(st, e->kids[0].get()));
         }
         if (e->k == EK::Var) {
             auto it = st.anns.find(e->a);
@@ -625,7 +567,7 @@ struct Walk {
             used_stmt(s, names);
             for (const std::string &n : names) last[n] = index;
         }
-        if (kDecls.count(s.k)) return;          // every body is walked on its own
+        if (is_decl_stmt(s.k)) return;          // every body is walked on its own
         switch (s.k) {
         case SK::Let: return let_stmt(s, st);
         case SK::Set: return assign(std::optional<std::string>(s.a), s.e1.get(), st, cur);
@@ -752,7 +694,7 @@ struct Walk {
         std::string ann = s.ann.value_or("");
         if (ann.empty()) ann = infer_ann(st, e);
         expr(e, st, false, cur);
-        bool copylike = kCopyAnns.count(ann) > 0 || copy_expr(e) ||
+        bool copylike = is_copy_scalar_ann(ann) || copy_expr(e) ||
                         (e && e->k == EK::Var && st.copies.count(e->a)) ||
                         (e && e->k == EK::Idx && elem_copy(st, e->kids[0].get()));
         auto place = place_of(e);
@@ -919,7 +861,7 @@ struct Walk {
                     const Expr *arg = e->kids[i].get();
                     bool copied = copy_expr(arg) ||
                                   (arg->k == EK::Var && st.copies.count(arg->a)) ||
-                                  kCopyAnns.count(infer_ann(st, arg)) > 0;
+                                  is_copy_scalar_ann(infer_ann(st, arg));
                     if (i == 1 && place && !copied) {
                         const std::string p = st.place(*place);
                         if (moved_under(st, p)) note(line, gone_message(st, p, p).first);
@@ -931,7 +873,7 @@ struct Walk {
                 }
                 return;
             }
-            if (kMutators.count(e->b)) {
+            if (is_cap_mutator(e->b)) {
                 auto place = place_of(e->kids[0].get());
                 if (place && !place->empty()) {
                     const std::string p = st.place(*place);
@@ -1003,7 +945,7 @@ void one_body(const View &stmts, const std::vector<Param> &params,
         }
         if (!ann.empty()) {
             st.anns[p.name] = ann;
-            if (kCopyAnns.count(ann)) st.copies.insert(p.name);
+            if (is_copy_scalar_ann(ann)) st.copies.insert(p.name);
         }
     }
     walk.block(stmts, st);
@@ -1048,7 +990,7 @@ std::vector<BorrowDiag> cap_verdicts(
             one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out);
             continue;
         }
-        if (kDecls.count(node->k)) {
+        if (is_decl_stmt(node->k)) {
             if (node->k == SK::Impl) {
                 for (const FnDecl &f : node->fns) {
                     one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out, node->a);

@@ -175,3 +175,25 @@ void print_expr(const Expr &e, std::string &out);
 void print_stmt(const Stmt &s, std::string &out);
 std::string pat_text(const Pat &p);
 std::string repr_f64(double v);
+
+using StmtView = std::vector<const Stmt *>;
+
+inline StmtView stmt_view(const std::vector<StmtP> &body) {
+    StmtView out;
+    out.reserve(body.size());
+    for (const auto &s : body) out.push_back(s.get());
+    return out;
+}
+
+inline StmtView stmt_else_of(const Stmt &s) {
+    if (!s.els) return {};
+    if (s.els->k == SK::Block) return stmt_view(s.els->body);
+    return {s.els.get()};
+}
+
+inline bool is_decl_stmt(SK k) {
+    return k == SK::Fn || k == SK::Impl || k == SK::Trait || k == SK::Enum ||
+           k == SK::Struct || k == SK::Extern || k == SK::ExternStruct ||
+           k == SK::ExportFn;
+}
+

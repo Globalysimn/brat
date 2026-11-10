@@ -22,8 +22,11 @@
 #endif
 
 #include "ast.h"
+#include "borrow.h"
+#include "check.h"
 #include "module.h"
 #include "parser.h"
+#include "pkg_io.h"
 
 struct BuildStage {
     std::filesystem::path path;
@@ -82,6 +85,8 @@ void emit_diag_line(const std::string &path, const std::vector<std::string> &lin
                     const char *kind, int line, const std::string &msg);
 std::set<std::string> imported_module_heads(const SourceFile &file);
 std::set<std::string> exported_fn_names(const SourceFile &sf);
+BorrowOut check_sibling_borrows(const std::vector<SourceFile> &files, std::size_t i);
+std::vector<TypeErr> check_sibling_types(const std::vector<SourceFile> &files, std::size_t i);
 int check_programs(const std::vector<SourceFile> &progs, bool quiet = false);
 
 std::filesystem::path executable_path(const char *arg0);
@@ -94,32 +99,7 @@ bool sha256_file(const std::filesystem::path &path, std::string &digest,
                  uint64_t &size, std::string &error);
 
 inline std::vector<std::string> split_compiler_cmd(std::string_view raw) {
-    while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t')) raw.remove_prefix(1);
-    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.remove_suffix(1);
-    if (raw.empty()) return {};
-    std::error_code ec;
-    const std::string whole(raw);
-    if (std::filesystem::is_regular_file(whole, ec)) return {whole};
-    std::vector<std::string> out;
-    std::string cur;
-    char quote = 0;
-    for (char c : raw) {
-        if (quote) {
-            if (c == quote) quote = 0;
-            else cur.push_back(c);
-        } else if (c == '\'' || c == '"') {
-            quote = c;
-        } else if (c == ' ' || c == '\t') {
-            if (!cur.empty()) {
-                out.push_back(std::move(cur));
-                cur.clear();
-            }
-        } else {
-            cur.push_back(c);
-        }
-    }
-    if (!cur.empty()) out.push_back(std::move(cur));
-    return out;
+    return pkg_io::split_compiler_cmd(raw);
 }
 
 std::filesystem::path cache_root();

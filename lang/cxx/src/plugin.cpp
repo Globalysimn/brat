@@ -10,7 +10,9 @@
 
 namespace {
 
-using View = std::vector<const Stmt *>;
+using View = StmtView;
+constexpr View (*view)(const std::vector<StmtP> &) = &stmt_view;
+constexpr View (*else_of)(const Stmt &) = &stmt_else_of;
 
 const std::string kOpen = "lib_open";
 const std::string kSym = "lib_sym";
@@ -268,9 +270,6 @@ struct FnEntry {
     const std::vector<StmtP> *body = nullptr;
 };
 
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
-                          SK::ExternStruct, SK::ExportFn};
-
 struct State {
     int next_id = 0;
     std::map<std::string, int> handle;         // binding -> library id
@@ -283,19 +282,6 @@ struct State {
     std::set<std::string> consumed;
     std::map<int, std::vector<std::pair<std::string, int>>> retained_cb;
 };
-
-View view(const std::vector<StmtP> &body) {
-    View out;
-    out.reserve(body.size());
-    for (const auto &s : body) out.push_back(s.get());
-    return out;
-}
-
-View else_of(const Stmt &s) {
-    if (!s.els) return {};
-    if (s.els->k == SK::Block) return view(s.els->body);
-    return {s.els.get()};
-}
 
 std::string lib_name(const State &st, int id) {
     for (const auto &entry : st.handle)
@@ -1022,7 +1008,7 @@ std::vector<BorrowDiag> plugin_check(const std::vector<StmtP> &body) {
                     }
                     continue;
                 }
-                if (kDecls.count(node->k)) continue;
+                if (is_decl_stmt(node->k)) continue;
                 if (node->k == SK::Let && !node->a.empty()) globals.insert(node->a);
                 top.push_back(node);
             }

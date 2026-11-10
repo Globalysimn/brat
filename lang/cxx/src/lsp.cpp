@@ -23,6 +23,7 @@
 
 #include "borrow.h"
 #include "check.h"
+#include "diag_codes.h"
 #include "lexer.h"
 #include "lsp_wire.h"
 #include "module.h"
@@ -155,38 +156,7 @@ bool ns_matches_word(std::string_view ns, const Word &word) {
 }
 
 std::string classify(std::string_view m) {
-    if (m.find("use of moved") != std::string_view::npos) return "E0382";
-    if (m.find("cannot move borrowed parameter") != std::string_view::npos) return "E0507";
-    if (m.find("while borrowed") != std::string_view::npos ||
-        m.find("cannot move borrowed pointer") != std::string_view::npos ||
-        m.find("cannot pass") != std::string_view::npos ||
-        m.find("cannot use") != std::string_view::npos ||
-        m.find("cannot assign") != std::string_view::npos) return "E0505";
-    if (m.find("while iterating it") != std::string_view::npos) return "E0502";
-    if (m.find("double mut borrow") != std::string_view::npos ||
-        m.find("law of exclusivity") != std::string_view::npos) return "E0499";
-    if (m.find("escapes via return") != std::string_view::npos) return "E0515";
-    if (m.find("escapes via spawn") != std::string_view::npos ||
-        m.find("return escapes spawn") != std::string_view::npos) return "B0521";
-    if (m.find("inside `spawn`") != std::string_view::npos ||
-        m.find("spawn` launched in a loop") != std::string_view::npos) return "B0522";
-    if (m.find("is from library") != std::string_view::npos ||
-        m.find("is closed twice") != std::string_view::npos ||
-        m.find("is closed on line") != std::string_view::npos) return "B0530";
-    if (m.find("the signature says") != std::string_view::npos ||
-        m.find("the signature has") != std::string_view::npos) return "B0531";
-    if (m.find("assign to immutable") != std::string_view::npos ||
-        m.find("cannot mutate immutable") != std::string_view::npos ||
-        m.find("pass immutable") != std::string_view::npos ||
-        m.find("assign to const") != std::string_view::npos ||
-        m.find("write through") != std::string_view::npos) return "E0596";
-    if (m.find("unsupported FFI type") != std::string_view::npos) return "F0001";
-    if (m.find("use of undeclared var") != std::string_view::npos) return "B0101";
-    if (m.find("unused var") != std::string_view::npos) return "W0001";
-    if (m.find("unused mut") != std::string_view::npos) return "W0002";
-    if (m.find("unused import") != std::string_view::npos) return "W0003";
-    if (m.find("looks cut short") != std::string_view::npos) return "W0004";
-    return "B0000";
+    return classify_diag_code(m);
 }
 
 struct Diagnostic {

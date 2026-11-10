@@ -1,6 +1,7 @@
 #include "cli_tools.h"
 #include "ffi_native.h"
 #include "lsp_wire.h"
+#include "pkg_io.h"
 
 #include <algorithm>
 #include <array>
@@ -247,345 +248,42 @@ struct CommandResult {
     std::string launch_error;
 };
 
-#if !defined(_WIN32)
-static bool set_nonblocking(int fd) {
-    const int flags = fcntl(fd, F_GETFL, 0);
-    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
-}
-
-static void append_capped(std::string &dst, const char *data, size_t size, bool &too_large) {
-    if (dst.size() > kMaxToolOutput || size > kMaxToolOutput - dst.size()) {
-        too_large = true;
-        return;
-    }
-    dst.append(data, size);
-}
-
 static CommandResult run_native(const std::string &exe, const std::vector<std::string> &args,
                                 int timeout_ms, const std::string &cwd = {}) {
     CommandResult result;
-    int out_pipe[2] = {-1, -1};
-    int err_pipe[2] = {-1, -1};
-    if (pipe(out_pipe) != 0 || pipe(err_pipe) != 0) {
-        result.launch_error = std::string("cannot create command pipes: ") + std::strerror(errno);
-        if (out_pipe[0] >= 0) close(out_pipe[0]);
-        if (out_pipe[1] >= 0) close(out_pipe[1]);
-        if (err_pipe[0] >= 0) close(err_pipe[0]);
-        if (err_pipe[1] >= 0) close(err_pipe[1]);
-        return result;
-    }
-    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(out_pipe[1], F_SETFD, FD_CLOEXEC);
-    fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
-    const pid_t pid = fork();
-    if (pid < 0) {
-        result.launch_error = std::string("cannot start native command: ") + std::strerror(errno);
-        close(out_pipe[0]); close(out_pipe[1]); close(err_pipe[0]); close(err_pipe[1]);
-        return result;
-    }
-    if (pid == 0) {
-        setpgid(0, 0);
-#if defined(SIGPIPE)
-        signal(SIGPIPE, SIG_DFL);
-#endif
-        close(out_pipe[0]);
-        close(err_pipe[0]);
-        for (int *wp : {&out_pipe[1], &err_pipe[1]}) {
-            if (*wp >= 0 && *wp < 3) {
-                int m = fcntl(*wp, F_DUPFD_CLOEXEC, 3);
-                if (m < 0) _exit(126);
-                close(*wp);
-                *wp = m;
-            }
-        }
-        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
-        if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
-        close(out_pipe[1]);
-        close(err_pipe[1]);
-        const int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (null_fd >= 0) {
-            if (null_fd == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
-            else {
-                (void)dup2(null_fd, STDIN_FILENO);
-                close(null_fd);
-            }
-        }
-        if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
-        std::vector<char *> argv;
-        argv.reserve(args.size() + 2);
-        argv.push_back(const_cast<char *>(exe.c_str()));
-        for (const auto &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
-        argv.push_back(nullptr);
-        execv(exe.c_str(), argv.data());
-        _exit(127);
-    }
-    close(out_pipe[1]);
-    close(err_pipe[1]);
-    (void)setpgid(pid, pid);
-    if (!set_nonblocking(out_pipe[0]) || !set_nonblocking(err_pipe[0])) {
-        result.launch_error = "cannot make command pipes non-blocking";
-        kill(-pid, SIGKILL);
-        close(out_pipe[0]); close(err_pipe[0]);
-        (void)waitpid(pid, nullptr, 0);
-        return result;
-    }
+    std::vector<std::string> argv;
+    argv.reserve(args.size() + 1);
+    argv.push_back(exe);
+    argv.insert(argv.end(), args.begin(), args.end());
 
-    bool out_open = true;
-    bool err_open = true;
-    bool child_done = false;
-    bool wait_failed = false;
-    int wait_status = 0;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    auto drain = [&](int fd, bool &open, std::string &dst) {
-        std::array<char, 8192> buffer{};
-        while (open) {
-            const ssize_t got = read(fd, buffer.data(), buffer.size());
-            if (got > 0) {
-                append_capped(dst, buffer.data(), static_cast<size_t>(got), result.too_large);
-                continue;
-            }
-            if (got == 0) {
-                open = false;
-                close(fd);
-                return;
-            }
-            if (errno == EINTR) continue;
-#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
-            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-#else
-            if (errno == EAGAIN) return;
-#endif
-            open = false;
-            close(fd);
-            return;
-        }
-    };
+    pkg_io::ProcOptions opts;
+    opts.timeout_ms = timeout_ms;
+    opts.cwd = cwd;
+    opts.search_path = false;
+    opts.capture_output = true;
+    opts.merge_stderr = false;
+    opts.null_stdin = true;
+    opts.max_out_total = kMaxToolOutput;
+    opts.max_err_total = kMaxToolOutput;
 
-    while (out_open || err_open || !child_done) {
-        if (!result.timed_out && std::chrono::steady_clock::now() >= deadline) {
-            result.timed_out = true;
-            (void)kill(-pid, SIGKILL);
-        }
-        if (result.too_large) (void)kill(-pid, SIGKILL);
-        pollfd fds[2] = {{out_open ? out_pipe[0] : -1, POLLIN | POLLHUP, 0},
-                         {err_open ? err_pipe[0] : -1, POLLIN | POLLHUP, 0}};
-        int wait_ms = 50;
-        if (!result.timed_out) {
-            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count();
-            wait_ms = static_cast<int>(std::clamp<long long>(left, 0, 50));
-        }
-        (void)poll(fds, 2, wait_ms);
-        if (out_open) drain(out_pipe[0], out_open, result.out);
-        if (err_open) drain(err_pipe[0], err_open, result.err);
-        if (!child_done) {
-            const pid_t waited = waitpid(pid, &wait_status, WNOHANG);
-            if (waited == pid) child_done = true;
-            else if (waited < 0 && errno != EINTR) {
-                child_done = true;
-                wait_failed = true;
-            }
-        }
-        if ((result.timed_out || result.too_large) && child_done && !out_open && !err_open) break;
-    }
-    if (!child_done) {
-        while (true) {
-            const pid_t waited = waitpid(pid, &wait_status, 0);
-            if (waited == pid) break;
-            if (waited < 0 && errno == EINTR) continue;
-            wait_failed = true;
-            break;
-        }
-    }
-    if (wait_failed) {
+    pkg_io::ProcResult pr = pkg_io::run_proc(argv, opts);
+    result.out = std::move(pr.out);
+    result.err = std::move(pr.err);
+    result.timed_out = pr.timed_out;
+    result.too_large = pr.over_limit;
+    if (!pr.launched) {
         result.code = 127;
-        result.launch_error = "cannot collect native command status";
-    } else if (result.timed_out) result.code = 124;
-    else if (result.too_large) result.code = 1;
-    else if (WIFEXITED(wait_status)) result.code = WEXITSTATUS(wait_status);
-    else if (WIFSIGNALED(wait_status)) result.code = 128 + WTERMSIG(wait_status);
-    else result.code = 1;
-    return result;
-}
-#else
-static std::wstring mcp_win_quote(std::string_view arg) {
-    int wn = MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
-    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), w.data(), wn);
-    if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
-    std::wstring out = L"\"";
-    for (size_t i = 0; i < w.size(); ++i) {
-        size_t bs = 0;
-        while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
-        if (i == w.size()) {
-            out.append(bs * 2, L'\\');
-            break;
-        }
-        if (w[i] == L'"') {
-            out.append(bs * 2 + 1, L'\\');
-            out.push_back(L'"');
-        } else {
-            out.append(bs, L'\\');
-            out.push_back(w[i]);
-        }
-    }
-    out.push_back(L'"');
-    return out;
-}
-
-static CommandResult run_native(const std::string &exe, const std::vector<std::string> &args,
-                                int timeout_ms, const std::string &cwd = {}) {
-    CommandResult result;
-    std::wstring cmdline = mcp_win_quote(exe);
-    for (const auto &a : args) {
-        cmdline.push_back(L' ');
-        cmdline += mcp_win_quote(a);
-    }
-    std::wstring wcwd;
-    if (!cwd.empty()) {
-        const int cn = MultiByteToWideChar(CP_UTF8, 0, cwd.data(), static_cast<int>(cwd.size()), nullptr, 0);
-        wcwd.assign(static_cast<size_t>(std::max(0, cn)), L'\0');
-        if (cn > 0) MultiByteToWideChar(CP_UTF8, 0, cwd.data(), static_cast<int>(cwd.size()), wcwd.data(), cn);
-    }
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE out_rd = nullptr, out_wr = nullptr;
-    HANDLE err_rd = nullptr, err_wr = nullptr;
-    if (!CreatePipe(&out_rd, &out_wr, &sa, 0)) {
-        result.launch_error = "cannot create stdout pipe";
+        result.launch_error = pr.launch_error.empty() ? "cannot launch native command" : pr.launch_error;
         return result;
     }
-    if (!CreatePipe(&err_rd, &err_wr, &sa, 0)) {
-        CloseHandle(out_rd);
-        CloseHandle(out_wr);
-        result.launch_error = "cannot create stderr pipe";
-        return result;
-    }
-    SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-    STARTUPINFOW si {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = out_wr;
-    si.hStdError = err_wr;
-    PROCESS_INFORMATION pi {};
-    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back(L'\0');
-    const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
-    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, flags,
-                        nullptr, cwd.empty() ? nullptr : wcwd.c_str(), &si, &pi)) {
-        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-        CloseHandle(out_rd); CloseHandle(out_wr);
-        CloseHandle(err_rd); CloseHandle(err_wr);
-        if (job) CloseHandle(job);
-        result.launch_error = "cannot launch native command";
-        return result;
-    }
-    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-    CloseHandle(out_wr);
-    CloseHandle(err_wr);
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    std::atomic<bool> too_large_flag{false};
-    auto drain_pipe = [&](HANDLE rd, std::string &dst) {
-        std::array<char, 8192> buf {};
-        DWORD got = 0;
-        while (ReadFile(rd, buf.data(), static_cast<DWORD>(buf.size()), &got, nullptr) && got > 0) {
-            if (dst.size() > kMaxToolOutput || got > kMaxToolOutput - dst.size()) {
-                too_large_flag.store(true, std::memory_order_relaxed);
-                if (job) TerminateJobObject(job, 1);
-                else TerminateProcess(pi.hProcess, 1);
-                break;
-            }
-            dst.append(buf.data(), got);
-        }
-    };
-    std::thread t_out([&]() { drain_pipe(out_rd, result.out); });
-    std::thread t_err([&]() { drain_pipe(err_rd, result.err); });
-
-    const DWORD tmo_ms = (timeout_ms > 0)
-                             ? static_cast<DWORD>(std::min<long long>(timeout_ms, 3600000LL))
-                             : INFINITE;
-    const DWORD wrc = WaitForSingleObject(pi.hProcess, tmo_ms);
-    if (wrc == WAIT_TIMEOUT) {
-        result.timed_out = true;
-        if (job) TerminateJobObject(job, 124);
-        else TerminateProcess(pi.hProcess, 124);
-        WaitForSingleObject(pi.hProcess, 5000);
-    }
-    if (result.timed_out || too_large_flag.load(std::memory_order_relaxed)) {
-        CancelIoEx(out_rd, nullptr);
-        CancelIoEx(err_rd, nullptr);
-    }
-    if (t_out.joinable()) t_out.join();
-    if (t_err.joinable()) t_err.join();
-    CloseHandle(out_rd);
-    CloseHandle(err_rd);
-    result.too_large = too_large_flag.load(std::memory_order_relaxed);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    if (job) CloseHandle(job);
     if (result.timed_out) result.code = 124;
     else if (result.too_large) result.code = 1;
-    else result.code = static_cast<int>(code);
+    else result.code = pr.exit_code;
     return result;
 }
-#endif
 
 static std::string resolve_executable(const char *arg0) {
-#if defined(_WIN32)
-    std::array<char, 32768> buffer{};
-    const DWORD len = GetModuleFileNameA(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (len > 0 && len < buffer.size()) return std::string(buffer.data(), len);
-#else
-    std::array<char, 4096> buffer{};
-    const ssize_t len = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
-    if (len > 0) return std::string(buffer.data(), static_cast<size_t>(len));
-#endif
-    if (!arg0 || !*arg0) return {};
-    std::error_code ec;
-    std::filesystem::path p(arg0);
-    if (p.has_parent_path()) {
-        auto full = std::filesystem::absolute(p, ec);
-        if (!ec) return full.lexically_normal().string();
-        return {};
-    }
-    const char *path_env = std::getenv("PATH");
-    if (!path_env) return {};
-#if defined(_WIN32)
-    constexpr char separator = ';';
-#else
-    constexpr char separator = ':';
-#endif
-    std::string paths(path_env);
-    size_t start = 0;
-    while (start <= paths.size()) {
-        const size_t end = paths.find(separator, start);
-        const std::string dir = paths.substr(start, end == std::string::npos ? end : end - start);
-        auto candidate = std::filesystem::path(dir.empty() ? "." : dir) / arg0;
-#if defined(_WIN32)
-        if (std::filesystem::is_regular_file(candidate, ec)) return std::filesystem::absolute(candidate, ec).string();
-#else
-        if (access(candidate.c_str(), X_OK) == 0) return std::filesystem::absolute(candidate, ec).string();
-#endif
-        if (end == std::string::npos) break;
-        start = end + 1;
-    }
-    return {};
+    return pkg_io::self_exe_path(arg0, false).string();
 }
 
 static bool path_is_within(const std::filesystem::path &child, const std::filesystem::path &root) {

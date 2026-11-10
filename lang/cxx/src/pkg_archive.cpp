@@ -1,4 +1,5 @@
 #include "pkg_archive.h"
+#include "pkg_io.h"
 
 #include <algorithm>
 #include <atomic>
@@ -285,272 +286,41 @@ struct ScopedTempDir {
     }
 };
 
-int cc_timeout_ms() {
-    if (const char *ev = std::getenv("BRAT_CC_TIMEOUT_MS"); ev && *ev) {
-        char *end = nullptr;
-        const long long v = std::strtoll(ev, &end, 10);
-        if (end != ev && *end == '\0' && v > 0 && v <= 3600000LL) return static_cast<int>(v);
-    }
-    return 120000;
-}
-
-#if defined(_WIN32)
-std::wstring win_quote_arg(std::string_view arg) {
-    int wn = MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
-    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), w.data(), wn);
-    if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
-    std::wstring out = L"\"";
-    for (size_t i = 0; i < w.size(); ++i) {
-        size_t bs = 0;
-        while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
-        if (i == w.size()) {
-            out.append(bs * 2, L'\\');
-            break;
-        }
-        if (w[i] == L'"') {
-            out.append(bs * 2 + 1, L'\\');
-            out.push_back(L'"');
-        } else {
-            out.append(bs, L'\\');
-            out.push_back(w[i]);
-        }
-    }
-    out.push_back(L'"');
-    return out;
-}
-#endif
-
 bool exec_capture(const std::vector<std::string> &args, int &exit_code, std::string &output) {
     output.clear();
     if (args.empty()) return false;
-    const int timeout_ms = cc_timeout_ms();
-#if defined(_WIN32)
-    std::wstring cmdline;
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (i) cmdline.push_back(L' ');
-        cmdline += win_quote_arg(args[i]);
-    }
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-    STARTUPINFOW si {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = wr;
-    si.hStdError = wr;
-    PROCESS_INFORMATION pi {};
-    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back(L'\0');
-    const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
-    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, flags,
-                        nullptr, nullptr, &si, &pi)) {
-        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-        CloseHandle(rd);
-        CloseHandle(wr);
-        if (job) CloseHandle(job);
-        return false;
-    }
-    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-    CloseHandle(wr);
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    bool over_cap = false;
-    std::thread reader([&]() {
-        char buf[4096];
-        DWORD got = 0;
-        size_t total = 0;
-        while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-            total += got;
-            if (total > (4u << 20)) {
-                over_cap = true;
-                if (job) TerminateJobObject(job, 124);
-                else TerminateProcess(pi.hProcess, 124);
-                break;
-            }
-            if (output.size() < 65536) output.append(buf, got);
-        }
-    });
-    const DWORD wrc = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
-    const bool timed_out = (wrc == WAIT_TIMEOUT);
-    if (timed_out) {
-        if (job) TerminateJobObject(job, 124);
-        else TerminateProcess(pi.hProcess, 124);
-        WaitForSingleObject(pi.hProcess, 5000);
-    }
-    if (timed_out || over_cap) CancelIoEx(rd, nullptr);
-    if (reader.joinable()) reader.join();
-    CloseHandle(rd);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    if (job) CloseHandle(job);
-    if (timed_out) {
+    pkg_io::ProcOptions opts;
+    opts.timeout_ms = pkg_io::cc_timeout_ms();
+    opts.search_path = true;
+    opts.capture_output = true;
+    opts.merge_stderr = true;
+    opts.null_stdin = true;
+    opts.max_out_total = 4u << 20;
+    opts.max_out_keep = 65536u;
+    pkg_io::ProcResult res = pkg_io::run_proc(args, opts);
+    if (!res.launched) return false;
+    if (res.timed_out) {
         output = "compiler timed out";
         exit_code = 124;
         return true;
     }
-    if (over_cap) {
+    if (res.over_limit) {
         output = "compiler output exceeded 4 MiB limit";
         exit_code = 125;
         return true;
     }
-    exit_code = static_cast<int>(code);
+    output = std::move(res.out);
+    exit_code = res.exit_code;
+#if defined(_WIN32)
     return true;
 #else
-    int pipefd[2];
-    if (pipe(pipefd) != 0) return false;
-    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
-    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
-    const pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return false;
-    }
-    if (pid == 0) {
-        setpgid(0, 0);
-#if defined(SIGPIPE)
-        signal(SIGPIPE, SIG_DFL);
-#endif
-        close(pipefd[0]);
-        if (pipefd[1] >= 0 && pipefd[1] < 3) {
-            int m = fcntl(pipefd[1], F_DUPFD_CLOEXEC, 3);
-            if (m < 0) _exit(126);
-            close(pipefd[1]);
-            pipefd[1] = m;
-        }
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(126);
-        if (dup2(pipefd[1], STDERR_FILENO) < 0) _exit(126);
-        close(pipefd[1]);
-        const int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
-        if (devnull >= 0) {
-            if (devnull == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
-            else { dup2(devnull, STDIN_FILENO); close(devnull); }
-        }
-        std::vector<char *> av;
-        av.reserve(args.size() + 1);
-        for (const auto &a : args) av.push_back(const_cast<char *>(a.c_str()));
-        av.push_back(nullptr);
-        execvp(av[0], av.data());
-        _exit(127);
-    }
-    setpgid(pid, pid);
-    close(pipefd[1]);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    bool timed_out = false;
-    bool over_cap = false;
-    size_t total_out = 0;
-    char buf[4096];
-    for (;;) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) { timed_out = true; break; }
-        const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        struct pollfd pfd {};
-        pfd.fd = pipefd[0];
-        pfd.events = POLLIN;
-        const int pr = poll(&pfd, 1, static_cast<int>(std::min<long long>(rem, 100)));
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (pr == 0) {
-            int st = 0;
-            if (waitpid(pid, &st, WNOHANG) == pid) {
-                fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-                while (!over_cap) {
-                    const ssize_t dn = read(pipefd[0], buf, sizeof(buf));
-                    if (dn <= 0) break;
-                    total_out += static_cast<size_t>(dn);
-                    if (total_out > (4u << 20)) { over_cap = true; break; }
-                    if (output.size() < 65536) {
-                        const size_t keep = std::min<size_t>(static_cast<size_t>(dn), 65536 - output.size());
-                        output.append(buf, keep);
-                    }
-                }
-                close(pipefd[0]);
-                if (over_cap) {
-                    output = "compiler output exceeded 4 MiB limit";
-                    exit_code = 125;
-                    return true;
-                }
-                exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : 128;
-                return exit_code != 127;
-            }
-            continue;
-        }
-        const ssize_t n = read(pipefd[0], buf, sizeof(buf));
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (n == 0) break;
-        total_out += static_cast<size_t>(n);
-        if (total_out > (4u << 20)) { over_cap = true; break; }
-        if (output.size() < 65536) {
-            const size_t keep = std::min<size_t>(static_cast<size_t>(n), 65536 - output.size());
-            output.append(buf, keep);
-        }
-    }
-    close(pipefd[0]);
-    if (timed_out || over_cap) {
-        if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    if (timed_out) {
-        output = "compiler timed out";
-        exit_code = 124;
-        return true;
-    }
-    if (over_cap) {
-        output = "compiler output exceeded 4 MiB limit";
-        exit_code = 125;
-        return true;
-    }
-    exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128;
     return exit_code != 127;
 #endif
 }
 
 bool find_c_compiler(std::vector<std::string> &cc_out, bool &is_zig, std::string &error) {
     if (const char *env_cc = std::getenv("BRAT_CC"); env_cc && *env_cc) {
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(env_cc, ec)) {
-            cc_out = {env_cc};
-        } else {
-            cc_out.clear();
-            std::string cur;
-            char q = 0;
-            for (size_t i = 0; env_cc[i]; ++i) {
-                char c = env_cc[i];
-                if (q) {
-                    if (c == q) q = 0;
-                    else cur.push_back(c);
-                } else if (c == '\'' || c == '"') {
-                    q = c;
-                } else if (c == ' ' || c == '\t') {
-                    if (!cur.empty()) { cc_out.push_back(std::move(cur)); cur.clear(); }
-                } else {
-                    cur.push_back(c);
-                }
-            }
-            if (!cur.empty()) cc_out.push_back(std::move(cur));
-        }
+        cc_out = pkg_io::split_compiler_cmd(env_cc);
         if (cc_out.empty()) {
             error = "empty BRAT_CC";
             return false;

@@ -248,32 +248,48 @@ std::set<std::string> exported_fn_names(const SourceFile &sf) {
     return out;
 }
 
+BorrowOut check_sibling_borrows(const std::vector<SourceFile> &files, std::size_t i) {
+    std::map<std::string, std::vector<ParamMode>> extra;
+    std::set<std::string> extra_consts;
+    std::set<std::string> extra_scalar;
+    std::map<std::string, std::vector<size_t>> extra_borrows;
+    std::set<std::string> extra_owned;
+    std::map<std::string, std::map<std::string, std::string>> extra_sfields;
+    std::map<std::string, std::string> extra_frets;
+    std::set<std::string> module_heads = imported_module_heads(files[i]);
+    for (std::size_t j = 0; j < files.size(); ++j) {
+        if (j == i) continue;
+        FnTable ps = pub_sigs(files[j].body, exported_fn_names(files[j]));
+        for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
+        module_heads.insert(ps.heads.begin(), ps.heads.end());
+        extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
+        extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
+        for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
+        extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
+        for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
+        for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
+    }
+    return borrow_check(files[i].body, extra, files[i].stray, module_heads,
+                        extra_consts, extra_scalar, extra_borrows, extra_owned,
+                        extra_sfields, extra_frets);
+}
+
+std::vector<TypeErr> check_sibling_types(const std::vector<SourceFile> &files, std::size_t i) {
+    Sigs merged;
+    std::map<std::string, Ty> merged_consts;
+    std::map<std::string, std::map<std::string, Ty>> merged_structs;
+    for (std::size_t j = 0; j < files.size(); ++j) {
+        if (j == i) continue;
+        collect_exports(files[j].body, merged_consts, merged_structs);
+        collect_sigs(files[j].body, merged);
+    }
+    return type_check(files[i].body, merged, merged_consts, merged_structs);
+}
+
 int check_programs(const std::vector<SourceFile> &progs, bool quiet) {
     int bad = 0;
     for (size_t i = 0; i < progs.size(); i++) {
-        std::map<std::string, std::vector<ParamMode>> extra;
-        std::set<std::string> extra_consts;
-        std::set<std::string> extra_scalar;
-        std::map<std::string, std::vector<size_t>> extra_borrows;
-        std::set<std::string> extra_owned;
-        std::map<std::string, std::map<std::string, std::string>> extra_sfields;
-        std::map<std::string, std::string> extra_frets;
-        std::set<std::string> module_heads = imported_module_heads(progs[i]);
-        for (size_t j = 0; j < progs.size(); j++) {
-            if (j == i) continue;
-            FnTable ps = pub_sigs(progs[j].body, exported_fn_names(progs[j]));
-            for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
-            module_heads.insert(ps.heads.begin(), ps.heads.end());
-            extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
-            extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
-            for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
-            extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
-            for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
-            for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
-        }
-        BorrowOut out = borrow_check(progs[i].body, extra, progs[i].stray, module_heads,
-                                     extra_consts, extra_scalar, extra_borrows, extra_owned,
-                                     extra_sfields, extra_frets);
+        BorrowOut out = check_sibling_borrows(progs, i);
         // Quiet on success: `run` is not `check`, and a program that runs must
         // not print a report first.
         if (!quiet || !out.errs.empty() || !out.warns.empty())
@@ -285,16 +301,8 @@ int check_programs(const std::vector<SourceFile> &progs, bool quiet) {
     }
 
     for (size_t i = 0; i < progs.size(); i++) {
-        Sigs merged;
-        std::map<std::string, Ty> merged_consts;
-        std::map<std::string, std::map<std::string, Ty>> merged_structs;
-        for (size_t j = 0; j < progs.size(); j++) {
-            if (j == i) continue;
-            collect_exports(progs[j].body, merged_consts, merged_structs);
-            collect_sigs(progs[j].body, merged);
-        }
         const SourceFile &f = progs[i];
-        std::vector<TypeErr> errs = type_check(f.body, merged, merged_consts, merged_structs);
+        std::vector<TypeErr> errs = check_sibling_types(progs, i);
         if (!quiet || !errs.empty())
             std::fprintf(g_report, "%s: %d type error(s)\n", f.path.c_str(),
                          static_cast<int>(errs.size()));
@@ -305,81 +313,11 @@ int check_programs(const std::vector<SourceFile> &progs, bool quiet) {
 }
 
 std::filesystem::path executable_path(const char *arg0) {
-    std::filesystem::path candidate(arg0 ? arg0 : "");
-    if (candidate.has_parent_path()) {
-        std::error_code ec;
-#if defined(_WIN32)
-        if (!std::filesystem::is_regular_file(candidate, ec) && candidate.extension().empty()) {
-            std::filesystem::path with_exe = candidate;
-            with_exe += ".exe";
-            if (std::filesystem::is_regular_file(with_exe, ec)) candidate = std::move(with_exe);
-        }
-#endif
-        auto resolved = std::filesystem::canonical(candidate, ec);
-        return ec ? std::filesystem::absolute(candidate) : resolved;
-    }
-    const char *env_path = std::getenv("PATH");
-    if (env_path) {
-#if defined(_WIN32)
-        constexpr char separator = ';';
-#else
-        constexpr char separator = ':';
-#endif
-        std::string paths(env_path);
-        size_t start = 0;
-        while (start <= paths.size()) {
-            size_t end = paths.find(separator, start);
-            if (end == std::string::npos) end = paths.size();
-            auto dir = std::filesystem::path(paths.substr(start, end - start));
-#if defined(_WIN32)
-            if (candidate.extension().empty()) {
-                auto found_exe = dir / (candidate.string() + ".exe");
-                std::error_code ec_exe;
-                if (std::filesystem::is_regular_file(found_exe, ec_exe))
-                    return std::filesystem::canonical(found_exe, ec_exe);
-            }
-#endif
-            auto found = dir / candidate;
-            std::error_code ec;
-            if (std::filesystem::is_regular_file(found, ec))
-                return std::filesystem::canonical(found, ec);
-            if (end == paths.size()) break;
-            start = end + 1;
-        }
-    }
-    return std::filesystem::absolute(candidate);
+    return pkg_io::resolve_exe_path(arg0, true);
 }
 
 std::filesystem::path self_executable_path(const char *arg0) {
-#if defined(_WIN32)
-    wchar_t wbuf[32768];
-    DWORD wlen = GetModuleFileNameW(nullptr, wbuf, static_cast<DWORD>(sizeof(wbuf) / sizeof(wbuf[0])));
-    if (wlen > 0 && wlen < sizeof(wbuf) / sizeof(wbuf[0])) {
-        std::error_code ec;
-        std::filesystem::path exe(std::wstring(wbuf, wlen));
-        auto resolved = std::filesystem::canonical(exe, ec);
-        return ec ? exe : resolved;
-    }
-#elif defined(__APPLE__)
-    uint32_t msz = 0;
-    (void)_NSGetExecutablePath(nullptr, &msz);
-    if (msz > 0 && msz < 32768) {
-        std::string mbuf(msz, '\0');
-        if (_NSGetExecutablePath(mbuf.data(), &msz) == 0) {
-            std::error_code ec;
-            std::filesystem::path exe(mbuf.c_str());
-            auto resolved = std::filesystem::canonical(exe, ec);
-            return ec ? exe : resolved;
-        }
-    }
-#elif defined(__linux__)
-    {
-        std::error_code ec;
-        auto exe = std::filesystem::canonical("/proc/self/exe", ec);
-        if (!ec) return exe;
-    }
-#endif
-    return executable_path(arg0);
+    return pkg_io::self_exe_path(arg0, true);
 }
 
 std::filesystem::path locate_lang_dir(const char *arg0) {
@@ -431,130 +369,13 @@ bool executable_on_path(const std::string &name) {
 
 // Native run caches assume a stable installed system toolchain.
 
-static void sha256_block(const unsigned char *block, uint32_t h[8]) {
-    static const uint32_t k[64] = {
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
-    auto ror = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
-    uint32_t w[64];
-    for (int i = 0; i < 16; i++)
-        w[i] = (uint32_t)block[i * 4] << 24 | (uint32_t)block[i * 4 + 1] << 16 |
-               (uint32_t)block[i * 4 + 2] << 8 | (uint32_t)block[i * 4 + 3];
-    for (int i = 16; i < 64; i++) {
-        const uint32_t s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
-        const uint32_t s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
-        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-    }
-    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
-    for (int i = 0; i < 64; i++) {
-        const uint32_t s1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25);
-        const uint32_t ch = (e & f) ^ (~e & g);
-        const uint32_t t1 = hh + s1 + ch + k[i] + w[i];
-        const uint32_t s0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22);
-        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
-        const uint32_t t2 = s0 + maj;
-        hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
-    }
-    h[0] += a; h[1] += b; h[2] += c; h[3] += d;
-    h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-}
-
 std::string sha256_hex(const std::string &data) {
-    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    std::string padded = data;
-    const uint64_t bits = static_cast<uint64_t>(data.size()) * 8;
-    padded.push_back(static_cast<char>(0x80));
-    while (padded.size() % 64 != 56) padded.push_back('\0');
-    for (int i = 7; i >= 0; i--)
-        padded.push_back(static_cast<char>((bits >> (i * 8)) & 0xff));
-    for (size_t at = 0; at < padded.size(); at += 64)
-        sha256_block(reinterpret_cast<const unsigned char *>(padded.data() + at), h);
-    char out[65];
-    for (int i = 0; i < 8; i++) std::snprintf(out + i * 8, 9, "%08x", h[i]);
-    return std::string(out, 64);
+    return pkg_io::sha256_hex(data);
 }
-
-struct Sha256Stream {
-    std::array<uint32_t, 8> h{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                              0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    std::array<unsigned char, 64> block{};
-    size_t used = 0;
-    uint64_t bytes = 0;
-
-    bool update(const unsigned char *data, size_t size) {
-        if (size > std::numeric_limits<uint64_t>::max() / 8 - bytes) return false;
-        bytes += size;
-        while (size) {
-            const size_t take = std::min(size, block.size() - used);
-            std::memcpy(block.data() + used, data, take);
-            used += take;
-            data += take;
-            size -= take;
-            if (used == block.size()) {
-                sha256_block(block.data(), h.data());
-                used = 0;
-            }
-        }
-        return true;
-    }
-
-    std::string finish() {
-        const uint64_t bits = bytes * 8;
-        block[used++] = 0x80;
-        if (used > 56) {
-            std::fill(block.begin() + static_cast<ptrdiff_t>(used), block.end(), 0);
-            sha256_block(block.data(), h.data());
-            used = 0;
-        }
-        std::fill(block.begin() + static_cast<ptrdiff_t>(used), block.begin() + 56, 0);
-        for (int i = 7; i >= 0; --i)
-            block[56 + (7 - i)] = static_cast<unsigned char>((bits >> (i * 8)) & 0xff);
-        sha256_block(block.data(), h.data());
-        char out[65];
-        for (int i = 0; i < 8; ++i) std::snprintf(out + i * 8, 9, "%08x", h[i]);
-        return std::string(out, 64);
-    }
-};
 
 bool sha256_file(const std::filesystem::path &path, std::string &digest,
-                        uint64_t &size, std::string &error) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        error = "cannot read " + path.string();
-        return false;
-    }
-    Sha256Stream hash;
-    std::array<unsigned char, 64 * 1024> buffer{};
-    size = 0;
-    while (in) {
-        in.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-        const std::streamsize count = in.gcount();
-        if (count > 0) {
-            const size_t n = static_cast<size_t>(count);
-            if (n > std::numeric_limits<uint64_t>::max() - size ||
-                !hash.update(buffer.data(), n)) {
-                error = "file is too large to hash";
-                return false;
-            }
-            size += n;
-        }
-    }
-    if (!in.eof()) {
-        error = "failed while reading " + path.string();
-        return false;
-    }
-    digest = hash.finish();
-    return true;
+                 uint64_t &size, std::string &error) {
+    return pkg_io::sha256_file_sized(path, digest, size, error);
 }
 
 std::filesystem::path cache_root() {
@@ -601,115 +422,19 @@ std::filesystem::path cache_root() {
 }
 
 int main_cc_timeout_ms() {
-    if (const char *ev = std::getenv("BRAT_CC_TIMEOUT_MS"); ev && *ev) {
-        char *end = nullptr;
-        const long long v = std::strtoll(ev, &end, 10);
-        if (end != ev && *end == '\0' && v > 0 && v <= 3600000LL) return static_cast<int>(v);
-    }
-    return 120000;
+    return pkg_io::cc_timeout_ms();
 }
 
 int run_process(const std::vector<std::string> &args, int timeout_ms, bool *timed_out) {
-    if (timed_out) *timed_out = false;
-    if (args.empty()) return 127;
-    std::vector<char *> argv;
-    argv.reserve(args.size() + 1);
-    for (const std::string &arg : args)
-        argv.push_back(const_cast<char *>(arg.c_str()));
-    argv.push_back(nullptr);
-#if defined(_WIN32)
-    if (timeout_ms <= 0) {
-        const intptr_t result = _spawnvp(_P_WAIT, argv[0], argv.data());
-        return result < 0 ? 127 : static_cast<int>(result);
-    }
-    auto quote_w = [](std::string_view arg) {
-        int wn = MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), nullptr, 0);
-        std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
-        if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), w.data(), wn);
-        if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
-        std::wstring out = L"\"";
-        for (size_t i = 0; i < w.size(); ++i) {
-            size_t bs = 0;
-            while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
-            if (i == w.size()) { out.append(bs * 2, L'\\'); break; }
-            if (w[i] == L'"') { out.append(bs * 2 + 1, L'\\'); out.push_back(L'"'); }
-            else { out.append(bs, L'\\'); out.push_back(w[i]); }
-        }
-        out.push_back(L'"');
-        return out;
-    };
-    std::wstring cmdline;
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (i) cmdline.push_back(L' ');
-        cmdline += quote_w(args[i]);
-    }
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-    STARTUPINFOW si {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi {};
-    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back(L'\0');
-    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE,
-                        CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        if (job) CloseHandle(job);
-        return 127;
-    }
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-    const DWORD wrc = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
-    if (wrc == WAIT_TIMEOUT) {
-        if (timed_out) *timed_out = true;
-        if (job) TerminateJobObject(job, 124);
-        else TerminateProcess(pi.hProcess, 124);
-        WaitForSingleObject(pi.hProcess, 5000);
-        CloseHandle(pi.hProcess);
-        if (job) CloseHandle(job);
-        return 124;
-    }
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess);
-    if (job) CloseHandle(job);
-    return static_cast<int>(code);
-#else
-    const pid_t pid = fork();
-    if (pid < 0) return 127;
-    if (pid == 0) {
-        if (timeout_ms > 0) setpgid(0, 0);
-        execvp(argv[0], argv.data());
-        std::perror("brat: exec compiler");
-        _exit(127);
-    }
-    if (timeout_ms <= 0) {
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0) {
-            if (errno != EINTR) return 127;
-        }
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-    }
-    setpgid(pid, pid);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    int status = 0;
-    for (;;) {
-        const pid_t wr = waitpid(pid, &status, WNOHANG);
-        if (wr == pid) return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-        if (wr < 0 && errno != EINTR) return 127;
-        if (std::chrono::steady_clock::now() >= deadline) {
-            if (timed_out) *timed_out = true;
-            if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
-            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-            return 124;
-        }
-        struct timespec ts {0, 10 * 1000 * 1000};
-        nanosleep(&ts, nullptr);
-    }
-#endif
+    pkg_io::ProcOptions opts;
+    opts.timeout_ms = timeout_ms;
+    opts.search_path = true;
+    opts.capture_output = false;
+    opts.null_stdin = false;
+    opts.perror_on_exec_fail = true;
+    const pkg_io::ProcResult res = pkg_io::run_proc(args, opts);
+    if (timed_out) *timed_out = res.timed_out;
+    return res.exit_code;
 }
 
 
@@ -2298,44 +2023,14 @@ static bool reject_flags(int argc, char **argv, const char *cmd, int first = 2) 
 // before any code is written -- which is what makes "same diagnostics" true for
 // `cc` and not only for `check`.
 std::size_t ownership_errors(const std::vector<SourceFile> &files, std::size_t i) {
-    std::map<std::string, std::vector<ParamMode>> extra;
-    std::set<std::string> extra_consts;
-    std::set<std::string> extra_scalar;
-    std::map<std::string, std::vector<size_t>> extra_borrows;
-    std::set<std::string> extra_owned;
-    std::map<std::string, std::map<std::string, std::string>> extra_sfields;
-    std::map<std::string, std::string> extra_frets;
-    std::set<std::string> module_heads = imported_module_heads(files[i]);
-    for (std::size_t j = 0; j < files.size(); j++) {
-        if (j == i) continue;
-        FnTable ps = pub_sigs(files[j].body, exported_fn_names(files[j]));
-        for (auto &kv : ps.sigs) extra[kv.first] = kv.second;
-        module_heads.insert(ps.heads.begin(), ps.heads.end());
-        extra_consts.insert(ps.pub_consts.begin(), ps.pub_consts.end());
-        extra_scalar.insert(ps.scalar_ret.begin(), ps.scalar_ret.end());
-        for (auto &kv : ps.borrows_ret) extra_borrows[kv.first] = kv.second;
-        extra_owned.insert(ps.owned_ret.begin(), ps.owned_ret.end());
-        for (auto &kv : ps.struct_fields) extra_sfields[kv.first] = kv.second;
-        for (auto &kv : ps.fn_rets) extra_frets[kv.first] = kv.second;
-    }
-    BorrowOut out = borrow_check(files[i].body, extra, files[i].stray, module_heads,
-                                 extra_consts, extra_scalar, extra_borrows, extra_owned,
-                                 extra_sfields, extra_frets);
+    BorrowOut out = check_sibling_borrows(files, i);
     report(files[i].path, files[i].src, out.errs, "error");
     return out.errs.size();
 }
 
 std::size_t type_errors(const std::vector<SourceFile> &files, std::size_t i,
-                               bool arena_only) {
-    Sigs merged;
-    std::map<std::string, Ty> merged_consts;
-    std::map<std::string, std::map<std::string, Ty>> merged_structs;
-    for (std::size_t j = 0; j < files.size(); j++) {
-        if (j == i) continue;
-        collect_exports(files[j].body, merged_consts, merged_structs);
-        collect_sigs(files[j].body, merged);
-    }
-    std::vector<TypeErr> errs = type_check(files[i].body, merged, merged_consts, merged_structs);
+                        bool arena_only) {
+    std::vector<TypeErr> errs = check_sibling_types(files, i);
     if (arena_only) {
         std::vector<TypeErr> filtered;
         for (const auto &e : errs) {

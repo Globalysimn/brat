@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +18,40 @@ inline constexpr size_t kMaxIndexGraphPackages = 256u;
 
 std::string sha256_hex(std::string_view data);
 bool sha256_file(const std::string &path, std::string &hex_out);
+bool sha256_file_sized(const std::filesystem::path &path, std::string &digest,
+                       uint64_t &size, std::string &error);
+
+int cc_timeout_ms();
+std::vector<std::string> split_compiler_cmd(std::string_view raw);
+std::filesystem::path resolve_exe_path(const char *arg0, bool fallback_abs = true);
+std::filesystem::path self_exe_path(const char *arg0 = nullptr, bool fallback_abs = true);
+
+struct ProcOptions {
+    std::string cwd;
+    int timeout_ms = 0;
+    bool search_path = true;
+    bool capture_output = true;
+    bool merge_stderr = false;
+    bool null_stdin = true;
+    bool perror_on_exec_fail = false;
+    bool strip_cr_out = false;
+    size_t max_out_total = 0;
+    size_t max_out_keep = 0;
+    size_t max_err_total = 0;
+    size_t max_err_keep = 0;
+};
+
+struct ProcResult {
+    bool launched = false;
+    bool timed_out = false;
+    bool over_limit = false;
+    int exit_code = 127;
+    std::string out;
+    std::string err;
+    std::string launch_error;
+};
+
+ProcResult run_proc(const std::vector<std::string> &args, const ProcOptions &opts = {});
 
 bool inflate_raw(const uint8_t *src, size_t len, size_t &consumed,
                  std::string &out, size_t max_out, std::string &err);

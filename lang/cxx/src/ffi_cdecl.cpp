@@ -1,4 +1,5 @@
 #include "ffi_cdecl.h"
+#include "pkg_io.h"
 
 #include <algorithm>
 #include <cctype>
@@ -288,25 +289,6 @@ bool read_header_inlined(const std::string &path, std::string &out, std::string 
     return {};
 }
 
-#ifdef _WIN32
-static std::wstring pp_win_quote_arg(std::string_view arg) {
-    int wn = MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
-    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), w.data(), wn);
-    if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
-    std::wstring out = L"\"";
-    for (size_t i = 0; i < w.size(); ++i) {
-        size_t bs = 0;
-        while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
-        if (i == w.size()) { out.append(bs * 2, L'\\'); break; }
-        if (w[i] == L'"') { out.append(bs * 2 + 1, L'\\'); out.push_back(L'"'); }
-        else { out.append(bs, L'\\'); out.push_back(w[i]); }
-    }
-    out.push_back(L'"');
-    return out;
-}
-#endif
-
 static std::string unescape_linemarker_path(std::string_view raw) {
     std::string out;
     out.reserve(raw.size());
@@ -340,28 +322,7 @@ bool preprocess_header_cc(const std::string &path,
     if (argv.empty()) {
         for (const char *env_var : {"BRAT_CC", "CC"}) {
             if (const char *ov = std::getenv(env_var); ov && *ov) {
-                std::vector<std::string> parts;
-                std::error_code ec;
-                if (fs::is_regular_file(ov, ec)) {
-                    parts = {ov};
-                } else {
-                    std::string cur;
-                    char q = 0;
-                    for (size_t i = 0; ov[i]; ++i) {
-                        char c = ov[i];
-                        if (q) {
-                            if (c == q) q = 0;
-                            else cur.push_back(c);
-                        } else if (c == '\'' || c == '"') {
-                            q = c;
-                        } else if (c == ' ' || c == '\t') {
-                            if (!cur.empty()) { parts.push_back(std::move(cur)); cur.clear(); }
-                        } else {
-                            cur.push_back(c);
-                        }
-                    }
-                    if (!cur.empty()) parts.push_back(std::move(cur));
-                }
+                std::vector<std::string> parts = pkg_io::split_compiler_cmd(ov);
                 if (!parts.empty()) {
                     std::string p = fs::path(parts[0]).has_parent_path() ? parts[0] : find_in_path(parts[0]);
                     if (!p.empty()) {
@@ -394,220 +355,36 @@ bool preprocess_header_cc(const std::string &path,
     for (const auto &def : defines) argv.push_back("-D" + def);
     argv.push_back((!path.empty() && path[0] == '-') ? ("./" + path) : path);
 
-    int timeout_ms = 120000;
-    if (const char *ev = std::getenv("BRAT_CC_TIMEOUT_MS"); ev && *ev) {
-        char *end = nullptr;
-        const long long v = std::strtoll(ev, &end, 10);
-        if (end != ev && *end == '\0' && v > 0 && v <= 3600000LL) timeout_ms = static_cast<int>(v);
-    }
-    std::string raw_out, raw_err;
     constexpr size_t kMaxPpBytes = 64u * 1024u * 1024u;
-    bool over = false, timed_out = false;
+    pkg_io::ProcOptions opts;
+    opts.timeout_ms = pkg_io::cc_timeout_ms();
+    opts.search_path = false;
+    opts.capture_output = true;
+    opts.merge_stderr = false;
+    opts.null_stdin = true;
+    opts.strip_cr_out = true;
+    opts.max_out_total = kMaxPpBytes;
+    opts.max_err_keep = 262144u;
 
-#ifdef _WIN32
-    std::wstring cmdline;
-    for (size_t i = 0; i < argv.size(); ++i) {
-        if (i) cmdline.push_back(L' ');
-        cmdline += pp_win_quote_arg(argv[i]);
-    }
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE out_rd = nullptr, out_wr = nullptr, err_rd = nullptr, err_wr = nullptr;
-    if (!CreatePipe(&out_rd, &out_wr, &sa, 0)) { err = "pipe failed"; return false; }
-    if (!CreatePipe(&err_rd, &err_wr, &sa, 0)) {
-        CloseHandle(out_rd); CloseHandle(out_wr);
-        err = "pipe failed";
+    pkg_io::ProcResult res = pkg_io::run_proc(argv, opts);
+    if (!res.launched) {
+        err = res.launch_error.empty() ? "CreateProcess failed for C preprocessor" : res.launch_error;
         return false;
     }
-    SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                             &sa, OPEN_EXISTING, 0, nullptr);
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-    STARTUPINFOW si {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = out_wr;
-    si.hStdError = err_wr;
-    PROCESS_INFORMATION pi {};
-    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back(L'\0');
-    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-        CloseHandle(out_rd); CloseHandle(out_wr);
-        CloseHandle(err_rd); CloseHandle(err_wr);
-        if (job) CloseHandle(job);
-        err = "CreateProcess failed for C preprocessor";
-        return false;
-    }
-    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-    CloseHandle(out_wr);
-    CloseHandle(err_wr);
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    std::thread out_thr([&]() {
-        char buf[8192];
-        DWORD got = 0;
-        while (ReadFile(out_rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-            if (raw_out.size() + got > kMaxPpBytes) {
-                over = true;
-                if (job) TerminateJobObject(job, 124);
-                else TerminateProcess(pi.hProcess, 124);
-                break;
-            }
-            for (DWORD k = 0; k < got; ++k) {
-                if (buf[k] != '\r') raw_out.push_back(buf[k]);
-            }
-        }
-    });
-    std::thread err_thr([&]() {
-        char buf[4096];
-        DWORD got = 0;
-        while (ReadFile(err_rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-            if (raw_err.size() < 262144u) raw_err.append(buf, got);
-        }
-    });
-    DWORD wait_rc = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
-    if (wait_rc == WAIT_TIMEOUT) {
-        timed_out = true;
-        if (job) TerminateJobObject(job, 124);
-        else TerminateProcess(pi.hProcess, 124);
-        WaitForSingleObject(pi.hProcess, 5000);
-    }
-    if (timed_out || over) {
-        CancelIoEx(out_rd, nullptr);
-        CancelIoEx(err_rd, nullptr);
-    }
-    out_thr.join();
-    err_thr.join();
-    DWORD win_ec = 1;
-    GetExitCodeProcess(pi.hProcess, &win_ec);
-    CloseHandle(pi.hProcess);
-    CloseHandle(out_rd);
-    CloseHandle(err_rd);
-    if (job) CloseHandle(job);
-    if (timed_out) { err = "C preprocessor timed out"; return false; }
-    if (over) { err = "preprocessed header exceeds 64 MiB limit"; return false; }
-    if (win_ec != 0) {
-        err = trim_sv(raw_err);
-        if (err.empty()) err = "C preprocessor failed on " + path;
-        return false;
-    }
-#else
-    int out_pipe[2] = {-1, -1}, err_pipe[2] = {-1, -1};
-    if (pipe(out_pipe) != 0) {
-        err = "pipe failed";
-        return false;
-    }
-    if (pipe(err_pipe) != 0) {
-        close(out_pipe[0]);
-        close(out_pipe[1]);
-        err = "pipe failed";
-        return false;
-    }
-    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(out_pipe[1], F_SETFD, FD_CLOEXEC);
-    fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
-    fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(out_pipe[0]); close(out_pipe[1]);
-        close(err_pipe[0]); close(err_pipe[1]);
-        err = "fork failed";
-        return false;
-    }
-    if (pid == 0) {
-        setpgid(0, 0);
-        close(out_pipe[0]);
-        close(err_pipe[0]);
-        for (int *wp : {&out_pipe[1], &err_pipe[1]}) {
-            if (*wp >= 0 && *wp < 3) {
-                int m = fcntl(*wp, F_DUPFD_CLOEXEC, 3);
-                if (m < 0) _exit(126);
-                close(*wp);
-                *wp = m;
-            }
-        }
-        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
-        if (dup2(err_pipe[1], STDERR_FILENO) < 0) _exit(126);
-        close(out_pipe[1]);
-        close(err_pipe[1]);
-        std::vector<char *> cargv;
-        for (auto &s : argv) cargv.push_back(s.data());
-        cargv.push_back(nullptr);
-        execv(cargv[0], cargv.data());
-        _exit(127);
-    }
-    setpgid(pid, pid);
-    close(out_pipe[1]);
-    close(err_pipe[1]);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    bool o_open = true, e_open = true;
-    char buf[8192];
-    while (o_open || e_open) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) { timed_out = true; break; }
-        const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        struct pollfd fds[2];
-        nfds_t nf = 0;
-        int oi = -1, ei = -1;
-        if (o_open) { oi = static_cast<int>(nf); fds[nf++] = {out_pipe[0], POLLIN, 0}; }
-        if (ei < 0 && e_open) { ei = static_cast<int>(nf); fds[nf++] = {err_pipe[0], POLLIN, 0}; }
-        int pr = poll(fds, nf, static_cast<int>(std::min<long long>(rem, 100)));
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (pr == 0) continue;
-        if (oi >= 0 && (fds[oi].revents & (POLLIN | POLLHUP | POLLERR))) {
-            ssize_t n = read(out_pipe[0], buf, sizeof(buf));
-            if (n > 0) {
-                if (raw_out.size() + static_cast<size_t>(n) > kMaxPpBytes) { over = true; break; }
-                raw_out.append(buf, static_cast<size_t>(n));
-            } else if (n == 0 || errno != EINTR) {
-                o_open = false;
-            }
-        }
-        if (ei >= 0 && (fds[ei].revents & (POLLIN | POLLHUP | POLLERR))) {
-            ssize_t n = read(err_pipe[0], buf, sizeof(buf));
-            if (n > 0) {
-                if (raw_err.size() < 262144u) raw_err.append(buf, static_cast<size_t>(n));
-            } else if (n == 0 || errno != EINTR) {
-                e_open = false;
-            }
-        }
-    }
-    close(out_pipe[0]);
-    close(err_pipe[0]);
-    if (over || timed_out) {
-        if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    if (timed_out) {
+    if (res.timed_out) {
         err = "C preprocessor timed out";
         return false;
     }
-    if (over) {
+    if (res.over_limit) {
         err = "preprocessed header exceeds 64 MiB limit";
         return false;
     }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        err = trim_sv(raw_err);
+    if (res.exit_code != 0) {
+        err = trim_sv(res.err);
         if (err.empty()) err = "C preprocessor failed on " + path;
         return false;
     }
-#endif
+    std::string raw_out = std::move(res.out);
 
     // Filter out system header chunks marked with linemarker flag `3` when binding a user
     // header, while also supporting direct `--preprocess` on a system header (`/usr/include/*.h`)

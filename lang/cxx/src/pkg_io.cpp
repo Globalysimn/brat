@@ -2,21 +2,30 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <set>
+#include <thread>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+#include <process.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -30,7 +39,11 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 namespace pkg_io {
@@ -275,17 +288,39 @@ std::string sha256_hex(std::string_view data) {
 }
 
 bool sha256_file(const std::string &path, std::string &hex_out) {
+    uint64_t sz = 0;
+    std::string err;
+    return sha256_file_sized(std::filesystem::path(path), hex_out, sz, err);
+}
+
+bool sha256_file_sized(const std::filesystem::path &path, std::string &digest,
+                       uint64_t &size, std::string &error) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+    if (!in) {
+        error = "cannot read " + path.string();
+        return false;
+    }
     Sha256 st;
     char buf[65536];
+    size = 0;
     while (in) {
         in.read(buf, sizeof(buf));
         const std::streamsize got = in.gcount();
-        if (got > 0) st.update(reinterpret_cast<const uint8_t *>(buf), static_cast<size_t>(got));
+        if (got > 0) {
+            const size_t n = static_cast<size_t>(got);
+            if (n > std::numeric_limits<uint64_t>::max() / 8 - size) {
+                error = "file is too large to hash";
+                return false;
+            }
+            st.update(reinterpret_cast<const uint8_t *>(buf), n);
+            size += n;
+        }
     }
-    if (in.bad()) return false;
-    hex_out = st.hex();
+    if (!in.eof()) {
+        error = "failed while reading " + path.string();
+        return false;
+    }
+    digest = st.hex();
     return true;
 }
 
@@ -1926,6 +1961,626 @@ bool write_ar_bundle(const std::string &out_path,
         return false;
     }
     return true;
+}
+
+int cc_timeout_ms() {
+    if (const char *ev = std::getenv("BRAT_CC_TIMEOUT_MS"); ev && *ev) {
+        char *end = nullptr;
+        const long long v = std::strtoll(ev, &end, 10);
+        if (end != ev && *end == '\0' && v > 0 && v <= 3600000LL) return static_cast<int>(v);
+    }
+    return 120000;
+}
+
+std::vector<std::string> split_compiler_cmd(std::string_view raw) {
+    while (!raw.empty() && (raw.front() == ' ' || raw.front() == '\t')) raw.remove_prefix(1);
+    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) raw.remove_suffix(1);
+    if (raw.empty()) return {};
+    std::error_code ec;
+    const std::string whole(raw);
+    if (std::filesystem::is_regular_file(whole, ec)) return {whole};
+    std::vector<std::string> out;
+    std::string cur;
+    char quote = 0;
+    for (char c : raw) {
+        if (quote) {
+            if (c == quote) quote = 0;
+            else cur.push_back(c);
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+        } else if (c == ' ' || c == '\t') {
+            if (!cur.empty()) {
+                out.push_back(std::move(cur));
+                cur.clear();
+            }
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(std::move(cur));
+    return out;
+}
+
+std::filesystem::path resolve_exe_path(const char *arg0, bool fallback_abs) {
+    if (!arg0 || !*arg0) return fallback_abs ? std::filesystem::absolute("") : std::filesystem::path{};
+    std::filesystem::path candidate(arg0);
+    if (candidate.has_parent_path()) {
+        std::error_code ec;
+#if defined(_WIN32)
+        if (!std::filesystem::is_regular_file(candidate, ec) && candidate.extension().empty()) {
+            std::filesystem::path with_exe = candidate;
+            with_exe += ".exe";
+            if (std::filesystem::is_regular_file(with_exe, ec)) candidate = std::move(with_exe);
+        }
+#endif
+        auto resolved = std::filesystem::canonical(candidate, ec);
+        return ec ? std::filesystem::absolute(candidate) : resolved;
+    }
+    if (const char *env_path = std::getenv("PATH")) {
+#if defined(_WIN32)
+        constexpr char separator = ';';
+#else
+        constexpr char separator = ':';
+#endif
+        const std::string paths(env_path);
+        size_t start = 0;
+        while (start <= paths.size()) {
+            size_t end = paths.find(separator, start);
+            if (end == std::string::npos) end = paths.size();
+            const std::string seg = paths.substr(start, end - start);
+            const auto dir = std::filesystem::path(seg.empty() ? "." : seg);
+#if defined(_WIN32)
+            if (candidate.extension().empty()) {
+                auto found_exe = dir / (candidate.string() + ".exe");
+                std::error_code ec_exe;
+                if (std::filesystem::is_regular_file(found_exe, ec_exe)) {
+                    auto can = std::filesystem::canonical(found_exe, ec_exe);
+                    return ec_exe ? std::filesystem::absolute(found_exe) : can;
+                }
+            }
+#endif
+            auto found = dir / candidate;
+            std::error_code ec;
+#if defined(_WIN32)
+            if (std::filesystem::is_regular_file(found, ec)) {
+                auto can = std::filesystem::canonical(found, ec);
+                return ec ? std::filesystem::absolute(found) : can;
+            }
+#else
+            if (std::filesystem::is_regular_file(found, ec) && ::access(found.c_str(), X_OK) == 0) {
+                auto can = std::filesystem::canonical(found, ec);
+                return ec ? std::filesystem::absolute(found) : can;
+            }
+#endif
+            if (end == paths.size()) break;
+            start = end + 1;
+        }
+    }
+    return fallback_abs ? std::filesystem::absolute(candidate) : std::filesystem::path{};
+}
+
+std::filesystem::path self_exe_path(const char *arg0, bool fallback_abs) {
+#if defined(_WIN32)
+    wchar_t wbuf[32768];
+    const DWORD wlen = GetModuleFileNameW(nullptr, wbuf,
+                                          static_cast<DWORD>(sizeof(wbuf) / sizeof(wbuf[0])));
+    if (wlen > 0 && wlen < sizeof(wbuf) / sizeof(wbuf[0])) {
+        std::error_code ec;
+        std::filesystem::path exe(std::wstring(wbuf, wlen));
+        auto resolved = std::filesystem::canonical(exe, ec);
+        return ec ? exe : resolved;
+    }
+#elif defined(__APPLE__)
+    uint32_t msz = 0;
+    (void)_NSGetExecutablePath(nullptr, &msz);
+    if (msz > 0 && msz < 32768) {
+        std::string mbuf(msz, '\0');
+        if (_NSGetExecutablePath(mbuf.data(), &msz) == 0) {
+            std::error_code ec;
+            std::filesystem::path exe(mbuf.c_str());
+            auto resolved = std::filesystem::canonical(exe, ec);
+            return ec ? exe : resolved;
+        }
+    }
+#elif defined(__linux__)
+    {
+        std::error_code ec;
+        auto exe = std::filesystem::canonical("/proc/self/exe", ec);
+        if (!ec) return exe;
+    }
+#endif
+    return resolve_exe_path(arg0, fallback_abs);
+}
+
+#if defined(_WIN32)
+namespace {
+
+std::wstring win_utf8_to_wide(std::string_view s) {
+    const int wn = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
+    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), wn);
+    return w;
+}
+
+std::wstring win_quote_arg(std::string_view arg) {
+    const std::wstring w = win_utf8_to_wide(arg);
+    if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
+    std::wstring out = L"\"";
+    for (size_t i = 0; i < w.size(); ++i) {
+        size_t bs = 0;
+        while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
+        if (i == w.size()) {
+            out.append(bs * 2, L'\\');
+            break;
+        }
+        if (w[i] == L'"') {
+            out.append(bs * 2 + 1, L'\\');
+            out.push_back(L'"');
+        } else {
+            out.append(bs, L'\\');
+            out.push_back(w[i]);
+        }
+    }
+    out.push_back(L'"');
+    return out;
+}
+
+}  // namespace
+#endif
+
+ProcResult run_proc(const std::vector<std::string> &args, const ProcOptions &opts) {
+    ProcResult res;
+    if (args.empty()) {
+        res.launch_error = "empty command";
+        return res;
+    }
+
+#if defined(_WIN32)
+    if (!opts.capture_output && opts.timeout_ms <= 0 && opts.cwd.empty()) {
+        std::vector<const char *> av;
+        av.reserve(args.size() + 1);
+        for (const auto &a : args) av.push_back(a.c_str());
+        av.push_back(nullptr);
+        const intptr_t r = _spawnvp(_P_WAIT, av[0], av.data());
+        if (r < 0) return res;
+        res.launched = true;
+        res.exit_code = static_cast<int>(r);
+        return res;
+    }
+
+    std::wstring cmdline;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i) cmdline.push_back(L' ');
+        cmdline += win_quote_arg(args[i]);
+    }
+    std::wstring wcwd;
+    if (!opts.cwd.empty()) wcwd = win_utf8_to_wide(opts.cwd);
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+    }
+
+    if (!opts.capture_output) {
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
+        cmd_buf.push_back(L'\0');
+        if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, FALSE,
+                            CREATE_SUSPENDED, nullptr,
+                            opts.cwd.empty() ? nullptr : wcwd.c_str(), &si, &pi)) {
+            if (job) CloseHandle(job);
+            res.launch_error = "CreateProcess failed";
+            return res;
+        }
+        res.launched = true;
+        if (job) AssignProcessToJobObject(job, pi.hProcess);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        const DWORD tmo = (opts.timeout_ms > 0)
+                              ? static_cast<DWORD>(std::min<long long>(opts.timeout_ms, 3600000LL))
+                              : INFINITE;
+        const DWORD wrc = WaitForSingleObject(pi.hProcess, tmo);
+        if (wrc == WAIT_TIMEOUT) {
+            res.timed_out = true;
+            if (job) TerminateJobObject(job, 124);
+            else TerminateProcess(pi.hProcess, 124);
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hProcess);
+            if (job) CloseHandle(job);
+            res.exit_code = 124;
+            return res;
+        }
+        DWORD code = 1;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hProcess);
+        if (job) CloseHandle(job);
+        res.exit_code = static_cast<int>(code);
+        return res;
+    }
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE out_rd = nullptr, out_wr = nullptr;
+    HANDLE err_rd = nullptr, err_wr = nullptr;
+    if (!CreatePipe(&out_rd, &out_wr, &sa, 0)) {
+        if (job) CloseHandle(job);
+        res.launch_error = "cannot create stdout pipe";
+        return res;
+    }
+    SetHandleInformation(out_rd, HANDLE_FLAG_INHERIT, 0);
+    if (!opts.merge_stderr) {
+        if (!CreatePipe(&err_rd, &err_wr, &sa, 0)) {
+            CloseHandle(out_rd);
+            CloseHandle(out_wr);
+            if (job) CloseHandle(job);
+            res.launch_error = "cannot create stderr pipe";
+            return res;
+        }
+        SetHandleInformation(err_rd, HANDLE_FLAG_INHERIT, 0);
+    }
+    HANDLE nul = INVALID_HANDLE_VALUE;
+    if (opts.null_stdin) {
+        nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          &sa, OPEN_EXISTING, 0, nullptr);
+    }
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = out_wr;
+    si.hStdError = opts.merge_stderr ? out_wr : err_wr;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
+    cmd_buf.push_back(L'\0');
+    const DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED;
+    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE, flags,
+                        nullptr, opts.cwd.empty() ? nullptr : wcwd.c_str(), &si, &pi)) {
+        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+        CloseHandle(out_rd);
+        CloseHandle(out_wr);
+        if (!opts.merge_stderr) {
+            CloseHandle(err_rd);
+            CloseHandle(err_wr);
+        }
+        if (job) CloseHandle(job);
+        res.launch_error = "cannot launch native command";
+        return res;
+    }
+    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
+    CloseHandle(out_wr);
+    if (!opts.merge_stderr) CloseHandle(err_wr);
+    res.launched = true;
+    if (job) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+
+    std::atomic<bool> over_flag{false};
+    auto drain_pipe = [&](HANDLE rd, std::string &dst, size_t max_tot, size_t max_keep, bool strip_cr) {
+        char buf[8192];
+        DWORD got = 0;
+        size_t total = 0;
+        while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
+            if (max_tot > 0 && (total > max_tot || got > max_tot - total)) {
+                over_flag.store(true, std::memory_order_relaxed);
+                if (job) TerminateJobObject(job, 124);
+                else TerminateProcess(pi.hProcess, 124);
+                break;
+            }
+            total += got;
+            for (DWORD k = 0; k < got; ++k) {
+                if (strip_cr && buf[k] == '\r') continue;
+                if (max_keep > 0 && dst.size() >= max_keep) break;
+                dst.push_back(buf[k]);
+            }
+        }
+    };
+
+    std::thread t_out([&]() {
+        drain_pipe(out_rd, res.out, opts.max_out_total, opts.max_out_keep, opts.strip_cr_out);
+    });
+    std::thread t_err;
+    if (!opts.merge_stderr) {
+        t_err = std::thread([&]() {
+            drain_pipe(err_rd, res.err, opts.max_err_total, opts.max_err_keep, false);
+        });
+    }
+
+    const DWORD tmo = (opts.timeout_ms > 0)
+                          ? static_cast<DWORD>(std::min<long long>(opts.timeout_ms, 3600000LL))
+                          : INFINITE;
+    const DWORD wrc = WaitForSingleObject(pi.hProcess, tmo);
+    if (wrc == WAIT_TIMEOUT) {
+        res.timed_out = true;
+        if (job) TerminateJobObject(job, 124);
+        else TerminateProcess(pi.hProcess, 124);
+        WaitForSingleObject(pi.hProcess, 5000);
+    }
+    if (res.timed_out || over_flag.load(std::memory_order_relaxed)) {
+        CancelIoEx(out_rd, nullptr);
+        if (!opts.merge_stderr) CancelIoEx(err_rd, nullptr);
+    }
+    if (t_out.joinable()) t_out.join();
+    if (t_err.joinable()) t_err.join();
+    CloseHandle(out_rd);
+    if (!opts.merge_stderr) CloseHandle(err_rd);
+    res.over_limit = over_flag.load(std::memory_order_relaxed);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    if (job) CloseHandle(job);
+    if (res.timed_out) res.exit_code = 124;
+    else if (res.over_limit) res.exit_code = 1;
+    else res.exit_code = static_cast<int>(code);
+    return res;
+#else
+    if (!opts.capture_output) {
+        std::vector<char *> argv;
+        argv.reserve(args.size() + 1);
+        for (const std::string &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
+        argv.push_back(nullptr);
+        const pid_t pid = fork();
+        if (pid < 0) {
+            res.launch_error = std::string("fork failed: ") + std::strerror(errno);
+            return res;
+        }
+        if (pid == 0) {
+            if (opts.timeout_ms > 0) setpgid(0, 0);
+            if (!opts.cwd.empty() && chdir(opts.cwd.c_str()) != 0) _exit(126);
+            if (opts.search_path) execvp(argv[0], argv.data());
+            else execv(argv[0], argv.data());
+            if (opts.perror_on_exec_fail) std::perror("brat: exec compiler");
+            _exit(127);
+        }
+        res.launched = true;
+        if (opts.timeout_ms <= 0) {
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0) {
+                if (errno != EINTR) {
+                    res.exit_code = 127;
+                    return res;
+                }
+            }
+            res.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
+            return res;
+        }
+        (void)setpgid(pid, pid);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(opts.timeout_ms);
+        int status = 0;
+        for (;;) {
+            const pid_t wr = waitpid(pid, &status, WNOHANG);
+            if (wr == pid) {
+                res.exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : (128 + WTERMSIG(status));
+                return res;
+            }
+            if (wr < 0 && errno != EINTR) {
+                res.exit_code = 127;
+                return res;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                res.timed_out = true;
+                if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+                res.exit_code = 124;
+                return res;
+            }
+            struct timespec ts{0, 10 * 1000 * 1000};
+            nanosleep(&ts, nullptr);
+        }
+    }
+
+    int out_pipe[2] = {-1, -1};
+    int err_pipe[2] = {-1, -1};
+    if (pipe(out_pipe) != 0 || (!opts.merge_stderr && pipe(err_pipe) != 0)) {
+        res.launch_error = std::string("cannot create command pipes: ") + std::strerror(errno);
+        if (out_pipe[0] >= 0) close(out_pipe[0]);
+        if (out_pipe[1] >= 0) close(out_pipe[1]);
+        if (err_pipe[0] >= 0) close(err_pipe[0]);
+        if (err_pipe[1] >= 0) close(err_pipe[1]);
+        return res;
+    }
+    fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out_pipe[1], F_SETFD, FD_CLOEXEC);
+    if (!opts.merge_stderr) {
+        fcntl(err_pipe[0], F_SETFD, FD_CLOEXEC);
+        fcntl(err_pipe[1], F_SETFD, FD_CLOEXEC);
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        res.launch_error = std::string("cannot start native command: ") + std::strerror(errno);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        if (!opts.merge_stderr) {
+            close(err_pipe[0]);
+            close(err_pipe[1]);
+        }
+        return res;
+    }
+    if (pid == 0) {
+        setpgid(0, 0);
+#if defined(SIGPIPE)
+        signal(SIGPIPE, SIG_DFL);
+#endif
+        close(out_pipe[0]);
+        if (!opts.merge_stderr) close(err_pipe[0]);
+        auto move_above_std = [](int &fd) {
+            if (fd >= 0 && fd < 3) {
+                int m = fcntl(fd, F_DUPFD_CLOEXEC, 3);
+                if (m < 0) _exit(126);
+                close(fd);
+                fd = m;
+            }
+        };
+        move_above_std(out_pipe[1]);
+        if (!opts.merge_stderr) move_above_std(err_pipe[1]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) < 0) _exit(126);
+        if (dup2(opts.merge_stderr ? out_pipe[1] : err_pipe[1], STDERR_FILENO) < 0) _exit(126);
+        close(out_pipe[1]);
+        if (!opts.merge_stderr) close(err_pipe[1]);
+        if (opts.null_stdin) {
+            const int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+            if (null_fd >= 0) {
+                if (null_fd == STDIN_FILENO) fcntl(STDIN_FILENO, F_SETFD, 0);
+                else {
+                    (void)dup2(null_fd, STDIN_FILENO);
+                    close(null_fd);
+                }
+            }
+        }
+        if (!opts.cwd.empty() && chdir(opts.cwd.c_str()) != 0) _exit(126);
+        std::vector<char *> argv;
+        argv.reserve(args.size() + 1);
+        for (const auto &arg : args) argv.push_back(const_cast<char *>(arg.c_str()));
+        argv.push_back(nullptr);
+        if (opts.search_path) execvp(argv[0], argv.data());
+        else execv(argv[0], argv.data());
+        _exit(127);
+    }
+
+    res.launched = true;
+    close(out_pipe[1]);
+    if (!opts.merge_stderr) close(err_pipe[1]);
+    (void)setpgid(pid, pid);
+
+    auto make_nb = [](int fd) {
+        const int fl = fcntl(fd, F_GETFL, 0);
+        return fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0;
+    };
+    if (!make_nb(out_pipe[0]) || (!opts.merge_stderr && !make_nb(err_pipe[0]))) {
+        res.launched = false;
+        res.launch_error = "cannot make command pipes non-blocking";
+        if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
+        close(out_pipe[0]);
+        if (!opts.merge_stderr) close(err_pipe[0]);
+        (void)waitpid(pid, nullptr, 0);
+        return res;
+    }
+
+    bool out_open = true;
+    bool err_open = !opts.merge_stderr;
+    bool child_done = false;
+    bool wait_failed = false;
+    int wait_status = 0;
+    size_t total_out = 0;
+    size_t total_err = 0;
+    const auto deadline = (opts.timeout_ms > 0)
+                              ? (std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(opts.timeout_ms))
+                              : std::chrono::steady_clock::time_point::max();
+
+    auto drain = [&](int fd, bool &open, std::string &dst, size_t &total,
+                     size_t max_tot, size_t max_keep) {
+        std::array<char, 8192> buf{};
+        while (open) {
+            const ssize_t got = read(fd, buf.data(), buf.size());
+            if (got > 0) {
+                const size_t n = static_cast<size_t>(got);
+                if (max_tot > 0 && (total > max_tot || n > max_tot - total)) {
+                    res.over_limit = true;
+                    open = false;
+                    close(fd);
+                    return;
+                }
+                total += n;
+                if (max_keep == 0) {
+                    dst.append(buf.data(), n);
+                } else if (dst.size() < max_keep) {
+                    dst.append(buf.data(), std::min(n, max_keep - dst.size()));
+                }
+                continue;
+            }
+            if (got == 0) {
+                open = false;
+                close(fd);
+                return;
+            }
+            if (errno == EINTR) continue;
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+#else
+            if (errno == EAGAIN) return;
+#endif
+            open = false;
+            close(fd);
+            return;
+        }
+    };
+
+    while (out_open || err_open || !child_done) {
+        if (opts.timeout_ms > 0 && !res.timed_out && std::chrono::steady_clock::now() >= deadline) {
+            res.timed_out = true;
+            if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
+        }
+        if (res.over_limit) {
+            if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
+        }
+        const bool was_done = child_done;
+        pollfd fds[2] = {{out_open ? out_pipe[0] : -1, POLLIN | POLLHUP, 0},
+                         {err_open ? err_pipe[0] : -1, POLLIN | POLLHUP, 0}};
+        int wait_ms = was_done ? 20 : 50;
+        if (opts.timeout_ms > 0 && !res.timed_out) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            wait_ms = static_cast<int>(std::clamp<long long>(left, 0, wait_ms));
+        }
+        const int pr = poll(fds, 2, wait_ms);
+        if (out_open) drain(out_pipe[0], out_open, res.out, total_out, opts.max_out_total, opts.max_out_keep);
+        if (err_open) drain(err_pipe[0], err_open, res.err, total_err, opts.max_err_total, opts.max_err_keep);
+        if (!child_done) {
+            const pid_t waited = waitpid(pid, &wait_status, WNOHANG);
+            if (waited == pid) {
+                child_done = true;
+                if (out_open) drain(out_pipe[0], out_open, res.out, total_out, opts.max_out_total, opts.max_out_keep);
+                if (err_open) drain(err_pipe[0], err_open, res.err, total_err, opts.max_err_total, opts.max_err_keep);
+            } else if (waited < 0 && errno != EINTR) {
+                child_done = true;
+                wait_failed = true;
+            }
+        } else if (pr == 0) {
+            // Direct child already exited and pipes stayed silent: close orphaned fds.
+            if (out_open) { close(out_pipe[0]); out_open = false; }
+            if (err_open) { close(err_pipe[0]); err_open = false; }
+            break;
+        }
+        if ((res.timed_out || res.over_limit) && child_done) {
+            if (out_open) { close(out_pipe[0]); out_open = false; }
+            if (err_open) { close(err_pipe[0]); err_open = false; }
+            break;
+        }
+    }
+    if (out_open) close(out_pipe[0]);
+    if (err_open) close(err_pipe[0]);
+    if (!child_done) {
+        for (;;) {
+            const pid_t waited = waitpid(pid, &wait_status, 0);
+            if (waited == pid) break;
+            if (waited < 0 && errno == EINTR) continue;
+            wait_failed = true;
+            break;
+        }
+    }
+    if (wait_failed) {
+        res.exit_code = 127;
+        res.launch_error = "cannot collect native command status";
+    } else if (res.timed_out) {
+        res.exit_code = 124;
+    } else if (res.over_limit) {
+        res.exit_code = 1;
+    } else if (WIFEXITED(wait_status)) {
+        res.exit_code = WEXITSTATUS(wait_status);
+    } else if (WIFSIGNALED(wait_status)) {
+        res.exit_code = 128 + WTERMSIG(wait_status);
+    } else {
+        res.exit_code = 1;
+    }
+    return res;
+#endif
 }
 
 }  // namespace pkg_io

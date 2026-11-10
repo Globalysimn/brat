@@ -7,11 +7,11 @@
 
 namespace {
 
-using View = std::vector<const Stmt *>;
+using View = StmtView;
+constexpr View (*view)(const std::vector<StmtP> &) = &stmt_view;
+constexpr View (*else_of)(const Stmt &) = &stmt_else_of;
 
 const std::set<std::string> kOps{"send", "recv", "close"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
-                          SK::ExternStruct, SK::ExportFn};
 
 std::string need_send(const std::string &name, int recv, int send) {
     return "`" + name + "`: " + std::to_string(recv) + " receive(s) but only " +
@@ -22,7 +22,7 @@ std::string need_send(const std::string &name, int recv, int send) {
 std::string need_recv(const std::string &name, int send, int cap, int recv) {
     return "`" + name + "`: " + std::to_string(send) + " value(s) sent into a queue of " +
            std::to_string(cap) + " and only " + std::to_string(recv) +
-           " received; `send` blocks once the queue is full (hint: receive more, or "
+           " received; `send` blocks once the queue is full (hint: receive more, or " +
            "make the channel larger)";
 }
 
@@ -41,19 +41,6 @@ std::string kind_of(const Expr *e) {
         return "any";
     default: return "any";
     }
-}
-
-View view(const std::vector<StmtP> &body) {
-    View out;
-    out.reserve(body.size());
-    for (const auto &s : body) out.push_back(s.get());
-    return out;
-}
-
-View else_of(const Stmt &s) {
-    if (!s.els) return {};
-    if (s.els->k == SK::Block) return view(s.els->body);
-    return {s.els.get()};
 }
 
 const std::string kMain = "main";
@@ -199,7 +186,7 @@ void collect(const View &stmts, Chans &chans, const std::string &side,
             collect(view(s->body), chans, side, quant);
             continue;
         default:
-            if (kDecls.count(s->k)) continue;   // each body is analysed on its own
+            if (is_decl_stmt(s->k)) continue;   // each body is analysed on its own
             collect_expr(s->e1.get(), chans, side, quant, s->line);
             collect_expr(s->e2.get(), chans, side, quant, s->line);
             collect_expr(s->e3.get(), chans, side, quant, s->line);
@@ -324,7 +311,7 @@ std::vector<BorrowDiag> session_check(const std::vector<StmtP> &body) {
                     one_body(view(node->fns[0].body), out);
                     continue;
                 }
-                if (kDecls.count(node->k)) {
+                if (is_decl_stmt(node->k)) {
                     if (node->k == SK::Impl) {
                         for (const auto &f : node->fns) one_body(view(f.body), out);
                     }

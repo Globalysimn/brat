@@ -968,25 +968,6 @@ static std::optional<std::string> brat_to_c_probe_type(std::string_view bt,
     return std::nullopt;
 }
 
-#ifdef _WIN32
-static std::wstring ffi_win_quote_arg(std::string_view arg) {
-    int wn = MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), nullptr, 0);
-    std::wstring w(static_cast<size_t>(std::max(0, wn)), L'\0');
-    if (wn > 0) MultiByteToWideChar(CP_UTF8, 0, arg.data(), static_cast<int>(arg.size()), w.data(), wn);
-    if (!w.empty() && w.find_first_of(L" \t\n\v\"") == std::wstring::npos) return w;
-    std::wstring out = L"\"";
-    for (size_t i = 0; i < w.size(); ++i) {
-        size_t bs = 0;
-        while (i < w.size() && w[i] == L'\\') { ++bs; ++i; }
-        if (i == w.size()) { out.append(bs * 2, L'\\'); break; }
-        if (w[i] == L'"') { out.append(bs * 2 + 1, L'\\'); out.push_back(L'"'); }
-        else { out.append(bs, L'\\'); out.push_back(w[i]); }
-    }
-    out.push_back(L'"');
-    return out;
-}
-#endif
-
 static bool write_temp_probe_c(const char *prefix, const std::string &body, std::string &path_out) {
 #ifdef _WIN32
     static std::atomic<unsigned long> seq{0};
@@ -1044,172 +1025,25 @@ static bool write_temp_probe_c(const char *prefix, const std::string &body, std:
 }
 
 [[maybe_unused]] static bool run_cmd_capture(const std::vector<std::string> &argv, int &rc_out, std::string &combined_out) {
-    if (argv.empty()) return false;
     combined_out.clear();
-    int timeout_ms = 120000;
-    if (const char *ev = std::getenv("BRAT_CC_TIMEOUT_MS"); ev && *ev) {
-        char *end = nullptr;
-        const long long v = std::strtoll(ev, &end, 10);
-        if (end != ev && *end == '\0' && v > 0 && v <= 3600000LL) timeout_ms = static_cast<int>(v);
-    }
-    constexpr size_t kMaxProbeOut = 4u * 1024u * 1024u;
-#ifdef _WIN32
-    std::wstring cmdline;
-    for (size_t i = 0; i < argv.size(); ++i) {
-        if (i) cmdline.push_back(L' ');
-        cmdline += ffi_win_quote_arg(argv[i]);
-    }
-    SECURITY_ATTRIBUTES sa {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-    HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                             &sa, OPEN_EXISTING, 0, nullptr);
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli {};
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
-    }
-    STARTUPINFOW si {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = (nul != INVALID_HANDLE_VALUE) ? nul : GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = wr;
-    si.hStdError = wr;
-    PROCESS_INFORMATION pi {};
-    std::vector<wchar_t> cmd_buf(cmdline.begin(), cmdline.end());
-    cmd_buf.push_back(L'\0');
-    if (!CreateProcessW(nullptr, cmd_buf.data(), nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
-        if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-        CloseHandle(rd); CloseHandle(wr);
-        if (job) CloseHandle(job);
-        return false;
-    }
-    if (nul != INVALID_HANDLE_VALUE) CloseHandle(nul);
-    CloseHandle(wr);
-    if (job) AssignProcessToJobObject(job, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-
-    bool over = false;
-    std::thread reader([&]() {
-        char buf[4096];
-        DWORD got = 0;
-        while (ReadFile(rd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-            if (combined_out.size() + got > kMaxProbeOut) {
-                over = true;
-                if (job) TerminateJobObject(job, 124);
-                else TerminateProcess(pi.hProcess, 124);
-                break;
-            }
-            combined_out.append(buf, got);
-        }
-    });
-    DWORD wait_rc = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
-    bool timed_out = (wait_rc == WAIT_TIMEOUT);
-    if (timed_out) {
-        if (job) TerminateJobObject(job, 124);
-        else TerminateProcess(pi.hProcess, 124);
-        WaitForSingleObject(pi.hProcess, 5000);
-    }
-    if (timed_out || over) CancelIoEx(rd, nullptr);
-    reader.join();
-    DWORD win_ec = 1;
-    GetExitCodeProcess(pi.hProcess, &win_ec);
-    CloseHandle(pi.hProcess);
-    CloseHandle(rd);
-    if (job) CloseHandle(job);
-    if (timed_out) {
+    if (argv.empty()) return false;
+    pkg_io::ProcOptions opts;
+    opts.timeout_ms = pkg_io::cc_timeout_ms();
+    opts.search_path = false;
+    opts.capture_output = true;
+    opts.merge_stderr = true;
+    opts.null_stdin = true;
+    opts.max_out_total = 4u * 1024u * 1024u;
+    pkg_io::ProcResult res = pkg_io::run_proc(argv, opts);
+    if (!res.launched) return false;
+    if (res.timed_out) {
         combined_out = "C compiler probe timed out";
         rc_out = 124;
         return true;
     }
-    if (over) {
-        rc_out = 1;
-        return true;
-    }
-    rc_out = static_cast<int>(win_ec);
+    combined_out = std::move(res.out);
+    rc_out = res.over_limit ? 1 : res.exit_code;
     return true;
-#else
-    int pfd[2];
-    if (pipe(pfd) != 0) return false;
-    fcntl(pfd[0], F_SETFD, FD_CLOEXEC);
-    fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pfd[0]);
-        close(pfd[1]);
-        return false;
-    }
-    if (pid == 0) {
-        setpgid(0, 0);
-        close(pfd[0]);
-        if (pfd[1] >= 0 && pfd[1] < 3) {
-            int m = fcntl(pfd[1], F_DUPFD_CLOEXEC, 3);
-            if (m < 0) _exit(126);
-            close(pfd[1]);
-            pfd[1] = m;
-        }
-        if (dup2(pfd[1], STDOUT_FILENO) < 0) _exit(126);
-        if (dup2(pfd[1], STDERR_FILENO) < 0) _exit(126);
-        close(pfd[1]);
-        std::vector<char *> cargv;
-        std::vector<std::string> copy = argv;
-        for (auto &s : copy) cargv.push_back(s.data());
-        cargv.push_back(nullptr);
-        execv(cargv[0], cargv.data());
-        _exit(127);
-    }
-    setpgid(pid, pid);
-    close(pfd[1]);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    bool over = false, timed_out = false;
-    char buf[4096];
-    for (;;) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) { timed_out = true; break; }
-        const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        struct pollfd pfd_poll {pfd[0], POLLIN, 0};
-        const int pr = poll(&pfd_poll, 1, static_cast<int>(std::min<long long>(rem, 100)));
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (pr == 0) continue;
-        ssize_t n = read(pfd[0], buf, sizeof(buf));
-        if (n > 0) {
-            if (combined_out.size() + static_cast<size_t>(n) > kMaxProbeOut) {
-                over = true;
-                break;
-            }
-            combined_out.append(buf, static_cast<size_t>(n));
-        } else if (n == 0 || errno != EINTR) {
-            break;
-        }
-    }
-    close(pfd[0]);
-    if (over || timed_out) {
-        if (kill(-pid, SIGKILL) != 0) kill(pid, SIGKILL);
-    }
-    int st = 0;
-    pid_t wr = 0;
-    do { wr = waitpid(pid, &st, 0); } while (wr < 0 && errno == EINTR);
-    if (timed_out) {
-        combined_out = "C compiler probe timed out";
-        rc_out = 124;
-        return true;
-    }
-    if (wr < 0 || over) {
-        rc_out = 1;
-        return true;
-    }
-    rc_out = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
-    return true;
-#endif
 }
 
 struct CompilerProbeResult {

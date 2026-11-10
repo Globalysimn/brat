@@ -2,6 +2,8 @@
 // function signatures, struct/trait rules, and `arena` escape boundaries.
 #include "check.h"
 
+#include "builtins.h"
+
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -551,16 +553,6 @@ static bool pure_read_builtin(const std::string &name) {
     return ro.count(name) > 0;
 }
 
-static bool scalar_only_call(const std::string &name) {
-    static const std::set<std::string> sc = {
-        "own", "len", "is_ok", "is_err", "is_some", "is_none", "is_vec", "is_str",
-        "is_map", "is_bool", "is_int", "is_float", "__stag_is", "__shas",
-        "ptr_is_null", "ptr_read_i64", "ptr_read_f64", "ptr_read_f32", "ptr_read_u8",
-        "re_match", "fs_exists", "fs_is_dir", "sbuf_len", "slice_len", "time_ms", "mono_ns", "errno"
-    };
-    return sc.count(name) > 0;
-}
-
 static void non_scalar_flow_vars(const Expr *e, std::set<std::string> &acc) {
     if (!e) return;
     if (e->k == EK::Num || e->k == EK::Bool || e->k == EK::None || e->k == EK::Un) return;
@@ -569,7 +561,7 @@ static void non_scalar_flow_vars(const Expr *e, std::set<std::string> &acc) {
             "-", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "in"};
         if (num_ops.count(e->a)) return;
     }
-    if (e->k == EK::Call && scalar_only_call(e->a)) return;
+    if (e->k == EK::Call && is_scalar_only_builtin(e->a)) return;
     if (e->k == EK::Var) {
         if (!e->a.empty()) acc.insert(e->a);
         return;

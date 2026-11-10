@@ -30,6 +30,7 @@
 #include <unistd.h>
 #endif
 
+#include "lsp_wire.h"
 #include "module.h"
 #include "parser.h"
 
@@ -37,29 +38,7 @@ namespace {
 
 std::string json_quote(std::string_view value) {
     std::string out;
-    out.reserve(value.size() + 2);
-    out.push_back('"');
-    static constexpr char hex[] = "0123456789abcdef";
-    for (unsigned char c : value) {
-        switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (c < 0x20) {
-                out += "\\u00";
-                out.push_back(hex[c >> 4]);
-                out.push_back(hex[c & 0x0f]);
-            } else {
-                out.push_back(static_cast<char>(c));
-            }
-        }
-    }
-    out.push_back('"');
+    lsp_wire::JsonWriter::write_escaped_string(out, value);
     return out;
 }
 

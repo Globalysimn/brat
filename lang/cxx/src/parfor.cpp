@@ -1,12 +1,16 @@
 #include "parfor.h"
 
+#include "builtins.h"
+
 #include <functional>
 #include <map>
 #include <set>
 
 namespace {
 
-using View = std::vector<const Stmt *>;
+using View = StmtView;
+constexpr View (*view)(const std::vector<StmtP> &) = &stmt_view;
+constexpr View (*else_of)(const Stmt &) = &stmt_else_of;
 
 const std::set<std::string> kRaise{"raise", "unwrap", "assert", "exit"};
 const std::set<std::string> kIo{"print", "eprint", "log.info", "log.warn", "log.error",
@@ -25,11 +29,6 @@ const std::set<std::string> kIoHeads{"tcp", "log", "trace"};
 const std::set<std::string> kAllocMeth{"push", "ins", "set", "copy", "map", "filter",
                                        "chars", "split", "replace", "trim", "upper",
                                        "lower", "join"};
-const std::set<std::string> kWriteMeth{"push", "pop", "ins", "del", "set", "sort",
-                                       "sort_by", "clear", "send", "close"};
-const std::set<std::string> kPtrWrite{"ptr_write_i64", "ptr_write_i32", "ptr_write_f64",
-                                      "ptr_write_f32", "ptr_write_u8", "ptr_write_str",
-                                      "ptr_write_ptr", "ptr_write_struct", "slice_set"};
 const std::set<std::string> kPluginFfi{
     "lib_open", "lib_sym", "lib_close", "call",
     "ptr_alloc_i64", "ptr_alloc_f64", "ptr_alloc_f32", "ptr_alloc_u8",
@@ -41,24 +40,10 @@ const std::set<std::string> kPluginFfi{
     "str_from_ptr", "slice_of", "slice_of_ptr", "slice_of_struct", "slice_struct_of",
     "slice_len", "slice_get", "slice_set"};
 const std::set<std::string> kOrder{"raise", "io", "alloc", "spawn", "ffi"};
-const std::set<SK> kDecls{SK::Fn, SK::Impl, SK::Trait, SK::Enum, SK::Struct, SK::Extern,
-                          SK::ExternStruct, SK::ExportFn};
 
 std::string head_of(const std::string &name) {
     auto dot = name.find('.');
     return dot == std::string::npos ? name : name.substr(0, dot);
-}
-
-View view(const std::vector<StmtP> &body) {
-    View out;
-    for (const auto &s : body) out.push_back(s.get());
-    return out;
-}
-
-View else_of(const Stmt &s) {
-    if (!s.els) return {};
-    if (s.els->k == SK::Block) return view(s.els->body);
-    return {s.els.get()};
 }
 
 void each_stmt(const View &body, const std::function<void(const Stmt &)> &fn) {
@@ -231,11 +216,12 @@ std::vector<std::string> outer_writes(const View &body, const std::set<std::stri
         for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()})
             each_expr(e, [&](const Expr &x) {
                 bool umut = funcs != nullptr && funcs->umeth.count(x.b) && funcs->umeth.at(x.b);
-                if (x.k == EK::MCall && (kWriteMeth.count(x.b) || umut) && !x.kids.empty()) {
+                const bool wmeth = is_cap_mutator(x.b) || x.b == "send" || x.b == "close";
+                if (x.k == EK::MCall && (wmeth || umut) && !x.kids.empty()) {
                     each_expr(x.kids[0].get(), [&](const Expr &r) {
                         if (r.k == EK::Var) note(r.a);
                     });
-                } else if (x.k == EK::Call && kPtrWrite.count(x.a) && !x.kids.empty()) {
+                } else if (x.k == EK::Call && is_ptr_write_builtin(x.a) && !x.kids.empty()) {
                     each_expr(x.kids[0].get(), [&](const Expr &r) {
                         if (r.k == EK::Var) note(r.a);
                     });

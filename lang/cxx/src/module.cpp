@@ -15,15 +15,7 @@
 
 #include "lexer.h"
 #include "parser.h"
-
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
+#include "pkg_io.h"
 
 namespace fs = std::filesystem;
 
@@ -60,31 +52,11 @@ fs::path stdlib_root() {
         std::error_code ec;
         if (fs::is_directory(g_stdlib_override, ec)) return g_stdlib_override;
     }
-#if defined(_WIN32)
-    wchar_t wbuf[32768];
-    DWORD wlen = GetModuleFileNameW(nullptr, wbuf, static_cast<DWORD>(sizeof(wbuf) / sizeof(wbuf[0])));
-    if (wlen > 0 && wlen < sizeof(wbuf) / sizeof(wbuf[0])) {
-        fs::path found = probe_stdlib_near(fs::path(std::wstring(wbuf, wlen)));
-        if (!found.empty()) return found;
-    }
-#elif defined(__APPLE__)
-    uint32_t msz = 0;
-    (void)_NSGetExecutablePath(nullptr, &msz);
-    if (msz > 0 && msz < 32768) {
-        std::string mbuf(msz, '\0');
-        if (_NSGetExecutablePath(mbuf.data(), &msz) == 0) {
-            fs::path found = probe_stdlib_near(fs::path(mbuf.c_str()));
-            if (!found.empty()) return found;
-        }
-    }
-#elif defined(__linux__)
-    std::error_code ec;
-    fs::path exe = fs::read_symlink("/proc/self/exe", ec);
-    if (!ec) {
+    const fs::path exe = pkg_io::self_exe_path(nullptr, false);
+    if (!exe.empty()) {
         fs::path found = probe_stdlib_near(exe);
         if (!found.empty()) return found;
     }
-#endif
     return {};
 }
 

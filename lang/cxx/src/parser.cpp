@@ -17,6 +17,7 @@
 
 #include <map>
 
+#include "builtins.h"
 #include "lexer.h"
 
 namespace {
@@ -86,10 +87,7 @@ const std::map<std::string, std::string> C_FFI_ALIAS = {
 };
 
 std::string trim_ann(const std::string &text) {
-    size_t first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    size_t last = text.find_last_not_of(" \t\r\n");
-    return text.substr(first, last - first + 1);
+    return trim_type_ann(text);
 }
 
 std::optional<std::string> canon_scalar(const std::string &ann) {
