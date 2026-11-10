@@ -927,6 +927,11 @@ struct Emitter {
     void run_opt();
     bool has_setidx(const StmtList &body);
     std::set<std::string> ops_in(const StmtList &body);
+    std::string fast_un_c(const Expr &e, const std::string &v);
+    std::string fast_idx_c(const Expr &e, const std::string &idx);
+    std::string fast_call_c(const Expr &e, std::string args);
+    std::string fast_bin_c(const Expr &e, const std::string &a, const std::string &b,
+                           bool *div_can_fail = nullptr);
     std::string fx(const Expr &e);
     // A fast-path expression that can panic must not feed a value on: fchk
     // evaluates it into a temp and bails while the error is still pending.
@@ -1311,13 +1316,47 @@ bool Emitter::int_body(const StmtList &body, const std::map<std::string, FnEntry
     return true;
 }
 
+static bool pure_int_arith_expr(const Expr &e, const std::set<std::string> &vars) {
+    switch (e.k) {
+    case EK::Num: return !e.is_float;
+    case EK::Var: return vars.count(e.a) > 0;
+    case EK::Un: return (e.a == "-" || e.a == "~") && pure_int_arith_expr(*e.kids[0], vars);
+    case EK::Bin:
+        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%" ||
+                e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") &&
+               pure_int_arith_expr(*e.kids[0], vars) && pure_int_arith_expr(*e.kids[1], vars);
+    default: return false;
+    }
+}
+
+static bool all_returns_match(const StmtList &stmts,
+                              const std::function<bool(const Expr &)> &pred,
+                              bool allow_for_iter) {
+    for (const Stmt *sp : stmts) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        if (s.k == SK::Return) {
+            if (!pred(*s.e1)) return false;
+        } else if (s.k == SK::If) {
+            if (!all_returns_match(view(s.body), pred, allow_for_iter)) return false;
+            if (const Stmt *els = real_else(s)) {
+                StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
+                if (!all_returns_match(eb, pred, allow_for_iter)) return false;
+            }
+        } else if (s.k == SK::While || s.k == SK::ForRange ||
+                   (allow_for_iter && s.k == SK::ForIter)) {
+            if (!all_returns_match(view(s.body), pred, allow_for_iter)) return false;
+        }
+    }
+    return true;
+}
+
 bool Emitter::pure_int_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
                                const std::set<std::string> &param_names,
                                const std::set<std::string> &vecvars) {
-    std::set<std::string> pure;
+    std::set<std::string> pure, vars_all;
     for (const auto &p : param_names)
         if (!vecvars.count(p)) pure.insert(p);
-    std::set<std::string> vars_all;
     collect_vars(body, vars_all);
     for (const auto &v : vars_all)
         if (!vecvars.count(v)) pure.insert(v);
@@ -1363,43 +1402,18 @@ bool Emitter::pure_int_returns(const StmtList &body, const std::map<std::string,
                     StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
                     if (scan_binds(eb)) dropped = true;
                 }
-            } else if (s.k == SK::While) {
-                if (scan_binds(view(s.body))) dropped = true;
-            } else if (s.k == SK::ForRange) {
+            } else if (s.k == SK::While || s.k == SK::ForRange) {
                 if (scan_binds(view(s.body))) dropped = true;
             } else if (s.k == SK::ForIter) {
-                if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a))) {
-                    if (pure.erase(s.a) > 0) dropped = true;
-                }
+                if (!(s.e1->k == EK::Var && vecvars.count(s.e1->a)) && pure.erase(s.a) > 0)
+                    dropped = true;
                 if (scan_binds(view(s.body))) dropped = true;
             }
         }
         return dropped;
     };
     while (scan_binds(body)) {}
-    std::function<bool(const StmtList &)> check_rets = [&](const StmtList &stmts) -> bool {
-        for (const Stmt *sp : stmts) {
-            if (!sp) continue;
-            const Stmt &s = *sp;
-            if (s.k == SK::Return) {
-                if (!is_pi(*s.e1)) return false;
-            } else if (s.k == SK::If) {
-                if (!check_rets(view(s.body))) return false;
-                if (const Stmt *els = real_else(s)) {
-                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
-                    if (!check_rets(eb)) return false;
-                }
-            } else if (s.k == SK::While) {
-                if (!check_rets(view(s.body))) return false;
-            } else if (s.k == SK::ForRange) {
-                if (!check_rets(view(s.body))) return false;
-            } else if (s.k == SK::ForIter) {
-                if (!check_rets(view(s.body))) return false;
-            }
-        }
-        return true;
-    };
-    return check_rets(body);
+    return all_returns_match(body, is_pi, true);
 }
 
 bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::string, FnEntry> &cand,
@@ -1408,18 +1422,6 @@ bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::strin
     collect_vars(body, vars_all);
     for (const auto &v : vars_all)
         if (!param_names.count(v)) fpure.insert(v);
-    std::function<bool(const Expr &)> is_num_int = [&](const Expr &e) -> bool {
-        switch (e.k) {
-        case EK::Num: return !e.is_float;
-        case EK::Var: return ipure.count(e.a) > 0;
-        case EK::Un: return (e.a == "-" || e.a == "~") && is_num_int(*e.kids[0]);
-        case EK::Bin:
-            return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%" ||
-                    e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") &&
-                   is_num_int(*e.kids[0]) && is_num_int(*e.kids[1]);
-        default: return false;
-        }
-    };
     std::function<bool(const Expr &)> is_pf = [&](const Expr &e) -> bool {
         switch (e.k) {
         case EK::Num: return e.is_float;
@@ -1429,7 +1431,7 @@ bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::strin
         case EK::Bin: {
             if (e.a != "+" && e.a != "-" && e.a != "*" && e.a != "/" && e.a != "%") return false;
             bool lf = is_pf(*e.kids[0]), rf = is_pf(*e.kids[1]);
-            bool li = is_num_int(*e.kids[0]), ri = is_num_int(*e.kids[1]);
+            bool li = pure_int_arith_expr(*e.kids[0], ipure), ri = pure_int_arith_expr(*e.kids[1], ipure);
             return (lf && (rf || ri)) || (rf && li);
         }
         case EK::Call: {
@@ -1451,9 +1453,9 @@ bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::strin
                 std::string nm = s.a.substr(0, s.a.find('.'));
                 if (fpure.count(nm) && !is_pf(*s.e1)) {
                     fpure.erase(nm);
-                    if (is_num_int(*s.e1)) ipure.insert(nm);
+                    if (pure_int_arith_expr(*s.e1, ipure)) ipure.insert(nm);
                     dropped = true;
-                } else if (ipure.count(nm) && !is_num_int(*s.e1)) {
+                } else if (ipure.count(nm) && !pure_int_arith_expr(*s.e1, ipure)) {
                     ipure.erase(nm);
                     dropped = true;
                 }
@@ -1476,27 +1478,7 @@ bool Emitter::pure_float_returns(const StmtList &body, const std::map<std::strin
         return dropped;
     };
     while (scan_binds(body)) {}
-    std::function<bool(const StmtList &)> check_rets = [&](const StmtList &stmts) -> bool {
-        for (const Stmt *sp : stmts) {
-            if (!sp) continue;
-            const Stmt &s = *sp;
-            if (s.k == SK::Return) {
-                if (!is_pf(*s.e1)) return false;
-            } else if (s.k == SK::If) {
-                if (!check_rets(view(s.body))) return false;
-                if (const Stmt *els = real_else(s)) {
-                    StmtList eb = els->k == SK::Block ? view(els->body) : StmtList{els};
-                    if (!check_rets(eb)) return false;
-                }
-            } else if (s.k == SK::While) {
-                if (!check_rets(view(s.body))) return false;
-            } else if (s.k == SK::ForRange) {
-                if (!check_rets(view(s.body))) return false;
-            }
-        }
-        return true;
-    };
-    return check_rets(body);
+    return all_returns_match(body, is_pf, false);
 }
 
 bool Emitter::has_float_lit(const StmtList &body) const {
@@ -1911,81 +1893,107 @@ static std::string fcmp_di_expr(const std::string &op, bool left_int,
     return cat(left_int ? "vcmp_di_le(" : "vcmp_di_ge(", d, ", ", i, ")");
 }
 
+static std::string strip_outer_parens(const std::string &s) {
+    if (s.size() < 2 || s.front() != '(' || s.back() != ')') return s;
+    int depth = 0;
+    for (size_t i = 0; i + 1 < s.size(); i++) {
+        if (s[i] == '(') depth++;
+        else if (s[i] == ')' && --depth == 0) return s;
+    }
+    return depth == 1 ? s.substr(1, s.size() - 2) : s;
+}
+
+std::string Emitter::fast_un_c(const Expr &e, const std::string &v) {
+    if (e.a == "!") return cat("(!(", v, "))");
+    if (e.a == "~") return cat("((int64_t)(~(uint64_t)(", v, ")))");
+    return (fkind == "f64" && !fint(*e.kids[0]))
+               ? cat("(-(", v, "))")
+               : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
+}
+
+std::string Emitter::fast_idx_c(const Expr &e, const std::string &idx) {
+    const char *fn = (fkind == "f64")
+                         ? "bf_vfat"
+                         : ((opt >= 2 && unchecked_idx.count(&e)) ? "bf_viat_nb" : "bf_viat");
+    return cat(fn, "(", fsym[e.kids[0]->a], ", ", idx, ")");
+}
+
+std::string Emitter::fast_call_c(const Expr &e, std::string args) {
+    if (!fself_rec.empty() && e.a == fself_rec) {
+        if (!args.empty()) args += ", ";
+        args += "_rem - 1";
+        return cat(fastc[e.a], "_r(", args, ")");
+    }
+    return cat(fastc[e.a], "(", args, ")");
+}
+
+std::string Emitter::fast_bin_c(const Expr &e, const std::string &a, const std::string &b,
+                                bool *div_can_fail) {
+    const bool dbl = fkind == "f64";
+    const std::string &op = e.a;
+    const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
+    if (div_can_fail) *div_can_fail = false;
+    if (op == "/" || op == "%") {
+        if (!dbl && opt >= 1 && unchecked.count(&e)) {
+            if (div_can_fail) *div_can_fail = (opt < 2);
+            return cat("(", a, " ", op, " ", b, ")");
+        }
+        if (!dbl && opt >= 2 && nonzero_div.count(&e))
+            return cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
+        if (div_can_fail) *div_can_fail = true;
+        if (dbl)
+            return cat(op == "/" ? "bf_fdiv" : "bf_fmod", "((double)(", a, "), (double)(", b, "))");
+        return cat(op == "/" ? "bf_idiv" : "bf_imod", "(", a, ", ", b, ")");
+    }
+    if (ia && ib && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^"))
+        return cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
+    if (ia && ib && op == "<<") return cat("bshl64(", a, ", ", b, ")");
+    if (ia && ib && op == ">>") return cat("bshr64(", a, ", ", b, ")");
+    if (dbl && (op == "+" || op == "-" || op == "*"))
+        return cat("((double)(", a, ") ", op, " (double)(", b, "))");
+    if (dbl && ia != ib &&
+        (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="))
+        return fcmp_di_expr(op, ia, a, b);
+    return cat("(", a, " ", op, " ", b, ")");
+}
+
 std::string Emitter::fx(const Expr &e) {
-    bool dbl = fkind == "f64";
+    const bool dbl = fkind == "f64";
     switch (e.k) {
     case EK::Num:
-        if (dbl && e.is_float)
-            return cat("(", repr_f64(e.f), ")");
-        return clit64(e.i);
+        return (dbl && e.is_float) ? cat("(", repr_f64(e.f), ")") : clit64(e.i);
     case EK::Bool:
         return cat("(", e.flag ? 1 : 0, "LL)");
     case EK::Var:
         return fsym[e.a];
-    case EK::Un: {
-        std::string v = fx(*e.kids[0]);
-        if (e.a == "!") return cat("(!(", v, "))");
-        if (e.a == "~") return cat("((int64_t)(~(uint64_t)(", v, ")))");
-        return (dbl && !fint(*e.kids[0])) ? cat("(-(", v, "))")
-                                          : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
-    }
+    case EK::Un:
+        return fast_un_c(e, fx(*e.kids[0]));
     case EK::Move:
         return fx(*e.kids[0]);
     case EK::Idx:
-        if (fkind == "f64")
-            return cat("bf_vfat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
-        if (opt >= 2 && unchecked_idx.count(&e))
-            return cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
-        return cat("bf_viat(", fsym[e.kids[0]->a], ", ", fx(*e.kids[1]), ")");
+        return fast_idx_c(e, fx(*e.kids[1]));
     case EK::Bin: {
         std::string a = fx(*e.kids[0]), b = fx(*e.kids[1]);
-        const std::string &op = e.a;
-        const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
-        if (op == "/" || op == "%") {
-            if (!dbl && opt >= 1 && unchecked.count(&e)) return cat("(", a, " ", op, " ", b, ")");
-            if (!dbl && opt >= 2 && nonzero_div.count(&e))
-                return cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
-            if (dbl)
-                return cat(op == "/" ? "bf_fdiv" : "bf_fmod", "((double)(", a, "), (double)(", b, "))");
-            return cat(op == "/" ? "bf_idiv" : "bf_imod", "(", a, ", ", b, ")");
+        if (e.a == "&&" || e.a == "||") {
+            const bool is_and = (e.a == "&&");
+            if (all_bool(e)) return cat("(", a, is_and ? " && " : " || ", b, ")");
+            const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
+            const std::string &tbr = is_and ? b : a, &fbr = is_and ? a : b;
+            if (ia == ib) return cat("(", a, " ? ", tbr, " : ", fbr, ")");
+            return cat("((", a, ") ? (double)(", tbr, ") : (double)(", fbr, "))");
         }
-        if (op == "&&") {
-            if (all_bool(e)) return cat("(", a, " && ", b, ")");
-            if (ia == ib) return cat("(", a, " ? ", b, " : ", a, ")");
-            return cat("((", a, ") ? (double)(", b, ") : (double)(", a, "))");
-        }
-        if (op == "||") {
-            if (all_bool(e)) return cat("(", a, " || ", b, ")");
-            if (ia == ib) return cat("(", a, " ? ", a, " : ", b, ")");
-            return cat("((", a, ") ? (double)(", a, ") : (double)(", b, "))");
-        }
-        if (ia && ib && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^"))
-            return cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
-        if (ia && ib && op == "<<") return cat("bshl64(", a, ", ", b, ")");
-        if (ia && ib && op == ">>") return cat("bshr64(", a, ", ", b, ")");
-        if (dbl && (op == "+" || op == "-" || op == "*"))
-            return cat("((double)(", a, ") ", op, " (double)(", b, "))");
-        if (dbl && ia != ib &&
-            (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">="))
-            return fcmp_di_expr(op, ia, a, b);
-        return cat("(", a, " ", op, " ", b, ")");
+        return fast_bin_c(e, a, b);
     }
-    case EK::Call:
+    case EK::Call: {
         if (e.a == "len") return cat("((", fsym[e.kids[0]->a], ")->len)");
-        {
-            std::string args;
-            for (size_t i = 0; i < e.kids.size(); i++) {
-                if (i) args += ", ";
-                std::string ai = fx(*e.kids[i]);
-                args += (dbl && fint(*e.kids[i])) ? cat("(double)(", ai, ")") : ai;
-            }
-            if (!fself_rec.empty() && e.a == fself_rec) {
-                if (!args.empty()) args += ", ";
-                args += "_rem - 1";
-                return cat(fastc[e.a], "_r(", args, ")");
-            }
-            return cat(fastc[e.a], "(", args, ")");
+        std::string args;
+        for (size_t i = 0; i < e.kids.size(); i++) {
+            if (i) args += ", ";
+            std::string ai = fx(*e.kids[i]);
+            args += (dbl && fint(*e.kids[i])) ? cat("(double)(", ai, ")") : ai;
         }
+        return fast_call_c(e, std::move(args));
+    }
     default:
         throw EmitError("fast node");
     }
@@ -2111,23 +2119,13 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
         return t;
     }
     switch (e.k) {
-    case EK::Un: {
-        std::string v = fchk(*e.kids[0], ind);
-        if (e.a == "!") return cat("(!(", v, "))");
-        if (e.a == "~") return cat("((int64_t)(~(uint64_t)(", v, ")))");
-        return (dbl && !fint(*e.kids[0])) ? cat("(-(", v, "))")
-                                          : cat("((int64_t)(0ULL - (uint64_t)(", v, ")))");
-    }
+    case EK::Un:
+        return fast_un_c(e, fchk(*e.kids[0], ind));
     case EK::Move:
         return fchk(*e.kids[0], ind);
     case EK::Idx: {
-        std::string idx = fchk(*e.kids[1], ind);
-        std::string call = dbl ? cat("bf_vfat(", fsym[e.kids[0]->a], ", ", idx, ")")
-                               : ((opt >= 2 && unchecked_idx.count(&e))
-                                      ? cat("bf_viat_nb(", fsym[e.kids[0]->a], ", ", idx, ")")
-                                      : cat("bf_viat(", fsym[e.kids[0]->a], ", ", idx, ")"));
-        std::string t = new_tmp("t");
-        ln(ind, cat(ect, " ", t, " = ", call, ";"));
+        std::string idx = fchk(*e.kids[1], ind), t = new_tmp("t");
+        ln(ind, cat(ect, " ", t, " = ", fast_idx_c(e, idx), ";"));
         ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
     }
@@ -2140,13 +2138,7 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
             args += (dbl && fint(*e.kids[i])) ? cat("(double)(", ai, ")") : ai;
         }
         std::string t = new_tmp("t");
-        if (!fself_rec.empty() && e.a == fself_rec) {
-            if (!args.empty()) args += ", ";
-            args += "_rem - 1";
-            ln(ind, cat(ect, " ", t, " = ", fastc[e.a], "_r(", args, ");"));
-        } else {
-            ln(ind, cat(ect, " ", t, " = ", fastc[e.a], "(", args, ");"));
-        }
+        ln(ind, cat(ect, " ", t, " = ", fast_call_c(e, std::move(args)), ";"));
         if (!fastc.count(e.a) || fails.count(e.a))
             ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         return t;
@@ -2155,53 +2147,22 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
         const std::string &op = e.a;
         const bool ia = fint(*e.kids[0]), ib = fint(*e.kids[1]);
         if (op == "&&" || op == "||") {
-            std::string a = fchk(*e.kids[0], ind);
-            std::string res = new_tmp("t");
+            std::string a = fchk(*e.kids[0], ind), res = new_tmp("t");
             const bool ab = all_bool(e);
-            const std::string init_a =
-                ab ? cat("((", a, ") ? 1LL : 0LL)")
-                   : ((dbl && !fint(e) && ia) ? cat("(double)(", a, ")") : a);
-            ln(ind, cat(ect, " ", res, " = ", init_a, ";"));
+            auto cast_op = [&](const std::string &v, bool is_i) {
+                return ab ? cat("((", v, ") ? 1LL : 0LL)")
+                          : ((dbl && !fint(e) && is_i) ? cat("(double)(", v, ")") : v);
+            };
+            ln(ind, cat(ect, " ", res, " = ", cast_op(a, ia), ";"));
             ln(ind, cat("if (", op == "&&" ? res : cat("!(", res, ")"), ") {"));
             std::string b = fchk(*e.kids[1], ind + "  ");
-            const std::string set_b =
-                ab ? cat("((", b, ") ? 1LL : 0LL)")
-                   : ((dbl && !fint(e) && ib) ? cat("(double)(", b, ")") : b);
-            ln(ind + "  ", cat(res, " = ", set_b, ";"));
+            ln(ind + "  ", cat(res, " = ", cast_op(b, ib), ";"));
             ln(ind, "}");
             return res;
         }
-        std::string a = fchk(*e.kids[0], ind);
-        std::string b = fchk(*e.kids[1], ind);
-        std::string comb;
+        std::string a = fchk(*e.kids[0], ind), b = fchk(*e.kids[1], ind);
         bool div_can_fail = false;
-        if (op == "/" || op == "%") {
-            if (!dbl && opt >= 1 && unchecked.count(&e)) {
-                comb = cat("(", a, " ", op, " ", b, ")");
-                div_can_fail = (opt < 2);
-            } else if (!dbl && opt >= 2 && nonzero_div.count(&e)) {
-                comb = cat(op == "/" ? "bf_idiv_nz" : "bf_imod_nz", "(", a, ", ", b, ")");
-            } else if (dbl) {
-                comb = cat(op == "/" ? "bf_fdiv" : "bf_fmod", "((double)(", a, "), (double)(", b, "))");
-                div_can_fail = true;
-            } else {
-                comb = cat(op == "/" ? "bf_idiv" : "bf_imod", "(", a, ", ", b, ")");
-                div_can_fail = true;
-            }
-        } else if (ia && ib && (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^")) {
-            comb = cat("((int64_t)((uint64_t)(", a, ") ", op, " (uint64_t)(", b, ")))");
-        } else if (ia && ib && op == "<<") {
-            comb = cat("bshl64(", a, ", ", b, ")");
-        } else if (ia && ib && op == ">>") {
-            comb = cat("bshr64(", a, ", ", b, ")");
-        } else if (dbl && (op == "+" || op == "-" || op == "*")) {
-            comb = cat("((double)(", a, ") ", op, " (double)(", b, "))");
-        } else if (dbl && ia != ib &&
-                   (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=")) {
-            comb = fcmp_di_expr(op, ia, a, b);
-        } else {
-            comb = cat("(", a, " ", op, " ", b, ")");
-        }
+        std::string comb = fast_bin_c(e, a, b, &div_can_fail);
         if (div_can_fail) {
             std::string t = new_tmp("t");
             ln(ind, cat(ect, " ", t, " = ", comb, ";"));
@@ -2264,9 +2225,11 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
     switch (s.k) {
     case SK::Let:
     case SK::LetTmp:
-    case SK::Set:
-        ln(ind, cat(fsym[s.a], " = ", fchk(*s.e1, ind), ";"));
+    case SK::Set: {
+        std::string rhs = fchk(*s.e1, ind);
+        if (rhs != fsym[s.a]) ln(ind, cat(fsym[s.a], " = ", rhs, ";"));
         break;
+    }
     case SK::Return: {
         std::string rv = fchk(*s.e1, ind);
         if (frec && fself_rec.empty()) ln(ind, "bdepth_pop();");
@@ -2284,7 +2247,7 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         }
         break;
     case SK::If: {
-        ln(ind, cat("if (", fx(*s.e1), ") {"));
+        ln(ind, cat("if (", strip_outer_parens(fx(*s.e1)), ") {"));
         for (const Stmt *t : view(s.body)) fst(*t, ind + "  ");
         if (const Stmt *els = real_else(s)) {
             ln(ind, "} else {");
@@ -2295,7 +2258,7 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         break;
     }
     case SK::While:
-        ln(ind, cat("while (", fx(*s.e1), ") {"));
+        ln(ind, cat("while (", strip_outer_parens(fx(*s.e1)), ") {"));
         for (const Stmt *t : view(s.body)) fst(*t, ind + "  ");
         ln(ind, "}");
         break;
@@ -2318,23 +2281,16 @@ void Emitter::fst(const Stmt &s, const std::string &ind) {
         ln(ind, "}");
         break;
     }
-    case SK::SetIdx:
-        if (fkind == "f64") {
-            std::string idx_s = fchk(*s.e2, ind);
-            std::string val_s = fchk(*s.e3, ind);
-            ln(ind, cat("bf_vset_f(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
-            ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
-        } else if (opt >= 2 && unchecked_setidx.count(&s)) {
-            std::string idx_s = fchk(*s.e2, ind);
-            std::string val_s = fchk(*s.e3, ind);
+    case SK::SetIdx: {
+        std::string idx_s = fchk(*s.e2, ind), val_s = fchk(*s.e3, ind);
+        if (fkind != "f64" && opt >= 2 && unchecked_setidx.count(&s)) {
             ln(ind, cat(fsym[s.e1->a], "->items[", idx_s, "] = vint(", val_s, ");"));
         } else {
-            std::string idx_s = fchk(*s.e2, ind);
-            std::string val_s = fchk(*s.e3, ind);
-            ln(ind, cat("bf_vset(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
+            ln(ind, cat(fkind == "f64" ? "bf_vset_f(" : "bf_vset(", fsym[s.e1->a], ", ", idx_s, ", ", val_s, ");"));
             ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
         }
         break;
+    }
     case SK::Break:
         ln(ind, "break;");
         break;
@@ -2803,6 +2759,11 @@ const std::map<std::string, std::pair<std::string, int>> SV_SIMPLE = {
     {"enumerate", {"venum", 0}}, {"chars", {"vchars", 0}},
     {"parse_float", {"vparse_float", 0}}, {"copy", {"vcopy", 0}},
     {"zip", {"vzip", 1}}, {"chunks", {"vchunks", 1}},
+    {"lines", {"vlines", 0}}, {"trim", {"vtrim", 0}},
+    {"parse_int", {"vparse_int", 0}}, {"first", {"vfirst", 0}},
+    {"last", {"vlast", 0}}, {"sort", {"vsort", 0}},
+    {"rev", {"vrev", 0}}, {"pop", {"vpop", 0}},
+    {"join", {"vjoin", 1}}, {"replace", {"vreplace", 2}},
 };
 
 const std::set<std::string> VBUILTIN_DIRECT = {"del", "copy", "slice"};
@@ -3232,17 +3193,7 @@ std::string Emitter::path_ref(const std::string &path) {
 }
 
 bool Emitter::ub_expr_ok(const Expr &e, const std::set<std::string> &cand) const {
-    if (cand.empty()) return false;
-    switch (e.k) {
-    case EK::Num: return !e.is_float;
-    case EK::Var: return cand.count(e.a) > 0;
-    case EK::Un: return (e.a == "-" || e.a == "~") && ub_expr_ok(*e.kids[0], cand);
-    case EK::Bin:
-        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%" ||
-                e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") &&
-               ub_expr_ok(*e.kids[0], cand) && ub_expr_ok(*e.kids[1], cand);
-    default: return false;
-    }
+    return !cand.empty() && pure_int_arith_expr(e, cand);
 }
 
 bool Emitter::ub_may_raise(const Expr &e) const {
@@ -3275,16 +3226,7 @@ std::string Emitter::ub_ex(const Expr &e) const {
 }
 
 bool Emitter::ub_int_sub(const Expr &e) const {
-    switch (e.k) {
-    case EK::Num: return !e.is_float;
-    case EK::Var: return ub_ints.count(e.a) > 0;
-    case EK::Un: return (e.a == "-" || e.a == "~") && ub_int_sub(*e.kids[0]);
-    case EK::Bin:
-        return (e.a == "+" || e.a == "-" || e.a == "*" || e.a == "/" || e.a == "%" ||
-                e.a == "&" || e.a == "|" || e.a == "^" || e.a == "<<" || e.a == ">>") &&
-               ub_int_sub(*e.kids[0]) && ub_int_sub(*e.kids[1]);
-    default: return false;
-    }
+    return pure_int_arith_expr(e, ub_ints);
 }
 
 bool Emitter::ubf_expr_ok(const Expr &e, const std::set<std::string> &cand) const {
@@ -4781,21 +4723,13 @@ V Emitter::ex_map_meth(const std::string &so, const std::vector<std::string> &po
         for (auto &p : r.pre) pre.push_back(p);
         return {pre, r.val};
     };
-    if (meth == "keys") {
+    static const std::map<std::string, const char *> MAP_0 = {
+        {"keys", "vmap_keys"}, {"items", "vmap_items"},
+        {"vals", "vmap_vals"}, {"copy", "vcopy"},
+    };
+    if (auto m0 = MAP_0.find(meth); m0 != MAP_0.end()) {
         need_arity(args, 0, meth);
-        return {po, cat("vmap_keys(", so, ")")};
-    }
-    if (meth == "items") {
-        need_arity(args, 0, meth);
-        return {po, cat("vmap_items(", so, ")")};
-    }
-    if (meth == "vals") {
-        need_arity(args, 0, meth);
-        return {po, cat("vmap_vals(", so, ")")};
-    }
-    if (meth == "copy") {
-        need_arity(args, 0, meth);
-        return {po, cat("vcopy(", so, ")")};
+        return {po, cat(m0->second, "(", so, ")")};
     }
     if (meth == "get_or") {
         need_arity(args, 2, meth);
@@ -4895,13 +4829,8 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
             return cat("vsplit(", so, ", ", vals[0], ")");
         }));
     }
-    if (meth == "lines") {
+    if (meth == "lower" || meth == "upper") {
         need_arity(args, 0, meth);
-        return {po, cat("vlines(", so, ")")};
-    }
-    if (meth == "trim" || meth == "lower" || meth == "upper") {
-        need_arity(args, 0, meth);
-        if (meth == "trim") return {po, cat("vtrim(", so, ")")};
         return {po, cat("vcase(", so, ", ", meth == "upper" ? 1 : 0, ")")};
     }
     if (meth == "starts_with" || meth == "ends_with" || meth == "contains") {
@@ -4911,37 +4840,12 @@ V Emitter::ex_strvec_meth(const std::string &so, const std::vector<std::string> 
             return cat("vbool(vaffix(", so, ", ", vals[0], ", ", flags, "))");
         }));
     }
-    if (meth == "parse_int") {
-        need_arity(args, 0, meth);
-        return {po, cat("vparse_int(", so, ")")};
-    }
-    if (meth == "replace") {
-        need_arity(args, 2, meth);
-        return with_po(direct_call_result(args, [&](const auto &vals) {
-            return cat("vreplace(", so, ", ", vals[0], ", ", vals[1], ")");
-        }));
-    }
-    if (meth == "first" || meth == "last" || meth == "sort" || meth == "rev") {
-        need_arity(args, 0, meth);
-        std::string fn = meth == "first" ? "vfirst" : meth == "last" ? "vlast" : meth == "sort" ? "vsort" : "vrev";
-        return {po, cat(fn, "(", so, ")")};
-    }
-    if (meth == "join") {
-        need_arity(args, 1, meth);
-        return with_po(direct_call_result(args, [&](const auto &vals) {
-            return cat("vjoin(", so, ", ", vals[0], ")");
-        }));
-    }
     if (meth == "push") {
         need_arity(args, 1, meth);
         V a = ex(*args[0]);
         std::vector<std::string> pre = po;
         for (auto &p : a.pre) pre.push_back(p);
         return {pre, cat("vpush(", so, ", ", keep(*args[0], a.val), ")")};
-    }
-    if (meth == "pop") {
-        need_arity(args, 0, meth);
-        return {po, cat("vpop(", so, ")")};
     }
     throw EmitError("method " + meth);
 }
@@ -5792,7 +5696,8 @@ void Emitter::ub_assign(const std::string &name, const Expr &rhs, const std::str
         emit_err_check(ind);
         ln(ind, cat(ucn, " = ", t, ";"));
     } else {
-        ln(ind, cat(ucn, " = ", ub_ex(rhs), ";"));
+        std::string ex = ub_ex(rhs);
+        if (ex != ucn) ln(ind, cat(ucn, " = ", ex, ";"));
     }
     assigned.insert(name);
 }
@@ -5805,7 +5710,8 @@ void Emitter::ubf_assign(const std::string &name, const Expr &rhs, const std::st
         emit_err_check(ind);
         ln(ind, cat(ucn, " = ", t, ";"));
     } else {
-        ln(ind, cat(ucn, " = ", ubf_ex(rhs), ";"));
+        std::string ex = ubf_ex(rhs);
+        if (ex != ucn) ln(ind, cat(ucn, " = ", ex, ";"));
     }
     assigned.insert(name);
 }
@@ -7795,42 +7701,24 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             all_mentions_stmts(e->fn->body, acc);
         }
     };
-    all_mentions_stmts = [&](const std::vector<StmtP> &stmts, std::set<std::string> &acc) {
-        for (const auto &sp : stmts) {
-            if (!sp) continue;
-            if (sp->k == SK::Let || sp->k == SK::LetTmp || sp->k == SK::Set)
-                acc.insert(sp->a.substr(0, sp->a.find('.')));
-            all_mentions_expr(sp->e1.get(), acc);
-            all_mentions_expr(sp->e2.get(), acc);
-            all_mentions_expr(sp->e3.get(), acc);
-            all_mentions_stmts(sp->body, acc);
-            all_mentions_stmts(sp->body2, acc);
-            if (sp->els) {
-                std::vector<const Stmt *> one{sp->els.get()};
-                all_mentions_expr(sp->els->e1.get(), acc);
-                all_mentions_expr(sp->els->e2.get(), acc);
-                all_mentions_expr(sp->els->e3.get(), acc);
-                all_mentions_stmts(sp->els->body, acc);
-                all_mentions_stmts(sp->els->body2, acc);
-                if (sp->els->els) {
-                    std::vector<StmtP> dummy;
-                    // walk chained else-if iteratively
-                    const Stmt *cur = sp->els->els.get();
-                    while (cur) {
-                        all_mentions_expr(cur->e1.get(), acc);
-                        all_mentions_expr(cur->e2.get(), acc);
-                        all_mentions_expr(cur->e3.get(), acc);
-                        all_mentions_stmts(cur->body, acc);
-                        all_mentions_stmts(cur->body2, acc);
-                        cur = cur->els.get();
-                    }
-                }
-            }
-            for (const auto &f : sp->fns) {
-                for (const auto &p : f.params) all_mentions_expr(p.def.get(), acc);
-                all_mentions_stmts(f.body, acc);
-            }
+    std::function<void(const Stmt *, std::set<std::string> &)> all_mentions_one =
+        [&](const Stmt *sp, std::set<std::string> &acc) {
+        if (!sp) return;
+        if (sp->k == SK::Let || sp->k == SK::LetTmp || sp->k == SK::Set)
+            acc.insert(sp->a.substr(0, sp->a.find('.')));
+        all_mentions_expr(sp->e1.get(), acc);
+        all_mentions_expr(sp->e2.get(), acc);
+        all_mentions_expr(sp->e3.get(), acc);
+        all_mentions_stmts(sp->body, acc);
+        all_mentions_stmts(sp->body2, acc);
+        if (sp->els) all_mentions_one(sp->els.get(), acc);
+        for (const auto &f : sp->fns) {
+            for (const auto &p : f.params) all_mentions_expr(p.def.get(), acc);
+            all_mentions_stmts(f.body, acc);
         }
+    };
+    all_mentions_stmts = [&](const std::vector<StmtP> &stmts, std::set<std::string> &acc) {
+        for (const auto &sp : stmts) all_mentions_one(sp.get(), acc);
     };
 
     auto plain_lit_str = [](const Expr *e, std::string &out) -> bool {
@@ -10210,9 +10098,26 @@ V Emitter::ex_call(const Expr &e) {
         }
         return {out, "vint(0)"};
     }
-    if (name == "len") {
+    static const std::map<std::string, std::pair<const char *, const char *>> READ_ONLY_1 = {
+        {"len", {"vlen(", ")"}},
+        {"str", {"vstr_of(", ")"}},
+        {"tagof", {"vtagof(", ")"}},
+        {"own", {"vown(", ")"}},
+        {"is_ok", {"vbool(vis_ok(", "))"}},
+        {"is_err", {"vbool(vis_err(", "))"}},
+        {"is_some", {"vbool(vis_some(", "))"}},
+        {"is_none", {"vbool(vis_none(", "))"}},
+        {"is_vec", {"vbool((", ").tag == V_VEC)"}},
+        {"is_str", {"vbool((", ").tag == V_STR)"}},
+        {"is_map", {"vbool((", ").tag == V_STRUCT)"}},
+        {"is_bool", {"vbool((", ").tag == V_BOOL)"}},
+        {"is_int", {"vbool((", ").tag == V_INT)"}},
+        {"is_float", {"vbool((", ").tag == V_FLOAT)"}},
+    };
+    if (auto ro = READ_ONLY_1.find(name); ro != READ_ONLY_1.end()) {
         need_arity(args, 1, name);
-        return read_only(*args[0], "vlen");
+        const auto [pre_s, post_s] = ro->second;
+        return read_only_call(*args[0], [=](const std::string &v) { return cat(pre_s, v, post_s); });
     }
     if (name == "__at") {
         need_arity(args, 2, name);
@@ -10270,36 +10175,10 @@ V Emitter::ex_call(const Expr &e) {
         pre.push_back("}");
         return {pre, tr};
     }
-    if (name == "unwrap" || name == "is_ok" || name == "is_err" || name == "is_some" ||
-        name == "is_none" || name == "is_vec" || name == "is_str" || name == "is_map" ||
-        name == "is_bool" || name == "is_int" || name == "is_float" || name == "tagof" ||
-        name == "str") {
+    if (name == "unwrap") {
         need_arity(args, 1, name);
-        if (name == "str") return read_only(*args[0], "vstr_of");
-        if (name == "tagof") return read_only(*args[0], "vtagof");
-        if (name == "is_ok")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_ok(", v, "))"); });
-        if (name == "is_err")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_err(", v, "))"); });
-        if (name == "is_some")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_some(", v, "))"); });
-        if (name == "is_none")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool(vis_none(", v, "))"); });
-        if (name == "is_vec")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_VEC)"); });
-        if (name == "is_str")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_STR)"); });
-        if (name == "is_map")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_STRUCT)"); });
-        if (name == "is_bool")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_BOOL)"); });
-        if (name == "is_int")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_INT)"); });
-        if (name == "is_float")
-            return read_only_call(*args[0], [](const std::string &v) { return cat("vbool((", v, ").tag == V_FLOAT)"); });
         V a = ex(*args[0]);
-        if (name == "unwrap") return part_of_temp(a, *args[0], "vunwrap(", ")");
-        return {a.pre, cat("vstr_of(", a.val, ")")};
+        return part_of_temp(a, *args[0], "vunwrap(", ")");
     }
     if (name == "assert") {
         if (args.empty() || args.size() > 2) throw EmitError("assert arity");
@@ -10316,133 +10195,78 @@ V Emitter::ex_call(const Expr &e) {
         pre.push_back(cat("if (!vassert1(", keep(*args[0], a.val), ")) ", bail));
         return {pre, "vbool(1)"};
     }
-    if (name == "read_file" || name == "write_file" || name == "append_file" ||
-        name == "read_bytes" || name == "write_bytes" ||
-        name == "proc_run" || name == "utf8_bytes" || name == "utf8_str" ||
-        name == "json_parse" || name == "json_stringify" ||
-        name == "fs_exists" || name == "fs_is_dir" || name == "fs_file_size" ||
-        name == "fs_mkdir_all" || name == "fs_list_dir" || name == "fs_remove_dir" ||
-        name == "fs_open" || name == "fs_read_line" ||
-        name == "fs_close" || name == "stdin_read_line" ||
-        name == "fs_rename" || name == "fs_remove" ||
-        name == "sha256_bytes" || name == "random_bytes" || name == "https_request_raw" ||
-        name == "sql_open" || name == "sql_close" || name == "sql_exec" || name == "sql_query" ||
-        name == "tcp_listen" || name == "tcp_connect" ||
-        name == "tcp_accept" || name == "tcp_close" || name == "sbuf" || name == "sbuf_add" ||
-        name == "sbuf_len" || name == "sbuf_str" || name == "tcp_recv" || name == "tcp_send" ||
-        name == "chan" || name == "join_all" || name == "args" || name == "args_bytes" || name == "exit" || name == "eprint" ||
-        name == "raise" || name == "own" || name == "$arena_enter" || name == "$arena_leave" ||
-        name == "time_ms" || name == "mono_ns" || name == "sleep_ms") {
-        static const std::map<std::string, std::string> BORROW_1 = {
-            {"read_file", "vreadfile"}, {"read_bytes", "vreadbytes"},
-            {"utf8_bytes", "vutf8_bytes"}, {"utf8_str", "vutf8_str"},
-            {"json_parse", "vjson_parse"},
-            {"fs_exists", "vfs_exists"}, {"fs_is_dir", "vfs_is_dir"},
-            {"fs_file_size", "vfs_file_size"}, {"fs_mkdir_all", "vfs_mkdir_all"},
-            {"fs_list_dir", "vfs_list_dir"}, {"fs_remove_dir", "vfs_remove_dir"},
-            {"fs_open", "vfs_open"},
-            {"fs_read_line", "vfs_read_line"}, {"fs_close", "vfs_close"},
-            {"fs_remove", "vfs_remove"},
-            {"sha256_bytes", "vsha256_bytes"},
-            {"random_bytes", "vrandom_bytes"},
-            {"sql_open", "vsql_open"}, {"sql_close", "vsql_close"},
-            {"tcp_listen", "vtcp_listen"}, {"tcp_connect", "vtcp_connect"},
-            {"tcp_accept", "vtcp_accept"}, {"tcp_close", "vtcp_close"},
-            {"sbuf_len", "vsbuf_len"}, {"sbuf_str", "vsbuf_str"},
-        };
-        static const std::map<std::string, std::string> BORROW_2 = {
-            {"write_file", "vwritefile"}, {"append_file", "vappendfile"},
-            {"write_bytes", "vwritebytes"},
-            {"proc_run", "vproc_run"}, {"fs_rename", "vfs_rename"},
-            {"json_stringify", "vjson_stringify"},
-            {"sql_exec", "vsql_exec"}, {"sbuf_add", "vsbuf_add"},
-            {"tcp_recv", "vtcp_recv"}, {"tcp_send", "vtcp_send"},
-        };
-        if (name == "proc_run" && args.size() == 3) {
-            return borrow_builtin("vproc_run_to", args);
-        }
-        if (auto it = BORROW_1.find(name); it != BORROW_1.end()) {
-            need_arity(args, 1, name);
-            return borrow_builtin(it->second, args);
-        }
-        if (auto it = BORROW_2.find(name); it != BORROW_2.end()) {
-            need_arity(args, 2, name);
-            return borrow_builtin(it->second, args);
-        }
-        if (name == "https_request_raw") {
-            need_arity(args, 4, name);
-            return borrow_builtin("vhttps_request_raw", args);
-        }
-        if (name == "sql_query") {
-            need_arity(args, 3, name);
-            return borrow_builtin("vsql_query", args);
-        }
-        if (name == "sbuf") {
-            need_arity(args, 0, name);
-            return {{}, "vsbuf()"};
-        }
-        if (name == "stdin_read_line") {
-            need_arity(args, 0, name);
-            return {{}, "vstdin_read_line()"};
-        }
-        if (name == "chan") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            return {a.pre, cat("vchan_new(", a.val, ")")};
-        }
-        if (name == "join_all") {
-            need_arity(args, 0, name);
-            return {{}, "(vjoin_all(), vint(0))"};
-        }
-        if (name == "args") {
-            need_arity(args, 0, name);
-            return {{}, "vargs()"};
-        }
-        if (name == "args_bytes") {
-            need_arity(args, 0, name);
-            return {{}, "vargs_bytes()"};
-        }
-        if (name == "exit") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            return {a.pre, cat("(vexit(", a.val, "), vint(0))")};
-        }
-        if (name == "eprint") {
-            V a = args_vec(args);
-            std::vector<std::string> pre = a.pre;
-            pre.push_back(cat("veprint(", a.val, ");"));
-            pre.push_back(cat("vargs_drop(", a.val, ");"));
-            return {pre, "vint(0)"};
-        }
-        if (name == "raise") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            std::vector<std::string> pre = a.pre;
-            pre.push_back(cat("vraisev(", keep(*args[0], a.val), ");"));
-            pre.push_back(err_bail());
-            return {pre, "vnil()"};
-        }
-        if (name == "own") {
-            need_arity(args, 1, name);
-            V a = ex(*args[0]);
-            return {a.pre, cat("vown(", a.val, ")")};
-        }
-        if (name == "$arena_enter" || name == "$arena_leave") {
-            need_arity(args, 0, name);
-            std::string fn = name == "$arena_enter" ? "varena_enter" : "varena_leave";
-            return {{cat(fn, "();")}, "vint(0)"};
-        }
-        if (name == "time_ms") {
-            need_arity(args, 0, name);
-            return {{}, "vtime_ms()"};
-        }
-        if (name == "mono_ns") {
-            need_arity(args, 0, name);
-            return {{}, "vmono_ns()"};
-        }
+    static const std::map<std::string, std::pair<const char *, size_t>> BORROW_CALLS = {
+        {"read_file", {"vreadfile", 1}}, {"read_bytes", {"vreadbytes", 1}},
+        {"utf8_bytes", {"vutf8_bytes", 1}}, {"utf8_str", {"vutf8_str", 1}},
+        {"json_parse", {"vjson_parse", 1}}, {"fs_exists", {"vfs_exists", 1}},
+        {"fs_is_dir", {"vfs_is_dir", 1}}, {"fs_file_size", {"vfs_file_size", 1}},
+        {"fs_mkdir_all", {"vfs_mkdir_all", 1}}, {"fs_list_dir", {"vfs_list_dir", 1}},
+        {"fs_remove_dir", {"vfs_remove_dir", 1}}, {"fs_open", {"vfs_open", 1}},
+        {"fs_read_line", {"vfs_read_line", 1}}, {"fs_close", {"vfs_close", 1}},
+        {"fs_remove", {"vfs_remove", 1}}, {"sha256_bytes", {"vsha256_bytes", 1}},
+        {"random_bytes", {"vrandom_bytes", 1}}, {"sql_open", {"vsql_open", 1}},
+        {"sql_close", {"vsql_close", 1}}, {"tcp_listen", {"vtcp_listen", 1}},
+        {"tcp_connect", {"vtcp_connect", 1}}, {"tcp_accept", {"vtcp_accept", 1}},
+        {"tcp_close", {"vtcp_close", 1}}, {"sbuf_len", {"vsbuf_len", 1}},
+        {"sbuf_str", {"vsbuf_str", 1}}, {"env_get", {"venv_get", 1}},
+        {"env_get_bytes", {"venv_get_bytes", 1}},
+        {"write_file", {"vwritefile", 2}}, {"append_file", {"vappendfile", 2}},
+        {"write_bytes", {"vwritebytes", 2}}, {"proc_run", {"vproc_run", 2}},
+        {"fs_rename", {"vfs_rename", 2}}, {"json_stringify", {"vjson_stringify", 2}},
+        {"sql_exec", {"vsql_exec", 2}}, {"sbuf_add", {"vsbuf_add", 2}},
+        {"tcp_recv", {"vtcp_recv", 2}}, {"tcp_send", {"vtcp_send", 2}},
+        {"sql_query", {"vsql_query", 3}},
+        {"https_request_raw", {"vhttps_request_raw", 4}},
+    };
+    if (name == "proc_run" && args.size() == 3)
+        return borrow_builtin("vproc_run_to", args);
+    if (auto bc = BORROW_CALLS.find(name); bc != BORROW_CALLS.end()) {
+        need_arity(args, bc->second.second, name);
+        return borrow_builtin(bc->second.first, args);
+    }
+    static const std::map<std::string, const char *> ZERO_ARG_CALLS = {
+        {"sbuf", "vsbuf()"}, {"stdin_read_line", "vstdin_read_line()"},
+        {"join_all", "(vjoin_all(), vint(0))"}, {"args", "vargs()"},
+        {"args_bytes", "vargs_bytes()"}, {"time_ms", "vtime_ms()"},
+        {"mono_ns", "vmono_ns()"}, {"ptr_null", "vint(0)"},
+        {"errno", "vint(errno)"},
+    };
+    if (auto zc = ZERO_ARG_CALLS.find(name); zc != ZERO_ARG_CALLS.end()) {
+        need_arity(args, 0, name);
+        return {{}, zc->second};
+    }
+    static const std::map<std::string, std::pair<const char *, const char *>> UNARY_EXPR_CALLS = {
+        {"chan", {"vchan_new(", ")"}},
+        {"exit", {"(vexit(", "), vint(0))"}},
+        {"sleep_ms", {"(vsleep_ms(", "), vint(0))"}},
+        {"ptr_is_null", {"vbool((", ").as.ival == 0)"}},
+        {"ptr_of_str", {"vptr_of_str(", ")"}},
+        {"strerror", {"vstr_c_checked(strerror((int)(",
+                      ").as.ival), \"strerror: NULL message\", \"strerror: invalid UTF-8\")"}},
+    };
+    if (auto uc = UNARY_EXPR_CALLS.find(name); uc != UNARY_EXPR_CALLS.end()) {
         need_arity(args, 1, name);
         V a = ex(*args[0]);
-        return {a.pre, cat("(vsleep_ms(", a.val, "), vint(0))")};
+        return {a.pre, cat(uc->second.first, a.val, uc->second.second)};
+    }
+    if (name == "eprint") {
+        V a = args_vec(args);
+        std::vector<std::string> pre = a.pre;
+        pre.push_back(cat("veprint(", a.val, ");"));
+        pre.push_back(cat("vargs_drop(", a.val, ");"));
+        return {pre, "vint(0)"};
+    }
+    if (name == "raise") {
+        need_arity(args, 1, name);
+        V a = ex(*args[0]);
+        std::vector<std::string> pre = a.pre;
+        pre.push_back(cat("vraisev(", keep(*args[0], a.val), ");"));
+        pre.push_back(err_bail());
+        return {pre, "vnil()"};
+    }
+    if (name == "$arena_enter" || name == "$arena_leave") {
+        need_arity(args, 0, name);
+        return {{cat(name == "$arena_enter" ? "varena_enter" : "varena_leave", "();")}, "vint(0)"};
     }
     if (name == "slice_of" || name == "slice_of_ptr" || name == "slice_len" || name == "slice_get" ||
         name == "slice_set" || name == "str_from_ptr" || name == "slice_of_struct" ||
@@ -10450,37 +10274,12 @@ V Emitter::ex_call(const Expr &e) {
         return ex_slice(name, args);
     if (name == "lib_open" || name == "lib_sym" || name == "lib_close" || name == "call")
         return ex_plugin(name, args);
-    if (name == "ptr_null") {
-        need_arity(args, 0, name);
-        return {{}, "vint(0)"};
-    }
-    if (name == "ptr_is_null") {
-        need_arity(args, 1, name);
-        V a = ex(*args[0]);
-        return {a.pre, cat("vbool((", a.val, ").as.ival == 0)")};
-    }
     if (name == "ptr_offset") {
         need_arity(args, 2, name);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
+        V a = ex(*args[0]), b = ex(*args[1]);
         std::vector<std::string> pre = a.pre;
         for (auto &p : b.pre) pre.push_back(p);
         return {pre, cat("vint((int64_t)((char *)(", a.val, ").as.ival + (", b.val, ").as.ival))")};
-    }
-    if (name == "ptr_read_f32") {
-        need_arity(args, 1, name);
-        V a = ex(*args[0]);
-        return {a.pre, cat("((vptr_live(", a.val, ")) ? vfloat((double)*(float *)(",
-                           a.val, ").as.ival) : vunwind)")};
-    }
-    if (name == "ptr_write_f32") {
-        need_arity(args, 2, name);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
-        std::vector<std::string> pre = a.pre;
-        for (auto &p : b.pre) pre.push_back(p);
-        return {pre, cat("((vptr_live(", a.val, ")) ? ((*(float *)(", a.val,
-                         ").as.ival = (float)(", b.val, ").as.fval), vint(0)) : vunwind)")};
     }
     if (name == "ptr_read_struct") {
         need_arity(args, 2, name);
@@ -10497,16 +10296,14 @@ V Emitter::ex_call(const Expr &e) {
     }
     if (name == "ptr_write_struct") {
         need_arity(args, 3, name);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
+        V a = ex(*args[0]), b = ex(*args[1]);
         const Expr &tn = *args[2];
         if (tn.k != EK::Str) throw EmitError("ptr_write_struct wants a struct name as a string literal");
         if (!structs.count(tn.a)) throw EmitError("ptr_write_struct: " + tn.a + " is not an extern struct");
         std::vector<std::string> pre = a.pre;
         for (auto &p : b.pre) pre.push_back(p);
         if (dec_able(*args[1], heap_returns())) {
-            std::string ws = new_tmp("ws");
-            std::string wr = new_tmp("wr");
+            std::string ws = new_tmp("ws"), wr = new_tmp("wr");
             pre.push_back(cat("Val ", ws, " = (", b.val, ");"));
             pre.push_back(cat("Val ", wr, " = vunwind;"));
             pre.push_back(cat("if (vptr_live(", a.val, ")) { *(bf_", tn.a, " *)(", a.val, ").as.ival = ",
@@ -10517,54 +10314,35 @@ V Emitter::ex_call(const Expr &e) {
         std::string stmt = cat("*(", "bf_", tn.a, " *)(", a.val, ").as.ival = ", val_to_c_struct(tn.a, b.val, true));
         return {pre, cat("((vptr_live(", a.val, ")) ? ((", stmt, "), (verr_pending() ? vunwind : vint(0))) : vunwind)")};
     }
-    if (name == "ptr_read_i64" || name == "ptr_read_f64" || name == "ptr_read_ptr" ||
-        name == "ptr_read_str") {
+    static const std::map<std::string, std::pair<const char *, const char *>> PTR_READS = {
+        {"ptr_read_i64", {"vint(*(int64_t *)(", ").as.ival)"}},
+        {"ptr_read_f32", {"vfloat((double)*(float *)(", ").as.ival)"}},
+        {"ptr_read_f64", {"vfloat(*(double *)(", ").as.ival)"}},
+        {"ptr_read_ptr", {"vint((int64_t)*(void **)(", ").as.ival)"}},
+        {"ptr_read_str", {"vstr_ptr_read((const char *)(", ").as.ival)"}},
+    };
+    if (auto pr = PTR_READS.find(name); pr != PTR_READS.end()) {
         need_arity(args, 1, name);
         V a = ex(*args[0]);
-        std::string deref;
-        if (name == "ptr_read_i64") deref = cat("vint(*(int64_t *)(", a.val, ").as.ival)");
-        else if (name == "ptr_read_f64") deref = cat("vfloat(*(double *)(", a.val, ").as.ival)");
-        else if (name == "ptr_read_ptr") deref = cat("vint((int64_t)*(void **)(", a.val, ").as.ival)");
-        else deref = cat("vstr_ptr_read((const char *)(", a.val, ").as.ival)");
-        return {a.pre, cat("((vptr_live(", a.val, ")) ? ", deref, " : vunwind)")};
+        return {a.pre, cat("((vptr_live(", a.val, ")) ? ", pr->second.first, a.val, pr->second.second, " : vunwind)")};
     }
-    if (name == "ptr_write_i64" || name == "ptr_write_f64" || name == "ptr_write_ptr" ||
-        name == "ptr_write_str") {
+    static const std::map<std::string, std::pair<const char *, const char *>> PTR_WRITES = {
+        {"ptr_write_i64", {"(*(int64_t *)(", ").as.ival)"}},
+        {"ptr_write_f32", {"(*(float *)(", ").as.fval)"}},
+        {"ptr_write_f64", {"(*(double *)(", ").as.fval)"}},
+        {"ptr_write_ptr", {"(*(void **)(", ").as.ival)"}},
+    };
+    if (name == "ptr_write_str" || PTR_WRITES.count(name)) {
         need_arity(args, 2, name);
-        V a = ex(*args[0]);
-        V b = ex(*args[1]);
+        V a = ex(*args[0]), b = ex(*args[1]);
         std::vector<std::string> pre = a.pre;
         for (auto &p : b.pre) pre.push_back(p);
-        std::string store;
-        if (name == "ptr_write_i64")
-            store = cat("(*(int64_t *)(", a.val, ").as.ival = (", b.val, ").as.ival)");
-        else if (name == "ptr_write_f64")
-            store = cat("(*(double *)(", a.val, ").as.ival = (", b.val, ").as.fval)");
-        else if (name == "ptr_write_ptr")
-            store = cat("(*(void **)(", a.val, ").as.ival = (void *)(", b.val, ").as.ival)");
         if (name == "ptr_write_str")
             return {pre, cat("vptr_write_str(", a.val, ", ", b.val, ")")};
-        return {pre, cat("((vptr_live(", a.val, ")) ? (", store, ", vint(0)) : vunwind)")};
-    }
-    if (name == "ptr_of_str") {
-        need_arity(args, 1, name);
-        V a = ex(*args[0]);
-        return {a.pre, cat("vptr_of_str(", a.val, ")")};
-    }
-    if (name == "errno") {
-        need_arity(args, 0, name);
-        return {{}, "vint(errno)"};
-    }
-    if (name == "strerror") {
-        need_arity(args, 1, name);
-        V a = ex(*args[0]);
-        return {a.pre, cat("vstr_c_checked(strerror((int)(", a.val,
-                            ").as.ival), \"strerror: NULL message\", "
-                            "\"strerror: invalid UTF-8\")")};
-    }
-    if (name == "env_get" || name == "env_get_bytes") {
-        need_arity(args, 1, name);
-        return borrow_builtin(name == "env_get" ? "venv_get" : "venv_get_bytes", args);
+        const char *rhs_cast = name == "ptr_write_f32" ? "(float)(" : name == "ptr_write_ptr" ? "(void *)(" : "(";
+        const auto [lhs_pre, rhs_suf] = PTR_WRITES.at(name);
+        return {pre, cat("((vptr_live(", a.val, ")) ? ((", lhs_pre, a.val, ").as.ival = ",
+                         rhs_cast, b.val, rhs_suf, "), vint(0)) : vunwind)")};
     }
     if (name == "re_match" || name == "re_find" || name == "re_captures" || name == "re_replace") {
         int want_n = (name == "re_replace") ? 3 : 2;

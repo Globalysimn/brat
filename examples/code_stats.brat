@@ -1,0 +1,352 @@
+import std.cli
+import std.crypto
+import std.fs
+import std.json
+import std.path
+
+struct LangSpec {
+  ext: str,
+  name: str,
+  line_comment: str,
+  block_open: str,
+  block_close: str,
+}
+
+struct LangTotals {
+  name: str,
+  files: i64,
+  blank: i64,
+  comment: i64,
+  code: i64,
+}
+
+enum ScanItem {
+  FileStats(str, i64, i64, i64, str),
+  Unsupported,
+}
+
+fn spec(ext: str, name: str, lc: str, bo: str, bc: str) -> LangSpec {
+  return LangSpec { ext: ext, name: name, line_comment: lc, block_open: bo, block_close: bc }
+}
+
+fn totals(name: str, files: i64, blank: i64, comment: i64, code: i64) -> LangTotals {
+  return LangTotals { name: name, files: files, blank: blank, comment: comment, code: code }
+}
+
+fn language_table() -> vec[LangSpec] {
+  return [
+    spec(".brat", "BRAT", "//", "/*", "*/"),
+    spec(".c", "C", "//", "/*", "*/"),
+    spec(".h", "C Header", "//", "/*", "*/"),
+    spec(".cpp", "C++", "//", "/*", "*/"),
+    spec(".py", "Python", "#", "", ""),
+    spec(".sh", "Shell", "#", "", ""),
+    spec(".md", "Markdown", "", "", ""),
+    spec(".json", "JSON", "", "", ""),
+  ]
+}
+
+fn lookup_lang(specs: vec[LangSpec], path: str) -> Option[LangSpec] {
+  let ext = std.path.ext(path).lower()
+  for s in specs {
+    if s.ext == ext {
+      return Some(s)
+    }
+  }
+  return None
+}
+
+// Returns [class_tag, next_in_block] where class_tag: 0 = blank, 1 = comment, 2 = code.
+fn classify_line(raw: str, lang: LangSpec, in_block_init: i64) -> vec[i64] {
+  let trimmed = raw.trim()
+  if len(trimmed) == 0 {
+    return [0, in_block_init]
+  }
+  if len(lang.line_comment) == 0 && len(lang.block_open) == 0 {
+    return [2, 0]
+  }
+  let n = len(trimmed)
+  let mut i = 0
+  let mut in_block = in_block_init
+  let mut in_str = false
+  let mut str_delim = ""
+  let mut saw_code = false
+  let mut saw_comment = in_block_init != 0
+  let lc_len = len(lang.line_comment)
+  let bo_len = len(lang.block_open)
+  let bc_len = len(lang.block_close)
+
+  while i < n {
+    let ch = trimmed[i]
+    if in_block != 0 {
+      saw_comment = true
+      if bc_len > 0 && i + bc_len <= n && trimmed.slice(i, i + bc_len) == lang.block_close {
+        in_block = 0
+        i = i + bc_len
+      } else {
+        i = i + 1
+      }
+    } else if in_str {
+      saw_code = true
+      if ch == "\\" && i + 1 < n {
+        i = i + 2
+      } else {
+        if ch == str_delim {
+          in_str = false
+        }
+        i = i + 1
+      }
+    } else if ch == " " || ch == "\t" || ch == "\r" {
+      i = i + 1
+    } else if lc_len > 0 && i + lc_len <= n && trimmed.slice(i, i + lc_len) == lang.line_comment {
+      saw_comment = true
+      i = n
+    } else if bo_len > 0 && i + bo_len <= n && trimmed.slice(i, i + bo_len) == lang.block_open {
+      saw_comment = true
+      in_block = 1
+      i = i + bo_len
+    } else {
+      saw_code = true
+      if ch == "\"" || ch == "'" {
+        in_str = true
+        str_delim = ch
+      }
+      i = i + 1
+    }
+  }
+  if saw_code {
+    return [2, in_block]
+  }
+  if saw_comment {
+    return [1, in_block]
+  }
+  return [0, in_block]
+}
+
+fn scan_text(text: str, lang: LangSpec) -> ScanItem {
+  arena {
+    let mut blank = 0
+    let mut comment = 0
+    let mut code = 0
+    let mut in_block = 0
+    for line in text.lines() {
+      let step = classify_line(line, lang, in_block)
+      in_block = step[1]
+      if step[0] == 2 {
+        code = code + 1
+      } else if step[0] == 1 {
+        comment = comment + 1
+      } else {
+        blank = blank + 1
+      }
+    }
+    let digest = unwrap(std.crypto.sha256_hex(text))
+    return own(FileStats(lang.name, blank, comment, code, digest))
+  }
+}
+
+fn scan_file(path: str, specs: vec[LangSpec], ext_filter: vec[str]) -> Result[ScanItem, str] {
+  if len(ext_filter) > 0 {
+    let ext = std.path.ext(path).lower()
+    let mut keep = false
+    for want in ext_filter {
+      if ext == want {
+        keep = true
+      }
+    }
+    if !keep {
+      return Ok(Unsupported)
+    }
+  }
+  match lookup_lang(specs, path) {
+    None => return Ok(Unsupported),
+    Some(lang) => {
+      let text = read_file(path)?
+      return Ok(scan_text(text, lang))
+    }
+  }
+}
+
+fn collect_files(roots: vec[str]) -> Result[vec[str], str] {
+  let mut files: vec[str] = []
+  let mut queue: vec[str] = []
+  for r in roots {
+    queue.push(r + "")
+  }
+  let mut head = 0
+  while head < len(queue) {
+    let cur = queue[head] + ""
+    head = head + 1
+    if std.fs.is_dir(cur) {
+      let mut entries = std.fs.list_dir(cur)?
+      entries.sort()
+      for e in entries {
+        if e != ".git" && e != "build" && e != "node_modules" && e != "__pycache__" {
+          queue.push(std.path.join(cur, e))
+        }
+      }
+    } else if std.fs.is_file(cur) {
+      files.push(cur)
+    } else {
+      return Err("path not found: " + cur)
+    }
+  }
+  return Ok(files)
+}
+
+fn pad_col(s: str, width: i64, left: bool) -> str {
+  let mut out = s + ""
+  while len(out) < width {
+    if left {
+      out = " " + out
+    } else {
+      out = out + " "
+    }
+  }
+  return out
+}
+
+fn merge_stats(rows: vec[LangTotals], lang: str, blank: i64, comment: i64, code: i64) -> vec[LangTotals] {
+  let mut out: vec[LangTotals] = []
+  let mut matched = false
+  for r in rows {
+    if r.name == lang {
+      matched = true
+      out.push(totals(r.name + "", r.files + 1, r.blank + blank, r.comment + comment, r.code + code))
+    } else {
+      out.push(totals(r.name + "", r.files, r.blank, r.comment, r.code))
+    }
+  }
+  if !matched {
+    out.push(totals(lang + "", 1, blank, comment, code))
+  }
+  return out
+}
+
+fn sort_totals(rows: vec[LangTotals]) -> vec[LangTotals] {
+  let mut out: vec[LangTotals] = []
+  let mut used: vec[bool] = []
+  for _r in rows {
+    used.push(false)
+  }
+  let n = len(rows)
+  let mut step = 0
+  while step < n {
+    let mut best = -1
+    for i in 0..n {
+      if !used[i] && (best < 0 || rows[i].code > rows[best].code || (rows[i].code == rows[best].code && rows[i].name < rows[best].name)) {
+        best = i
+      }
+    }
+    used[best] = true
+    let b = rows[best]
+    out.push(totals(b.name + "", b.files, b.blank, b.comment, b.code))
+    step = step + 1
+  }
+  return out
+}
+
+fn format_row(name: str, files: i64, blank: i64, comment: i64, code: i64) -> str {
+  return pad_col(name, 12, false) + pad_col(str(files), 7, true) + pad_col(str(blank), 8, true) + pad_col(str(comment), 9, true) + pad_col(str(code), 8, true)
+}
+
+fn format_report(rows: vec[LangTotals], manifest_hash: str, want_json: bool) -> str {
+  let sorted = sort_totals(rows)
+  let mut tot_files = 0
+  let mut tot_blank = 0
+  let mut tot_comment = 0
+  let mut tot_code = 0
+  let mut lines: vec[str] = [
+    pad_col("Language", 12, false) + pad_col("Files", 7, true) + pad_col("Blank", 8, true) + pad_col("Comment", 9, true) + pad_col("Code", 8, true)
+  ]
+  let mut items = []
+  for r in sorted {
+    tot_files = tot_files + r.files
+    tot_blank = tot_blank + r.blank
+    tot_comment = tot_comment + r.comment
+    tot_code = tot_code + r.code
+    lines.push(format_row(r.name, r.files, r.blank, r.comment, r.code))
+    items.push({ "language": r.name, "files": r.files, "blank": r.blank, "comment": r.comment, "code": r.code })
+  }
+  if want_json {
+    return std.json.stringify({ "files": tot_files, "code": tot_code, "manifest_sha256": manifest_hash, "languages": items })
+  }
+  lines.push(format_row("Total", tot_files, tot_blank, tot_comment, tot_code))
+  lines.push("manifest_sha256: " + manifest_hash.slice(0, 16))
+  return lines.join("\n")
+}
+
+fn parse_ext_filter(raw: str) -> vec[str] {
+  let mut out: vec[str] = []
+  for part in raw.split(",") {
+    let clean = part.trim().lower()
+    if len(clean) > 0 {
+      if clean.starts_with(".") { out.push(clean) } else { out.push("." + clean) }
+    }
+  }
+  return out
+}
+
+fn run_self_test(specs: vec[LangSpec]) -> Result[str, str] {
+  let sample_brat = "// header\n\nlet u = \"http://example/*not_comment*/\"\n/* open\n   still comment */\nlet x = 1 /* inline */\n"
+  let probe = "_code_stats_probe.h"
+  let _w = std.fs.write_atomic(probe, "#pragma once\n/* header */\ndouble hypot(double x, double y);\n")?
+  defer std.fs.remove(probe)
+  let mut rows: vec[LangTotals] = []
+  let items = [
+    scan_text(sample_brat, unwrap(lookup_lang(specs, "demo.brat"))),
+    scan_text("# note\n\nx = '# literal'\n", unwrap(lookup_lang(specs, "script.py"))),
+    scan_file(probe, specs, [".h"])?,
+  ]
+  for it in items {
+    match it {
+      Unsupported => {},
+      FileStats(lang, blank, comment, code, _d) => { rows = merge_stats(rows, lang, blank, comment, code) },
+    }
+  }
+  let sorted = sort_totals(rows)
+  assert(len(sorted) == 3)
+  let mut code_sum = 0
+  for r in sorted {
+    code_sum = code_sum + r.code
+  }
+  assert(code_sum == 5)
+  return Ok("code_stats: self-test ok (3 languages, " + str(code_sum) + " code lines)")
+}
+
+fn run_cli(argv: vec[str]) -> Result[str, str] {
+  let specs = language_table()
+  if std.cli.has_flag(argv, "--help") || std.cli.has_flag(argv, "-h") {
+    return Ok("usage: code_stats [--json] [--ext .brat,.h] [path ...]")
+  }
+  let want_json = std.cli.has_flag(argv, "--json")
+  let ext_filter = parse_ext_filter(std.cli.opt(argv, "--ext", ""))
+  let roots = std.cli.positional(argv, ["--ext"])
+  if len(roots) == 0 {
+    return run_self_test(specs)
+  }
+  let files = collect_files(roots)?
+  let mut rows: vec[LangTotals] = []
+  let mut manifest_entries: vec[str] = []
+  for f in files {
+    match scan_file(f, specs, ext_filter)? {
+      Unsupported => {},
+      FileStats(lang, blank, comment, code, digest) => {
+        manifest_entries.push(f + ":" + digest)
+        rows = merge_stats(rows, lang, blank, comment, code)
+      }
+    }
+  }
+  let manifest_hash = std.crypto.sha256_hex(manifest_entries.join("\n"))?
+  return Ok(format_report(rows, manifest_hash, want_json))
+}
+
+fn main() {
+  match run_cli(args()) {
+    Ok(out) => print(out),
+    Err(msg) => {
+      eprint("code_stats: " + msg)
+      exit(1)
+    }
+  }
+}

@@ -724,6 +724,11 @@ static void scan_sink_expr(const Expr *e, const std::set<std::string> &sinks,
             std::string fv = first_var(*e->kids[j]);
             if (!fv.empty() && sinks.count(fv) && !locals.count(fv)) has_sink_arg = true;
         }
+        if ((e->a == "slice_set" || e->a == "ptr_write_str" || e->a == "ptr_write_ptr" ||
+             e->a == "ptr_write_struct") && !e->kids.empty()) {
+            auto dv = deps_of_expr(e->kids.back().get(), deps);
+            sink_params.insert(dv.begin(), dv.end());
+        }
         if (has_sink_arg && !pure_read_builtin(e->a))
             sink_params.insert(all_d.begin(), all_d.end());
     }
@@ -827,9 +832,11 @@ void collect_sigs(const std::vector<StmtP> &prog, Sigs &sigs) {
             params = &node.fns[0].params;
             sig.ret = ann_type(node.fns[0].ret);
         }
-        for (const auto &p : *params) {
+        for (size_t pi = 0; pi < params->size(); pi++) {
+            const auto &p = (*params)[pi];
             sig.params.push_back(ann_type(p.ann));
             sig.param_anns.push_back(p.ann);
+            if (p.mode == Mode::Mut) sig.mut_params.insert(pi);
             if (p.def) sig.ndef++;
         }
         sig.ret_ann = node.k == SK::Extern ? node.ext.ret : node.fns[0].ret;
@@ -1169,6 +1176,25 @@ struct FnTyper {
         return sp;
     }
 
+    static bool safe_immut_ty(const Ty &t, int d, bool ia) {
+        if (d > 8) return false;
+        if (t.k == Ty::Bool || t.k == Ty::Float || t.k == Ty::Str || t.k == Ty::None)
+            return true;
+        if (t.k == Ty::Int) return ia;
+        if (t.k == Ty::Vec || t.k == Ty::Option)
+            return t.inner && safe_immut_ty(*t.inner, d + 1, true);
+        if (t.k == Ty::Result)
+            return t.inner && t.inner2 && safe_immut_ty(*t.inner, d + 1, true) &&
+                   safe_immut_ty(*t.inner2, d + 1, true);
+        if (t.k == Ty::Struct) {
+            if (t.fields.empty()) return false;
+            for (const auto &f : t.fields)
+                if (!safe_immut_ty(f.type, d + 1, true)) return false;
+            return true;
+        }
+        return false;
+    }
+
     void check_arena_call_expr(const Expr &e) {
         if (current_region() == 0 || !arena_checked.insert(&e).second) return;
         if (e.k == EK::MCall) {
@@ -1215,12 +1241,28 @@ struct FnTyper {
                 }
                 return;
             }
+            if (sigs.count(e.a) && sigs.at(e.a).is_ctor) return;
             if (sigs.count(e.a) || env.count(e.a) || local_fn_sinks.count(e.a)) {
+                const FnSig *callee_sig = sigs.count(e.a) ? &sigs.at(e.a) : nullptr;
                 bool escapes_any = false, outer = false;
-                for (const auto &a : e.kids) {
-                    if (escapes(*a) || closure_captures_arena(*a)) escapes_any = true;
-                    std::string fv = first_var(*a);
-                    if (!fv.empty() && !inner(fv)) outer = true;
+                for (size_t k = 0; k < e.kids.size(); k++) {
+                    const Expr &ak = *e.kids[k];
+                    if (escapes(ak) || closure_captures_arena(ak)) escapes_any = true;
+                    std::string fv = first_var(ak);
+                    if (fv.empty() || inner(fv)) continue;
+                    bool is_out_addr = (ak.k == EK::Un && ak.a == "&");
+                    auto eit = env.find(fv);
+                    if (!is_out_addr && eit != env.end()) {
+                        const Ty &ft = eit->second;
+                        bool ann = annotated_vars.count(fv) > 0;
+                        if (ft.k == Ty::Bool || ft.k == Ty::Float || ft.k == Ty::Str ||
+                            (ft.k == Ty::Int && ann))
+                            continue;
+                        if (callee_sig && !callee_sig->extern_fn &&
+                            !callee_sig->mut_params.count(k) && safe_immut_ty(ft, 0, ann))
+                            continue;
+                    }
+                    outer = true;
                 }
                 if (!escapes_any) return;
                 if (outer) {

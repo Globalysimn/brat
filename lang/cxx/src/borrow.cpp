@@ -1018,7 +1018,10 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
         check_expr(e->kids[0].get(), decl, errs, funcs);
         check_expr(e->kids[1].get(), decl, errs, funcs);
         Decls sub = decl;
-        sub.set(e->a, bare_decl());     // the loop variable is bound by the body
+        Decl pd = bare_decl();
+        pd.copy = true;
+        pd.ann = "i64";
+        sub.set(e->a, std::move(pd));   // the range counter is always an i64 value
         Borrows none;
         walk_block(wrap(e->fn->body), sub, none, errs, funcs);
         break;
@@ -2079,10 +2082,11 @@ void escaping_refs_name(const std::string &name, const Decls &decl, Errs &errs) 
 
 // Walk a loop body twice: a `move` legal on pass one is a use-after-move on two.
 void walk_loop(const Body &body, Decls &decl, Borrows &borrows, Errs &errs, FnTable &funcs,
-               const std::optional<std::string> &varname = std::nullopt) {
+               const std::optional<std::string> &varname = std::nullopt,
+               const Decl *vdecl = nullptr) {
     auto one = [&]() {
         Decls sub = copy_decl(decl);
-        if (varname) sub.set(*varname, bare_decl());
+        if (varname) sub.set(*varname, vdecl ? *vdecl : bare_decl());
         Borrows bs = copy_borrows(borrows);
         walk_block(body, sub, bs, errs, funcs);
         return sub;
@@ -2346,13 +2350,24 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         // Only a *place* pins the walk: `for x in v.copy()` walks a fresh
         // container and `path_of` answers nullopt for a call; a range pins
         // nothing, so `for i in 0..3 { v.push(i) }` stays legal.
+        Decl iter_d = bare_decl();
+        if (auto ia = infer_expr_ann(s.e1.get(), decl, &funcs)) {
+            if (starts_with(*ia, "vec[") && ends_with(*ia, "]")) {
+                std::string el = trim_ann(ia->substr(4, ia->size() - 5));
+                if (!el.empty()) {
+                    iter_d.ann = el;
+                    iter_d.copy = COPY_ANNS.count(el) > 0;
+                }
+            }
+        }
+        if (!iter_d.copy && elem_copy(decl, s.e1.get())) iter_d.copy = true;
         std::optional<std::string> ip = path_of(s.e1.get());
         if (!ip) {
-            walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a);
+            walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a, &iter_d);
             return;
         }
         errs.iters.emplace_back(root_of(*ip), errs.line);
-        walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a);
+        walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a, &iter_d);
         errs.iters.pop_back();
         return;
     }
@@ -2363,7 +2378,10 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
             std::vector<std::pair<std::string, std::string>> claimed;
             scan_calls(b, decl, borrows, errs, funcs, claimed);
         }
-        walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a);
+        Decl rd = bare_decl();
+        rd.copy = true;
+        rd.ann = "i64";
+        walk_loop(wrap(s.body), decl, borrows, errs, funcs, s.a, &rd);
         return;
     }
     case SK::Break:

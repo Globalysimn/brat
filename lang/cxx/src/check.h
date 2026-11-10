@@ -125,6 +125,7 @@ struct FnSig {
     // written, and nowhere else.
     bool extern_fn = false;
     bool is_ctor = false;
+    std::set<size_t> mut_params;
     std::set<size_t> sink_params;
     std::vector<SinkEdge> sink_edges;
 };

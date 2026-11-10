@@ -104,7 +104,7 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
     and returns `Err(e)` / `None` early.
   - Otherwise unwraps `Ok(v)` and raises `e` into the thread-local error channel
     caught by `try { ... } catch err { ... }`.
-- `defer { ... }` blocks run in LIFO order on every lexical scope exit (`normal`,
+- `defer expr` statements run in LIFO order on every lexical scope exit (`normal`,
   `return`, `break`, `continue`, `?`, and `raise`).
 - Call depth is capped at 2,000 frames alongside a 64-frame stack-floor probe,
   raising a catchable `recursion limit exceeded` error before stack exhaustion.

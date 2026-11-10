@@ -38,6 +38,7 @@ def test_examples_directory() -> None:
         ("sqlite_kv.brat", [], "42\n"),
         ("parallel_sum.brat", [], "338350\n"),
         ("c_ffi_math.brat", ["--header", os.path.join(ex_dir, "c_ffi_math.h")], "5.0 40.0\n"),
+        ("code_stats.brat", [], "code_stats: self-test ok (3 languages, 5 code lines)\n"),
     ]
     with tempfile.TemporaryDirectory(prefix="brat-examples-") as td:
         for fname, extra_flags, expected_out in cases:
@@ -236,8 +237,156 @@ fn main() {
               f"Valgrind error/leak in multithreaded worker pool (rc={r_par.returncode}):\nstdout={r_par.stdout!r}\nstderr={r_par.stderr}")
 
 
+def test_soundness_and_dogfood_regressions() -> None:
+    ex_cs = os.path.join(ROOT, "examples", "code_stats.brat")
+    r_json = subprocess.run(
+        [BIN, "run", ex_cs, "--", "--json", "--ext", ".brat,.h", "."],
+        capture_output=True, text=True, timeout=60,
+    )
+    check(r_json.returncode == 0 and '"languages":' in r_json.stdout and '"manifest_sha256":' in r_json.stdout,
+          f"code_stats --json failed: {r_json.stdout!r} {r_json.stderr!r}")
+
+    with tempfile.TemporaryDirectory(prefix="brat-soundness-reg-") as td:
+        prog = os.path.join(td, "reg.brat")
+        with open(prog, "w", encoding="utf-8") as f:
+            f.write("""enum Packet {
+  Empty,
+  Data(str, vec[i64]),
+}
+
+struct Pair {
+  a: i64,
+  b: i64,
+}
+
+fn sra_else_fn(cond: bool) -> i64 {
+  let p = Pair { a: 17, b: 25 }
+  if cond {
+    return p.a
+  } else {
+    fn read_p(q: Pair) -> i64 { return q.a + q.b }
+    return read_p(p)
+  }
+}
+
+fn inspect_with_outer(s: str, cfg: Pair, flag: bool) -> i64 {
+  if flag {
+    return len(s) + cfg.a
+  }
+  return len(s) + cfg.b
+}
+
+fn arena_enum_promote(tag_id: i64) -> Packet {
+  let cfg = Pair { a: 3, b: 4 }
+  arena {
+    let s = "arena_heap_payload_" + str(tag_id)
+    let n = inspect_with_outer(s, cfg, true)
+    let v = [10, 20, n]
+    return own(Data(s, v))
+  }
+}
+
+fn loop_for_iter_typed(xs: vec[i64]) -> i64 {
+  let mut round = 0
+  let mut acc = 0
+  while round < 3 {
+    for x in xs {
+      acc = acc + x
+    }
+    for i in 0..len(xs) {
+      acc = acc + i
+    }
+    round = round + 1
+  }
+  return acc
+}
+
+fn self_assign_i64(x: i64) -> i64 {
+  let mut a = x
+  a = a
+  if a == 0 {
+    while a == 0 {
+      a = a + 1
+    }
+  }
+  return a
+}
+
+fn self_assign_f64(y: f64) -> f64 {
+  let mut fy = y
+  fy = fy
+  if fy == 5.0 {
+    fy = fy + 1.0
+  }
+  return fy
+}
+
+fn main() {
+  assert(sra_else_fn(false) == 42)
+  assert(sra_else_fn(true) == 17)
+  match arena_enum_promote(99) {
+    Data(s, v) => {
+      assert(s == "arena_heap_payload_99")
+      assert(len(v) == 3 && v[2] == 24)
+    },
+    Empty => assert(false),
+  }
+  let hv = own([100, 200, 300])
+  let hs = own("heap_prefix_over_14_" + str(77))
+  assert(len(hv) == 3 && len(hs) == 22)
+  assert(loop_for_iter_typed([10, 20, 30]) == 189)
+  assert(self_assign_i64(0) == 1)
+  assert(self_assign_f64(5.0) == 6.0)
+  print("reg_ok")
+}
+""")
+        clang = shutil.which("clang-18") or shutil.which("clang")
+        engine_dir = os.path.join(ROOT, "lang", "engine")
+        for opt in ["-O0", "-O1", "-O2"]:
+            ec = subprocess.run([BIN, "emit-c", opt, prog], capture_output=True, text=True, timeout=60)
+            check(ec.returncode == 0, f"emit-c {opt} failed: {ec.stderr}")
+            c_path = os.path.join(td, f"reg_{opt[1:]}.c")
+            exe_path = os.path.join(td, f"reg_{opt[1:]}.bin")
+            with open(c_path, "w", encoding="utf-8") as cf:
+                cf.write(ec.stdout)
+            if clang:
+                cc_cmd = [
+                    clang, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror",
+                    "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-parameter",
+                    "-Wno-unused-but-set-variable",
+                    "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                    f"-I{engine_dir}", c_path, "-lm", "-lpthread", "-o", exe_path,
+                ]
+                rc = subprocess.run(cc_cmd, capture_output=True, text=True, timeout=60)
+                check(rc.returncode == 0, f"clang -Werror {opt} failed: {rc.stderr}")
+                rr = subprocess.run(
+                    [exe_path],
+                    env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1"),
+                    capture_output=True, text=True, timeout=30,
+                )
+                check(rr.returncode == 0 and rr.stdout == "reg_ok\n",
+                      f"ASAN/LSAN {opt} failed: out={rr.stdout!r} err={rr.stderr!r}")
+
+        # Ensure mutable outer container passed alongside arena value is still rejected.
+        neg = os.path.join(td, "neg_mut.brat")
+        with open(neg, "w", encoding="utf-8") as nf:
+            nf.write("""fn stash(mut dst: vec[str], s: str) { dst.push(s) }
+fn main() {
+  let mut out: vec[str] = []
+  arena {
+    let s = "arena_str_" + str(123)
+    stash(out, s)
+  }
+}
+""")
+        rn = subprocess.run([BIN, "check", neg], capture_output=True, text=True, timeout=30)
+        check(rn.returncode != 0 and "next to an outer binding" in (rn.stdout + rn.stderr),
+              f"expected arena mut-outer rejection, got: {rn.stdout} {rn.stderr}")
+
+
 if __name__ == "__main__":
     test_examples_directory()
+    test_soundness_and_dogfood_regressions()
     test_multi_cu_dwarf5_strx()
     test_o2_leaf_guard_exact_budget()
     test_valgrind_audit()
