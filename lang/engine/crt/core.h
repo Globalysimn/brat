@@ -1594,7 +1594,7 @@ BFN void vdrop_recv_part(Val recv, Val result) {
     }
     if (h == rh) return;
     BHead *rb = (BHead *)rh;
-    if (rb && rb->rc == 1 && !BIS_ARENA(rb)) {
+    if (rb && !BIS_IMMORTAL(rb) && !BIS_ARENA(rb) && BRC_LOAD(rb) == 1) {
         Vec *items = 0;
         if (recv.tag == V_VEC) items = recv.as.vec;
         else if (recv.tag == V_TAG) items = recv.as.tv;

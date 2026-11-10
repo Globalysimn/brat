@@ -1116,8 +1116,16 @@ BFN Val vpred(Val obj, Val fn, const char *meth) {
     return vbool(meth[1] == 'l' ? 1 : 0);
 }
 BFN Val vpos(Val v, Val x) {
+    if (verr_pending()) return vunwind;
     Vec *w = vvec_of_m(v, "pos");
-    for (bint i = 0; i < w->len; i++) if (veq(w->items[i], x)) return vint(i);
+    if (verr_pending() || !w) return vunwind;
+    BRAT_CTR_LOCK_OBJ(w);
+    for (bint i = 0; i < w->len; i++) {
+        int eq = veq(w->items[i], x);
+        if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
+        if (eq) { BRAT_CTR_UNLOCK_OBJ(w); return vint(i); }
+    }
+    BRAT_CTR_UNLOCK_OBJ(w);
     return vnil();
 }
 

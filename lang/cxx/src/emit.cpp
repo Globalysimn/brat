@@ -635,7 +635,8 @@ const std::set<std::string> HEAP_CALLS = {
     "re_find", "re_captures", "re_replace",
     "strerror", "ptr_read_str", "ptr_read_struct",
     "tcp_listen", "tcp_connect", "tcp_accept", "tcp_close",
-    "tcp_recv", "tcp_send", "sbuf", "sbuf_str", "chan", "tagof"};
+    "tcp_recv", "tcp_send", "sbuf", "sbuf_str", "chan", "tagof",
+    "slice_of", "slice_of_ptr", "slice_of_struct", "slice_struct_of", "slice_get", "call"};
 
 bool must_return(const StmtList &body) {
     if (body.empty() || body.back() == nullptr) return false;
@@ -3720,6 +3721,14 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
         std::vector<std::string> pre = b.pre;
         for (auto &p : a.pre) pre.push_back(p);
         for (auto &p : c.pre) pre.push_back(p);
+        if (dec_able(*args[0], heap_returns())) {
+            std::string tb = new_tmp("sb");
+            std::string sr = new_tmp("sl");
+            pre.push_back(cat("Val ", tb, " = ", b.val, ";"));
+            pre.push_back(cat("Val ", sr, " = vslice_of(", tb, ", ", a.val, ", ", c.val, ");"));
+            pre.push_back(cat("vdrop_temp(", tb, ");"));
+            return {pre, sr};
+        }
         return {pre, cat("vslice_of(", b.val, ", ", a.val, ", ", c.val, ")")};
     }
     if (name == "slice_of_ptr") {
@@ -3765,7 +3774,7 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
         for (const auto &kid : lit.kids) {
             V v = ex(*kid);
             for (auto &p : v.pre) pre.push_back(p);
-            vals.push_back(v.val);
+            vals.push_back(keep(*kid, v.val));
         }
         std::string arr = new_tmp("el");
         std::string joined;
@@ -3782,7 +3791,16 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
     if (name == "slice_len") {
         need_arity(args, 1, name);
         V s = ex(*args[0]);
-        return {s.pre, cat("vslice_len(", s.val, ")")};
+        std::vector<std::string> pre = s.pre;
+        if (dec_able(*args[0], heap_returns())) {
+            std::string ts = new_tmp("ts");
+            std::string r = new_tmp("sl");
+            pre.push_back(cat("Val ", ts, " = ", s.val, ";"));
+            pre.push_back(cat("Val ", r, " = vslice_len(", ts, ");"));
+            pre.push_back(cat("vdrop_temp(", ts, ");"));
+            return {pre, r};
+        }
+        return {pre, cat("vslice_len(", s.val, ")")};
     }
     if (name == "slice_get") {
         need_arity(args, 2, name);
@@ -3790,19 +3808,31 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
         V i = ex(*args[1]);
         std::vector<std::string> pre = s.pre;
         for (auto &p : i.pre) pre.push_back(p);
-        // A window over C records hands back the record, not its address: the
-        // element the window declared is the layout to read it with.
+        std::string sval = s.val;
+        std::string ts;
+        if (dec_able(*args[0], heap_returns())) {
+            ts = new_tmp("ts");
+            pre.push_back(cat("Val ", ts, " = ", s.val, ";"));
+            sval = ts;
+        }
         if (std::string se = slice_elem(*args[0]); structs.count(se)) {
             std::string sa = new_tmp("sa");
             std::string r = new_tmp("sr");
-            pre.push_back(cat("Val ", sa, " = vslice_at(", s.val, ", ", i.val, ");"));
+            pre.push_back(cat("Val ", sa, " = vslice_at(", sval, ", ", i.val, ");"));
+            if (!ts.empty()) pre.push_back(cat("vdrop_temp(", ts, ");"));
             pre.push_back(cat("Val ", r, " = vunwind;"));
             pre.push_back(cat("if (vptr_live(", sa, ")) { ", r, " = ",
                               c_struct_to_val(se, cat("(*(bf_", se, " *)(", sa, ").as.ival)")),
                               "; }"));
             return {pre, r};
         }
-        return {pre, cat("vslice_at(", s.val, ", ", i.val, ")")};
+        if (!ts.empty()) {
+            std::string r = new_tmp("sg");
+            pre.push_back(cat("Val ", r, " = vslice_at(", ts, ", ", i.val, ");"));
+            pre.push_back(cat("vdrop_temp(", ts, ");"));
+            return {pre, r};
+        }
+        return {pre, cat("vslice_at(", sval, ", ", i.val, ")")};
     }
     if (name == "slice_set") {
         need_arity(args, 3, name);
@@ -3812,7 +3842,16 @@ V Emitter::ex_slice(const std::string &name, const ExprList &args) {
         std::vector<std::string> pre = s.pre;
         for (auto &p : i.pre) pre.push_back(p);
         for (auto &p : v.pre) pre.push_back(p);
-        return {pre, cat("vslice_set(", s.val, ", ", i.val, ", ", v.val, ")")};
+        std::string vval = keep(*args[2], v.val);
+        if (dec_able(*args[0], heap_returns())) {
+            std::string ts = new_tmp("ts");
+            std::string r = new_tmp("ss");
+            pre.push_back(cat("Val ", ts, " = ", s.val, ";"));
+            pre.push_back(cat("Val ", r, " = vslice_set(", ts, ", ", i.val, ", ", vval, ");"));
+            pre.push_back(cat("vdrop_temp(", ts, ");"));
+            return {pre, r};
+        }
+        return {pre, cat("vslice_set(", s.val, ", ", i.val, ", ", vval, ")")};
     }
     if (name == "str_from_ptr") {
         need_arity(args, 2, name);

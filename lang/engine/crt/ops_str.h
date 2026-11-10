@@ -119,16 +119,31 @@ BFN Val vstr_from_ptr(Val p, Val n) {
  *                                    the elements travel inside the window, so
  *                                    a store cannot outlive its targets.
  * A window whose kind is 7 indexes `elems`; every other kind indexes memory. */
+BFN_HOT Val vat_owned(Val a, Val i);
+
+BFN Vec *_vslice_vec(Val s) {
+    if (verr_pending()) return NULL;
+    if (s.tag != V_TAG || !s.as.tv || !s.as.tv->tag ||
+        strcmp(s.as.tv->tag, "__brat_slice") != 0 || s.as.tv->len < 4) {
+        vraise("not a slice");
+        return NULL;
+    }
+    return s.as.tv;
+}
+
 BFN Val vslice_make(Val base, Val start, Val len, Val kind) {
     Vec *s = vvec();
     vec_push(s, vrc_inc(base));
     vec_push(s, vint(start.as.ival));
     vec_push(s, vint(len.as.ival));
     vec_push(s, vint(kind.as.ival));
-    return vvecv(s);
+    return vtagv("__brat_slice", s);
 }
 
 BFN Val vslice_of(Val v, Val a, Val b) {
+    if (verr_pending()) return vunwind;
+    if (v.tag != V_VEC) { vraise("slice_of wants a vec"); return vunwind; }
+    if (a.tag != V_INT || b.tag != V_INT) { vraise("slice_of bounds must be integers"); return vunwind; }
     bint n = vlen(v).as.ival;
     if (a.as.ival < 0 || b.as.ival < a.as.ival || b.as.ival > n) {
         char m[96];
@@ -141,6 +156,8 @@ BFN Val vslice_of(Val v, Val a, Val b) {
 }
 
 BFN Val vslice_of_ptr(Val p, Val n, Val kind) {
+    if (verr_pending()) return vunwind;
+    if (p.tag != V_INT || n.tag != V_INT) { vraise("slice_of_ptr: invalid arguments"); return vunwind; }
     bint k = kind.as.ival;
     if (k < 1 || k > 5) {
         vraise("slice_of_ptr: kind must be i64, f64, u8, i32 or f32");
@@ -152,20 +169,12 @@ BFN Val vslice_of_ptr(Val p, Val n, Val kind) {
     return vslice_make(p, vint(0), n, vint(k));
 }
 
-/* The only struct an element walker can build without a compiler is one whose
- * fields the emitter knows: a C array of `Val` literals. */
 typedef struct { Val *items; bint len; } _Elems;
 
-/* A window over elements built in BRAT itself: [base, 0, n, 7, esize, elems].
- * `esize` is unused by the accessors (elements are values, not bytes) but keeps
- * the slot count of a slice uniform. */
 BFN Val vslice_elems(_Elems e) {
     Vec *v = vvec();
     for (bint i = 0; i < e.len; i++) vec_push(v, e.items[i]);
     Val elems = vvecv(v);
-    /* The window is over the elements themselves: slot 0 and slot 5 both name
-     * that vec, and the second reference is counted, so releasing the window
-     * does not free storage it still points at. */
     Vec *out = vvec();
     vec_push(out, elems);
     vec_push(out, vint(0));
@@ -173,13 +182,12 @@ BFN Val vslice_elems(_Elems e) {
     vec_push(out, vint(7));
     vec_push(out, vint(0));
     vec_push(out, vrc_inc(elems));
-    return vvecv(out);
+    return vtagv("__brat_slice", out);
 }
 
-/* A window over C memory laid out as `esize`-byte records. Reading is
- * `ptr_read_struct` at a computed address, so the layout stays the compiler's
- * business and only the stride is BRAT's. */
 BFN Val vslice_of_struct(Val p, Val n, Val esize) {
+    if (verr_pending()) return vunwind;
+    if (p.tag != V_INT || n.tag != V_INT) { vraise("slice_of_struct: invalid arguments"); return vunwind; }
     if (n.as.ival < 0) { vraise("slice_of_struct: n must be >= 0"); return vunwind; }
     if (p.as.ival < 0) { vraise("pointer is negative"); return vunwind; }
     if (p.as.ival == 0 && n.as.ival > 0) { vraise("null pointer dereference"); return vunwind; }
@@ -190,15 +198,21 @@ BFN Val vslice_of_struct(Val p, Val n, Val esize) {
     vec_push(s, vint(n.as.ival));
     vec_push(s, vint(6));
     vec_push(s, vint(esize.as.ival));
-    return vvecv(s);
+    return vtagv("__brat_slice", s);
 }
 
-BFN Val vslice_len(Val s) { return vat(s, vint(2)); }
+BFN Val vslice_len(Val s) {
+    Vec *sv = _vslice_vec(s);
+    if (!sv) return vunwind;
+    return sv->items[2];
+}
 
 BFN Val vslice_at(Val s, Val i) {
-    Val base = vat(s, vint(0));
-    bint start = vat(s, vint(1)).as.ival, n = vat(s, vint(2)).as.ival, k, idx = i.as.ival;
-    if (verr_pending()) return vunwind;
+    Vec *sv = _vslice_vec(s);
+    if (!sv) return vunwind;
+    if (i.tag != V_INT) { vraise("slice_get: index wants i64"); return vunwind; }
+    Val base = sv->items[0];
+    bint start = sv->items[1].as.ival, n = sv->items[2].as.ival, k, idx = i.as.ival;
     if (idx < 0 || idx >= n) {
         char m[96];
         snprintf(m, sizeof m, "slice index %" PRId64 " out of range 0..%" PRId64,
@@ -206,17 +220,17 @@ BFN Val vslice_at(Val s, Val i) {
         vraise(m);
         return vunwind;
     }
-    if (base.tag == V_VEC) return vat(base, vint(start + idx));
-    k = vat(s, vint(3)).as.ival;
+    if (base.tag == V_VEC) return vat_owned(base, vint(start + idx));
+    k = sv->items[3].as.ival;
     if (k == 7) {
-        Val elems = vat(s, vint(5));
-        return vat(elems, vint(start + idx));
+        if (sv->len < 6) { vraise("not a slice"); return vunwind; }
+        return vat_owned(sv->items[5], vint(start + idx));
     }
     if (k == 6) {
-        /* The address of the record, not its bytes: reading it is
-         * `ptr_read_struct`, which is where the layout is decided. */
-        bint esize = vat(s, vint(4)).as.ival;
-        return vint((bint)(intptr_t)((char *)(intptr_t)base.as.ival + (start + idx) * esize));
+        if (sv->len < 5) { vraise("not a slice"); return vunwind; }
+        uint64_t esize = (uint64_t)sv->items[4].as.ival;
+        uint64_t off = (uint64_t)(start + idx) * esize;
+        return vint((bint)((uint64_t)base.as.ival + off));
     }
     if (k == 2) return vfloat(((double *)(intptr_t)base.as.ival)[start + idx]);
     if (k == 3) return vint((int64_t)((unsigned char *)(intptr_t)base.as.ival)[start + idx]);
@@ -226,34 +240,41 @@ BFN Val vslice_at(Val s, Val i) {
 }
 
 BFN Val vslice_set(Val s, Val i, Val v) {
-    Val base = vat(s, vint(0));
-    bint start = vat(s, vint(1)).as.ival, n = vat(s, vint(2)).as.ival, k, idx = i.as.ival;
-    if (verr_pending()) return vunwind;
+    Vec *sv = _vslice_vec(s);
+    if (!sv) { vrc_dec(v); return vunwind; }
+    if (i.tag != V_INT) { vrc_dec(v); vraise("slice_set: index wants i64"); return vunwind; }
+    Val base = sv->items[0];
+    bint start = sv->items[1].as.ival, n = sv->items[2].as.ival, k, idx = i.as.ival;
     if (idx < 0 || idx >= n) {
+        vrc_dec(v);
         char m[96];
         snprintf(m, sizeof m, "slice index %" PRId64 " out of range 0..%" PRId64,
                  (int64_t)idx, (int64_t)n);
         vraise(m);
         return vunwind;
     }
-    if (base.tag == V_VEC) return vset_at(base, vint(start + idx), v);
-    k = vat(s, vint(3)).as.ival;
-    if (k == 7) return vset_at(vat(s, vint(5)), vint(start + idx), v);
+    if (base.tag == V_VEC) {
+        (void)vset_at(base, vint(start + idx), v);
+        return verr_pending() ? vunwind : vint(0);
+    }
+    k = sv->items[3].as.ival;
+    if (k == 7) {
+        if (sv->len < 6) { vrc_dec(v); vraise("not a slice"); return vunwind; }
+        (void)vset_at(sv->items[5], vint(start + idx), v);
+        return verr_pending() ? vunwind : vint(0);
+    }
     if (k == 6) {
-        /* A table of records is a view of foreign memory. Writing one from a
-         * value is C's job (`ptr_write_struct` and the function that owns the
-         * buffer); a silent store here would be a memcpy of a layout BRAT only
-         * knows by size. */
+        vrc_dec(v);
         vraise("slice_set: a window of C structs is read-only");
         return vunwind;
     }
     if (k == 2) {
-        if (v.tag != V_INT && v.tag != V_FLOAT) { vraise("slice_set: want f64, got other"); return vunwind; }
+        if (v.tag != V_INT && v.tag != V_FLOAT) { vrc_dec(v); vraise("slice_set: want f64, got other"); return vunwind; }
         ((double *)(intptr_t)base.as.ival)[start + idx] = vnum(v);
         return vint(0);
     }
     if (k == 4) {
-        if (v.tag != V_INT) { vraise("slice_set: want i32, got other"); return vunwind; }
+        if (v.tag != V_INT) { vrc_dec(v); vraise("slice_set: want i32, got other"); return vunwind; }
         if (v.as.ival < -2147483648LL || v.as.ival > 2147483647LL) {
             char m[96];
             snprintf(m, sizeof m, "slice_set: i32 value %" PRId64 " out of range", (int64_t)v.as.ival);
@@ -264,11 +285,11 @@ BFN Val vslice_set(Val s, Val i, Val v) {
         return vint(0);
     }
     if (k == 5) {
-        if (v.tag != V_INT && v.tag != V_FLOAT) { vraise("slice_set: want f32, got other"); return vunwind; }
+        if (v.tag != V_INT && v.tag != V_FLOAT) { vrc_dec(v); vraise("slice_set: want f32, got other"); return vunwind; }
         ((float *)(intptr_t)base.as.ival)[start + idx] = (float)vnum(v);
         return vint(0);
     }
-    if (v.tag != V_INT) { vraise("slice_set: want i64, got other"); return vunwind; }
+    if (v.tag != V_INT) { vrc_dec(v); vraise("slice_set: want i64, got other"); return vunwind; }
     if (k == 3) {
         if (v.as.ival < 0 || v.as.ival > 255) {
             char m[96];
@@ -2264,7 +2285,7 @@ static HANDLE _vwin_open_parent_confined(const wchar_t *wpath, int *escaped) {
 }
 #endif
 
-static int _vfd_confined(int fd) {
+BFN int _vfd_confined(int fd) {
     if (fd < 0) return 0;
 #if defined(_WIN32)
     intptr_t osfh = _get_osfhandle(fd);

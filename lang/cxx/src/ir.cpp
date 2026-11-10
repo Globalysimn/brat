@@ -968,7 +968,7 @@ Cong bitwise_cong(const std::string &op, const Cong &a, const Cong &c,
             if (m1 >= 2 && (m1 & mask) == 0 && m1 <= (1ULL << 62) && x.m != 1) {
                 uint64_t g = x.m == 0 ? m1 : gcd64(x.m, m1);
                 if (g >= 2) {
-                    uint64_t rx = (x.m == 0 ? x.r : x.r) % g;
+                    uint64_t rx = x.r % g;
                     if (g > out.m) out = Cong{false, g, rx};
                 }
             }

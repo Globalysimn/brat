@@ -351,7 +351,11 @@ static CommandResult run_native(const std::string &exe, const std::vector<std::s
                 return;
             }
             if (errno == EINTR) continue;
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
             if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+#else
+            if (errno == EAGAIN) return;
+#endif
             open = false;
             close(fd);
             return;

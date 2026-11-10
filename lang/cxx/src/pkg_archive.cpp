@@ -1,6 +1,8 @@
 #include "pkg_archive.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -253,9 +255,10 @@ struct ScopedTempDir {
         const auto base = std::filesystem::temp_directory_path(ec);
         if (ec) return;
 #if defined(_WIN32)
-        static unsigned long seq = 0;
+        static std::atomic<uint64_t> seq{0};
         for (unsigned attempt = 0; attempt < 128; ++attempt) {
-            auto cand = base / (std::string(prefix) + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(++seq));
+            uint64_t nseq = seq.fetch_add(1, std::memory_order_relaxed) + 1;
+            auto cand = base / (std::string(prefix) + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(nseq));
             if (std::filesystem::create_directory(cand, ec)) {
                 std::filesystem::permissions(cand, std::filesystem::perms::owner_all,
                                              std::filesystem::perm_options::replace, ec);

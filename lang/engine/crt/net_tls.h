@@ -878,14 +878,38 @@ BFN Val vsbuf_str(Val h) {
     return vtagv("ok", a);
 }
 #if (BRAT_CRT_MASK & BRAT_CRT_NET)
+BFN int _vparse_ipv4_strict(const char *s, bin_addr_t *out_net) {
+    if (!s || !*s) return 0;
+    uint32_t acc = 0;
+    for (int part = 0; part < 4; part++) {
+        if (*s < '0' || *s > '9') return 0;
+        if (*s == '0' && s[1] >= '0' && s[1] <= '9') return 0;
+        uint32_t oct = 0;
+        while (*s >= '0' && *s <= '9') {
+            oct = oct * 10u + (uint32_t)(*s - '0');
+            if (oct > 255u) return 0;
+            s++;
+        }
+        if (part < 3) {
+            if (*s != '.') return 0;
+            s++;
+        } else if (*s != '\0') {
+            return 0;
+        }
+        acc = (acc << 8) | oct;
+    }
+    *out_net = (bin_addr_t)htonl(acc);
+    return 1;
+}
+
 BFN Val vtcp_listen(Val addr) {
     if (addr.tag != V_STR) return _verr_c("tcp_listen wants a string address");
     char host[256]; int port = 0;
     if (!_vhost_port(vstr_c(&addr), host, sizeof host, &port))
         return _verr_c("address wants host:port with port 1..65535");
     if (!_vsk_init_net()) return _verr_c("socket init failed");
-    uint64_t ip = inet_addr(host);
-    if (ip == INADDR_NONE) return _verr_c("host must be an IPv4 address");
+    bin_addr_t ip = 0;
+    if (!_vparse_ipv4_strict(host, &ip)) return _verr_c("host must be an IPv4 address");
     bsock_t fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd == BSOCK_INVALID) return _verr_c("socket failed");
     _vsk_confine(fd);
@@ -909,8 +933,8 @@ BFN Val vtcp_connect(Val addr) {
     if (!_vhost_port(vstr_c(&addr), host, sizeof host, &port))
         return _verr_c("address wants host:port with port 1..65535");
     if (!_vsk_init_net()) return _verr_c("socket init failed");
-    uint64_t ip = inet_addr(host);
-    if (ip == INADDR_NONE) return _verr_c("host must be an IPv4 address");
+    bin_addr_t ip = 0;
+    if (!_vparse_ipv4_strict(host, &ip)) return _verr_c("host must be an IPv4 address");
     bsock_t fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd == BSOCK_INVALID) return _verr_c("socket failed");
     _vsk_confine(fd);
@@ -1718,10 +1742,10 @@ BFN Val vfs_rename(Val src, Val dst) {
             errno = e;
             return esc2 ? verr("path escaped during open") : verr_os(dbuf);
         }
-        struct stat sst, dst;
+        struct stat sst, dst_st;
         if (!_vfd_confined(sfd) || !_vfd_confined(dfd) ||
             (fstatat(sfd, sleaf, &sst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(sst.st_mode)) ||
-            (fstatat(dfd, dleaf, &dst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(dst.st_mode))) {
+            (fstatat(dfd, dleaf, &dst_st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(dst_st.st_mode))) {
             close(sfd);
             close(dfd);
             return verr("path escaped during open");

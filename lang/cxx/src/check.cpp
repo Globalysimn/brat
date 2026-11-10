@@ -2385,11 +2385,6 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
                       size_t start) {
     const size_t n = kids.size() - start;
     auto at = [&](size_t i) -> const Expr & { return *kids[start + i]; };
-    auto elem = [&](const Expr &node) {
-        Ty t = expr(node);
-        if (t.k == Ty::Vec || t.k == Ty::Slice) return *t.inner;
-        return Ty::dyn();
-    };
     size_t want = 0;
     if (name == "slice_of" || name == "slice_of_ptr" || name == "slice_set" ||
         name == "slice_of_struct") {
@@ -2417,9 +2412,19 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
         }
         return Ty::of(Ty::Str);
     }
-    if (name == "slice_len") return Ty::of(Ty::Int);
+    if (name == "slice_len") {
+        Ty st = expr(at(0));
+        if (!type_ok(Ty::wrap(Ty::Slice, Ty::dyn()), st)) {
+            note("slice_len: want slice, got " + type_name(st));
+        }
+        return Ty::of(Ty::Int);
+    }
     if (name == "slice_of") {
-        Ty e = elem(at(0));
+        Ty bt = expr(at(0));
+        if (!type_ok(Ty::wrap(Ty::Vec, Ty::dyn()), bt)) {
+            note("slice_of: want vec, got " + type_name(bt));
+        }
+        Ty e = (bt.k == Ty::Vec || bt.k == Ty::Slice) ? *bt.inner : Ty::dyn();
         for (size_t i = 1; i <= 2; i++) {
             Ty got = expr(at(i));
             if (!type_ok(Ty::of(Ty::Int), got)) {
@@ -2489,7 +2494,11 @@ Ty FnTyper::slice_call(const std::string &name, const std::vector<ExprP> &kids,
         }
         return Ty::wrap(Ty::Slice, word_type(kind.a));
     }
-    Ty e = elem(at(0));
+    Ty st0 = expr(at(0));
+    if (!type_ok(Ty::wrap(Ty::Slice, Ty::dyn()), st0)) {
+        note(name + ": want slice, got " + type_name(st0));
+    }
+    Ty e = st0.k == Ty::Slice ? *st0.inner : Ty::dyn();
     Ty got_idx = expr(at(1));
     if (!type_ok(Ty::of(Ty::Int), got_idx)) {
         note(name + ": index wants i64, got " + type_name(got_idx));

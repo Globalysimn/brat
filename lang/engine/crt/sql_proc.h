@@ -660,7 +660,7 @@ BFN int _vexec_allowed(const char *cmd) {
     return 0;
 }
 
-static bint _vproc_default_timeout_ms(void) {
+BFN bint _vproc_default_timeout_ms(void) {
     const char *ev = getenv("BRAT_PROC_TIMEOUT_MS");
     if (ev && *ev) {
         char *end = NULL;
@@ -670,7 +670,7 @@ static bint _vproc_default_timeout_ms(void) {
     return 60000;
 }
 
-static uint64_t _vproc_mono_ms(void) {
+BFN uint64_t _vproc_mono_ms(void) {
 #if defined(_WIN32)
     return (uint64_t)GetTickCount64();
 #else
@@ -680,7 +680,7 @@ static uint64_t _vproc_mono_ms(void) {
 #endif
 }
 
-static char *_vbytes_to_cstr(Vec *v) {
+BFN char *_vbytes_to_cstr(Vec *v) {
     char *s = (char *)malloc((size_t)v->len + 1);
     if (!s) return NULL;
     for (bint i = 0; i < v->len; i++) s[i] = (char)v->items[i].as.ival;

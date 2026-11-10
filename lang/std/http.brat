@@ -407,7 +407,7 @@ fn scan_chunked(bs: vec[i64], want_text: bool) {
           let tline = unwrap(tr)
           let tc = tline.index_of(":")
           if !is_none(tc) {
-            let tname = tline.slice(0, tc).trim().lower()
+            let tname = tline.slice(0, tc).lower()
             let tval = tline.slice(tc + 1, len(tline)).trim()
             tr_ok = valid_http_token(tname) && valid_header_value(tval) && tname != "content-length" && tname != "transfer-encoding"
           }
@@ -469,16 +469,22 @@ fn parse_framing_headers(lines) {
   let mut headers = {}
   let mut i = 1
   while i < len(lines) {
-    let ln = lines[i].trim()
-    if len(ln) > 0 {
-      let c = ln.index_of(":")
+    let raw_ln = lines[i]
+    if raw_ln.starts_with(" ") || raw_ln.starts_with("\t") {
+      return Err("obsolete line folding in HTTP header")
+    }
+    if len(raw_ln.trim()) > 0 {
+      let c = raw_ln.index_of(":")
       if is_none(c) {
-        return Err("malformed HTTP header line: " + ln)
+        return Err("malformed HTTP header line: " + raw_ln)
       }
-      let hk = ln.slice(0, c).trim().lower()
-      let hv = ln.slice(c + 1, len(ln)).trim()
+      let hk = raw_ln.slice(0, c).lower()
+      let hv = raw_ln.slice(c + 1, len(raw_ln)).trim()
       if !valid_http_token(hk) || !valid_header_value(hv) {
         return Err("invalid HTTP header: " + hk)
+      }
+      if hk == "host" && headers.has("host") {
+        return Err("duplicate Host header")
       }
       if hk == "content-length" && headers.has("content-length") {
         if headers["content-length"] != hv {
@@ -489,7 +495,11 @@ fn parse_framing_headers(lines) {
       if hk == "transfer-encoding" && headers.has("transfer-encoding") {
         return Err("duplicate Transfer-Encoding header")
       }
-      headers.set(hk, hv)
+      if hk == "connection" && headers.has("connection") {
+        headers.set("connection", headers["connection"] + ", " + hv)
+      } else {
+        headers.set(hk, hv)
+      }
     }
     i = i + 1
   }
@@ -565,8 +575,11 @@ fn split_head_body(raw: str) {
 
 fn is_keep_alive_conn(version: str, headers) -> bool {
   let conn_hdr = headers.get_or("connection", "").lower()
+  if conn_hdr.contains("close") {
+    return false
+  }
   if version == "HTTP/1.1" {
-    return !conn_hdr.contains("close")
+    return true
   }
   if version == "HTTP/1.0" {
     return conn_hdr.contains("keep-alive")
@@ -1058,81 +1071,110 @@ fn is_numeric_ipv4_form(h: str) -> bool {
   return true
 }
 
-fn extract_mapped_v4(v6: str) -> vec[i64] {
-  let mut tail = ""
-  if v6.starts_with("::ffff:") {
-    tail = v6.slice(7, len(v6))
-  } else {
-    if v6.starts_with("0:0:0:0:0:ffff:") {
-      tail = v6.slice(15, len(v6))
-    } else {
-      if v6.starts_with("64:ff9b::") {
-        tail = v6.slice(9, len(v6))
-      }
-    }
+fn parse_ipv6_hextets(raw_v6: str) -> vec[i64] {
+  let mut s = raw_v6 + ""
+  let pct = s.index_of("%")
+  if !is_none(pct) {
+    s = s.slice(0, pct)
   }
-  if len(tail) == 0 {
+  if len(s) == 0 {
     return []
   }
-  let v4 = parse_canon_v4(tail)
-  if len(v4) == 4 {
-    return v4
-  }
-  let hp = tail.split(":")
-  if len(hp) == 2 {
-    let hi = parse_hex_u16(hp[0])
-    let lo = parse_hex_u16(hp[1])
-    if hi >= 0 && lo >= 0 {
-      return [(hi / 256) % 256, hi % 256, (lo / 256) % 256, lo % 256]
+  let mut v4_tail = []
+  if !is_none(s.index_of(".")) {
+    let parts_c = s.split(":")
+    let last_tok = parts_c[len(parts_c) - 1]
+    let v4 = parse_canon_v4(last_tok)
+    if len(v4) != 4 {
+      return []
+    }
+    v4_tail = [v4[0] * 256 + v4[1], v4[2] * 256 + v4[3]]
+    let cut = len(s) - len(last_tok)
+    if cut <= 0 {
+      return []
+    }
+    if cut >= 2 && s.slice(cut - 2, cut) == "::" {
+      s = s.slice(0, cut)
+    } else {
+      s = s.slice(0, cut - 1)
     }
   }
-  return []
-}
-
-fn is_v6_all_zero_or_one(v6: str, want_last: i64) -> bool {
-  if want_last == 0 && (v6 == "::" || v6 == "::0") {
-    return true
-  }
-  if want_last == 1 && v6 == "::1" {
-    return true
-  }
-  if v6.contains("::") {
-    let halves = v6.split("::")
+  let mut lhs = []
+  let mut rhs = []
+  let has_dc = !is_none(s.index_of("::"))
+  if has_dc {
+    let halves = s.split("::")
     if len(halves) != 2 {
-      return false
+      return []
     }
     if len(halves[0]) > 0 {
       for g in halves[0].split(":") {
-        if parse_hex_u16(g) != 0 {
-          return false
+        let hv = parse_hex_u16(g)
+        if hv < 0 {
+          return []
         }
+        lhs.push(hv)
       }
     }
-    if len(halves[1]) == 0 {
-      return want_last == 0
-    }
-    let rhs = halves[1].split(":")
-    let mut i = 0
-    while i + 1 < len(rhs) {
-      if parse_hex_u16(rhs[i]) != 0 {
-        return false
+    if len(halves[1]) > 0 {
+      for g in halves[1].split(":") {
+        let hv = parse_hex_u16(g)
+        if hv < 0 {
+          return []
+        }
+        rhs.push(hv)
       }
-      i = i + 1
     }
-    return parse_hex_u16(rhs[len(rhs) - 1]) == want_last
-  }
-  let gs = v6.split(":")
-  if len(gs) != 8 {
-    return false
-  }
-  let mut i = 0
-  while i < 7 {
-    if parse_hex_u16(gs[i]) != 0 {
-      return false
+  } else {
+    if len(s) > 0 {
+      for g in s.split(":") {
+        let hv = parse_hex_u16(g)
+        if hv < 0 {
+          return []
+        }
+        lhs.push(hv)
+      }
     }
-    i = i + 1
   }
-  return parse_hex_u16(gs[7]) == want_last
+  for t in v4_tail {
+    rhs.push(t)
+  }
+  let total = len(lhs) + len(rhs)
+  if has_dc {
+    if total >= 8 {
+      return []
+    }
+  } else {
+    if total != 8 {
+      return []
+    }
+  }
+  let mut out = []
+  for x in lhs {
+    out.push(x)
+  }
+  let mut z = 8 - total
+  while z > 0 {
+    out.push(0)
+    z = z - 1
+  }
+  for x in rhs {
+    out.push(x)
+  }
+  return out
+}
+
+fn extract_embedded_v4(hx: vec[i64]) -> vec[i64] {
+  if len(hx) != 8 {
+    return []
+  }
+  let z5 = hx[0] == 0 && hx[1] == 0 && hx[2] == 0 && hx[3] == 0 && hx[4] == 0
+  let mapped = z5 && (hx[5] == 65535 || (hx[5] == 0 && !(hx[6] == 0 && hx[7] <= 1)))
+  let nat64 = hx[0] == 100 && hx[1] == 65435 && ((hx[2] == 0 && hx[3] == 0 && hx[4] == 0 && hx[5] == 0) || hx[2] == 1)
+  if mapped || nat64 {
+    return [(hx[6] / 256) % 256, hx[6] % 256, (hx[7] / 256) % 256, hx[7] % 256]
+  }
+  return []
 }
 
 fn is_link_local_or_unspec_v4(v4: vec[i64]) -> bool {
@@ -1168,14 +1210,17 @@ fn is_internal_v4(v4: vec[i64]) -> bool {
 fn is_link_local_or_unspec_host(raw_host: str) -> bool {
   let h = norm_host_dots(raw_host)
   if h.starts_with("[") && h.ends_with("]") {
-    let v6 = h.slice(1, len(h) - 1)
-    if is_v6_all_zero_or_one(v6, 0) {
+    let hx = parse_ipv6_hextets(h.slice(1, len(h) - 1))
+    if len(hx) != 8 {
       return true
     }
-    if v6.starts_with("fe8") || v6.starts_with("fe9") || v6.starts_with("fea") || v6.starts_with("feb") {
+    if hx[0] == 0 && hx[1] == 0 && hx[2] == 0 && hx[3] == 0 && hx[4] == 0 && hx[5] == 0 && hx[6] == 0 && hx[7] == 0 {
       return true
     }
-    let mv4 = extract_mapped_v4(v6)
+    if hx[0] >= 65152 && hx[0] <= 65215 {
+      return true
+    }
+    let mv4 = extract_embedded_v4(hx)
     if len(mv4) == 4 {
       return is_link_local_or_unspec_v4(mv4)
     }
@@ -1200,14 +1245,20 @@ fn is_internal_host(raw_host: str) -> bool {
     return true
   }
   if h.starts_with("[") && h.ends_with("]") {
-    let v6 = h.slice(1, len(h) - 1)
-    if is_v6_all_zero_or_one(v6, 1) {
+    let hx = parse_ipv6_hextets(h.slice(1, len(h) - 1))
+    if len(hx) != 8 {
       return true
     }
-    if v6.starts_with("fc") || v6.starts_with("fd") || v6.starts_with("ff") || v6.starts_with("2002:") || v6.starts_with("64:ff9b:") {
+    if hx[0] == 0 && hx[1] == 0 && hx[2] == 0 && hx[3] == 0 && hx[4] == 0 && hx[5] == 0 && hx[6] == 0 && hx[7] == 1 {
       return true
     }
-    let mv4 = extract_mapped_v4(v6)
+    if (hx[0] >= 64512 && hx[0] <= 65023) || (hx[0] >= 65216 && hx[0] <= 65279) || hx[0] >= 65280 {
+      return true
+    }
+    if hx[0] == 8194 || (hx[0] == 100 && hx[1] == 65435) || (hx[0] == 8193 && hx[1] == 0) {
+      return true
+    }
+    let mv4 = extract_embedded_v4(hx)
     if len(mv4) == 4 {
       return is_internal_v4(mv4)
     }
@@ -1336,6 +1387,9 @@ pub fn parse_request(raw: str) -> Result[map, str] {
   let lines = hb[0].lines()
   if len(lines) == 0 {
     return Err("empty HTTP request line")
+  }
+  if lines[0].starts_with(" ") || lines[0].starts_with("\t") {
+    return Err("leading whitespace in HTTP request line")
   }
   let rl = parse_req_line(lines[0].trim())
   if is_err(rl) {
