@@ -449,8 +449,8 @@ fn main() -> i64 {
 
         # 2. Negative soundness gates:
         #    (a) off-by-one `let mut i = len(v); while i >= 0 { v[i] }` MUST keep bounds check!
-        #    (b) underflowing `while i >= -9223372036854775807 - 1` (`INT64_MIN`) MUST bail!
-        #    (c) shadowed `ForIter` variable `let mut x = 10; for x in v {}; 100 / x` MUST keep div check!
+        #    (b) `ForIter` body mutating outer `x` (`let mut x = 10; for y in v { x = y }; 100 / x`) MUST keep div check!
+        #    (c) `ForIter` loop variable shadowing outer `x` (`let mut x = 10; for x in v {}; 100 / x`) preserves outer `x == 10`!
         bad_src = os.path.join(td, "desc_soundness.brat")
         with open(bad_src, "w", encoding="utf-8") as f:
             f.write("""fn off_by_one(v: vec[i64]) -> i64 {
@@ -463,24 +463,25 @@ fn main() -> i64 {
   return s
 }
 
-fn shadow_iter(v: vec[i64]) -> i64 {
+fn mut_iter(v: vec[i64]) -> i64 {
   let mut x = 10
-  for x in v {
+  for y in v {
+    x = y
   }
   return 100 / x
 }
 
 fn main() -> i64 {
-  print(shadow_iter([0]))
+  print(mut_iter([0]))
   return 0
 }
 """)
         why_bad = subprocess.run([CXX, "cc", "-O2", "--why-opt", bad_src], capture_output=True, text=True)
         check(why_bad.returncode == 0, f"cc failed on soundness test: {why_bad.stderr}")
         check(why_bad.stderr.strip() == "",
-              f"UNSOUND proof emitted on off-by-one or shadowed ForIter:\n{why_bad.stderr}")
+              f"UNSOUND proof emitted on off-by-one or mutated ForIter:\n{why_bad.stderr}")
 
-        # Verify `shadow_iter([0])` raises clean `"div by zero"` identically across `-O0`, `-O1`, and `-O2`
+        # Verify `mut_iter([0])` raises clean `"div by zero"` identically across `-O0`, `-O1`, and `-O2`
         # (never emitting raw `100 / x` SIGFPE under `-O2`!).
         outs = []
         for opt in ("-O0", "-O1", "-O2"):
@@ -488,11 +489,31 @@ fn main() -> i64 {
             subprocess.run([CXX, "build", opt, bad_src, "-o", exe], check=True)
             rr = subprocess.run([exe], capture_output=True, text=True)
             check(rr.returncode == 1 and "div by zero" in rr.stderr,
-                  f"{opt} miscompiled shadowed ForIter variable (rc={rr.returncode}, err={rr.stderr!r})!")
+                  f"{opt} miscompiled mutated ForIter variable (rc={rr.returncode}, err={rr.stderr!r})!")
             outs.append((rr.returncode, rr.stdout, rr.stderr))
-        check(outs[0] == outs[1] == outs[2], f"-O0/-O1/-O2 mismatch on shadow_iter: {outs}")
+        check(outs[0] == outs[1] == outs[2], f"-O0/-O1/-O2 mismatch on mut_iter: {outs}")
 
-        # 3. 4-way differential equivalence (`-O0 == -O1 == -O2 == -O0`) on 30 randomized
+        shadow_src = os.path.join(td, "shadow_foriter.brat")
+        with open(shadow_src, "w", encoding="utf-8") as f:
+            f.write("""fn shadow_iter(v: vec[i64]) -> i64 {
+  let mut x = 10
+  for x in v {
+  }
+  return 100 / x
+}
+fn main() -> i64 {
+  print(shadow_iter([0]))
+  return 0
+}
+""")
+        for opt in ("-O0", "-O1", "-O2"):
+            exe = os.path.join(td, f"sh_{opt[1:]}")
+            subprocess.run([CXX, "build", opt, shadow_src, "-o", exe], check=True)
+            rr = subprocess.run([exe], capture_output=True, text=True)
+            check(rr.returncode == 0 and rr.stdout.strip() == "10",
+                  f"{opt} clobbered outer variable in shadowed ForIter: rc={rr.returncode}, out={rr.stdout!r}, err={rr.stderr!r}")
+
+        # 3. 3-way differential equivalence (`-O0 == -O1 == -O2`) on 30 randomized
         #    descending / ascending / ForIter programs!
         rng = random.Random(20261101)
         lines = []

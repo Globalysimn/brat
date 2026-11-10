@@ -1781,81 +1781,8 @@ int fuzzy_score(std::string_view query_low, std::string_view cand_low) {
     return qi == query_low.size() ? 200 : 0;
 }
 
-// Canonical fast lossless BRAT source formatter (2-space block indentation,
-// preserves comments, strings, and empty-line spacing).
-std::string format_brat_source(std::string_view text, const LineIndex &lines) {
-    std::string out;
-    out.reserve(text.size() + 64);
-    int indent = 0;
-    int consecutive_blank = 0;
-    bool in_str = false, raw_str = false, esc = false, in_blk = false;
-    auto scan_line = [&](std::string_view s) -> int {
-        int net = 0;
-        for (size_t k = 0; k < s.size(); ++k) {
-            const char c = s[k];
-            if (in_blk) {
-                if (c == '*' && k + 1 < s.size() && s[k + 1] == '/') {
-                    in_blk = false;
-                    ++k;
-                }
-                continue;
-            }
-            if (in_str) {
-                if (!raw_str && esc) esc = false;
-                else if (!raw_str && c == '\\') esc = true;
-                else if (c == '"') { in_str = false; raw_str = false; }
-                continue;
-            }
-            if (c == '/' && k + 1 < s.size() && s[k + 1] == '/') break;
-            if (c == '/' && k + 1 < s.size() && s[k + 1] == '*') {
-                in_blk = true;
-                ++k;
-                continue;
-            }
-            if (c == '"') {
-                in_str = true;
-                raw_str = is_raw_str_open(s, k);
-                esc = false;
-            } else if (c == '{' || c == '(' || c == '[') ++net;
-            else if (c == '}' || c == ')' || c == ']') --net;
-        }
-        if (in_str && !raw_str && esc) esc = false;
-        return net;
-    };
-    for (size_t i = 0; i < lines.line_count(); ++i) {
-        if (i + 1 == lines.line_count() && lines.line_view(text, static_cast<int>(i)).empty() &&
-            !text.empty() && text.back() == '\n') {
-            break;
-        }
-        std::string_view raw_sv = lines.line_view(text, static_cast<int>(i));
-        if (in_str) {
-            out.append(raw_sv.data(), raw_sv.size());
-            out.push_back('\n');
-            indent = std::max(0, indent + scan_line(raw_sv));
-            continue;
-        }
-        std::string_view sv = raw_sv;
-        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
-        while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t')) sv.remove_suffix(1);
-        if (sv.empty()) {
-            if (++consecutive_blank <= 1 && !out.empty()) out.push_back('\n');
-            continue;
-        }
-        consecutive_blank = 0;
-        int lead_close = 0;
-        if (!in_blk) {
-            for (char c : sv) {
-                if (c == '}' || c == ')' || c == ']') ++lead_close;
-                else break;
-            }
-        }
-        const int line_indent = std::max(0, indent - lead_close);
-        out.append(static_cast<size_t>(line_indent) * 2, ' ');
-        out.append(sv.data(), sv.size());
-        out.push_back('\n');
-        indent = std::max(0, indent + scan_line(sv));
-    }
-    return out;
+std::string format_brat_source(std::string_view text, const LineIndex &) {
+    return format_source_canonical(text);
 }
 
 // LSP server over the zero-copy wire and incremental Salsa query table.

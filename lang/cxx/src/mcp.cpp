@@ -868,16 +868,16 @@ static bool send_body(std::string_view body, bool jsonl_mode) {
 
 int cmd_mcp(int argc, char **argv) {
     if (argc == 3 && (std::string_view(argv[2]) == "--help" || std::string_view(argv[2]) == "-h")) {
-        std::fprintf(stderr, "usage: brat-cxx mcp\n");
+        std::fprintf(stdout, "usage: brat mcp\n");
         return 0;
     }
     if (argc != 2) {
-        std::fprintf(stderr, "usage: brat-cxx mcp\n");
+        std::fprintf(stderr, "usage: brat mcp\n");
         return 2;
     }
     const std::string exe = resolve_executable(argv[0]);
     if (exe.empty()) {
-        std::fprintf(stderr, "brat-cxx mcp: cannot resolve executable path\n");
+        std::fprintf(stderr, "brat mcp: cannot resolve executable path\n");
         return 1;
     }
 #if defined(_WIN32)

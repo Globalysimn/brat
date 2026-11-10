@@ -8471,12 +8471,15 @@ struct ShadowRenamer {
             walk_expr(s.e2.get(), renames, seen);
             auto sub_ren = renames;
             if (!s.a.empty() && s.a != "_") {
-                auto it = sub_ren.find(s.a);
-                if (it != sub_ren.end()) {
-                    s.a = it->second;
+                if (seen.count(s.a)) {
+                    std::string fresh = s.a + "$sh" + std::to_string(++seq);
+                    sub_ren[s.a] = fresh;
+                    seen.insert(fresh);
+                    s.a = fresh;
                     changed = true;
                 } else {
                     seen.insert(s.a);
+                    sub_ren.erase(s.a);
                 }
             }
             walk_block(s.body, sub_ren, seen, true);

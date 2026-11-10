@@ -153,7 +153,7 @@ void print_parse_error(const std::string &path, const ParseError &e);
 std::size_t ownership_errors(const std::vector<SourceFile> &files, std::size_t i);
 std::size_t type_errors(const std::vector<SourceFile> &files, std::size_t i,
                         bool arena_only = false);
-void print_cli_usage();
+void print_cli_usage(FILE *out = stderr);
 int brat_cli_main(int argc, char **argv);
 
 #endif

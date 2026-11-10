@@ -20,3 +20,5 @@ std::vector<Tok> lex(std::string_view src, uint32_t start_line = 1);
 // Whole source is valid UTF-8; `bad_line` receives the line of the first offending
 // byte when it is not.
 bool utf8_valid(std::string_view s, uint32_t &bad_line, uint32_t start_line = 1);
+
+std::string format_source_canonical(std::string_view raw_src);

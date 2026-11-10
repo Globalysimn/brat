@@ -133,10 +133,15 @@ for name, argv in (("nul_line_o0", CLI + ["run", "-O0", NUL]),
     first = text.strip().splitlines()[0] if text.strip() else ""
     ok(name, first.startswith(NUL + ":4: error:") and "NUL" in first, repr(first[:110]))
 
-# 5. `--help`, and `--` still reaches the program
-r = run(CLI + ["fmt", "--help"])
-ok("help_flag", r.returncode == 0 and b"usage: brat" in r.stdout + r.stderr,
-   "rc=%d %r" % (r.returncode, (r.stdout + r.stderr)[:80]))
+# 5. `--help` writes usage to stdout across subcommands, and `--` still reaches the program
+for sub in ([], ["fmt"], ["deps"], ["api"], ["pkg"], ["dist"], ["ffi"], ["bindgen"], ["mcp"]):
+    r = run(CLI + sub + ["--help"])
+    tag = "help_" + (sub[0] if sub else "top")
+    ok(tag, r.returncode == 0 and b"usage: brat" in r.stdout and r.stderr == b"",
+       "rc=%d out=%r err=%r" % (r.returncode, r.stdout[:60], r.stderr[:60]))
+r_newcomer_fmt = run(CLI + ["fmt", "--check", os.path.join(ROOT, "lang", "examples", "newcomer.brat")])
+ok("newcomer_fmt_clean", r_newcomer_fmt.returncode == 0,
+   "rc=%d err=%r" % (r_newcomer_fmt.returncode, r_newcomer_fmt.stderr[:120]))
 args_src = os.path.join(TMP, "args.brat")
 with open(args_src, "w", encoding="utf-8") as f:
     f.write('fn main() -> i64 {\n  for a in args() {\n    print(a)\n  }\n  return 0\n}\n')

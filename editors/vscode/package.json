@@ -2,7 +2,7 @@
   "name": "brat-lang",
   "displayName": "BRAT Language Support",
   "description": "Syntax highlighting, snippets, language configuration, and native brat-cxx LSP integration for BRAT (.brat, .bri).",
-  "version": "0.8.0",
+  "version": "0.7.0",
   "publisher": "brat-lang",
   "license": "Apache-2.0",
   "repository": {

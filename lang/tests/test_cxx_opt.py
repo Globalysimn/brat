@@ -526,9 +526,9 @@ def part_fuzz_o2(n_fns=None):
             fail("O2 differential fuzz mismatch (%s vs -O0): got %r, want %r"
                  % (mode, outs[mode][:2], want[:2]))
 
-    # Explicit native soundness pin: non-zero-trip `for i in lo..hi` clobbers an
-    # outer `let mut i` in C, so neither -O1 nor -O2 may assume `i` retains its
-    # pre-loop range afterwards (e.g. `INT64_MIN / -1` overflow trap).
+    # `for` loop bindings (`for i in lo..hi` and `for s in xs`) are scoped to the
+    # loop body and must never clobber an outer local of the same name (even when
+    # the outer local has a different static type such as `str`).
     shadow_trap = os.path.join(TMP, "for_shadow_min_trap.brat")
     with open(shadow_trap, "w", encoding="utf-8") as f:
         f.write("fn f() -> i64 {\n"
@@ -537,8 +537,21 @@ def part_fuzz_o2(n_fns=None):
                 "  }\n"
                 "  return i / -1\n"
                 "}\n"
+                "fn g(n: i64) -> str {\n"
+                "  let s: str = \"dynamic_heap_string_payload_\" + str(n)\n"
+                "  let mut acc = 0\n"
+                "  for s in 0..3 { acc += s }\n"
+                "  for s in [\"aa\", \"bbb\"] { acc += len(s) }\n"
+                "  if n > 0 {\n"
+                "    let s = 100\n"
+                "    for s in 0..4 { acc += s }\n"
+                "    acc += s\n"
+                "  }\n"
+                "  return s.upper() + \":\" + str(acc)\n"
+                "}\n"
                 "fn main() -> i64 {\n"
                 "  print(f())\n"
+                "  print(g(42))\n"
                 "  return 0\n"
                 "}\n")
     trap_outs = {}
@@ -552,8 +565,10 @@ def part_fuzz_o2(n_fns=None):
             fail("shadow_trap cc %s failed: %s" % (lvl, why))
             return
         trap_outs[lvl] = run_exe(exe)
-    if trap_outs["-O0"][1] == 0 or trap_outs["-O1"] != trap_outs["-O0"] or trap_outs["-O2"] != trap_outs["-O0"]:
-        fail("shadow_trap mismatch across -O0/-O1/-O2: %r" % (trap_outs,))
+    want_shadow = (0, "-10\nDYNAMIC_HEAP_STRING_PAYLOAD_42:114\n", "")
+    for lvl in ("-O0", "-O1", "-O2"):
+        if trap_outs[lvl] != want_shadow:
+            fail("shadow_trap %s got %r, want %r" % (lvl, trap_outs[lvl], want_shadow))
 
     print("%-34s %d fns across -O0/-O1/-O2, %.1fs"
           % ("-O2 == -O1 == -O0", n_fns, time.time() - t0))
@@ -711,8 +726,8 @@ LOOPS = {
         "  return s\n"
         "}\n", 0),
 
-    # the counter is bound by the loop, so its value after the loop is unknown:
-    # no proof, and nothing is claimed about it.
+    # `for i in 0..n` scopes its own counter, so outer `i = 0` keeps [0, 0] (`i / 2`
+    # gets 1 proof) while loop-mutated `s` stays unbounded (`s / 2` gets no proof).
     "for_after.brat": (
         "fn f(n: i64) -> i64 {\n"
         "  let mut s = 0\n"
@@ -721,7 +736,7 @@ LOOPS = {
         "    s = s + 1\n"
         "  }\n"
         "  return s / 2 + i / 2\n"
-        "}\n", 0),
+        "}\n", 1),
 
     # a non-counter local mutated later in the loop body does not keep its
     # pre-loop interval on the second iteration.

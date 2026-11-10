@@ -21,8 +21,7 @@ _spec.loader.exec_module(_tc)
 CAP = 32 * 1024 * 1024
 
 # let re-run + rebind of a loop-local: two leaked 1 KB strings per pass (~80 MB
-# over 40k passes if unreclaimed, well past the 32 MB RLIMIT_AS ceiling while
-# keeping the pure-Python reference check fast).
+# over 40k passes if unreclaimed, well past the 32 MB RLIMIT_AS ceiling).
 RELET = ('fn main() -> i64 {\n'
          '  let base = "x".repeat(1024)\n'
          '  let mut i = 0\n'

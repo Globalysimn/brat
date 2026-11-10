@@ -572,6 +572,10 @@ int cmd_deps(int argc, char **argv) {
             continue;
         }
         if (arg.rfind("--target=", 0) == 0) continue;
+        if (arg == "--help" || arg == "-h") {
+            std::fputs("usage: brat deps FILE [--json|--dot] [-o OUT]\n", stdout);
+            return 0;
+        }
         if (!arg.empty() && arg[0] == '-') {
             std::fprintf(stderr, "brat deps: unknown flag %s\n", arg.c_str());
             return 2;
@@ -631,6 +635,11 @@ int cmd_api(int argc, char **argv) {
         if (arg == "--") continue;
         if (arg == "--json") { want_json = true; continue; }
         if (arg == "--diff") { want_diff = true; continue; }
+        if (arg == "--help" || arg == "-h") {
+            std::fputs("usage: brat api FILE [--json]\n"
+                       "       brat api --diff OLD.bri NEW.bri [--json]\n", stdout);
+            return 0;
+        }
         if (!arg.empty() && arg[0] == '-') {
             std::fprintf(stderr, "brat api: unknown flag %s\n", arg.c_str());
             return 2;

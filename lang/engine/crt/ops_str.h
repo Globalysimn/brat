@@ -1761,7 +1761,14 @@ BFN void vraise(const char *msg) {
 }
 BFN void vraisef(const char *fmt, const char *arg) {
     char buf[256];
-    snprintf(buf, sizeof buf, fmt, arg);
+    const char *s = arg ? arg : "";
+    const char *p = strstr(fmt, "%s");
+    if (p) {
+        int pre = (int)(p - fmt);
+        snprintf(buf, sizeof buf, "%.*s%s%s", pre, fmt, s, p + 2);
+    } else {
+        snprintf(buf, sizeof buf, "%s", fmt);
+    }
     bint n = (bint)strlen(buf);
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     vraise(buf);

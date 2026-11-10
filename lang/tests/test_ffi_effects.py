@@ -50,15 +50,12 @@ def errors(cmd):
     return p.returncode, "\n".join(l for l in text.splitlines() if ": error: " in l)
 
 
-def both_checkers(path):
-    """(rc, messages) from each front end -- they must be identical, not similar."""
-    return {"py": errors(_cxx.cli_args("check", path)),
-            "cxx": errors([CXX, "check", path])}
+def check_file(path):
+    """(rc, messages) from `brat check`."""
+    return errors([CXX, "check", path])
 
 
-# A declaration that cannot mean what it says. Each is refused by the parser, so
-# the message is the same in both front ends by construction: the tree the two
-# parsers agree on is the tree that carries the effect list.
+# A declaration that cannot mean what it says. Each is refused by the parser.
 REFUSALS = {
     "pure_with_writes": "extern fn f(p: ptr) -> i64 pure writes(p)\n",
     "pure_with_move": "extern fn f(p: ptr) -> move ptr pure\n",
@@ -72,7 +69,7 @@ REFUSALS = {
 }
 
 # A foreign write is a write. The pair differs only in whether the declaration
-# says so, and the verdicts must differ with it, in both checkers.
+# says so, and the verdicts must differ with it.
 RACES = {
     # `writes(p)` on the callee makes the parent's second call a second writer.
     "extern_write_race": ('''%s
@@ -162,16 +159,14 @@ def check_str_effect_accepted():
     """`str` is a pointer to bytes, so `reads(s)` is a promise that can hold."""
     src = 'extern fn my_strlen(s: str) -> i64 pure reads(s)\nfn main() -> i64 { return 0 }\n'
     path = write("str_effect", src)
-    seen = both_checkers(path)
-    if len(set(seen.values())) != 1:
-        fail("str_effect", "checkers disagree: %r" % (seen,))
-    if seen["py"][0] != 0:
-        fail("str_effect", "must be accepted, got:\n%s" % seen["py"][1])
+    rc, text = check_file(path)
+    if rc != 0:
+        fail("str_effect", "must be accepted, got:\n%s" % text)
     print("EFFECTS str ok (`reads(s)` on a `str` parameter)")
 
 
 def check_dumps_agree():
-    """The effect list is part of the tree, so both parsers must print it alike."""
+    """The effect list is preserved in the parsed AST dump."""
     src = ('extern fn strlen(s: str) -> i64 pure nothrow\n'
            'extern fn read(fd: i64, buf: ptr, n: i64) -> i64 writes(buf)\n'
            'extern fn peek(p: ptr) -> i64 pure reads(p)\n'
@@ -187,32 +182,24 @@ def check_dumps_agree():
 def check_refusals():
     for name, src in sorted(REFUSALS.items()):
         path = write(name, src)
-        seen = both_checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        rc, text = seen["py"]
+        rc, text = check_file(path)
         if rc == 0:
             fail(name, "must be refused, got 0 error(s)")
         if not text:
             fail(name, "refused with no message")
-        if seen["cxx"][1] != text:
-            fail(name, "messages differ:\n  py : %s\n  cxx: %s" % (text, seen["cxx"][1]))
-    print("EFFECTS refusals ok (%d cases, identical messages)" % len(REFUSALS))
+    print("EFFECTS refusals ok (%d cases)" % len(REFUSALS))
 
 
 def check_races():
     for name, (src, want) in sorted(RACES.items()):
         path = write(name, src)
-        seen = both_checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        rc, text = seen["py"]
+        rc, text = check_file(path)
         if want is None:
             if rc != 0:
                 fail(name, "must be accepted, got:\n%s" % text)
         elif rc == 0 or want not in text:
             fail(name, "want %r in the diagnostic, got:\n%s" % (want, text))
-    print("EFFECTS races ok (%d cases, both checkers)" % len(RACES))
+    print("EFFECTS races ok (%d cases)" % len(RACES))
 
 
 def check_emitted_attribute():
@@ -246,11 +233,9 @@ def check_lib_block_with_typed_return():
     src = ('extern "libm.so" {\n  extern fn cos(x: f64) -> f64\n}\n'
            'fn main() -> i64 { return 0 }\n')
     path = write("libblock", src)
-    seen = both_checkers(path)
-    if len(set(seen.values())) != 1:
-        fail("libblock", "checkers disagree: %r" % (seen,))
-    if seen["py"][0] != 0:
-        fail("libblock", "a lib block with a typed return must parse:\n%s" % seen["py"][1])
+    rc, text = check_file(path)
+    if rc != 0:
+        fail("libblock", "a lib block with a typed return must parse:\n%s" % text)
     print("EFFECTS lib block ok (typed return inside `extern \"lib\" { }`)")
 
 

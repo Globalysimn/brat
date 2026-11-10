@@ -2816,6 +2816,12 @@ int cmd_ffi(int argc, char **argv) {
         if (a.rfind("-I", 0) == 0 && a.size() > 2) { inc_dirs.push_back(a.substr(2)); continue; }
         if (a == "-D" && i + 1 < argc) { defines.push_back(argv[++i]); continue; }
         if (a.rfind("-D", 0) == 0 && a.size() > 2) { defines.push_back(a.substr(2)); continue; }
+        if (a == "--help" || a == "-h") {
+            std::fprintf(stdout,
+                         "usage: brat ffi <file.brat> [--header <h>] [--object <o>] "
+                         "[--abi-matrix] [--emit-bind] [--bin <exe>] [--json]\n");
+            return 0;
+        }
         if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "ffi: unknown option: %s\n", a.c_str());
             return 2;
@@ -3129,6 +3135,13 @@ int cmd_bindgen(int argc, char **argv) {
         if (a.rfind("--target=", 0) == 0) { target = a.substr(9); continue; }
         if (a == "--lang" && i + 1 < argc) { lang = argv[++i]; continue; }
         if (a.rfind("--lang=", 0) == 0) { lang = a.substr(7); continue; }
+        if (a == "--help" || a == "-h") {
+            std::fprintf(stdout,
+                         "usage: brat bindgen <header.h | lib.rs> [-o out] [--lib NAME] "
+                         "[--preprocess] [--header-only] [-I DIR] [-D DEF] [--inline-arrays] "
+                         "[--lang brat|python|go|rust] [--target TRIPLE]\n");
+            return 0;
+        }
         if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "bindgen: unknown option: %s\n", a.c_str());
             return 2;

@@ -363,213 +363,11 @@ int cmd_check_json(const std::vector<std::string> &files) {
     return rc;
 }
 
-static bool fmt_is_raw_open(std::string_view line, size_t quote_idx) {
-    if (quote_idx == 0 || line[quote_idx - 1] != 'r') return false;
-    if (quote_idx >= 2) {
-        const unsigned char prev = static_cast<unsigned char>(line[quote_idx - 2]);
-        if (std::isalnum(prev) || prev == '_') return false;
-    }
-    return true;
-}
-
-static std::string normalize_equals_line(std::string_view line, bool &in_blk) {
-    std::string out;
-    out.reserve(line.size() + 4);
-    size_t i = 0;
-    const size_t n = line.size();
-    bool in_str = false, raw_str = false;
-    while (i < n) {
-        const char c = line[i];
-        if (in_blk) {
-            out.push_back(c);
-            if (c == '*' && i + 1 < n && line[i + 1] == '/') {
-                out.push_back('/');
-                in_blk = false;
-                i += 2;
-                continue;
-            }
-            ++i;
-            continue;
-        }
-        if (in_str) {
-            out.push_back(c);
-            if (!raw_str && c == '\\') {
-                if (i + 1 < n) {
-                    out.push_back(line[i + 1]);
-                    i += 2;
-                    continue;
-                }
-            } else if (c == '"') {
-                in_str = false;
-                raw_str = false;
-            }
-            ++i;
-            continue;
-        }
-        if (c == '"') {
-            in_str = true;
-            raw_str = fmt_is_raw_open(line, i);
-            out.push_back(c);
-            ++i;
-            continue;
-        }
-        if (c == '/' && i + 1 < n && line[i + 1] == '/') {
-            out.append(line.substr(i));
-            break;
-        }
-        if (c == '/' && i + 1 < n && line[i + 1] == '*') {
-            in_blk = true;
-            out.append("/*");
-            i += 2;
-            continue;
-        }
-        if (c == '=') {
-            const char prev = (i > 0) ? line[i - 1] : '\0';
-            const char nxt = (i + 1 < n) ? line[i + 1] : '\0';
-            if (nxt == '=' || nxt == '>' || prev == '=' || prev == '!' || prev == '<' ||
-                prev == '>' || prev == '+' || prev == '-' || prev == '*' || prev == '/' ||
-                prev == '%' || prev == '&' || prev == '|' || prev == '^') {
-                out.push_back(c);
-                ++i;
-                continue;
-            }
-            while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
-            size_t j = i + 1;
-            while (j < n && (line[j] == ' ' || line[j] == '\t')) ++j;
-            if (j >= n) {
-                if (out.empty()) out = "=";
-                else out += " =";
-                i = j;
-                continue;
-            }
-            if (out.empty()) out = "= ";
-            else out += " = ";
-            i = j;
-            continue;
-        }
-        out.push_back(c);
-        ++i;
-    }
-    return out;
-}
-
-static void count_braces_line(std::string_view line, bool &in_str, bool &raw_str, bool &in_blk,
-                              int &opens, int &closes) {
-    opens = 0;
-    closes = 0;
-    size_t i = 0;
-    const size_t n = line.size();
-    while (i < n) {
-        const char c = line[i];
-        if (in_blk) {
-            if (c == '*' && i + 1 < n && line[i + 1] == '/') {
-                in_blk = false;
-                i += 2;
-                continue;
-            }
-            ++i;
-            continue;
-        }
-        if (in_str) {
-            if (!raw_str && c == '\\') {
-                i += (i + 1 < n) ? 2 : 1;
-                continue;
-            }
-            if (c == '"') {
-                in_str = false;
-                raw_str = false;
-            }
-            ++i;
-            continue;
-        }
-        if (c == '"') {
-            in_str = true;
-            raw_str = fmt_is_raw_open(line, i);
-            ++i;
-            continue;
-        }
-        if (c == '/' && i + 1 < n && line[i + 1] == '/') break;
-        if (c == '/' && i + 1 < n && line[i + 1] == '*') {
-            in_blk = true;
-            i += 2;
-            continue;
-        }
-        if (c == '{') ++opens;
-        else if (c == '}') ++closes;
-        ++i;
-    }
-}
-
 static std::string trim_ws(std::string_view s) {
     size_t b = 0, e = s.size();
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
     while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
     return std::string(s.substr(b, e - b));
-}
-
-static std::string fmt_src_canonical(std::string_view raw_src) {
-    std::string norm_nl;
-    norm_nl.reserve(raw_src.size());
-    for (size_t i = 0; i < raw_src.size(); ++i) {
-        if (raw_src[i] == '\r') {
-            if (i + 1 < raw_src.size() && raw_src[i + 1] == '\n') continue;
-            norm_nl.push_back('\n');
-        } else {
-            norm_nl.push_back(raw_src[i]);
-        }
-    }
-    std::vector<std::string> lines;
-    {
-        size_t pos = 0;
-        while (pos < norm_nl.size()) {
-            size_t nl = norm_nl.find('\n', pos);
-            if (nl == std::string::npos) {
-                lines.push_back(norm_nl.substr(pos));
-                break;
-            }
-            lines.push_back(norm_nl.substr(pos, nl - pos));
-            pos = nl + 1;
-        }
-    }
-    std::vector<std::string> out;
-    int depth = 0;
-    bool in_str = false, raw_str = false, in_blk = false;
-    for (const std::string &raw : lines) {
-        if (in_str) {
-            out.push_back(raw);
-            int o = 0, c = 0;
-            count_braces_line(raw, in_str, raw_str, in_blk, o, c);
-            depth += (o - c);
-            if (depth < 0) depth = 0;
-            continue;
-        }
-        std::string stripped = trim_ws(raw);
-        if (stripped.empty()) {
-            out.emplace_back("");
-            continue;
-        }
-        bool blk_eq = in_blk;
-        std::string norm = trim_ws(normalize_equals_line(stripped, blk_eq));
-        if (norm.empty()) {
-            out.emplace_back("");
-            continue;
-        }
-        const int orig = depth;
-        if (!in_blk && !norm.empty() && norm[0] == '}') depth = (depth > 0) ? (depth - 1) : 0;
-        out.push_back(std::string(static_cast<size_t>(depth) * 2, ' ') + norm);
-        int o = 0, c = 0;
-        count_braces_line(norm, in_str, raw_str, in_blk, o, c);
-        depth = orig + (o - c);
-        if (depth < 0) depth = 0;
-    }
-    while (!out.empty() && out.back().empty()) out.pop_back();
-    std::string res;
-    for (size_t i = 0; i < out.size(); ++i) {
-        if (i) res.push_back('\n');
-        res += out[i];
-    }
-    res.push_back('\n');
-    return res;
 }
 
 int cmd_fmt(int argc, char **argv) {
@@ -581,7 +379,7 @@ int cmd_fmt(int argc, char **argv) {
         const std::string a = argv[i];
         if (!after_ddash && a == "--") { after_ddash = true; continue; }
         if (!after_ddash && (a == "--help" || a == "-h")) {
-            print_cli_usage();
+            print_cli_usage(stdout);
             return 0;
         }
         if (!after_ddash && a == "--check") { check_only = true; continue; }
@@ -616,7 +414,7 @@ int cmd_fmt(int argc, char **argv) {
             code = 1;
             continue;
         }
-        const std::string formatted = fmt_src_canonical(src);
+        const std::string formatted = format_source_canonical(src);
         if (to_stdout) {
 #if defined(_WIN32)
             _setmode(_fileno(stdout), _O_BINARY);
@@ -708,7 +506,7 @@ int cmd_explain(int argc, char **argv) {
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--") continue;
-        if (a == "--help" || a == "-h") { print_cli_usage(); return 0; }
+        if (a == "--help" || a == "-h") { print_cli_usage(stdout); return 0; }
         if (a == "--json") { want_json = true; continue; }
         codes.push_back(a);
     }
@@ -958,7 +756,7 @@ Next:  lang/examples/ has ~70 working programs, lang/spec/SPEC.md is the law.
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--") continue;
-        if (a == "--help" || a == "-h") { print_cli_usage(); return 0; }
+        if (a == "--help" || a == "-h") { print_cli_usage(stdout); return 0; }
         if (a == "--kind" && i + 1 < argc) {
             kind = argv[++i];
             continue;
@@ -1064,7 +862,7 @@ int cmd_doc(int argc, char **argv) {
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--") continue;
-        if (a == "--help" || a == "-h") { print_cli_usage(); return 0; }
+        if (a == "--help" || a == "-h") { print_cli_usage(stdout); return 0; }
         if (a == "--json") { want_json = true; continue; }
         if (a == "-o" && i + 1 < argc) { out_path = argv[++i]; continue; }
         if (!a.empty() && a[0] == '-') {
@@ -1470,7 +1268,7 @@ int cmd_test(int argc, char **argv) {
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--") continue;
-        if (a == "--help" || a == "-h") { print_cli_usage(); return 0; }
+        if (a == "--help" || a == "-h") { print_cli_usage(stdout); return 0; }
         if (a == "-j" || a == "--jobs") {
             if (i + 1 >= argc || !parse_jobs(argv[++i], jobs)) {
                 std::fprintf(stderr, "brat test: invalid job count (want 1..256)\n");
@@ -1616,7 +1414,7 @@ int cmd_emit_c(int argc, char **argv) {
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--") == 0) continue;
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            print_cli_usage();
+            print_cli_usage(stdout);
             return 0;
         }
     }
@@ -1892,10 +1690,10 @@ static bool capture_native_cli(const std::vector<std::string> &args, int &status
     try {
         status = brat_cli_main(static_cast<int>(args.size()), argv.data());
     } catch (const std::exception &e) {
-        std::fprintf(stderr, "brat-cxx: internal build error: %s\n", e.what());
+        std::fprintf(stderr, "brat: internal build error: %s\n", e.what());
         status = 1;
     } catch (...) {
-        std::fprintf(stderr, "brat-cxx: internal build error\n");
+        std::fprintf(stderr, "brat: internal build error\n");
         status = 1;
     }
     std::fflush(nullptr);
@@ -1989,8 +1787,8 @@ static bool write_dist_manifest(const std::filesystem::path &out_dir,
     return true;
 }
 
-static void print_dist_usage() {
-    std::fprintf(stderr,
+static void print_dist_usage(FILE *out = stderr) {
+    std::fprintf(out,
                  "usage: brat dist FILE [-o DIR] [--target TRIPLE[,TRIPLE...]] "
                  "[--static|--dynamic] [--shared] [--unsafe-ffi]\n");
 }
@@ -2008,7 +1806,7 @@ static int refuse_unproven_dist(const std::string &path) {
 
 int cmd_dist(int argc, char **argv) {
     if (argc == 3 && (std::string(argv[2]) == "--help" || std::string(argv[2]) == "-h")) {
-        print_dist_usage();
+        print_dist_usage(stdout);
         return 0;
     }
     std::string out_arg = "dist";
@@ -2236,10 +2034,6 @@ int cmd_dist(int argc, char **argv) {
 }
 
 int cmd_ffi_native(int argc, char **argv) {
-    if (argc == 3 && (std::string(argv[2]) == "--help" || std::string(argv[2]) == "-h")) {
-        print_cli_usage();
-        return 0;
-    }
     return native_ffi::cmd_ffi(argc - 2, argv + 2);
 }
 

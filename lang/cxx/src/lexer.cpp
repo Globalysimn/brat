@@ -274,3 +274,228 @@ std::vector<Tok> lex(std::string_view src, uint32_t start_line) {
     out.push_back({TK::Eof, {}, out.empty() ? start_line : out.back().line});
     return out;
 }
+
+static bool fmt_is_raw_open(std::string_view line, size_t quote_idx) {
+    if (quote_idx == 0 || line[quote_idx - 1] != 'r') return false;
+    if (quote_idx >= 2) {
+        const unsigned char prev = static_cast<unsigned char>(line[quote_idx - 2]);
+        if (std::isalnum(prev) || prev == '_') return false;
+    }
+    return true;
+}
+
+static std::string normalize_equals_line(std::string_view line, bool &in_blk) {
+    std::string out;
+    out.reserve(line.size() + 4);
+    size_t i = 0;
+    const size_t n = line.size();
+    bool in_str = false, raw_str = false;
+    while (i < n) {
+        const char c = line[i];
+        if (in_blk) {
+            out.push_back(c);
+            if (c == '*' && i + 1 < n && line[i + 1] == '/') {
+                out.push_back('/');
+                in_blk = false;
+                i += 2;
+                continue;
+            }
+            ++i;
+            continue;
+        }
+        if (in_str) {
+            out.push_back(c);
+            if (!raw_str && c == '\\') {
+                if (i + 1 < n) {
+                    out.push_back(line[i + 1]);
+                    i += 2;
+                    continue;
+                }
+            } else if (c == '"') {
+                in_str = false;
+                raw_str = false;
+            }
+            ++i;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            raw_str = fmt_is_raw_open(line, i);
+            out.push_back(c);
+            ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && line[i + 1] == '/') {
+            out.append(line.substr(i));
+            break;
+        }
+        if (c == '/' && i + 1 < n && line[i + 1] == '*') {
+            in_blk = true;
+            out.append("/*");
+            i += 2;
+            continue;
+        }
+        if (c == '=') {
+            const char prev = (i > 0) ? line[i - 1] : '\0';
+            const char nxt = (i + 1 < n) ? line[i + 1] : '\0';
+            if (nxt == '=' || nxt == '>' || prev == '=' || prev == '!' || prev == '<' ||
+                prev == '>' || prev == '+' || prev == '-' || prev == '*' || prev == '/' ||
+                prev == '%' || prev == '&' || prev == '|' || prev == '^') {
+                out.push_back(c);
+                ++i;
+                continue;
+            }
+            while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+            size_t j = i + 1;
+            while (j < n && (line[j] == ' ' || line[j] == '\t')) ++j;
+            if (j >= n) {
+                if (out.empty()) out = "=";
+                else out += " =";
+                i = j;
+                continue;
+            }
+            if (out.empty()) out = "= ";
+            else out += " = ";
+            i = j;
+            continue;
+        }
+        out.push_back(c);
+        ++i;
+    }
+    return out;
+}
+
+static void advance_indent_line(std::string_view line, bool &in_str, bool &raw_str, bool &in_blk,
+                                std::vector<int> &stack) {
+    auto cur_depth = [&]() -> int { return stack.empty() ? 0 : (stack.back() + 1); };
+    bool opened_on_line = false;
+    int open_base = cur_depth();
+    size_t i = 0;
+    const size_t n = line.size();
+    while (i < n) {
+        const char c = line[i];
+        if (in_blk) {
+            if (c == '*' && i + 1 < n && line[i + 1] == '/') {
+                in_blk = false;
+                i += 2;
+                continue;
+            }
+            ++i;
+            continue;
+        }
+        if (in_str) {
+            if (!raw_str && c == '\\') {
+                i += (i + 1 < n) ? 2 : 1;
+                continue;
+            }
+            if (c == '"') {
+                in_str = false;
+                raw_str = false;
+            }
+            ++i;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            raw_str = fmt_is_raw_open(line, i);
+            ++i;
+            continue;
+        }
+        if (c == '/' && i + 1 < n && line[i + 1] == '/') break;
+        if (c == '/' && i + 1 < n && line[i + 1] == '*') {
+            in_blk = true;
+            i += 2;
+            continue;
+        }
+        if (c == '{' || c == '(' || c == '[') {
+            if (!opened_on_line) {
+                open_base = cur_depth();
+                opened_on_line = true;
+            }
+            stack.push_back(open_base);
+        } else if (c == '}' || c == ')' || c == ']') {
+            if (!stack.empty()) stack.pop_back();
+            if (cur_depth() <= open_base) opened_on_line = false;
+        }
+        ++i;
+    }
+}
+
+static std::string trim_ws(std::string_view s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return std::string(s.substr(b, e - b));
+}
+
+std::string format_source_canonical(std::string_view raw_src) {
+    if (raw_src.empty()) return {};
+    std::string norm_nl;
+    norm_nl.reserve(raw_src.size());
+    for (size_t i = 0; i < raw_src.size(); ++i) {
+        if (raw_src[i] == '\r') {
+            if (i + 1 < raw_src.size() && raw_src[i + 1] == '\n') continue;
+            norm_nl.push_back('\n');
+        } else {
+            norm_nl.push_back(raw_src[i]);
+        }
+    }
+    std::vector<std::string> lines;
+    {
+        size_t pos = 0;
+        while (pos < norm_nl.size()) {
+            size_t nl = norm_nl.find('\n', pos);
+            if (nl == std::string::npos) {
+                lines.push_back(norm_nl.substr(pos));
+                break;
+            }
+            lines.push_back(norm_nl.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
+    }
+    std::vector<std::string> out;
+    std::vector<int> indent_stack;
+    bool in_str = false, raw_str = false, in_blk = false;
+    for (const std::string &raw : lines) {
+        if (in_str) {
+            out.push_back(raw);
+            advance_indent_line(raw, in_str, raw_str, in_blk, indent_stack);
+            continue;
+        }
+        std::string stripped = trim_ws(raw);
+        if (stripped.empty()) {
+            out.emplace_back("");
+            continue;
+        }
+        bool blk_eq = in_blk;
+        std::string norm = trim_ws(normalize_equals_line(stripped, blk_eq));
+        if (norm.empty()) {
+            out.emplace_back("");
+            continue;
+        }
+        size_t lead_close = 0;
+        if (!in_blk) {
+            for (char ch : norm) {
+                if (ch == '}' || ch == ')' || ch == ']') ++lead_close;
+                else break;
+            }
+        }
+        int line_indent = indent_stack.empty() ? 0 : (indent_stack.back() + 1);
+        if (lead_close > 0) {
+            line_indent = (indent_stack.size() >= lead_close)
+                              ? indent_stack[indent_stack.size() - lead_close]
+                              : 0;
+        }
+        out.push_back(std::string(static_cast<size_t>(line_indent) * 2, ' ') + norm);
+        advance_indent_line(norm, in_str, raw_str, in_blk, indent_stack);
+    }
+    while (!out.empty() && out.back().empty()) out.pop_back();
+    std::string res;
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (i) res.push_back('\n');
+        res += out[i];
+    }
+    res.push_back('\n');
+    return res;
+}
+

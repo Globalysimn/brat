@@ -2602,7 +2602,7 @@ static int native_pkg_update(int argc, char **argv) {
     }
     if (options.size() > 1 || (!options.empty() && options.front() != "--dry-run") ||
         targets.size() > 1) {
-        std::fprintf(stderr, "usage: brat-cxx pkg update [NAME] [--dry-run]\n");
+        std::fprintf(stderr, "usage: brat pkg update [NAME] [--dry-run]\n");
         return 2;
     }
     dry_run = !options.empty();
@@ -2749,7 +2749,7 @@ static int native_pkg_update(int argc, char **argv) {
 
 static int native_pkg_publish(int argc, char **argv) {
     if (argc < 5) {
-        std::fprintf(stderr, "usage: brat-cxx pkg publish OWNER/NAME@VERSION SOURCE [--depends OWNER/NAME@CONSTRAINT]...\n");
+        std::fprintf(stderr, "usage: brat pkg publish OWNER/NAME@VERSION SOURCE [--depends OWNER/NAME@CONSTRAINT]...\n");
         return 2;
     }
     const std::string spec = argv[3];
@@ -2991,17 +2991,29 @@ static bool parse_pkg_target_args(int argc, char **argv, int start,
 
 int cmd_pkg(int argc, char **argv) {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: brat-cxx pkg {add|install|update|verify|list|remove|publish} [ARGS]\n");
+        std::fprintf(stderr, "usage: brat pkg {add|install|update|verify|list|remove|publish} [ARGS]\n");
         return 2;
     }
     const std::string sub = argv[2];
+    if (sub == "--help" || sub == "-h" || sub == "help") {
+        std::fprintf(stdout,
+                     "usage: brat pkg {add|install|update|verify|list|remove|publish} [ARGS]\n"
+                     "       brat pkg add <SPEC|URL> [--target TRIPLE]\n"
+                     "       brat pkg install [--target TRIPLE]\n"
+                     "       brat pkg update [NAME] [--dry-run]\n"
+                     "       brat pkg verify [--target TRIPLE]\n"
+                     "       brat pkg list\n"
+                     "       brat pkg remove NAME\n"
+                     "       brat pkg publish OWNER/NAME@VERSION SOURCE [--depends OWNER/NAME@CONSTRAINT]...\n");
+        return 0;
+    }
     if (sub == "publish") return native_pkg_publish(argc, argv);
     if (sub == "update") return native_pkg_update(argc, argv);
     if (sub == "add") {
         std::string target;
         std::vector<std::string> pos;
         if (!parse_pkg_target_args(argc, argv, 3, target, pos) || pos.size() != 1) {
-            std::fprintf(stderr, "usage: brat-cxx pkg add <SPEC|URL> [--target TRIPLE]\n");
+            std::fprintf(stderr, "usage: brat pkg add <SPEC|URL> [--target TRIPLE]\n");
             return 2;
         }
         return native_pkg_add(pos[0], target);
@@ -3010,33 +3022,36 @@ int cmd_pkg(int argc, char **argv) {
         std::string target;
         std::vector<std::string> pos;
         if (!parse_pkg_target_args(argc, argv, 3, target, pos) || !pos.empty()) {
-            std::fprintf(stderr, "usage: brat-cxx pkg install [--target TRIPLE]\n");
+            std::fprintf(stderr, "usage: brat pkg install [--target TRIPLE]\n");
             return 2;
         }
         return native_pkg_install(target);
     }
     if (sub == "list") {
         if (argc != 3) {
-            std::fprintf(stderr, "usage: brat-cxx pkg list\n");
+            std::fprintf(stderr, "usage: brat pkg list\n");
             return 2;
         }
         return native_pkg_list();
     }
     if (sub == "remove") {
         if (argc != 4) {
-            std::fprintf(stderr, "usage: brat-cxx pkg remove NAME\n");
+            std::fprintf(stderr, "usage: brat pkg remove NAME\n");
             return 2;
         }
         return native_pkg_remove(argv[3]);
     }
     if (sub != "verify") {
-        std::fprintf(stderr, "brat-cxx pkg: native subcommand not implemented: %s\n", sub.c_str());
+        std::fprintf(stderr,
+                     "brat pkg: unknown subcommand '%s'\n"
+                     "usage: brat pkg {add|install|update|verify|list|remove|publish} [ARGS]\n",
+                     sub.c_str());
         return 2;
     }
     std::string target;
     std::vector<std::string> pos;
     if (!parse_pkg_target_args(argc, argv, 3, target, pos) || !pos.empty()) {
-        std::fprintf(stderr, "usage: brat-cxx pkg verify [--target TRIPLE]\n");
+        std::fprintf(stderr, "usage: brat pkg verify [--target TRIPLE]\n");
         return 2;
     }
     return native_pkg_verify(target);

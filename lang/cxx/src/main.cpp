@@ -683,7 +683,7 @@ int run_process(const std::vector<std::string> &args, int timeout_ms, bool *time
     if (pid == 0) {
         if (timeout_ms > 0) setpgid(0, 0);
         execvp(argv[0], argv.data());
-        std::perror("brat-cxx: exec compiler");
+        std::perror("brat: exec compiler");
         _exit(127);
     }
     if (timeout_ms <= 0) {
@@ -811,7 +811,7 @@ static int bundle_driver(const char *arg0, const std::filesystem::path &output) 
         std::printf("bundle ok %s\n", output.string().c_str());
         return 0;
     } catch (const std::exception &e) {
-        std::fprintf(stderr, "brat-cxx bundle: %s\n", e.what());
+        std::fprintf(stderr, "brat bundle: %s\n", e.what());
         return 1;
     }
 }
@@ -1781,7 +1781,7 @@ static int build_one(const char *arg0, const std::string &file,
             return 1;
         }
     } else if (check_programs(set.files)) {
-        std::fprintf(stderr, "brat-cxx build: refusing to build after checker errors\n");
+        std::fprintf(stderr, "brat build: refusing to build after checker errors\n");
         return 1;
     }
     if (native_ffi::ffi_gate(file, module_source_pairs(set.files), ffi_header, ffi_objects,
@@ -1808,12 +1808,12 @@ static int build_one(const char *arg0, const std::string &file,
     else if (executable_on_path("gcc")) compiler = "gcc";
     else if (executable_on_path("clang")) compiler = "clang";
     else {
-        std::fprintf(stderr, "brat-cxx build: no C compiler found (set BRAT_CC)\n");
+        std::fprintf(stderr, "brat build: no C compiler found (set BRAT_CC)\n");
         return 1;
     }
     const auto cc_parts = split_compiler_cmd(compiler);
     if (cc_parts.empty()) {
-        std::fprintf(stderr, "brat-cxx build: no C compiler found (set BRAT_CC)\n");
+        std::fprintf(stderr, "brat build: no C compiler found (set BRAT_CC)\n");
         return 1;
     }
     const bool zig_any = std::filesystem::path(cc_parts[0]).filename().string().rfind("zig", 0) == 0;
@@ -1850,7 +1850,7 @@ static int build_one(const char *arg0, const std::string &file,
         if (!out) throw std::runtime_error("cannot write " + cfile.string());
         emitted_c = std::move(c);
     } catch (const std::exception &e) {
-        std::fprintf(stderr, "brat-cxx build: emit failed: %s\n", e.what());
+        std::fprintf(stderr, "brat build: emit failed: %s\n", e.what());
         std::error_code ec;
         std::filesystem::remove(cfile, ec);
         return 1;
@@ -1860,7 +1860,7 @@ static int build_one(const char *arg0, const std::string &file,
     std::string vendored_digest, vendored_err;
     if (!collect_vendored_c_objects(set.files, compiler, zig, target, shared,
                                     vendored_objs, vendored_digest, vendored_err)) {
-        std::fprintf(stderr, "brat-cxx build: %s\n", vendored_err.c_str());
+        std::fprintf(stderr, "brat build: %s\n", vendored_err.c_str());
         return 1;
     }
 
@@ -1911,16 +1911,16 @@ static int build_one(const char *arg0, const std::string &file,
      const int result = run_process(args, cc_timeout_ms, &cc_timed_out);
      if (result != 0) {
          if (cc_timed_out)
-             std::fprintf(stderr, "brat-cxx build: C compiler timed out after %d ms\n", cc_timeout_ms);
+             std::fprintf(stderr, "brat build: C compiler timed out after %d ms\n", cc_timeout_ms);
          else
-             std::fprintf(stderr, "brat-cxx build: C compiler exited with status %d\n", result);
+             std::fprintf(stderr, "brat build: C compiler exited with status %d\n", result);
          return 1;
      }
  #if defined(_WIN32)
      if (!MoveFileExW(temporary_output.wstring().c_str(), output_path.wstring().c_str(),
                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
          const DWORD error = GetLastError();
-         std::fprintf(stderr, "brat-cxx build: cannot install output (Windows error %lu)\n",
+         std::fprintf(stderr, "brat build: cannot install output (Windows error %lu)\n",
                       static_cast<unsigned long>(error));
          return 1;
      }
@@ -1928,7 +1928,7 @@ static int build_one(const char *arg0, const std::string &file,
      std::error_code ec;
      std::filesystem::rename(temporary_output, output_path, ec);
      if (ec) {
-         std::fprintf(stderr, "brat-cxx build: cannot install output: %s\n", ec.message().c_str());
+         std::fprintf(stderr, "brat build: cannot install output: %s\n", ec.message().c_str());
         return 1;
     }
  #endif
@@ -1959,7 +1959,7 @@ static int run_one(const char *arg0, const std::string &file, int opt,
         g_report = stdout;
         if (checker_errors) {
             std::fflush(stdout);
-            std::fprintf(stderr, "brat-cxx run: refusing to run after checker errors\n");
+            std::fprintf(stderr, "brat run: refusing to run after checker errors\n");
             return 1;
         }
     }
@@ -1972,7 +1972,7 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     const auto engine = locate_lang_dir(arg0) / "engine";
     std::string header;
     if (!read_crt_bundle(engine, header)) {
-        std::fprintf(stderr, "brat-cxx run: cannot read %s\n", (engine / "crt.h").string().c_str());
+        std::fprintf(stderr, "brat run: cannot read %s\n", (engine / "crt.h").string().c_str());
         return 1;
     }
     const auto libs = codegen::extern_libs(set.flat);
@@ -2003,7 +2003,7 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     std::string vendored_digest, vendored_err;
     if (!collect_vendored_c_objects(set.files, compiler, run_zig, "", false,
                                     vendored_objs, vendored_digest, vendored_err)) {
-        std::fprintf(stderr, "brat-cxx run: %s\n", vendored_err.c_str());
+        std::fprintf(stderr, "brat run: %s\n", vendored_err.c_str());
         return 1;
     }
     const std::string compiler_context = compiler_cache_context(compiler);
@@ -2069,13 +2069,13 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     {
         std::ofstream out(cfile, std::ios::binary | std::ios::trunc);
         if (!out) {
-            std::fprintf(stderr, "brat-cxx run: cannot write %s\n", cfile.string().c_str());
+            std::fprintf(stderr, "brat run: cannot write %s\n", cfile.string().c_str());
             return 1;
         }
         out.write(source.data(), static_cast<std::streamsize>(source.size()));
         out.flush();
         if (!out) {
-            std::fprintf(stderr, "brat-cxx run: cannot write %s\n", cfile.string().c_str());
+            std::fprintf(stderr, "brat run: cannot write %s\n", cfile.string().c_str());
             return 1;
         }
     }
@@ -2112,9 +2112,9 @@ static int run_one(const char *arg0, const std::string &file, int opt,
     if (built != 0) {
         std::filesystem::remove(temporary, ec);
         if (cc_timed_out)
-            std::fprintf(stderr, "brat-cxx run: C compiler timed out after %d ms\n", cc_timeout_ms);
+            std::fprintf(stderr, "brat run: C compiler timed out after %d ms\n", cc_timeout_ms);
         else
-            std::fprintf(stderr, "brat-cxx run: C compiler exited with status %d\n", built);
+            std::fprintf(stderr, "brat run: C compiler exited with status %d\n", built);
         return 1;
     }
 #if defined(_WIN32)
@@ -2126,14 +2126,14 @@ static int run_one(const char *arg0, const std::string &file, int opt,
 #else
     std::filesystem::rename(temporary, binary, ec);
     if (ec) {
-        std::fprintf(stderr, "brat-cxx run: cannot install %s: %s\n", binary.string().c_str(),
+        std::fprintf(stderr, "brat run: cannot install %s: %s\n", binary.string().c_str(),
                      ec.message().c_str());
         return 1;
     }
     pass_argv[0] = const_cast<char *>(binary_path.c_str());
     std::fflush(stdout);
     execv(pass_argv[0], pass_argv);
-    std::perror("brat-cxx run: exec");
+    std::perror("brat run: exec");
     return 127;
 #endif
 }
@@ -2347,8 +2347,8 @@ std::size_t type_errors(const std::vector<SourceFile> &files, std::size_t i,
     return errs.size();
 }
 
-void print_cli_usage() {
-    std::fprintf(stderr,
+void print_cli_usage(FILE *out) {
+    std::fprintf(out,
                  "usage: brat --version\n"
                  "       brat run|build|dist|check|deps|api|fmt|test|doc|new|emit-c|ffi|bindgen|pkg|explain|lsp|mcp|bundle ...\n"
                  "       brat run FILE [-- args...] [-g|--debug] [-O0|-O1|-O2] [--mem N]\n"
@@ -2378,8 +2378,9 @@ int brat_cli_main(int argc, char **argv) {
         const auto std_dir = locate_lang_dir(argv[0]) / "std";
         set_stdlib_root(std_dir.string());
     }
-    if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
-        print_cli_usage();
+    if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h" ||
+                      std::string(argv[1]) == "help")) {
+        print_cli_usage(stdout);
         return 0;
     }
     if (argc >= 2 && (std::string(argv[1]) == "-V" || std::string(argv[1]) == "--version" ||
@@ -2395,22 +2396,22 @@ int brat_cli_main(int argc, char **argv) {
         const std::string c1 = argv[1];
         if (c1 == "bundle") {
             if (argc == 3 && (std::string(argv[2]) == "--help" || std::string(argv[2]) == "-h")) {
-                print_cli_usage();
+                std::fprintf(stdout, "usage: brat bundle OUTPUT_DIR\n");
                 return 0;
             }
             if (argc != 3) {
-                std::fprintf(stderr, "usage: brat-cxx bundle OUTPUT_DIR\n");
+                std::fprintf(stderr, "usage: brat bundle OUTPUT_DIR\n");
                 return 2;
             }
             return bundle_driver(argv[0], argv[2]);
         }
         if (c1 == "lsp") {
             if (argc == 3 && (std::string(argv[2]) == "--help" || std::string(argv[2]) == "-h")) {
-                print_cli_usage();
+                std::fprintf(stdout, "usage: brat lsp\n");
                 return 0;
             }
             if (argc != 2) {
-                std::fprintf(stderr, "usage: brat-cxx lsp\n");
+                std::fprintf(stderr, "usage: brat lsp\n");
                 return 2;
             }
             return run_lsp();
@@ -2419,10 +2420,6 @@ int brat_cli_main(int argc, char **argv) {
         if (c1 == "dist") return cmd_dist(argc, argv);
         if (c1 == "ffi") return cmd_ffi_native(argc, argv);
         if (c1 == "bindgen") {
-            if (argc == 3 && (std::string(argv[2]) == "--help" || std::string(argv[2]) == "-h")) {
-                print_cli_usage();
-                return 0;
-            }
             return native_ffi::cmd_bindgen(argc - 2, argv + 2);
         }
         if (c1 == "fmt") return cmd_fmt(argc, argv);
@@ -2454,7 +2451,7 @@ int brat_cli_main(int argc, char **argv) {
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--") == 0) break;
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            print_cli_usage();
+            print_cli_usage(stdout);
             return 0;
         }
     }
@@ -2499,13 +2496,13 @@ int brat_cli_main(int argc, char **argv) {
                     return 2;
                 }
             } else if (!arg.empty() && arg[0] == '-') {
-                std::fprintf(stderr, "brat-cxx run: unknown flag %s\n", arg.c_str());
+                std::fprintf(stderr, "brat run: unknown flag %s\n", arg.c_str());
                 return 2;
             } else if (file.empty()) file = arg;
             else program_args.push_back(arg);
         }
         if (file.empty()) {
-            std::fprintf(stderr, "brat-cxx run: needs one source file\n");
+            std::fprintf(stderr, "brat run: needs one source file\n");
             return 2;
         }
         std::vector<std::string> keep;
@@ -2521,7 +2518,7 @@ int brat_cli_main(int argc, char **argv) {
             print_parse_error(file, e);
             return 1;
         } catch (const std::exception &e) {
-            std::fprintf(stderr, "brat-cxx run: %s\n", e.what());
+            std::fprintf(stderr, "brat run: %s\n", e.what());
             return 1;
         }
     }
@@ -2585,16 +2582,16 @@ int brat_cli_main(int argc, char **argv) {
             else if (arg == "--trace-lines") trace_lines = true;
             else if (arg == "--no-check") no_check = true;
             else if (!arg.empty() && arg[0] == '-') {
-                std::fprintf(stderr, "brat-cxx build: unknown flag %s\n", arg.c_str());
+                std::fprintf(stderr, "brat build: unknown flag %s\n", arg.c_str());
                 return 2;
             } else if (file.empty()) file = arg;
             else {
-                std::fprintf(stderr, "brat-cxx build: expected exactly one source file\n");
+                std::fprintf(stderr, "brat build: expected exactly one source file\n");
                 return 2;
             }
         }
         if (file.empty()) {
-            std::fprintf(stderr, "brat-cxx build: needs one source file\n");
+            std::fprintf(stderr, "brat build: needs one source file\n");
             return 2;
         }
         if (output.empty()) {
@@ -2613,7 +2610,7 @@ int brat_cli_main(int argc, char **argv) {
             print_parse_error(file, e);
             return 1;
         } catch (const std::exception &e) {
-            std::fprintf(stderr, "brat-cxx build: %s\n", e.what());
+            std::fprintf(stderr, "brat build: %s\n", e.what());
             return 1;
         }
     }

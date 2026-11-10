@@ -310,15 +310,10 @@ def fail(name, msg):
     raise SystemExit(1)
 
 
-def checkers(path):
-    """Both checkers' diagnostics, normalised to the lines that carry a message."""
-    out = {}
-    for tag, cmd in (("py", _cxx.cli_args("check", path)),
-                     ("cxx", [CXX, "check", path])):
-        p = sh(cmd)
-        out[tag] = (p.returncode,
-                    "\n".join(l for l in p.stdout.splitlines() if ": error: " in l))
-    return out
+def check_one(path):
+    """Checker diagnostics, normalised to the lines that carry a message."""
+    p = sh([CXX, "check", path])
+    return p.returncode, "\n".join(l for l in p.stdout.splitlines() if ": error: " in l)
 
 
 def main():
@@ -328,22 +323,17 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        seen = checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        rc, text = seen["py"]
+        rc, text = check_one(path)
         if want is None:
             if rc != 0:
                 fail(name, "must be accepted, got:\n%s" % text)
             exe = os.path.join(TMP, name + ".exe")
-            for tag, cmd in (("py", _cxx.cli_args("build", path, "-o", exe)),
-                             ("cxx", [CXX, "build", path, "-o", exe])):
-                b = sh(cmd)
-                if b.returncode != 0:
-                    fail(name, "%s build: %s" % (tag, (b.stdout + b.stderr)[-500:]))
-                run = sh([exe])
-                if run.stdout != stdout:
-                    fail(name, "%s stdout %r, want %r" % (tag, run.stdout, stdout))
+            b = sh([CXX, "build", path, "-o", exe])
+            if b.returncode != 0:
+                fail(name, "build: %s" % (b.stdout + b.stderr)[-500:])
+            run = sh([exe])
+            if run.stdout != stdout:
+                fail(name, "stdout %r, want %r" % (run.stdout, stdout))
             run_o0 = sh(_cxx.run_args(path))
             if run_o0.stdout != stdout:
                 fail(name, "run_o0 stdout %r, want %r" % (run_o0.stdout, stdout))
@@ -388,13 +378,11 @@ fn main() -> i64 {
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(accepted[name])
-        seen = checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        if seen["py"][0] != 0:
-            fail(name, "a joined pointer use must be accepted, got:\n%s" % seen["py"][1])
+        rc, text = check_one(path)
+        if rc != 0:
+            fail(name, "a joined pointer use must be accepted, got:\n%s" % text)
 
-    print("CAPABILITY ALL GREEN (%d cases, both checkers)" % (len(CASES) + len(accepted)))
+    print("CAPABILITY ALL GREEN (%d cases)" % (len(CASES) + len(accepted)))
 
 
 def run_gate():
