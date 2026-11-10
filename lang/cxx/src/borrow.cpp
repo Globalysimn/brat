@@ -1,7 +1,5 @@
 // Intraprocedural ownership, move, and borrow checker.
-// Every function keeps the reference's name and its order of checks, because
-// the two are compared diagnostic for diagnostic on the whole corpus: the
-// order of `warns` and `errs` is part of the output.
+// Preserves deterministic check and declaration ordering for `warns` and `errs`.
 #include "borrow.h"
 
 #include "capability.h"
@@ -113,14 +111,13 @@ struct Decl {
     bool owned = false;
     bool borrowed_ptr = false;
     bool spawn_frozen = false;
+    bool clo_outer = false;
+    std::set<std::string> clo_muts;
     std::optional<std::pair<std::string, int>> frozen_by;
 };
 
-// Insertion-ordered, like the dict it replaces: a leaked-pointer report or a
-// frozen-borrow note is emitted in declaration order, and that order shows.
-// Entries are shared pointers because the reference distinguishes two kinds of
-// copy: `copy_decl` clones every entry, `dict(decl)` shares them, and a walk
-// over a shared table sees the moves its caller made.
+// Insertion-ordered symbol table so leaked-pointer and borrow diagnostics
+// are emitted in declaration order.
 struct Decls {
     std::vector<std::pair<std::string, std::shared_ptr<Decl>>> v;
 
@@ -756,8 +753,7 @@ void interp_names(const std::string &text, std::vector<std::string> &acc) {
     }
 }
 
-// The reference returns `acc` for chaining; returning a copy of the whole
-// accumulated list at every level is the one thing that must not be translated.
+// Collect variable names referenced inside `e` into `acc`.
 void vars_in(const Expr *e, std::vector<std::string> &acc) {
     if (!e) return;
     switch (e->k) {
@@ -1044,8 +1040,8 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
         }
         auto cb = HOF_CB_ARG.find(e->b);
         for (size_t i = 1; i < e->kids.size(); i++) {
-            check_expr(e->kids[i].get(), decl, errs, funcs, false,
-                       cb != HOF_CB_ARG.end() && cb->second == i - 1);
+            bool is_cb = cb != HOF_CB_ARG.end() && cb->second == i - 1;
+            check_expr(e->kids[i].get(), decl, errs, funcs, false, is_cb);
         }
         break;
     }
@@ -1105,7 +1101,8 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
 
 void walk_closure_arg(const Expr &a, Decls &decl, Errs &errs, FnTable &funcs) {
     if (a.k != EK::Closure || !a.fn) return;
-    Decls sub = decl;                  // shallow, like `dict(decl)`: same Decl objects
+    Decls sub = copy_decl(decl);
+    for (auto &kv : sub.v) kv.second->clo_outer = true;
     auto saved_floor = errs.fn_floor;
     auto saved_defers = errs.active_defers;
     errs.fn_floor.clear();
@@ -1217,6 +1214,10 @@ void scan_moves(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs) {
             }
         }
         if (verb == "sent" && d->copy) continue;
+        if (d->clo_outer && (!d->copy || d->owned || verb != "moved")) {
+            errs.note("cannot move `" + v + "` inside a closure: closures may run more than once");
+            continue;
+        }
         if (d->moved) {
             // A consuming call reads its argument, and the read is already
             // reported with the right verb; reporting again is the same error
@@ -1412,9 +1413,169 @@ bool claim_loe(const std::string &path,
     return true;
 }
 
+void eval_vars_in(const Expr *e, std::vector<std::string> &acc) {
+    if (!e || e->k == EK::Closure) return;
+    if (e->k == EK::Var) { acc.push_back(e->a); return; }
+    if (e->k == EK::Str) { interp_names(e->a, acc); return; }
+    for (const auto &sub : e->kids) eval_vars_in(sub.get(), acc);
+}
+
+void collect_closure_muts_expr(const Expr *e, const std::set<std::string> &outer_roots,
+                               const std::set<std::string> &locals, const Decls &decl,
+                               FnTable &funcs, std::set<std::string> &out);
+void collect_closure_muts_body(const Body &body, const std::set<std::string> &outer_roots,
+                               std::set<std::string> locals, const Decls &decl,
+                               FnTable &funcs, std::set<std::string> &out) {
+    auto note_root = [&](const std::string &r) {
+        if (!locals.count(r) && outer_roots.count(r)) out.insert(alias_owner(r, decl));
+    };
+    for (const Stmt *sp : body) {
+        if (!sp) continue;
+        const Stmt &s = *sp;
+        switch (s.k) {
+        case SK::Let:
+        case SK::LetTmp:
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            locals.insert(s.a);
+            break;
+        case SK::Set:
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            note_root(root_of(s.a));
+            break;
+        case SK::SetIdx:
+        case SK::SetField: {
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            collect_closure_muts_expr(s.e2.get(), outer_roots, locals, decl, funcs, out);
+            collect_closure_muts_expr(s.e3.get(), outer_roots, locals, decl, funcs, out);
+            if (auto dv = deref_var(s.e1.get(), decl, funcs)) note_root(*dv);
+            else if (auto wp = write_path(s.e1.get())) note_root(root_of(*wp));
+            break;
+        }
+        case SK::Return:
+        case SK::Expr:
+        case SK::Defer:
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            break;
+        case SK::If:
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            collect_closure_muts_body(wrap(s.body), outer_roots, locals, decl, funcs, out);
+            if (s.els) collect_closure_muts_body(else_body(s), outer_roots, locals, decl, funcs, out);
+            break;
+        case SK::While:
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            collect_closure_muts_body(wrap(s.body), outer_roots, locals, decl, funcs, out);
+            break;
+        case SK::ForIter: {
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            auto sub_loc = locals;
+            sub_loc.insert(s.a);
+            collect_closure_muts_body(wrap(s.body), outer_roots, sub_loc, decl, funcs, out);
+            break;
+        }
+        case SK::ForRange: {
+            collect_closure_muts_expr(s.e1.get(), outer_roots, locals, decl, funcs, out);
+            collect_closure_muts_expr(s.e2.get(), outer_roots, locals, decl, funcs, out);
+            auto sub_loc = locals;
+            sub_loc.insert(s.a);
+            collect_closure_muts_body(wrap(s.body), outer_roots, sub_loc, decl, funcs, out);
+            break;
+        }
+        case SK::Try: {
+            collect_closure_muts_body(wrap(s.body), outer_roots, locals, decl, funcs, out);
+            auto sub_loc = locals;
+            if (s.opt1 && !s.opt1->empty()) sub_loc.insert(*s.opt1);
+            collect_closure_muts_body(wrap(s.body2), outer_roots, sub_loc, decl, funcs, out);
+            break;
+        }
+        case SK::Scope:
+        case SK::Unsafe:
+        case SK::Spawn:
+        case SK::Block:
+            collect_closure_muts_body(wrap(s.body), outer_roots, locals, decl, funcs, out);
+            break;
+        default: break;
+        }
+    }
+}
+
+void collect_closure_muts_expr(const Expr *e, const std::set<std::string> &outer_roots,
+                               const std::set<std::string> &locals, const Decls &decl,
+                               FnTable &funcs, std::set<std::string> &out) {
+    if (!e || e->k == EK::Closure) return;
+    auto note_root = [&](const std::string &r) {
+        if (!locals.count(r) && outer_roots.count(r)) out.insert(alias_owner(r, decl));
+    };
+    if (e->k == EK::Call) {
+        for (const auto &kid : e->kids) {
+            const Expr *arg = skip_quest(kid.get());
+            if (arg && arg->k == EK::Un && arg->a == "&" && !arg->kids.empty() &&
+                arg->kids[0]->k == EK::Var) {
+                note_root(arg->kids[0]->a);
+            }
+        }
+        auto it = funcs.sigs.find(e->a);
+        if (it != funcs.sigs.end()) {
+            for (size_t i = 0; i < it->second.size() && i < e->kids.size(); i++) {
+                if (it->second[i].mode == Mode::Mut) {
+                    if (auto p = place_of(skip_quest(e->kids[i].get()))) note_root(root_of(*p));
+                }
+            }
+        }
+        if (!locals.count(e->a)) {
+            if (const Decl *cd = decl.find(e->a)) {
+                for (const std::string &m : cd->clo_muts) {
+                    if (outer_roots.count(m)) out.insert(m);
+                }
+            }
+        }
+    } else if (e->k == EK::MCall) {
+        if (mutate_kind(e->b, funcs)) {
+            if (auto dv = deref_var(e->kids[0].get(), decl, funcs)) note_root(*dv);
+            else if (auto wp = write_path(e->kids[0].get())) note_root(root_of(*wp));
+            else if (auto bp = path_of(e->kids[0].get())) note_root(root_of(*bp));
+        }
+        auto cb = HOF_CB_ARG.find(e->b);
+        if (cb != HOF_CB_ARG.end() && cb->second + 1 < e->kids.size()) {
+            const Expr *cba = skip_quest(e->kids[cb->second + 1].get());
+            if (cba && cba->k == EK::Var && !locals.count(cba->a)) {
+                if (const Decl *cd = decl.find(cba->a)) {
+                    for (const std::string &m : cd->clo_muts) {
+                        if (outer_roots.count(m)) out.insert(m);
+                    }
+                }
+            } else if (cba && cba->k == EK::Closure && cba->fn) {
+                std::set<std::string> sub_loc = locals;
+                if (cba->fn->name) sub_loc.insert(*cba->fn->name);
+                for (const Param &p : cba->fn->params) sub_loc.insert(p.name);
+                collect_closure_muts_body(wrap(cba->fn->body), outer_roots, sub_loc, decl, funcs, out);
+            }
+        }
+    }
+    for (const auto &sub : e->kids) collect_closure_muts_expr(sub.get(), outer_roots, locals, decl, funcs, out);
+}
+
+std::set<std::string> closure_muts_of(const Expr *e, const Decls &decl, FnTable &funcs) {
+    e = skip_quest(e);
+    if (!e) return {};
+    if (e->k == EK::Var) {
+        const Decl *d = decl.find(e->a);
+        return d ? d->clo_muts : std::set<std::string>{};
+    }
+    if (e->k == EK::Closure && e->fn) {
+        std::set<std::string> outer_roots, locals, out;
+        for (const auto &kv : decl.v) outer_roots.insert(kv.first);
+        if (e->fn->name) locals.insert(*e->fn->name);
+        for (const Param &p : e->fn->params) locals.insert(p.name);
+        collect_closure_muts_body(wrap(e->fn->body), outer_roots, std::move(locals), decl, funcs, out);
+        return out;
+    }
+    return {};
+}
+
 void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTable &funcs,
                 std::vector<std::pair<std::string, std::string>> &claimed) {
     if (!e) return;
+    std::set<size_t> reported_ref_kids;
     if (e->k == EK::Call) {
         // `&x` is an exclusive loan. C receives a writable pointer, so BRAT's
         // aliasing rule has to hold at the boundary exactly as it does inside a
@@ -1452,18 +1613,32 @@ void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTabl
                 }
             }
         }
+        if (const Decl *cd = decl.find(e->a); cd && !cd->clo_muts.empty()) {
+            for (const std::string &m : cd->clo_muts) {
+                check_mutate(m, decl, borrows, errs, "mut", e->a);
+            }
+        }
         auto it = funcs.sigs.find(e->a);
         if (it != funcs.sigs.end()) {
             const std::vector<ParamMode> &sig = it->second;
+            std::vector<std::tuple<size_t, std::string, std::string>> call_muts;
             for (size_t i = 0; i < sig.size() && i < e->kids.size(); i++) {
                 const Expr *arg = skip_quest(e->kids[i].get());
                 const ParamMode &pm = sig[i];
+                if (arg) {
+                    for (const std::string &cm : closure_muts_of(arg, decl, funcs)) {
+                        call_muts.emplace_back(i, cm, pm.name);
+                    }
+                }
                 if (pm.mode == Mode::Ref || (pm.mode != Mode::Mut && pm.mode != Mode::Move)) {
                     continue;
                 }
                 if (!arg) continue;
                 auto p = place_of(arg);
-                if (p && claim_loe(*p, claimed, errs)) claimed.emplace_back(*p, pm.name);
+                if (p) {
+                    call_muts.emplace_back(i, *p, pm.name);
+                    if (claim_loe(*p, claimed, errs)) claimed.emplace_back(*p, pm.name);
+                }
                 std::string v;
                 bool whole = arg->k == EK::Var;
                 if (whole) {
@@ -1489,6 +1664,10 @@ void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTabl
                                       "`",
                                   rel_at(b.line, "borrowed by `" + b.name + "` here"));
                     }
+                    continue;
+                }
+                if (d && d->clo_outer && (!d->copy || d->owned)) {
+                    errs.note("cannot move `" + v + "` inside a closure: closures may run more than once");
                     continue;
                 }
                 if (d && d->moved) {
@@ -1517,6 +1696,30 @@ void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTabl
                     d->moved = true;
                     d->moved_line = errs.line;
                     note_try_move(errs, v, v, "moved");
+                }
+            }
+            if (!call_muts.empty()) {
+                for (size_t i = 0; i < sig.size() && i < e->kids.size(); i++) {
+                    if (sig[i].mode != Mode::Ref) continue;
+                    const Expr *arg = skip_quest(e->kids[i].get());
+                    if (!arg || is_copy_expr(arg, decl, funcs)) continue;
+                    std::vector<std::string> rpaths;
+                    if (auto p = place_of(arg)) rpaths.push_back(*p);
+                    else rpaths = borrow_srcs(arg, decl, funcs);
+                    bool hit = false;
+                    for (const std::string &rp : rpaths) {
+                        for (const auto &[mi, mp, mwho] : call_muts) {
+                            if (mi != i && paths_conflict(rp, mp)) {
+                                errs.note("law of exclusivity: `" + rp +
+                                          "` borrowed and mutated in one expression (clashes with `" +
+                                          mp + "` used by `" + mwho + "`)");
+                                reported_ref_kids.insert(i);
+                                hit = true;
+                                break;
+                            }
+                        }
+                        if (hit) break;
+                    }
                 }
             }
         }
@@ -1562,8 +1765,79 @@ void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTabl
                 claimed.emplace_back(*p, who);
             }
         }
+        auto cb = HOF_CB_ARG.find(e->b);
+        if (cb != HOF_CB_ARG.end() && cb->second + 1 < e->kids.size()) {
+            const Expr *cba = skip_quest(e->kids[cb->second + 1].get());
+            if (cba && cba->k == EK::Var) {
+                if (const Decl *cd = decl.find(cba->a); cd && !cd->clo_muts.empty()) {
+                    for (const std::string &m : cd->clo_muts) {
+                        check_mutate(m, decl, borrows, errs, "mut", cba->a);
+                    }
+                }
+            }
+        }
     }
     for (const auto &sub : e->kids) scan_calls(sub.get(), decl, borrows, errs, funcs, claimed);
+    bool check_sib = (e->k == EK::Bin && e->kids.size() == 2 && e->a != "&&" && e->a != "||");
+    if (!check_sib) return;
+    size_t start_k = (e->k == EK::MCall) ? 1 : 0;
+    auto collect_moves = [&](const Expr *sub, std::vector<std::pair<std::string, std::string>> &out) {
+        auto rec = [&](auto &&self, const Expr *x) -> void {
+            if (!x || x->k == EK::Closure) return;
+            if (x->k == EK::Move && !x->kids.empty()) {
+                if (auto mp = place_of(x->kids[0].get())) out.emplace_back(*mp, "move");
+            } else if (x->k == EK::Call) {
+                auto sit = funcs.sigs.find(x->a);
+                if (sit != funcs.sigs.end()) {
+                    for (size_t k = 0; k < sit->second.size() && k < x->kids.size(); k++) {
+                        if (sit->second[k].mode == Mode::Move) {
+                            if (auto mp = place_of(skip_quest(x->kids[k].get()))) {
+                                out.emplace_back(*mp, sit->second[k].name);
+                            }
+                        }
+                    }
+                }
+            }
+            for (const auto &sk : x->kids) self(self, sk.get());
+        };
+        rec(rec, sub);
+    };
+    std::vector<std::vector<std::pair<std::string, std::string>>> kid_moves(e->kids.size());
+    bool any_kid_move = false;
+    for (size_t i = start_k; i < e->kids.size(); i++) {
+        collect_moves(e->kids[i].get(), kid_moves[i]);
+        if (!kid_moves[i].empty()) any_kid_move = true;
+    }
+    if (any_kid_move) {
+        for (size_t i = start_k; i < e->kids.size(); i++) {
+            if (reported_ref_kids.count(i)) continue;
+            std::vector<std::string> rvars;
+            eval_vars_in(e->kids[i].get(), rvars);
+            bool hit = false;
+            for (const std::string &rv : rvars) {
+                if (!decl.has(rv)) continue;
+                std::string owner = alias_owner(rv, decl);
+                for (size_t j = start_k; j < e->kids.size(); j++) {
+                    if (j == i) continue;
+                    for (const auto &[mp, mwho] : kid_moves[j]) {
+                        bool own_move = false;
+                        for (const auto &[ip, _] : kid_moves[i]) {
+                            if (paths_conflict(ip, mp)) { own_move = true; break; }
+                        }
+                        if (!own_move && paths_conflict(owner, mp)) {
+                            errs.note("law of exclusivity: `" + rv +
+                                      "` borrowed and mutated in one expression (clashes with `" +
+                                      mp + "` used by `" + mwho + "`)");
+                            hit = true;
+                            break;
+                        }
+                    }
+                    if (hit) break;
+                }
+                if (hit) break;
+            }
+        }
+    }
 }
 
 
@@ -1623,7 +1897,9 @@ void scan_defer_call_moves(const Expr *e, Decls &decl, Borrows &borrows, Errs &e
                 move_roots.insert(v);
                 Decl *d = decl.find(v);
                 const std::vector<Borrow> *live = borrows.peek(v);
-                if (d && d->moved) {
+                if (d && d->clo_outer && (!d->copy || d->owned)) {
+                    errs.note("cannot move `" + v + "` inside a closure: closures may run more than once");
+                } else if (d && d->moved) {
                     errs.note("use of moved `" + v + "`",
                               rel_at(d->moved_line, "`" + v + "` moved here"));
                 } else if (live && !live->empty()) {
@@ -1842,6 +2118,7 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
         }
         d->owned = value && value->k == EK::Call && funcs.owned_ret.count(value->a) > 0;
         if (d->owned) d->dl = errs.line;
+        d->clo_muts = closure_muts_of(value, decl, funcs);
     }
     d->moved = false;
     if (d->pinned && is_copy_expr(value, decl, funcs)) {
@@ -1912,6 +2189,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         bool owned_call = e && e->k == EK::Call && funcs.owned_ret.count(e->a) > 0;
         if (owned_call) d.owned = true;
         if (is_borrowed_ptr_expr(e, decl, funcs)) d.borrowed_ptr = true;
+        d.clo_muts = closure_muts_of(e, decl, funcs);
         decl.set(s.a, std::move(d));
         return;
     }
@@ -2009,7 +2287,8 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
     case SK::Fn:
     case SK::ExportFn: {
         const FnDecl &f = s.fns[0];
-        Decls sub = decl;                  // shallow, like `dict(decl)`
+        Decls sub = copy_decl(decl);
+        for (auto &kv : sub.v) kv.second->clo_outer = true;
         auto saved_floor = errs.fn_floor;
         auto saved_defers = errs.active_defers;
         auto saved_sinks = std::move(errs.try_sinks);
@@ -2160,9 +2439,20 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
     case SK::Unsafe: {
         Decls sub = copy_decl(decl);
         Borrows bs = copy_borrows(borrows);
-        // `unsafe` is for raw pointers and FFI; it does not buy a way around
-        // ownership.
         walk_block(wrap(s.body), sub, bs, errs, funcs);
+        if (!always_exits(wrap(s.body))) {
+            for (const auto &[n, sd] : sub.v) {
+                Decl *t = decl.find(n);
+                if (!t || (t->param && t->mode.value_or(Mode::Ref) != Mode::Move) || t->borrowed_ptr)
+                    continue;
+                if (sd->moved && !t->moved) {
+                    t->moved = true;
+                    t->moved_line = sd->moved_line;
+                    t->moved_verb = sd->moved_verb;
+                }
+                for (const std::string &p : sd->moved_paths) t->moved_paths.insert(p);
+            }
+        }
         return;
     }
     case SK::Impl: {
@@ -2173,7 +2463,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
                 errs.note("duplicate method `" + s.a + "." + name + "`");
             }
             seen.insert(name);
-            Decls sub = decl;              // shallow, like `dict(decl)`
+            Decls sub = copy_decl(decl);
             auto saved_floor = errs.fn_floor;
             auto saved_defers = errs.active_defers;
             auto saved_sinks = std::move(errs.try_sinks);
@@ -2930,8 +3220,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
         }
     }
 
-    // Sharing: cycles (a refcount cannot reclaim them) and writes that escape a
-    // spawn. Same order as the reference: functions first, then the script body.
+    // Sharing: reference cycles and writes that escape a `spawn` block.
     for (const BorrowDiag &d : sharing_check(body, funcs.struct_fields)) errs.v.push_back(d);
     // Channels: a straight-line pipe whose ends do not match cannot finish.
     for (const BorrowDiag &d : session_check(body)) errs.v.push_back(d);
