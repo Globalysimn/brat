@@ -1,71 +1,46 @@
-# Region Allocation (`arena` Blocks)
-
-Regression suites: `test_arena_c.py` (ASan), `test_arena_diff.py`,
-`test_arena_escape.py`, `test_arena_request.py`, `test_arena_pool.py`,
-`test_arena_strings.py`.
-
-## Purpose
-
-Request handlers, parsers and batch transforms allocate many short-lived strings,
-vectors and maps that become garbage together at the end of one step. Without
-arenas, each value pays a separate `calloc`/`free` pair and reference-count
-decrement cascade. `arena { ... }` routes heap allocations inside the block to a
-thread-local bump allocator and resets the mark in one step on scope exit.
-
-## Syntax and lowering
+# Lexical Bump Arenas (`arena` / `own`)
 
 ```brat
-arena {
-  let parts = raw.split(",")
-  let line = parts.join(":")
-  send_reply(line)
+fn summarize_line(line: str) -> str {
+  arena {
+    let parts = line.split(",")
+    let tag = parts[0].trim().upper()
+    return own("{tag}:{len(parts)}")
+  }
 }
 ```
 
-The parser lowers `arena { body }` to `if true { $arena_enter(); defer
-$arena_leave(); body }`. User source cannot call `$arena_enter` or
-`$arena_leave` directly, `emit-c --no-check` rejects programs containing `arena`
-blocks, and nesting depth is capped at 64 levels. Because reset runs through
-`defer`, unwinding an error out of the block still resets the arena mark.
+## Runtime mechanism (`lang/engine/crt/core.h`)
 
-## Static escape rules
+Entering `arena { ... }` increments the thread-local arena depth (`varena_enter`)
+and saves a `(chunk, used)` cursor. While active, heap allocations (`VStr` > 14
+bytes, `Vec`, `Map`, `Tag`, `Clos` together with backing storage) bump a pointer
+inside 64 KiB chunks (`BHEAD_ARENA`) instead of calling `malloc`/`free` per
+value.
 
-An object allocated inside `arena { ... }` is invalidated when the mark resets,
-so `check.cpp` rejects at compile time:
+- `b_inc` and `b_dec` check `BHEAD_ARENA` and return without touching `rc`.
+- Exiting the block (`normal`, `return`, `break`, `continue`, `?`, or `raise`)
+  runs `varena_leave` via `defer`, rewinding the cursor in `O(chunks)` time and
+  retaining up to 4 chunks (`256 KiB`) per thread for the next `arena` entry.
+  Allocations larger than 32 KiB get dedicated chunks freed on exit.
+- `own(x)` deep-copies `x` onto the regular reference-counted heap outside the
+  active arena (with a 256-level recursion guard). Scalars, inline short strings
+  (`<= 14` bytes), and objects already on the regular heap return unchanged.
+- Under AddressSanitizer, `varena_leave` poisons rewound bytes so any bug in the
+  static escape pass faults on the first read.
 
-1. Returning a non-scalar value bound inside the arena from the block or
-   enclosing function.
-2. Assigning an arena-allocated value to an outer variable or mutating an outer
-   container (`push`, index write, field write, `.set`) with one.
-3. Capturing an arena-allocated value in `spawn` or in a closure that outlives
-   the block.
+## Static escape rules (`lang/cxx/src/borrow.cpp`)
 
-To promote a value out of an arena onto the reference-counted heap, call
-`own(x)`. `own(x)` suspends the active thread-local arena while deep-copying `x`
-(for example, `return Err(own("bad record {n}"))`). At `-O2`, non-escaping
-local `struct` bindings inside an `arena` block are scalarized by SRA without
-allocating a `Map` in the arena at all; passing a whole `struct` to `own(s)`
-marks `s` as escaping so `own(s)` deep-copies the full aggregate, while
-`own(s.field)` promotes individual arena-backed fields cleanly before reset.
+`borrow.cpp` tags values allocated inside an `arena` block and rejects four
+escape paths unless wrapped in `own(...)`:
 
-## Runtime layout (`crt.h`)
+1. Returning an arena-tainted expression (`return x` inside `arena`).
+2. Assigning or mutating a binding declared outside the `arena` (`outer = x`,
+   `outer.push(x)`, `outer[k] = x`, `outer.f = x`).
+3. Sending an arena-tainted value over a channel (`ch.send(x)`).
+4. Spawning tasks (`spawn`), nested `par for`, or storing into raw C pointers
+   (`ptr_write_*`, `slice_set`) inside `arena`.
 
-- Each OS thread owns a linked list of 64 KiB bump chunks plus an active mark
-  stack. Objects larger than 64 KiB receive dedicated oversize chunks that are
-  freed on reset.
-- `BHead` carries an origin bit distinguishing arena objects from heap objects
-  so `vrc_dec` never passes an arena pointer to `free()`.
-- Resetting a mark recycles up to 4 chunks (256 KiB) in a per-thread pool before
-  falling back to `malloc`. Size rounding and chunk growth use checked overflow
-  arithmetic.
-- Under AddressSanitizer (`__SANITIZE_ADDRESS__`), resetting a mark poisons the
-  payload bytes while keeping `BHead` readable for frame cleanup, catching
-  dangling arena reads immediately even when chunks stay pooled.
-
-## Scope boundaries
-
-- Foreign C code receives `str` and `ptr` arguments as borrowed addresses for
-  the duration of the call; C code must never stash an arena-backed pointer
-  past the end of the `arena` block.
-- `spawn` inside an `arena` block is rejected statically; cross-thread region
-  sharing is intentionally unsupported.
+Functions called inside `arena` allocate from the active thread-local region as
+well, and any value returned from such a call is treated as arena-tainted by the
+caller until passed through `own(...)`.

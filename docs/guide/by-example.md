@@ -5,11 +5,9 @@ Ten self-contained programs covering common tasks in BRAT.
 Every `brat run` and `brat check` block on this page is compiled and checked in
 CI by `lang/tests/test_docs_examples.py`.
 
----
-
 ## 1. Records, `impl` methods, and exhaustive `enum` matching
 
-Records need no boilerplate `struct` header when prototyping: `Job { id: 7, ms: 18 }`
+Record literals work without a prior `struct` declaration: `Job { id: 7, ms: 18 }`
 creates a tagged record immediately (add `struct Job { ... }` only when you want
 checked fixed slots). `enum` variants can optionally declare payload types, and
 `match` checks exhaustiveness across local and imported `pub enum`s, `Option[T]`,
@@ -62,8 +60,6 @@ job #2: retry #3 (upstream 503)
 job #3: cancelled
 ```
 
----
-
 ## 2. Errors as values (`Result`, `?`, and LIFO `defer`)
 
 Recoverable errors travel as `Ok(v)` and `Err(e)`. The `?` suffix unwraps `Ok`
@@ -103,8 +99,6 @@ rejected: port 99999 out of range 1..65535
   leaving parse_port(broken)
 rejected: expected key=value
 ```
-
----
 
 ## 3. Unknown-size JSON in an `arena`, keeping one result with `own()`
 
@@ -164,8 +158,6 @@ example.brat:4: error: arena: a value made inside the block is returned out of i
   |     return slow
 ```
 
----
-
 ## 4. Hash table CRUD (`map`)
 
 `map` is an open-addressed hash table with inline storage for small maps and
@@ -205,8 +197,6 @@ missing /nope: true
 /login -> 4
 ```
 
----
-
 ## 5. Doubly-linked lists and LRU queues without pointer cycles
 
 BRAT uses deterministic reference counting without a background cycle collector.
@@ -216,17 +206,25 @@ functions leak unless scoped inside an `arena`.
 
 Just as in Rust or data-oriented C, long-lived doubly-linked lists and LRU
 queues store nodes in flat vectors and link them with `i64` indices (`-1` for
-null). You get $O(1)$ splice/detach, cache locality, and zero reference cycles:
+null). You get O(1) splice/detach, cache locality, and zero reference cycles:
 
 ```brat run
+struct LruList {
+  keys: vec[str],
+  prev: vec[i64],
+  next: vec[i64],
+  head: i64,
+  tail: i64
+}
+
 impl LruList {
-  fn make() {
+  fn make() -> LruList {
     return LruList { keys: [], prev: [], next: [], head: -1, tail: -1 }
   }
 
   fn push_front(mut self, key: str) -> i64 {
     let idx = len(self.keys)
-    let old_head = self.head + 0
+    let old_head = self.head
     self.keys.push(key)
     self.prev.push(-1)
     self.next.push(old_head)
@@ -240,28 +238,27 @@ impl LruList {
   }
 
   fn move_to_front(mut self, idx: i64) {
-    let cur_head = self.head + 0
-    let cur_tail = self.tail + 0
-    if idx == cur_head {
+    if idx == self.head {
       return
     }
-    let p = self.prev[idx] + 0
-    let n = self.next[idx] + 0
+    let p = self.prev[idx]
+    let n = self.next[idx]
     if p != -1 { self.next[p] = n }
     if n != -1 { self.prev[n] = p }
-    if idx == cur_tail { self.tail = p }
+    if idx == self.tail { self.tail = p }
+    let old_head = self.head
     self.prev[idx] = -1
-    self.next[idx] = cur_head
-    if cur_head != -1 { self.prev[cur_head] = idx }
+    self.next[idx] = old_head
+    if old_head != -1 { self.prev[old_head] = idx }
     self.head = idx
   }
 
   fn order(self) -> str {
     let mut out = []
-    let mut cur = self.head + 0
+    let mut cur = self.head
     while cur != -1 {
       out.push(self.keys[cur])
-      cur = self.next[cur] + 0
+      cur = self.next[cur]
     }
     return out.join(" -> ")
   }
@@ -283,8 +280,6 @@ fn main() -> i64 {
 initial: page:c -> page:b -> page:a
 touched a: page:a -> page:c -> page:b
 ```
-
----
 
 ## 6. Linear-time regular expressions (Pike VM)
 
@@ -316,8 +311,6 @@ status=502
 date=2026-11-07 ms=184
 token=[REDACTED] token=[REDACTED]
 ```
-
----
 
 ## 7. Parameterized SQLite queries (`std.sqlite`)
 
@@ -352,8 +345,6 @@ fn main() -> i64 {
 auth_sum=42ms slowest=billing(64ms)
 ```
 
----
-
 ## 8. SHA-256, HMAC, and constant-time MAC verification (`std.crypto`)
 
 `std.crypto` ships FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, OS CSPRNG bytes,
@@ -384,8 +375,6 @@ sha256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 valid sig: true
 tampered: false
 ```
-
----
 
 ## 9. CLI flags, paths, and ISO-8601 UTC timestamps
 
@@ -419,8 +408,6 @@ fn main() -> i64 {
 cmd=deploy workers=4 verbose=true
 target=configs/prod.json stem=prod deadline=2026-11-07T09:31:30Z
 ```
-
----
 
 ## 10. Deterministic `par for` folds and bounded channels
 

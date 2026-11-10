@@ -1,51 +1,43 @@
 # Contributing
 
-## Reporting bugs
+## Build and test
 
-Include a minimal `.brat` program, the exact `brat-cxx` command, expected output,
-actual output, operating system and C/C++ compiler versions (`g++ --version`,
-`cc --version`). Include the Python version only when reporting an issue in
-`lang/tests/run_all.py` or `scripts/bench.py`. Never include tokens or private
-credentials. See [SECURITY.md](SECURITY.md) for security-sensitive bugs.
-
-## Building and running tests
-
-Build the native compiler and run the test suite from the repository root:
+Building requires `make`, a C++20 compiler (`g++` or `clang++`), and a C11
+compiler (`cc`, `gcc`, or `clang`). Python 3 is used to run the test and
+benchmark scripts:
 
 ```sh
-make -j4                         # minimum -j2; locally use -j$(nproc)
+make -j4
+make -j4 asan
 python3 lang/tests/run_all.py -j 4
 ```
 
-Run targeted native suites while iterating:
+`run_all.py` accepts individual test filenames and `--shard K/N` (1-based) for
+CI sharding. Every test in `lang/tests/` compiles and executes against
+`brat-cxx`.
+
+Formatting across all `.brat` files is checked with:
 
 ```sh
-python3 lang/tests/test_agreement.py
-python3 lang/tests/test_cxx_frontend.py
-python3 lang/tests/test_cxx_checker.py
-python3 lang/tests/test_cxx_borrow.py
-python3 lang/tests/test_cxx_modules.py
-python3 lang/tests/test_modules_deep.py
-python3 lang/tests/test_sqlite_fs_confinement.py
-python3 lang/tests/test_docs_examples.py
+./lang/cxx/bin/brat-cxx fmt --check $(git ls-files '*.brat')
 ```
-
-`run_all.py` accepts explicit test filenames and `--shard K/N` (1-based) for CI
-sharding. Every test in `lang/tests/` compiles and executes directly against
-`brat-cxx`.
 
 ## Submitting changes
 
-- **Every bug fix needs a regression test** that fails before your change and
+- Bug fixes need a minimal regression test that fails before the change and
   passes after it.
-- **Runtime, FFI and concurrency changes** must stay clean under AddressSanitizer,
-  UndefinedBehaviorSanitizer and LeakSanitizer (`python3 lang/tests/test_asan_examples.py`),
-  and ThreadSanitizer where threads or channels are touched.
-- **Performance changes** must include `make bench` (`python3 scripts/bench.py --runs 5`)
-  before/after numbers, CPU model, OS and C compiler version.
-- **Documentation changes** must run `python3 lang/tests/test_docs_examples.py`
-  and `python3 lang/tests/test_newcomer.py` (which verifies README quickstart
-  commands, repository links, test-suite count, `newcomer.brat` and newcomer
-  error diagnostics) so code fences and references stay verified.
-- Keep compiled binaries, `.brat-build-*` staging directories and scratch files
-  out of git commits.
+- Runtime, FFI, and concurrency changes must pass under AddressSanitizer,
+  UndefinedBehaviorSanitizer, and LeakSanitizer
+  (`python3 lang/tests/test_asan_examples.py`), plus ThreadSanitizer when
+  threads, locks, or channels are touched.
+- Compiler and runtime edits must compile with zero warnings under `-Wall
+  -Wextra -Wformat=2 -Werror` on both GCC and Clang, and `lang/engine/crt.h`
+  must stay clean under `x86_64-w64-mingw32-gcc -Werror` (no bare `long` on
+  Windows LLP64).
+- Performance changes must include `make bench` (`python3 scripts/bench.py
+  --runs 5`) numbers before and after, along with CPU model, OS, and C compiler
+  version.
+- Documentation changes must pass `python3 lang/tests/test_docs_examples.py` and
+  `python3 lang/tests/test_newcomer.py`.
+- Keep compiled binaries, `.brat-build-*` staging directories, and scratch files
+  out of commits.

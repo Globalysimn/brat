@@ -122,7 +122,7 @@ both normal control flow and error unwinding.
 
 ## 5. `match`, enums, structs and `impl` methods
 
-BRAT does not require upfront type boilerplate: `Point { x: 3, y: 4 }` creates an
+Record literals do not require a prior `struct` declaration: `Point { x: 3, y: 4 }` creates an
 ad-hoc tagged record immediately, while `struct Point { x: i64, y: i64 }` opts
 into fixed-slot layout and field checking. Likewise, `enum` variants can omit
 types (`Done(ms)`) or declare payload types (`Done(ms: i64)`, `Click(x: i64, y: i64)`);

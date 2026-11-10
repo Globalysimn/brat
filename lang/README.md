@@ -1,13 +1,14 @@
-# `lang/` Directory Layout
+# `lang/`
 
-- `cxx/src/`: C++20 compiler, module loader, ownership/type/effect checker,
-  C11 emitter, FFI/DWARF verifier, LSP/MCP servers and CLI tools (`brat-cxx`,
-  26 `.cpp` and 25 `.h` files).
-- `engine/crt.h`, `engine/crt/*.h`: modular C11 runtime headers (`core.h`,
-  `ops_str.h`, `conc.h`, `sql_proc.h`, `net_tls.h`) included by emitted C programs.
-- `std/`: 12 standard-library modules and `.bri` interface files.
-- `examples/`: 64 runnable `.brat` programs exercised by the test suite.
-- `tests/`: regression, sanitizer and fuzz test files driven by `run_all.py`.
-- `spec/SPEC.md`: language reference.
+Compiler, C11 runtime, standard library, specification, and test suite:
 
-See the [root README](../README.md) for build and test instructions.
+- `cxx/src/` - C++20 ahead-of-time compiler, ownership/type checker, C11
+  emitter, and CLI subcommands (`check`, `build`, `run`, `emit-c`, `ffi`, `pkg`,
+  `fmt`, `test`, `lsp`, `mcp`).
+- `engine/` - `crt.h` and `crt/*.h` modular C11 runtime headers linked into
+  compiled programs.
+- `std/` - 12 standard-library modules (`*.brat`) and interface files (`*.bri`).
+- `spec/SPEC.md` - BRAT v0.7 language specification.
+- `examples/` - 64 small feature programs (`newcomer.brat`, `logstat.brat`,
+  ownership, arenas, FFI, concurrency).
+- `tests/` - 175 test files executed by `python3 lang/tests/run_all.py`.

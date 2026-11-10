@@ -1,9 +1,7 @@
 # CLI, Environment Variables, and Diagnostic Codes
 
-`./bin/brat` is a thin wrapper around `./lang/cxx/bin/brat-cxx`. Both accept the
-exact same subcommands and flags.
-
----
+`make` creates `./bin/brat` as a symlink to `./lang/cxx/bin/brat-cxx`; both
+paths invoke the same binary and accept the same subcommands and flags.
 
 ## 1. Subcommands
 
@@ -47,8 +45,6 @@ Build-time FFI flags accepted by `build` and `run`:
 | `brat lsp` | Start the JSON-RPC 2.0 Language Server on `stdio` (diagnostics, hover, go-to-definition, completions, formatting, code actions). |
 | `brat mcp` | Start the Model Context Protocol tool server on `stdio`. |
 
----
-
 ## 2. Environment variables
 
 ### Compiler and build cache
@@ -79,8 +75,6 @@ Build-time FFI flags accepted by `build` and `run`:
 | `BRAT_THREADS` | hardware concurrency | Worker thread count for `par for` and the runtime task pool. |
 | `BRAT_TRACE` | unset | Set to `1` to enable line-number trace updates when compiled with `--trace-lines`. |
 
----
-
 ## 3. Diagnostic code index (`brat explain <code>`)
 
 Run `./bin/brat explain E0382` (or `--json`) at any time to see a runnable
@@ -91,7 +85,7 @@ before/after example in your terminal.
 | Code | Summary | Typical cause & fix |
 |---|---|---|
 | `E0382` | Use of moved value | Reading a binding after `move x` transferred ownership. Borrow with `ref`, pass `x.copy()`, or reorder the read before `move`. |
-| `E0499` | Second mutable borrow while first is active | Passing the same binding twice as `mut` in one call (`swap_both(mut v, mut v)`). Use distinct values or index positions inside one `mut` parameter. |
+| `E0499` | Borrow | Law of exclusivity (`mut`+`mut` or `ref`+`mut`/`move` on one root in a call, binary read+`move`, or `let mut y = m[k]`) |
 | `E0502` | Cannot mutate / borrow conflict | Mutating a container inside `for x in items { items.push(...) }`, mutating a binding while an active `ref` borrow is still read later, or direct self-insertion (`v.push(v)`). Collect changes in a second vector or finish reading the borrow first. |
 | `E0505` | Cannot move out of borrowed value | Moving `x` (`eat(move x)`) while a local alias `let r = x` still has a later read. Move `eat(move x)` past the last read of `r`, or `r = x.copy()`. |
 | `E0507` | Cannot move out of borrowed parameter | `move s` inside `fn f(s: ref str)`. Change the parameter to `s: move str` or copy (`let owned = s.copy()`). |

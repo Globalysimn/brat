@@ -132,8 +132,10 @@ fn main() -> i64 {
 ## 5. Typed slices, structs behind pointers and `errno`
 
 - `slice_of_ptr(p, len, kind)` wraps C memory without copying for `kind` in
-  `"u8"`, `"i32"`, `"i64"`, `"f32"`, `"f64"`. Both index bounds and element
-  value ranges are checked on `slice_get` and `slice_set`.
+  `"u8"`, `"i32"`, `"i64"`, `"f32"`, `"f64"`. Slices carry a dedicated static
+  `slice` type and runtime `__brat_slice` tag (plain `vec` values are rejected),
+  check index bounds and element value ranges on `slice_get` / `slice_set`, and
+  retain/release heap-backed element values across writes.
 - `ptr_read_struct(p, "Node")` and `ptr_write_struct(p, val, "Node")` copy
   `extern struct` values to and from foreign addresses; `p[i]` indexes
   `ptr[Node]` directly; `slice_of_struct(p, n, "Node")` builds a read-only

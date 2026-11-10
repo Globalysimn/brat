@@ -138,7 +138,7 @@ the checker sees both arms together.
 | Reassign `const` | `assign to const \`x\`` |
 | Mutating method on immutable receiver | `cannot mutate immutable \`x\`: \`x.push\` writes through it` |
 | Overlapping mutable borrows | `double mut borrow of \`x\`` |
-| Aliasing `mut` arguments in one call | `law of exclusivity: ...` |
+| Aliasing `mut`+`mut` or `ref`+`mut`/`move` in one call, or binary read+`move` | `law of exclusivity: ...` (`E0499`) |
 | Move out of a borrowed parameter | `cannot move borrowed parameter ...` |
 | Immutable binding passed to `mut` param | `pass immutable \`x\` as mut param \`p\`` |
 | Local borrow returned from function | `ref \`x\` escapes via return` |
@@ -148,9 +148,40 @@ the checker sees both arms together.
 | Unfreed `move ptr` from FFI | `leaked owned pointer \`p\`` |
 | Missing trait method in `impl` | `impl Shout for Point missing loud` |
 
-### Container iteration lock and `.copy()`
+### Call-site exclusivity (`E0499`)
 
-A `for x in v` loop holds a read-only view over `v` for the entire loop body:
+Within one call expression, the same root binding cannot be passed twice as
+`mut` or passed as `ref` alongside a `mut` or `move` parameter (including
+closure arguments that mutate a captured binding). Reading a binding on one side
+of a binary operator while moving it on the other (`s + consume(move s)`) is
+rejected under the same rule:
+
+```brat check
+fn drain_and_len(mut dst: vec[str], src: vec[str]) -> i64 {
+  dst.pop()
+  return len(src)
+}
+
+fn main() -> i64 {
+  let mut items = ["a", "b"]
+  return drain_and_len(items, items)
+}
+```
+
+```diagnostics
+example.brat: 1 error(s), 0 warning(s)
+example.brat:8: error: law of exclusivity: `items` borrowed and mutated in one expression (clashes with `items` used by `dst`)
+  |   return drain_and_len(items, items)
+example.brat: 0 type error(s)
+```
+
+### Container iteration lock, closures, and `.copy()`
+
+A `for x in v` loop holds a read-only view over `v` for the entire loop body
+(blocking direct mutation as well as calls to closures that mutate `v`).
+Closures capture outer bindings by shallow copy and cannot `move` outer
+non-`Copy` bindings or take ownership of outer `move ptr` allocations; `unsafe`
+blocks keep type, borrow, and post-block `move` state checks active:
 
 ```brat check
 fn main() -> i64 {

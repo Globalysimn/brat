@@ -75,7 +75,7 @@ signatures and runnable examples live in [Standard Library Reference](stdlib.md)
 
 | Module | What it covers |
 |---|---|
-| `std.json` | C-accelerated RFC 8259 `parse`, `stringify`, `stringify_indent`, `get_path`, `get_str`, `get_int`, `get_bool` |
+| `std.json` | C-backed RFC 8259 `parse`, `stringify`, `stringify_indent`, `get_path`, `get_str`, `get_int`, `get_bool` |
 | `std.http` | HTTP/1.1 + HTTPS client (`get`, `post_json`, `request_ex`, keep-alive pools, custom CA) and server (`listen`, `serve_once`, `serve_keep_alive`) |
 | `std.sqlite` | Confined SQLite3 (`open`, `open_memory`, `close`, `exec`, parameterized `query`, `query_one`, `scalar_int`) |
 | `std.crypto` | `sha256`, `sha256_hex`, `hmac_sha256`, `hmac_sha256_hex`, `constant_time_eq`, OS CSPRNG `rand_bytes` / `rand_hex` |

@@ -14,8 +14,6 @@ A library cannot enforce three things at once:
 
 If you do not need that combination, an existing language is a better choice.
 
----
-
 ## How does BRAT compare to Rust, Go, Zig, and Python?
 
 | Question | Rust | Go | Zig | Python | BRAT |
@@ -38,8 +36,6 @@ When to pick each:
   otherwise be Python + C extensions, when you want a single native binary,
   checked C ABI types, and scoped `arena` cleanup.
 
----
-
 ## Why reference counting + local borrow checks instead of full lifetimes or a tracing GC?
 
 A moving or concurrent GC complicates C interop (pointer pinning, FFI call
@@ -52,8 +48,6 @@ atomic once threads or plugins are active) and runs an intra-function place
 checker over `x`, `x.f`, and `x[i]`. That catches local use-after-move,
 iterator mutation, returning pointers to dead locals, and concurrent `spawn`
 writes without requiring `'a` on data structures.
-
----
 
 ## What happens if I build a reference cycle or a doubly-linked list?
 
@@ -91,8 +85,6 @@ analysis and will stay alive until process exit unless freed by a region:
    `LruList` implementation is in
    [BRAT by Example #5](by-example.md#5-doubly-linked-lists-and-lru-queues-without-pointer-cycles).
 
----
-
 ## Why compile to C11 instead of LLVM or Cranelift?
 
 1. Small build footprint: `brat-cxx` has no third-party C++ dependencies and
@@ -108,8 +100,6 @@ analysis and will stay alive until process exit unless freed by a region:
 
 The trade-off is C compiler time on cold builds (~0.7s for a minimal program at
 `-O2`), offset during development by `brat run`'s content-addressed binary cache.
-
----
 
 ## Why does `brat build` refuse `extern fn puts(s: str) -> i32` by default?
 
@@ -128,8 +118,6 @@ dropping `const` silently corrupts registers or memory at run time.
    SHA-256 digest.
 4. `--unsafe-ffi` on the command line when you intentionally bypass checks.
 
----
-
 ## How are strings represented? Bytes, UTF-16, or UTF-8?
 
 Strings are immutable, NUL-terminated UTF-8:
@@ -137,14 +125,12 @@ Strings are immutable, NUL-terminated UTF-8:
 - Strings up to 14 bytes are stored inline inside the 16-byte `Val`
   representation (no heap allocation or reference-count traffic).
 - Longer strings use reference-counted heap buffers with cached byte and
-  code-point metadata (ASCII strings index in $O(1)$).
+  code-point metadata (ASCII strings index in O(1)).
 - `len(s)`, `s[i]`, and `s.slice(a, b)` count Unicode scalar values (code
   points), so `"héllo"[1]` is `"é"`. Extended grapheme clusters (such as
   multi-codepoint emoji sequences) are not segmented.
 - Raw binary buffers and non-UTF-8 OS arguments/paths use `vec[i64]` byte slices
   via `utf8_bytes`, `utf8_str`, `args_bytes`, `env_get_bytes`, and `std.bytes`.
-
----
 
 ## What happens on integer overflow, division by zero, and deep recursion?
 
@@ -178,8 +164,6 @@ fn main() -> i64 {
 caught: div by zero
 ```
 
----
-
 ## Why does BRAT have both `Result`/`?` and `try`/`catch`?
 
 Expected I/O and parsing errors (`json.parse`, `sqlite.query`, `"abc".parse_int()`,
@@ -192,8 +176,6 @@ request boundary can wrap work in `try { ... } catch e { ... }`, which runs
 active `defer` blocks and drops all local RC and `arena` allocations as it
 unwinds.
 
----
-
 ## Why aren't top-level `fn` names runtime values?
 
 Top-level functions compile directly to static C functions (often with unboxed
@@ -202,16 +184,12 @@ boxing wrapper for every function. Bare `fn` names work directly with collection
 methods (`[1, 2, 3].map(double)`); when you want a closure value to
 store in a variable or container, write `fn(x) { return double(x) }`.
 
----
-
 ## Is the compiler self-hosted?
 
 No. `brat-cxx` is ~57k lines of C++20 (`lang/cxx/src/`, 26 `.cpp` and 25 `.h`
 files) with no external C++ libraries, emitting C11 against `lang/engine/crt.h`.
 Keeping the compiler in plain C++20 avoids bootstrap cycles while the language
 is still changing.
-
----
 
 ## What is rough or unfinished right now?
 

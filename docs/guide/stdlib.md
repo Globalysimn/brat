@@ -10,8 +10,6 @@ Import a module with `import std.<name>` and call functions qualified
 SQLite, subprocesses) are stripped at compile time via `BRAT_CRT_MASK` when a
 program does not reference them.
 
----
-
 ## `std.json`: RFC 8259 JSON parser and serializer
 
 Backed directly by the C scanner/serializer in `crt/sql_proc.h`. JSON objects
@@ -44,8 +42,6 @@ fn main() -> i64 {
 ```output
 8080 {"ok":true,"port":8080}
 ```
-
----
 
 ## `std.bytes`: Byte vectors, hex, and Base64
 
@@ -87,8 +83,6 @@ fn main() -> i64 {
 42524154 QlJBVA== BRAT
 ```
 
----
-
 ## `std.cli`: Command-line flags and subcommands
 
 Stateless helpers over `args()` (or any `vec[str]`). Both `--flag value` and
@@ -120,8 +114,6 @@ fn main() -> i64 {
 sync 3 true
 sync,a.txt,b.txt
 ```
-
----
 
 ## `std.crypto`: SHA-256, HMAC-SHA256, and CSPRNG
 
@@ -156,8 +148,6 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 true true
 ```
 
----
-
 ## `std.csv`: RFC 4180 CSV parser and serializer
 
 Handles quoted fields, embedded commas/newlines, and doubled `""` escapes.
@@ -185,8 +175,6 @@ db-1 -> primary, eu
 db-2 -> say "hi"
 ```
 
----
-
 ## `std.env`: Environment variables
 
 Reads process environment variables subject to the runtime credential denylist
@@ -201,8 +189,6 @@ fn get_or(name: str, fallback: str) -> str
 fn has(name: str) -> bool
 fn flag(name: str) -> bool
 ```
-
----
 
 ## `std.fs`: Confined filesystem helpers
 
@@ -237,8 +223,6 @@ fn close(handle: i64) -> Result[i64, str]
 fn stdin_line() -> Result[Option[str], str]
 ```
 
----
-
 ## `std.path`: Pure path manipulation
 
 Pure lexical operations (no disk touches), normalizing `.` and `..` segments
@@ -272,8 +256,6 @@ fn main() -> i64 {
 var/cache/index.tar.gz | dir: var/cache | ext: .gz
 var/cache/index.tar.idx | rel: cache/index.tar.gz
 ```
-
----
 
 ## `std.time`: Clocks, Hinnant calendar math, and ISO-8601 UTC
 
@@ -312,8 +294,6 @@ fn main() -> i64 {
 true true 1.25s
 ```
 
----
-
 ## `std.sqlite`: Embedded SQLite3
 
 Opens `:memory:` or confined file databases (`SQLITE_OPEN_NOFOLLOW`, defensive
@@ -331,13 +311,14 @@ fn query_one(db: i64, sql: str, params) -> Result[Option[map], str]
 fn scalar_int(db: i64, sql: str, params) -> Result[i64, str]
 ```
 
----
-
 ## `std.http`: HTTP/1.1 & HTTPS client and server
 
 Includes pure URL/query/wire parsers plus TCP/OpenSSL client requests,
-keep-alive connection pools, redirect following (`get_follow`), and blocking or
-keep-alive HTTP/1.1 servers (`listen`, `serve_once`, `serve_keep_alive`).
+keep-alive connection pools, redirect following (`get_follow`, blocking
+loopback, private, link-local, ULA, and IPv4-embedded IPv6 SSRF targets), and
+HTTP/1.1 servers (`listen`, `serve_once`, `serve_keep_alive`) that reject
+malformed `obs-fold`, whitespace-prefixed header/trailer, and duplicate-`Host`
+request framing.
 
 ```brat
 fn parse_url(url: str) -> Result[map, str]
@@ -385,8 +366,6 @@ fn main() -> i64 {
 ```output
 api.example.com 8443 /v1/items a b Created
 ```
-
----
 
 ## `std.proc`: Subprocess execution (`execve`, no shell)
 
