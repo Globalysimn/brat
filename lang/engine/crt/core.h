@@ -1105,7 +1105,12 @@ BFN_HOT Val vrc_inc(Val v) {
     case V_STR:   if (v.as.str)  { BHead *h = (BHead *)v.as.str - 1; if (!BIS_IMMORTAL(h)) BRC_ADD(h); }  return v;
     case V_VEC:   if (v.as.vec)  { BHead *h = (BHead *)v.as.vec - 1; if (!BIS_IMMORTAL(h)) BRC_ADD(h); }  return v;
     case V_STRUCT: if (v.as.map) { BHead *h = (BHead *)v.as.map - 1; if (!BIS_IMMORTAL(h)) BRC_ADD(h); } return v;
-    case V_TAG:   if (v.as.tv) { BHead *h = (BHead *)v.as.tv - 1; if (!BIS_IMMORTAL(h)) BRC_ADD(h); } return v;
+    case V_TAG:
+        /* A failed call evaluates to the error being carried. vrc_dec_slow
+         * ignores a release of it, so a frame that binds it takes no reference. */
+        if (verr_pending() && v.as.tv == vunwind.as.tv) return v;
+        if (v.as.tv) { BHead *h = (BHead *)v.as.tv - 1; if (!BIS_IMMORTAL(h)) BRC_ADD(h); }
+        return v;
     default: return v;
     }
 }

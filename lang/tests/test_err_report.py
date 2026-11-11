@@ -199,6 +199,31 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # a failed method call bound by `let`: the binding counted a reference to the
+    # error that no release gave back
+    "bind_method": '''fn id(x) {
+  return x
+}
+
+fn main() -> i64 {
+  let s = id("a string long enough to live on the heap")
+  let mut out = []
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    try {
+      let q = s.nope()
+      print(q)
+    } catch e {
+      n = n + 1
+    }
+    try { out.push(s.nope()) } catch e { n = n + 1 }
+    i = i + 1
+  }
+  print(n, out)
+  return 0
+}
+''',
 }
 
 for name, src in ASSIGNED.items():
