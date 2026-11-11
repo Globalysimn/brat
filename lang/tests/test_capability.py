@@ -284,6 +284,42 @@ fn main() -> i64 {
 }
 ''', "`m` is written inside `spawn` and touched again with no `join_all()` in between", None),
 
+    "spawn_inner_shadow_race": ('''\
+fn main() -> i64 {
+  let mut v = ["a"]
+  spawn {
+    if false {
+      let v = 0
+      print(v)
+    }
+    v.push("b")
+  }
+  v.push("c")
+  join_all()
+  return 0
+}
+''', RACE, None),
+
+    "spawn_helper_inner_shadow_global_race": ('''\
+let mut shared = [1]
+fn touch_shared() -> i64 {
+  if false {
+    let shared = 0
+    print(shared)
+  }
+  shared.push(2)
+  return 0
+}
+fn main() -> i64 {
+  spawn {
+    touch_shared()
+  }
+  shared.push(3)
+  join_all()
+  return 0
+}
+''', "`shared` is written inside `spawn` and touched again with no `join_all()` in between", None),
+
     "cycle_via_mut_helper": ('''\
 fn link(mut a: map[str, i64], b: map[str, i64]) -> i64 {
   a.set("next", b)

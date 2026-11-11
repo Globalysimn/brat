@@ -192,6 +192,27 @@ struct TouchDetail {
 
 TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
     TouchDetail out;
+    auto write_place = [&](const Expr *pl) {
+        std::string r = root(pl);
+        if (!r.empty()) {
+            out.write.insert(r);
+            if (is_nested_place(pl)) out.nested_write.insert(r);
+        }
+    };
+    auto apply_summary = [&](const FnSummary &fs, const std::vector<ExprP> &kids, bool with_ptr) {
+        for (size_t idx : fs.mut_idx)
+            if (idx < kids.size()) write_place(kids[idx].get());
+        if (with_ptr) {
+            for (size_t idx : fs.ptr_idx) {
+                if (idx < kids.size()) {
+                    std::string ar = root(kids[idx].get());
+                    if (!ar.empty()) out.ptr_touch.insert(ar);
+                }
+            }
+        }
+        for (const auto &gw : fs.global_writes) out.write.insert(gw);
+        for (const auto &gr : fs.global_reads) out.read.insert(gr);
+    };
     std::vector<const Expr *> exprs = stmt_exprs(s);
     std::vector<const Expr *> nodes;
     for (const Expr *e : exprs) each_node(e, nodes);
@@ -205,11 +226,7 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
                     auto dot = ist->a.find('.');
                     out.write.insert(dot == std::string::npos ? ist->a : ist->a.substr(0, dot));
                 } else if (ist->k == SK::SetIdx || ist->k == SK::SetField) {
-                    std::string ir = root(ist->e1.get());
-                    if (!ir.empty()) {
-                        out.write.insert(ir);
-                        if (is_nested_place(ist->e1.get())) out.nested_write.insert(ir);
-                    }
+                    write_place(ist->e1.get());
                 }
             }
         }
@@ -229,27 +246,12 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
                 if (it != fns->end()) fs = &it->second;
             }
             if (!r.empty()) {
-                if (is_cap_mutator(n->b) || (fs && fs->mut_idx.count(0))) {
-                    out.write.insert(r);
-                    if (!n->kids.empty() && is_nested_place(n->kids[0].get()))
-                        out.nested_write.insert(r);
-                } else {
+                if (is_cap_mutator(n->b) || (fs && fs->mut_idx.count(0)))
+                    write_place(n->kids[0].get());
+                else
                     out.read.insert(r);
-                }
             }
-            if (fs) {
-                for (size_t idx : fs->mut_idx) {
-                    if (idx < n->kids.size()) {
-                        std::string ar = root(n->kids[idx].get());
-                        if (!ar.empty()) {
-                            out.write.insert(ar);
-                            if (is_nested_place(n->kids[idx].get())) out.nested_write.insert(ar);
-                        }
-                    }
-                }
-                for (const auto &gw : fs->global_writes) out.write.insert(gw);
-                for (const auto &gr : fs->global_reads) out.read.insert(gr);
-            }
+            if (fs) apply_summary(*fs, n->kids, false);
         } else if (n->k == EK::Call && n->a == "call") {
             if (n->kids.size() >= 2) {
                 auto widxs = plugin_write_indices(n->kids[1].get());
@@ -265,18 +267,12 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
         } else if (n->k == EK::Call && (is_ptr_write_builtin(n->a) || n->a == "fill")) {
             if (!n->kids.empty()) {
                 std::string ar = root(n->kids[0].get());
-                if (!ar.empty()) {
-                    out.write.insert(ar);
-                    out.ptr_touch.insert(ar);
-                }
+                if (!ar.empty()) { out.write.insert(ar); out.ptr_touch.insert(ar); }
             }
         } else if (n->k == EK::Call && is_ptr_read_builtin(n->a)) {
             if (!n->kids.empty()) {
                 std::string ar = root(n->kids[0].get());
-                if (!ar.empty()) {
-                    out.read.insert(ar);
-                    out.ptr_touch.insert(ar);
-                }
+                if (!ar.empty()) { out.read.insert(ar); out.ptr_touch.insert(ar); }
             }
         } else if (n->k == EK::Call && kResourceClose.count(n->a)) {
             if (!n->kids.empty()) {
@@ -290,78 +286,20 @@ TouchDetail touch_detail(const Stmt &s, const FnSummaries *fns = nullptr) {
             std::string r = root(n);
             if (!r.empty()) out.write.insert(r);
         } else if (n->k == EK::Call && fns && fns->count(n->a)) {
-            const auto &fs = fns->at(n->a);
-            for (size_t idx : fs.mut_idx) {
-                if (idx < n->kids.size()) {
-                    std::string ar = root(n->kids[idx].get());
-                    if (!ar.empty()) {
-                        out.write.insert(ar);
-                        if (is_nested_place(n->kids[idx].get())) out.nested_write.insert(ar);
-                    }
-                }
-            }
-            for (size_t idx : fs.ptr_idx) {
-                if (idx < n->kids.size()) {
-                    std::string ar = root(n->kids[idx].get());
-                    if (!ar.empty()) out.ptr_touch.insert(ar);
-                }
-            }
-            for (const auto &gw : fs.global_writes) out.write.insert(gw);
-            for (const auto &gr : fs.global_reads) out.read.insert(gr);
+            apply_summary(fns->at(n->a), n->kids, true);
         } else if (n->k == EK::Var || n->k == EK::Field || n->k == EK::Idx) {
             std::string r = root(n);
             if (!r.empty()) out.read.insert(r);
         }
     }
-    if (s.k == SK::SetIdx) {
-        std::string r = root(s.e1.get());
-        if (!r.empty()) {
-            out.write.insert(r);
-            if (is_nested_place(s.e1.get())) out.nested_write.insert(r);
-        }
-    }
-    if (s.k == SK::SetField) {
-        std::string r = root(s.e1.get());
-        if (!r.empty()) {
-            out.write.insert(r);
-            if (is_nested_place(s.e1.get())) out.nested_write.insert(r);
-        }
-    }
+    if (s.k == SK::SetIdx || s.k == SK::SetField) write_place(s.e1.get());
     for (const auto &w : out.write) out.read.erase(w);
     return out;
 }
 
-void declared_expr(const Expr *e, std::set<std::string> &out);
-
-void declared(const View &body, std::set<std::string> &out) {
-    for (const Stmt *s : body) {
-        if (!s) continue;
-        if (s->k == SK::Let || s->k == SK::LetTmp || s->k == SK::ForRange || s->k == SK::ForIter)
-            out.insert(s->a);
-        if (s->k == SK::Try && s->opt1 && !s->opt1->empty()) out.insert(*s->opt1);
-        for (const Expr *e : stmt_exprs(*s)) declared_expr(e, out);
-        declared(view(s->body), out);
-        declared(view(s->body2), out);
-        declared(else_of(*s), out);
-        for (const auto &f : s->fns) declared(view(f.body), out);
-    }
-}
-
-void declared_expr(const Expr *e, std::set<std::string> &out) {
-    if (!e) return;
-    if ((e->k == EK::Closure || e->k == EK::ParFor) && e->fn) {
-        if (e->k == EK::ParFor && !e->a.empty()) out.insert(e->a);
-        for (const auto &p : e->fn->params) out.insert(p.name);
-        declared(view(e->fn->body), out);
-    }
-    for (const auto &k : e->kids) declared_expr(k.get(), out);
-}
-
 using StructFields = std::map<std::string, std::map<std::string, std::string>>;
 
-std::string trim_type(const std::string &s) {
-    return trim_type_ann(s);
-}
+constexpr std::string (*trim_type)(std::string_view) = &trim_type_ann;
 
 bool is_acyclic_type(const std::string &raw, const std::set<std::string> &acyc_structs) {
     std::string t = trim_type_ann(raw);
@@ -626,6 +564,16 @@ std::vector<InsEdge> inserts(const Stmt &s, const FnSummaries *fns = nullptr) {
     }
     std::vector<const Expr *> nodes;
     for (const Expr *e : stmt_exprs(s)) each_node(e, nodes);
+    auto add_fn_ins = [&](const std::string &fn_name, const std::vector<ExprP> &kids) {
+        if (!fns || !fns->count(fn_name)) return;
+        const auto &fs = fns->at(fn_name);
+        for (const auto &[ci, vi] : fs.ins_pairs)
+            if (ci < kids.size() && vi < kids.size())
+                out.push_back({"", kids[ci].get(), kids[vi].get()});
+        for (const auto &[g, vi] : fs.global_ins)
+            if (vi < kids.size())
+                out.push_back({g, nullptr, kids[vi].get()});
+    };
     for (const Expr *n : nodes) {
         if (!n) continue;
         if (n->k == EK::MCall) {
@@ -633,27 +581,11 @@ std::vector<InsEdge> inserts(const Stmt &s, const FnSummaries *fns = nullptr) {
                 const Expr *value =
                     n->b == "set" ? n->kids.back().get() : n->kids[1].get();
                 out.push_back({"", n->kids[0].get(), value});
-            } else if (fns && fns->count(n->b)) {
-                const auto &fs = fns->at(n->b);
-                for (const auto &[ci, vi] : fs.ins_pairs) {
-                    if (ci < n->kids.size() && vi < n->kids.size())
-                        out.push_back({"", n->kids[ci].get(), n->kids[vi].get()});
-                }
-                for (const auto &[g, vi] : fs.global_ins) {
-                    if (vi < n->kids.size())
-                        out.push_back({g, nullptr, n->kids[vi].get()});
-                }
+            } else {
+                add_fn_ins(n->b, n->kids);
             }
-        } else if (n->k == EK::Call && fns && fns->count(n->a)) {
-            const auto &fs = fns->at(n->a);
-            for (const auto &[ci, vi] : fs.ins_pairs) {
-                if (ci < n->kids.size() && vi < n->kids.size())
-                    out.push_back({"", n->kids[ci].get(), n->kids[vi].get()});
-            }
-            for (const auto &[g, vi] : fs.global_ins) {
-                if (vi < n->kids.size())
-                    out.push_back({g, nullptr, n->kids[vi].get()});
-            }
+        } else if (n->k == EK::Call) {
+            add_fn_ins(n->a, n->kids);
         }
     }
     return out;
@@ -727,6 +659,10 @@ struct Owner {
     }
 };
 
+void run_cycles(const View &stmts, std::map<std::string, std::string> vars,
+                std::vector<BorrowDiag> &out, const FnSummaries *fns,
+                const StructFields &sf, const std::set<std::string> &acyc);
+
 void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
             const std::map<std::string, std::string> &alias,
             const FnSummaries *fns,
@@ -764,15 +700,10 @@ void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
         case SK::Fn:
         case SK::ExportFn:
             for (const auto &f : s->fns) {
-                Owner fresh;
                 std::map<std::string, std::string> fvars = vars;
-                for (const auto &p : f.params) {
+                for (const auto &p : f.params)
                     if (p.ann && !p.ann->empty()) fvars[p.name] = trim_type(*p.ann);
-                }
-                collect_var_types(view(f.body), fvars, sf);
-                std::map<std::string, std::string> inner;
-                cycle_alias_map(view(f.body), inner, fvars, sf, acyc);
-                cycles(view(f.body), out, fresh, inner, fns, fvars, sf, acyc);
+                run_cycles(view(f.body), std::move(fvars), out, fns, sf, acyc);
             }
             break;
         default:
@@ -781,15 +712,59 @@ void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
     }
 }
 
+void run_cycles(const View &stmts, std::map<std::string, std::string> vars,
+                std::vector<BorrowDiag> &out, const FnSummaries *fns,
+                const StructFields &sf, const std::set<std::string> &acyc) {
+    Owner own;
+    collect_var_types(stmts, vars, sf);
+    std::map<std::string, std::string> alias;
+    cycle_alias_map(stmts, alias, vars, sf, acyc);
+    cycles(stmts, out, own, alias, fns, vars, sf, acyc);
+}
+
 struct Event {
     bool spawn = false;
     bool join = false;
     std::set<std::string> writes, reads, nested_writes, ptr_touches;
     std::vector<std::pair<std::string, std::string>> chan_sends;
     std::set<std::string> chan_recvs;
+    std::map<std::string, int> decl_depth;
     int line = 0;
     const void *loop = nullptr;
     size_t member_begin = 0, member_end = 0;
+};
+
+struct SpawnEnv {
+    std::map<std::string, int> depth;
+    std::map<std::string, std::string> alias;
+    int level = 0;
+
+    std::string resolve_name(const std::string &n) const { return resolve(n, alias); }
+    int depth_of(const std::string &n) const {
+        auto it = depth.find(n);
+        return it == depth.end() ? 0 : it->second;
+    }
+    void bind_fresh(const std::string &n) {
+        if (n.empty()) return;
+        alias.erase(n);
+        depth[n] = level;
+    }
+    void bind_let(const Stmt &s) {
+        if (s.a.empty()) return;
+        std::string r = s.e1 ? root(s.e1.get()) : std::string();
+        if (r.empty() && s.e1 && s.e1->k == EK::Call && kPtrAliasCalls.count(s.e1->a) &&
+            !s.e1->kids.empty())
+            r = root(s.e1->kids[0].get());
+        if (!r.empty()) {
+            std::string tgt = resolve_name(r);
+            int d = depth_of(tgt);
+            if (tgt != s.a) alias[s.a] = tgt;
+            else alias.erase(s.a);
+            depth[s.a] = d;
+        } else {
+            bind_fresh(s.a);
+        }
+    }
 };
 
 bool touches(const Event &a, const Event &b) {
@@ -817,33 +792,40 @@ std::string first_touched(const Event &a, const Event &b) {
 
 void collect(const View &body, std::vector<Event> &events,
              std::vector<std::pair<size_t, size_t>> &loops, const void *loop,
-             const FnSummaries *fns = nullptr) {
+             const FnSummaries *fns = nullptr, SpawnEnv env = {}) {
     for (const Stmt *s : body) {
         if (!s) continue;
         if (s->k == SK::Spawn) {
             size_t before = events.size();
-            collect(view(s->body), events, loops, loop, fns);
-            std::set<std::string> locals;
-            declared(view(s->body), locals);
+            SpawnEnv child = env;
+            child.level = env.level + 1;
+            collect(view(s->body), events, loops, loop, fns, child);
             Event ev;
             ev.spawn = true;
             ev.line = s->line;
             ev.loop = loop;
+            auto lift = [&](const std::set<std::string> &src, std::set<std::string> &dst,
+                            const std::map<std::string, int> &depths) {
+                for (const auto &x : src) {
+                    auto it = depths.find(x);
+                    int d = it == depths.end() ? 0 : it->second;
+                    if (d < child.level) {
+                        dst.insert(x);
+                        auto cur = ev.decl_depth.find(x);
+                        if (cur == ev.decl_depth.end() || d < cur->second) ev.decl_depth[x] = d;
+                    }
+                }
+            };
             for (size_t i = before; i < events.size(); i++) {
-                for (const auto &w : events[i].writes)
-                    if (!locals.count(w)) ev.writes.insert(w);
-                for (const auto &r : events[i].reads)
-                    if (!locals.count(r)) ev.reads.insert(r);
-                for (const auto &nw : events[i].nested_writes)
-                    if (!locals.count(nw)) ev.nested_writes.insert(nw);
-                for (const auto &pt : events[i].ptr_touches)
-                    if (!locals.count(pt)) ev.ptr_touches.insert(pt);
-                for (const auto &cr : events[i].chan_recvs)
-                    if (!locals.count(cr)) ev.chan_recvs.insert(cr);
+                lift(events[i].writes, ev.writes, events[i].decl_depth);
+                lift(events[i].reads, ev.reads, events[i].decl_depth);
+                lift(events[i].nested_writes, ev.nested_writes, events[i].decl_depth);
+                lift(events[i].ptr_touches, ev.ptr_touches, events[i].decl_depth);
+                lift(events[i].chan_recvs, ev.chan_recvs, events[i].decl_depth);
             }
             ev.member_begin = before + 1;
             ev.member_end = events.size() + 1;
-            events.insert(events.begin() + static_cast<long>(before), ev);
+            events.insert(events.begin() + static_cast<long>(before), std::move(ev));
             for (auto &[a, b] : loops) {
                 a++;
                 b++;
@@ -852,34 +834,51 @@ void collect(const View &body, std::vector<Event> &events,
         }
         TouchDetail td = touch_detail(*s, fns);
         Event ev;
-        ev.writes = std::move(td.write);
-        ev.reads = std::move(td.read);
-        ev.nested_writes = std::move(td.nested_write);
-        ev.ptr_touches = std::move(td.ptr_touch);
-        ev.chan_sends = std::move(td.chan_sends);
-        ev.chan_recvs = std::move(td.chan_recvs);
+        auto add_set = [&](const std::set<std::string> &src, std::set<std::string> &dst) {
+            for (const auto &raw : src) {
+                std::string n = env.resolve_name(raw);
+                dst.insert(n);
+                int d = env.depth_of(n);
+                auto cur = ev.decl_depth.find(n);
+                if (cur == ev.decl_depth.end() || d < cur->second) ev.decl_depth[n] = d;
+            }
+        };
+        add_set(td.write, ev.writes);
+        add_set(td.read, ev.reads);
+        add_set(td.nested_write, ev.nested_writes);
+        add_set(td.ptr_touch, ev.ptr_touches);
+        add_set(td.chan_recvs, ev.chan_recvs);
+        for (const auto &[cr, vr] : td.chan_sends)
+            ev.chan_sends.emplace_back(env.resolve_name(cr), env.resolve_name(vr));
         ev.line = s->line;
         ev.loop = loop;
         ev.join = (s->k == SK::Expr && s->e1 && s->e1->k == EK::Call && s->e1->a == "join_all");
         events.push_back(std::move(ev));
         if (s->k == SK::While || s->k == SK::ForRange || s->k == SK::ForIter) {
             size_t start = events.size();
-            collect(view(s->body), events, loops, s, fns);
+            SpawnEnv inner = env;
+            if ((s->k == SK::ForRange || s->k == SK::ForIter) && !s->a.empty())
+                inner.bind_fresh(s->a);
+            collect(view(s->body), events, loops, s, fns, std::move(inner));
             loops.emplace_back(start, events.size());
         } else if (s->k == SK::If) {
-            collect(view(s->body), events, loops, loop, fns);
-            collect(else_of(*s), events, loops, loop, fns);
+            collect(view(s->body), events, loops, loop, fns, env);
+            collect(else_of(*s), events, loops, loop, fns, env);
         } else if (s->k == SK::Scope) {
-            collect(view(s->body), events, loops, loop, fns);
+            collect(view(s->body), events, loops, loop, fns, env);
             Event end_ev;
             end_ev.join = true;
             end_ev.line = s->line;
             end_ev.loop = loop;
             events.push_back(std::move(end_ev));
         } else if (s->k == SK::Try) {
-            collect(view(s->body), events, loops, loop, fns);
-            collect(view(s->body2), events, loops, loop, fns);
+            collect(view(s->body), events, loops, loop, fns, env);
+            SpawnEnv catch_env = env;
+            if (s->opt1 && !s->opt1->empty()) catch_env.bind_fresh(*s->opt1);
+            collect(view(s->body2), events, loops, loop, fns, std::move(catch_env));
+            collect(else_of(*s), events, loops, loop, fns, env);
         }
+        if (s->k == SK::Let || s->k == SK::LetTmp) env.bind_let(*s);
     }
 }
 
@@ -1030,99 +1029,119 @@ FnSummaries build_fn_summaries(const std::vector<StmtP> &body,
             if (info.body.empty()) continue;
             std::map<std::string, size_t> pindex;
             for (size_t i = 0; i < info.params.size(); i++) pindex[info.params[i]] = i;
-            std::set<std::string> local(info.params.begin(), info.params.end());
-            declared(info.body, local);
             ContainsMap contains = containment_graph(info.body, info.alias, &fns);
             ContainsMap rev_contains;
             for (const auto &[par, kids] : contains)
                 for (const auto &ch : kids) rev_contains[ch].insert(par);
 
-            std::vector<const Stmt *> stmts;
-            all_stmts(info.body, stmts);
-            for (const Stmt *s : stmts) {
-                TouchDetail td = touch_detail(*s, &fns);
-                for (const auto &w : td.write) {
-                    std::string rw = resolve(w, info.alias);
-                    auto ip = pindex.find(rw);
-                    if (ip != pindex.end()) info.mut_idx.insert(ip->second);
-                    else if (globals.count(rw) && !local.count(rw)) info.global_writes.insert(rw);
-                }
-                for (const auto &r : td.read) {
-                    std::string rr = resolve(r, info.alias);
-                    if (globals.count(rr) && !local.count(rr)) info.global_reads.insert(rr);
-                }
-                for (const auto &p : td.ptr_touch) {
-                    std::string rp = resolve(p, info.alias);
-                    auto ip = pindex.find(rp);
-                    if (ip != pindex.end()) info.ptr_idx.insert(ip->second);
-                }
-                for (const auto &[cr, vr] : td.chan_sends) {
-                    std::string rc = resolve(cr, info.alias);
-                    std::string rv = resolve(vr, info.alias);
-                    auto iv = pindex.find(rv);
-                    if (globals.count(rc) && !local.count(rc) && iv != pindex.end()) {
-                        info.global_ins.insert({rc, iv->second});
-                        info.global_writes.insert(rc);
+            auto walk_fn = [&](auto &self, const View &stmts, std::set<std::string> local) -> void {
+                auto is_glob = [&](const std::string &res, const std::string &raw) {
+                    return globals.count(res) && !pindex.count(res) &&
+                           !local.count(res) && !local.count(raw);
+                };
+                for (const Stmt *s : stmts) {
+                    if (!s) continue;
+                    TouchDetail td = touch_detail(*s, &fns);
+                    for (const auto &w : td.write) {
+                        std::string rw = local.count(w) ? w : resolve(w, info.alias);
+                        auto ip = pindex.find(rw);
+                        if (!local.count(w) && ip != pindex.end()) info.mut_idx.insert(ip->second);
+                        else if (is_glob(rw, w)) info.global_writes.insert(rw);
                     }
-                }
-                if (s->k == SK::Set && !s->a.empty() && globals.count(s->a) &&
-                    !local.count(s->a) && s->e1) {
-                    info.global_writes.insert(s->a);
-                    std::set<std::string> vs;
-                    non_own_vars(s->e1.get(), vs);
-                    for (const auto &vn : vs) {
-                        std::string rv = resolve(vn, info.alias);
+                    for (const auto &r : td.read) {
+                        std::string rr = local.count(r) ? r : resolve(r, info.alias);
+                        if (is_glob(rr, r)) info.global_reads.insert(rr);
+                    }
+                    for (const auto &p : td.ptr_touch) {
+                        if (local.count(p)) continue;
+                        std::string rp = resolve(p, info.alias);
+                        auto ip = pindex.find(rp);
+                        if (ip != pindex.end()) info.ptr_idx.insert(ip->second);
+                    }
+                    for (const auto &[cr, vr] : td.chan_sends) {
+                        std::string rc = local.count(cr) ? cr : resolve(cr, info.alias);
+                        std::string rv = local.count(vr) ? vr : resolve(vr, info.alias);
                         auto iv = pindex.find(rv);
-                        if (iv != pindex.end()) info.global_ins.insert({s->a, iv->second});
-                        for (const auto &ch : descendants(rv, contains)) {
-                            auto ic = pindex.find(ch);
-                            if (ic != pindex.end()) info.global_ins.insert({s->a, ic->second});
+                        if (is_glob(rc, cr) && !local.count(vr) && iv != pindex.end()) {
+                            info.global_ins.insert({rc, iv->second});
+                            info.global_writes.insert(rc);
                         }
                     }
-                }
-                if (s->k == SK::Return && s->e1) {
-                    std::set<std::string> vs;
-                    non_own_vars(s->e1.get(), vs);
-                    for (const auto &vn : vs) {
-                        std::string rv = resolve(vn, info.alias);
+                    auto collect_param_deps = [&](const Expr *expr, auto &&sink) {
+                        std::set<std::string> vs;
+                        non_own_vars(expr, vs);
+                        for (const auto &vn : vs) {
+                            if (local.count(vn)) continue;
+                            std::string rv = resolve(vn, info.alias);
+                            auto iv = pindex.find(rv);
+                            if (iv != pindex.end()) sink(iv->second);
+                            for (const auto &ch : descendants(rv, contains)) {
+                                auto ic = pindex.find(ch);
+                                if (ic != pindex.end()) sink(ic->second);
+                            }
+                        }
+                    };
+                    if (s->k == SK::Set && !s->a.empty() && is_glob(s->a, s->a) && s->e1) {
+                        info.global_writes.insert(s->a);
+                        collect_param_deps(s->e1.get(),
+                                           [&](size_t idx) { info.global_ins.insert({s->a, idx}); });
+                    }
+                    if (s->k == SK::Return && s->e1) {
+                        collect_param_deps(s->e1.get(),
+                                           [&](size_t idx) { info.ret_params.insert(idx); });
+                    }
+                    for (const auto &ed : inserts(*s, &fns)) {
+                        std::string rc_raw = ed.c_override.empty() ? root(ed.c_expr) : ed.c_override;
+                        std::string rv_raw = root(ed.v_expr);
+                        if (rc_raw.empty() || rv_raw.empty()) continue;
+                        std::string rc = local.count(rc_raw) ? rc_raw : resolve(rc_raw, info.alias);
+                        std::string rv = local.count(rv_raw) ? rv_raw : resolve(rv_raw, info.alias);
+                        auto ic = pindex.find(rc);
                         auto iv = pindex.find(rv);
-                        if (iv != pindex.end()) info.ret_params.insert(iv->second);
-                        for (const auto &ch : descendants(rv, contains)) {
-                            auto ic = pindex.find(ch);
-                            if (ic != pindex.end()) info.ret_params.insert(ic->second);
+                        if (!local.count(rc_raw) && !local.count(rv_raw) &&
+                            ic != pindex.end() && iv != pindex.end() && ic->second != iv->second) {
+                            info.ins_pairs.insert({ic->second, iv->second});
+                            info.mut_idx.insert(ic->second);
                         }
+                        if (is_glob(rc, rc_raw)) {
+                            info.global_writes.insert(rc);
+                            if (!local.count(rv_raw)) {
+                                if (iv != pindex.end()) info.global_ins.insert({rc, iv->second});
+                                for (const auto &ch : descendants(rv, contains)) {
+                                    auto ich = pindex.find(ch);
+                                    if (ich != pindex.end()) info.global_ins.insert({rc, ich->second});
+                                }
+                            }
+                        }
+                        auto it_rev = rev_contains.find(rc);
+                        if (!local.count(rc_raw) && !local.count(rv_raw) &&
+                            it_rev != rev_contains.end() && iv != pindex.end()) {
+                            for (const auto &anc : it_rev->second) {
+                                auto ianc = pindex.find(anc);
+                                if (ianc != pindex.end() && ianc->second != iv->second)
+                                    info.ins_pairs.insert({ianc->second, iv->second});
+                            }
+                        }
+                    }
+                    std::set<std::string> b1 = local, b2 = local;
+                    if ((s->k == SK::ForRange || s->k == SK::ForIter) && !s->a.empty())
+                        b1.insert(s->a);
+                    if (s->k == SK::Try && s->opt1 && !s->opt1->empty())
+                        b2.insert(*s->opt1);
+                    self(self, view(s->body), std::move(b1));
+                    self(self, view(s->body2), std::move(b2));
+                    self(self, else_of(*s), local);
+                    if ((s->k == SK::Let || s->k == SK::LetTmp) && !s->a.empty()) {
+                        std::string r = s->e1 ? root(s->e1.get()) : std::string();
+                        if (r.empty() && s->e1 && s->e1->k == EK::Call &&
+                            kPtrAliasCalls.count(s->e1->a) && !s->e1->kids.empty())
+                            r = root(s->e1->kids[0].get());
+                        if (r.empty() || local.count(r)) local.insert(s->a);
+                        else local.erase(s->a);
                     }
                 }
-                for (const auto &ed : inserts(*s, &fns)) {
-                    std::string rc = ed.c_override.empty() ? root(ed.c_expr) : ed.c_override;
-                    std::string rv = root(ed.v_expr);
-                    if (rc.empty() || rv.empty()) continue;
-                    rc = resolve(rc, info.alias);
-                    rv = resolve(rv, info.alias);
-                    auto ic = pindex.find(rc);
-                    auto iv = pindex.find(rv);
-                    if (ic != pindex.end() && iv != pindex.end() && ic->second != iv->second) {
-                        info.ins_pairs.insert({ic->second, iv->second});
-                        info.mut_idx.insert(ic->second);
-                    }
-                    if (globals.count(rc) && !local.count(rc)) {
-                        info.global_writes.insert(rc);
-                        if (iv != pindex.end()) info.global_ins.insert({rc, iv->second});
-                        for (const auto &ch : descendants(rv, contains)) {
-                            auto ich = pindex.find(ch);
-                            if (ich != pindex.end()) info.global_ins.insert({rc, ich->second});
-                        }
-                    }
-                    auto it_rev = rev_contains.find(rc);
-                    if (it_rev != rev_contains.end() && iv != pindex.end()) {
-                        for (const auto &anc : it_rev->second) {
-                            auto ianc = pindex.find(anc);
-                            if (ianc != pindex.end() && ianc->second != iv->second)
-                                info.ins_pairs.insert({ianc->second, iv->second});
-                        }
-                    }
-                }
-            }
+            };
+            walk_fn(walk_fn, info.body, {});
         }
     }
     return fns;
@@ -1169,22 +1188,51 @@ std::map<std::string, CallbackSlot> callback_slots(const View &stmts) {
     return out;
 }
 
-void uses(const View &body, std::set<std::string> &names, std::set<std::string> &calls) {
-    std::vector<const Stmt *> stmts;
-    all_stmts(body, stmts);
+void free_uses(const View &stmts, std::set<std::string> local,
+               std::set<std::string> &names, std::set<std::string> &calls);
+
+void free_uses_expr(const Expr *e, const std::set<std::string> &local,
+                    std::set<std::string> &names, std::set<std::string> &calls) {
+    if (!e) return;
+    if (e->k == EK::Call) calls.insert(e->a);
+    else if (e->k == EK::MCall) calls.insert(e->b);
+    else if (e->k == EK::Var && !local.count(e->a)) names.insert(e->a);
+    for (const auto &k : e->kids) free_uses_expr(k.get(), local, names, calls);
+    if ((e->k == EK::Closure || e->k == EK::ParFor) && e->fn) {
+        std::set<std::string> inner = local;
+        if (e->k == EK::ParFor && !e->a.empty()) inner.insert(e->a);
+        for (const auto &p : e->fn->params) inner.insert(p.name);
+        free_uses(view(e->fn->body), std::move(inner), names, calls);
+    }
+}
+
+void free_uses(const View &stmts, std::set<std::string> local,
+               std::set<std::string> &names, std::set<std::string> &calls) {
     for (const Stmt *s : stmts) {
-        std::vector<const Expr *> nodes;
-        for (const Expr *e : stmt_exprs(*s)) each_node(e, nodes);
-        for (const Expr *n : nodes) {
-            if (!n) continue;
-            if (n->k == EK::Call) calls.insert(n->a);
-            else if (n->k == EK::Var) names.insert(n->a);
+        if (!s) continue;
+        for (const Expr *e : stmt_exprs(*s)) free_uses_expr(e, local, names, calls);
+        if (s->k == SK::Set && !s->a.empty()) {
+            auto dot = s->a.find('.');
+            std::string head = dot == std::string::npos ? s->a : s->a.substr(0, dot);
+            if (!local.count(head)) names.insert(head);
         }
+        std::set<std::string> b1 = local, b2 = local;
+        if ((s->k == SK::ForRange || s->k == SK::ForIter) && !s->a.empty()) b1.insert(s->a);
+        if (s->k == SK::Try && s->opt1 && !s->opt1->empty()) b2.insert(*s->opt1);
+        free_uses(view(s->body), std::move(b1), names, calls);
+        free_uses(view(s->body2), std::move(b2), names, calls);
+        free_uses(else_of(*s), local, names, calls);
+        for (const auto &f : s->fns) {
+            std::set<std::string> fs = local;
+            for (const auto &p : f.params) fs.insert(p.name);
+            free_uses(view(f.body), std::move(fs), names, calls);
+        }
+        if ((s->k == SK::Let || s->k == SK::LetTmp) && !s->a.empty()) local.insert(s->a);
     }
 }
 
-std::string first_global_touch(const std::string &start, const FnSummaries &fns,
-                               const std::set<std::string> &globals) {
+template <typename Visit>
+bool walk_reachable_fns(const std::string &start, const FnSummaries &fns, Visit &&visit) {
     std::set<std::string> seen;
     std::vector<std::string> stack{start};
     while (!stack.empty()) {
@@ -1194,35 +1242,33 @@ std::string first_global_touch(const std::string &start, const FnSummaries &fns,
         auto it = fns.find(cur);
         if (it == fns.end()) continue;
         std::set<std::string> names, calls;
-        uses(it->second.body, names, calls);
-        std::set<std::string> local(it->second.params.begin(), it->second.params.end());
-        declared(it->second.body, local);
-        for (const auto &n : names) {
-            if (local.count(n)) continue;
-            if (globals.count(n)) return n;
-        }
-        for (const auto &c : calls)
-            if (c != cur) stack.push_back(c);
-    }
-    return {};
-}
-
-bool reaches(const std::string &start, const std::string &target, const FnSummaries &fns) {
-    std::set<std::string> seen;
-    std::vector<std::string> stack{start};
-    while (!stack.empty()) {
-        const std::string cur = stack.back();
-        stack.pop_back();
-        if (!seen.insert(cur).second) continue;
-        auto it = fns.find(cur);
-        if (it == fns.end()) continue;
-        std::set<std::string> names, calls;
-        uses(it->second.body, names, calls);
-        if (calls.count(target)) return true;
+        free_uses(it->second.body,
+                  std::set<std::string>(it->second.params.begin(), it->second.params.end()),
+                  names, calls);
+        if (visit(names, calls)) return true;
         for (const auto &c : calls)
             if (c != cur) stack.push_back(c);
     }
     return false;
+}
+
+std::string first_global_touch(const std::string &start, const FnSummaries &fns,
+                               const std::set<std::string> &globals) {
+    std::string hit;
+    walk_reachable_fns(start, fns, [&](const std::set<std::string> &names,
+                                       const std::set<std::string> &) {
+        for (const auto &n : names)
+            if (globals.count(n)) { hit = n; return true; }
+        return false;
+    });
+    return hit;
+}
+
+bool reaches(const std::string &start, const std::string &target, const FnSummaries &fns) {
+    return walk_reachable_fns(start, fns, [&](const std::set<std::string> &,
+                                              const std::set<std::string> &calls) {
+        return calls.count(target) > 0;
+    });
 }
 
 std::vector<BorrowDiag> callback_contracts(const View &stmts, const View &top,
@@ -1314,7 +1360,6 @@ std::vector<BorrowDiag> sharing_check(
         if (is_decl_stmt(node->k)) {
             if (node->k == SK::Fn || node->k == SK::ExportFn || node->k == SK::Impl) {
                 for (const auto &f : node->fns) {
-                    Owner own;
                     std::map<std::string, std::string> fvars;
                     for (const auto &p : f.params) {
                         if (p.ann && !p.ann->empty()) fvars[p.name] = trim_type(*p.ann);
@@ -1322,10 +1367,7 @@ std::vector<BorrowDiag> sharing_check(
                                  (sf.count(node->a) || sf.count("__enum__:" + node->a)))
                             fvars[p.name] = node->a;
                     }
-                    collect_var_types(view(f.body), fvars, sf);
-                    std::map<std::string, std::string> alias;
-                    cycle_alias_map(view(f.body), alias, fvars, sf, acyc);
-                    cycles(view(f.body), out, own, alias, &fns, fvars, sf, acyc);
+                    run_cycles(view(f.body), std::move(fvars), out, &fns, sf, acyc);
                     races(view(f.body), out, &fns, true);
                 }
             }
@@ -1333,12 +1375,7 @@ std::vector<BorrowDiag> sharing_check(
         }
         top.push_back(sp.get());
     }
-    Owner own;
-    std::map<std::string, std::string> top_vars;
-    collect_var_types(top, top_vars, sf);
-    std::map<std::string, std::string> alias;
-    cycle_alias_map(top, alias, top_vars, sf, acyc);
-    cycles(top, out, own, alias, &fns, top_vars, sf, acyc);
+    run_cycles(top, {}, out, &fns, sf, acyc);
     races(top, out, &fns, false);
     for (const auto &d : callback_contracts(view(body), top, fns)) out.push_back(d);
     return out;

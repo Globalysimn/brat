@@ -313,7 +313,8 @@ std::string root_name(const std::string &p) { return p.substr(0, p.find('.')); }
 // `let` bindings and loop variables of this block. Nested blocks are their own
 // scopes and hand nothing back, so the walk does not descend: a loop-carried
 // value can only be one this level declares.
-static void bound_in_into(const View &body, std::set<std::string> &out) {
+static std::set<std::string> bound_in(const View &body) {
+    std::set<std::string> out;
     for (const Stmt *sp : body) {
         if (!sp) continue;
         const Stmt &s = *sp;
@@ -322,11 +323,6 @@ static void bound_in_into(const View &body, std::set<std::string> &out) {
         if ((s.k == SK::Let || s.k == SK::ForRange || s.k == SK::ForIter) && !s.a.empty())
             out.insert(s.a);
     }
-}
-
-static std::set<std::string> bound_in(const View &body) {
-    std::set<std::string> out;
-    bound_in_into(body, out);
     return out;
 }
 
@@ -365,15 +361,10 @@ void flatten(const View &stmts, std::vector<const Stmt *> &order) {
     for (const Stmt *s : stmts) {
         if (s == nullptr) continue;
         order.push_back(s);
-        for (const auto &t : s->body) flatten({t.get()}, order);
-        for (const auto &t : s->body2) flatten({t.get()}, order);
-        if (s->els) {
-            if (s->els->k == SK::Block) {
-                for (const auto &t : s->els->body) flatten({t.get()}, order);
-            } else {
-                order.push_back(s->els.get());
-            }
-        }
+        if (is_decl_stmt(s->k)) continue;
+        flatten(view(s->body), order);
+        flatten(view(s->body2), order);
+        if (s->els) flatten(else_of(*s), order);
     }
 }
 
@@ -562,11 +553,6 @@ struct Walk {
     void stmt(const Stmt &s, State &st) {
         index += 1;
         if (s.line) cur = s.line;
-        {
-            std::vector<std::string> names;
-            used_stmt(s, names);
-            for (const std::string &n : names) last[n] = index;
-        }
         if (is_decl_stmt(s.k)) return;          // every body is walked on its own
         switch (s.k) {
         case SK::Let: return let_stmt(s, st);
@@ -650,7 +636,9 @@ struct Walk {
         std::set<std::string> declared = bound_in(view(s.body));
         if ((s.k == SK::ForRange || s.k == SK::ForIter) && !s.a.empty())
             declared.insert(s.a);
+        const int loop_base = index;
         for (int i = 0; i < 2; i++) {
+            index = loop_base;
             State once = st;
             for (const std::string &name : declared) once.forget(name);
             if (s.k == SK::ForRange && !s.a.empty()) once.copies.insert(s.a);

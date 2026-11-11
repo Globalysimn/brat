@@ -134,6 +134,12 @@ int cmd_check_json(const std::vector<std::string> &files) {
             std::filesystem::absolute(raw_path), ec).string();
         if (ec || abs_path.empty())
             abs_path = std::filesystem::absolute(raw_path).lexically_normal().string();
+        auto emit_load_err = [&](int line, const char *code, std::string msg) {
+            JsonDiag d{abs_path, line, line > 0, "error", code, std::move(msg), false, 0, ""};
+            std::string js = render_diags_json(abs_path, {std::move(d)});
+            std::fwrite(js.data(), 1, js.size(), stdout);
+            rc = 1;
+        };
         ModuleSet loaded;
         try {
             loaded = load_modules(raw_path);
@@ -141,24 +147,15 @@ int cmd_check_json(const std::vector<std::string> &files) {
         } catch (const ParseError &e) {
             std::string msg = e.what();
             if (e.line > 0) msg += " at line " + std::to_string(e.line);
-            JsonDiag d{abs_path, static_cast<int>(e.line), e.line > 0, "error", "P0001", msg, false, 0, ""};
-            std::string js = render_diags_json(abs_path, {d});
-            std::fwrite(js.data(), 1, js.size(), stdout);
-            rc = 1;
+            emit_load_err(static_cast<int>(e.line), "P0001", std::move(msg));
             continue;
         } catch (const ModuleError &e) {
-            JsonDiag d{abs_path, 0, false, "error", "B0000", e.what(), false, 0, ""};
-            std::string js = render_diags_json(abs_path, {d});
-            std::fwrite(js.data(), 1, js.size(), stdout);
-            rc = 1;
+            emit_load_err(0, "B0000", e.what());
             continue;
         } catch (const std::exception &e) {
             std::string msg = e.what();
             const char *code = (msg.rfind("cannot read", 0) == 0) ? "P0001" : "B0000";
-            JsonDiag d{abs_path, 0, false, "error", code, msg, false, 0, ""};
-            std::string js = render_diags_json(abs_path, {d});
-            std::fwrite(js.data(), 1, js.size(), stdout);
-            rc = 1;
+            emit_load_err(0, code, std::move(msg));
             continue;
         }
 
@@ -168,31 +165,16 @@ int cmd_check_json(const std::vector<std::string> &files) {
             std::vector<TypeErr> terrs = check_sibling_types(loaded.files, i);
 
             std::vector<JsonDiag> diags;
-            for (const BorrowDiag &bd : bout.errs) {
-                JsonDiag jd;
-                jd.file = sf.path;
-                jd.line = bd.line;
-                jd.has_line = bd.line > 0;
-                jd.severity = "error";
-                jd.code = classify_diag_code(bd.msg);
-                jd.message = bd.msg;
-                if (bd.note) {
-                    jd.has_note = true;
-                    jd.note_line = bd.note->line;
-                    jd.note_message = bd.note->msg;
-                }
+            auto add_bdiag = [&](const BorrowDiag &bd, const char *sev) {
+                JsonDiag jd{sf.path, bd.line, bd.line > 0, sev,
+                            classify_diag_code(bd.msg), bd.msg,
+                            static_cast<bool>(bd.note),
+                            bd.note ? bd.note->line : 0,
+                            bd.note ? bd.note->msg : std::string()};
                 diags.push_back(std::move(jd));
-            }
-            for (const BorrowDiag &bw : bout.warns) {
-                JsonDiag jd;
-                jd.file = sf.path;
-                jd.line = bw.line;
-                jd.has_line = bw.line > 0;
-                jd.severity = "warning";
-                jd.code = classify_diag_code(bw.msg);
-                jd.message = bw.msg;
-                diags.push_back(std::move(jd));
-            }
+            };
+            for (const BorrowDiag &bd : bout.errs) add_bdiag(bd, "error");
+            for (const BorrowDiag &bw : bout.warns) add_bdiag(bw, "warning");
             for (const TypeErr &te : terrs) {
                 JsonDiag jd;
                 jd.file = sf.path;
@@ -708,6 +690,37 @@ static std::string leading_doc_comment(const std::vector<std::string> &lines, in
     return trim_ws(joined);
 }
 
+static std::vector<std::string> collect_brat_files(const std::vector<std::string> &inputs,
+                                                   bool test_only) {
+    std::vector<std::string> out;
+    for (const std::string &in : inputs) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(in, ec)) {
+            out.push_back(in);
+            continue;
+        }
+        std::vector<std::string> found;
+        for (auto it = std::filesystem::recursive_directory_iterator(in, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
+            const std::string fn = it->path().filename().string();
+            if (it->is_directory(ec)) {
+                if (fn == ".git" || fn == "__pycache__" || fn == "bin" ||
+                    (test_only && (fn == "vendor" || fn == ".brat-cache")))
+                    it.disable_recursion_pending();
+                continue;
+            }
+            if (it->is_regular_file(ec) && fn.size() > 5 &&
+                fn.compare(fn.size() - 5, 5, ".brat") == 0 &&
+                (!test_only || fn.rfind("test_", 0) == 0)) {
+                found.push_back(it->path().string());
+            }
+        }
+        std::sort(found.begin(), found.end());
+        for (auto &f : found) out.push_back(std::move(f));
+    }
+    return out;
+}
+
 int cmd_doc(int argc, char **argv) {
     bool want_json = false;
     std::string out_path;
@@ -728,30 +741,7 @@ int cmd_doc(int argc, char **argv) {
         std::fprintf(stderr, "usage: brat doc <file_or_dir> [--json] [-o OUT]\n");
         return 2;
     }
-    std::vector<std::string> brat_files;
-    for (const std::string &t : targets) {
-        std::error_code ec;
-        if (std::filesystem::is_directory(t, ec)) {
-            std::vector<std::string> found;
-            for (auto it = std::filesystem::recursive_directory_iterator(t, ec);
-                 !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-                const std::string fn = it->path().filename().string();
-                if (it->is_directory(ec)) {
-                    if (fn == ".git" || fn == "__pycache__" || fn == "bin")
-                        it.disable_recursion_pending();
-                    continue;
-                }
-                if (it->is_regular_file(ec) && fn.size() > 5 &&
-                    fn.compare(fn.size() - 5, 5, ".brat") == 0) {
-                    found.push_back(it->path().string());
-                }
-            }
-            std::sort(found.begin(), found.end());
-            for (auto &f : found) brat_files.push_back(std::move(f));
-        } else {
-            brat_files.push_back(t);
-        }
-    }
+    std::vector<std::string> brat_files = collect_brat_files(targets, false);
 
     struct DocItem {
         std::string kind;
@@ -1135,31 +1125,7 @@ int cmd_test(int argc, char **argv) {
         print_cli_usage();
         return 2;
     }
-    std::vector<std::string> files;
-    for (const std::string &in : inputs) {
-        std::error_code ec;
-        if (std::filesystem::is_directory(in, ec)) {
-            std::vector<std::string> found;
-            for (auto it = std::filesystem::recursive_directory_iterator(in, ec);
-                 !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-                const std::string fn = it->path().filename().string();
-                if (it->is_directory(ec)) {
-                    if (fn == ".git" || fn == "__pycache__" || fn == "bin" ||
-                        fn == "vendor" || fn == ".brat-cache")
-                        it.disable_recursion_pending();
-                    continue;
-                }
-                if (it->is_regular_file(ec) && fn.rfind("test_", 0) == 0 &&
-                    fn.size() > 5 && fn.compare(fn.size() - 5, 5, ".brat") == 0) {
-                    found.push_back(it->path().string());
-                }
-            }
-            std::sort(found.begin(), found.end());
-            for (auto &f : found) files.push_back(std::move(f));
-        } else {
-            files.push_back(in);
-        }
-    }
+    std::vector<std::string> files = collect_brat_files(inputs, true);
     if (!filter.empty()) {
         files.erase(std::remove_if(files.begin(), files.end(), [&](const std::string &p) {
                         return p.find(filter) == std::string::npos;
@@ -1311,36 +1277,28 @@ int cmd_emit_c(int argc, char **argv) {
         std::fprintf(stderr, "brat emit-c: %s contains a NUL byte\n", path.c_str());
         return 1;
     }
-    if (no_check && has_arena_block_tokens(src)) {
+    auto refuse_arena = [&]() {
         std::fprintf(stderr,
                      "brat emit-c: refusing --no-check for %s: arena blocks depend on the "
                      "escape rules, which only the checker applies.\n",
                      path.c_str());
         return 1;
-    }
+    };
+    if (no_check && has_arena_block_tokens(src)) return refuse_arena();
     try {
-        if (no_check) {
-            ModuleSet fresh = load_modules(path);
-            for (const auto &sf : fresh.files) {
-                if (has_arena_block_tokens(sf.src)) {
-                    std::fprintf(stderr,
-                                 "brat emit-c: refusing --no-check for %s: arena blocks depend on the "
-                                 "escape rules, which only the checker applies.\n",
-                                 path.c_str());
-                    return 1;
-                }
-            }
-        }
         if (!no_check) {
             ModuleSet fresh = load_modules(path);
             mangle_modules(fresh);
-            g_report = stderr;
+            struct ReportGuard {
+                FILE *prev;
+                ReportGuard() : prev(g_report) { g_report = stderr; }
+                ~ReportGuard() { g_report = prev; }
+            } guard;
             std::size_t nerr = 0;
             for (std::size_t fi = 0; fi < fresh.files.size(); ++fi) {
                 nerr += ownership_errors(fresh.files, fi);
                 nerr += type_errors(fresh.files, fi, /*arena_only=*/true);
             }
-            g_report = stdout;
             if (nerr != 0) {
                 std::fprintf(stderr,
                              "brat emit-c: refusing to emit %s: the ownership/type checker "
@@ -1352,6 +1310,10 @@ int cmd_emit_c(int argc, char **argv) {
             }
         }
         ModuleSet set = load_modules(path);
+        if (no_check) {
+            for (const auto &sf : set.files)
+                if (has_arena_block_tokens(sf.src)) return refuse_arena();
+        }
         if (native_ffi::ffi_gate(path, module_source_pairs(set.files), ffi_header, ffi_objects,
                                  target, "brat emit-c", unsafe_ffi) != 0) {
             return 1;
@@ -1405,15 +1367,6 @@ int cmd_emit_c(int argc, char **argv) {
     }
 }
 
-
-static std::string trim_dist_target(std::string value) {
-    const auto ws = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    size_t first = 0;
-    while (first < value.size() && ws(static_cast<unsigned char>(value[first]))) ++first;
-    size_t last = value.size();
-    while (last > first && ws(static_cast<unsigned char>(value[last - 1]))) --last;
-    return value.substr(first, last - first);
-}
 
 static bool safe_dist_target(const std::string &target) {
     if (target.empty() || target == "." || target == "..") return false;
@@ -1698,7 +1651,7 @@ int cmd_dist(int argc, char **argv) {
         while (at <= target_arg.size()) {
             const size_t comma = target_arg.find(',', at);
             const size_t end = comma == std::string::npos ? target_arg.size() : comma;
-            const std::string target = trim_dist_target(target_arg.substr(at, end - at));
+            const std::string target = trim_ws(std::string_view(target_arg).substr(at, end - at));
             if (!target.empty()) targets.push_back(target);
             if (comma == std::string::npos) break;
             at = comma + 1;

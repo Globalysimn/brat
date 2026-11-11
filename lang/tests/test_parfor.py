@@ -101,6 +101,20 @@ fn main() -> i64 {
   return t
 }
 ''', "the `par for` body writes `seen`, which lives outside the loop"),
+    ("outer_write_inner_shadow", '''fn add(a: i64, b: i64) -> i64 { return a + b }
+fn main() -> i64 {
+  let v = [1, 2]
+  let mut seen = 0
+  let t = par for x in v reduce(add, 0) {
+    if false {
+      let seen = 0
+    }
+    seen = x
+    return x
+  }
+  return t
+}
+''', "the `par for` body writes `seen`, which lives outside the loop"),
 ]
 
 

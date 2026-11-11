@@ -194,49 +194,67 @@ bool ordered_empty(const std::set<std::string> &row) {
 
 std::vector<std::string> outer_writes(const View &body, const std::set<std::string> &local,
                                       const FnTable *funcs = nullptr) {
-    std::set<std::string> bound = local;
-    each_stmt(body, [&](const Stmt &s) {
-        if (s.k == SK::Let || s.k == SK::LetTmp || s.k == SK::ForRange || s.k == SK::ForIter)
-            bound.insert(s.a);
-    });
     std::vector<std::string> hits;
-    auto note = [&](const std::string &name) {
-        if (name.empty() || bound.count(name)) return;
+    auto note = [&](const std::string &name, const std::set<std::string> &scope) {
+        if (name.empty() || scope.count(name)) return;
         for (const auto &h : hits)
             if (h == name) return;
         hits.push_back(name);
     };
-    each_stmt(body, [&](const Stmt &s) {
-        if (s.k == SK::Set) note(head_of(s.a));
-        if (s.k == SK::SetIdx || s.k == SK::SetField) {
-            each_expr(s.e1.get(), [&](const Expr &e) {
-                if (e.k == EK::Var) note(e.a);
-            });
+    std::function<void(const View &, std::set<std::string>)> walk_block;
+    std::function<void(const Expr *, const std::set<std::string> &)> walk_expr =
+        [&](const Expr *e, const std::set<std::string> &scope) {
+            if (!e) return;
+            auto note_vars = [&](const Expr *sub) {
+                each_expr(sub, [&](const Expr &r) {
+                    if (r.k == EK::Var) note(r.a, scope);
+                });
+            };
+            bool umut = funcs != nullptr && funcs->umeth.count(e->b) && funcs->umeth.at(e->b);
+            const bool wmeth = is_cap_mutator(e->b) || e->b == "send" || e->b == "close";
+            if (e->k == EK::MCall && (wmeth || umut) && !e->kids.empty()) {
+                note_vars(e->kids[0].get());
+            } else if (e->k == EK::Call && is_ptr_write_builtin(e->a) && !e->kids.empty()) {
+                note_vars(e->kids[0].get());
+            } else if (e->k == EK::Call && funcs != nullptr && funcs->sigs.count(e->a)) {
+                const auto &ps = funcs->sigs.at(e->a);
+                for (size_t i = 0; i < ps.size() && i < e->kids.size(); i++)
+                    if (ps[i].mode == Mode::Mut) note_vars(e->kids[i].get());
+            }
+            for (const auto &k : e->kids) walk_expr(k.get(), scope);
+            if ((e->k == EK::Closure || e->k == EK::ParFor) && e->fn) {
+                std::set<std::string> inner = scope;
+                if (e->k == EK::ParFor && !e->a.empty()) inner.insert(e->a);
+                for (const auto &p : e->fn->params) inner.insert(p.name);
+                walk_block(view(e->fn->body), std::move(inner));
+            }
+        };
+    walk_block = [&](const View &stmts, std::set<std::string> scope) {
+        for (const Stmt *sp : stmts) {
+            if (!sp) continue;
+            const Stmt &s = *sp;
+            if (s.k == SK::Set) note(head_of(s.a), scope);
+            if (s.k == SK::SetIdx || s.k == SK::SetField) {
+                each_expr(s.e1.get(), [&](const Expr &e) {
+                    if (e.k == EK::Var) note(e.a, scope);
+                });
+            }
+            for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()}) walk_expr(e, scope);
+            std::set<std::string> b1 = scope, b2 = scope;
+            if ((s.k == SK::ForRange || s.k == SK::ForIter) && !s.a.empty()) b1.insert(s.a);
+            if (s.k == SK::Try && s.opt1 && !s.opt1->empty()) b2.insert(*s.opt1);
+            walk_block(view(s.body), std::move(b1));
+            walk_block(view(s.body2), std::move(b2));
+            walk_block(else_of(s), scope);
+            for (const auto &f : s.fns) {
+                std::set<std::string> fs = scope;
+                for (const auto &p : f.params) fs.insert(p.name);
+                walk_block(view(f.body), std::move(fs));
+            }
+            if ((s.k == SK::Let || s.k == SK::LetTmp) && !s.a.empty()) scope.insert(s.a);
         }
-        for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()})
-            each_expr(e, [&](const Expr &x) {
-                bool umut = funcs != nullptr && funcs->umeth.count(x.b) && funcs->umeth.at(x.b);
-                const bool wmeth = is_cap_mutator(x.b) || x.b == "send" || x.b == "close";
-                if (x.k == EK::MCall && (wmeth || umut) && !x.kids.empty()) {
-                    each_expr(x.kids[0].get(), [&](const Expr &r) {
-                        if (r.k == EK::Var) note(r.a);
-                    });
-                } else if (x.k == EK::Call && is_ptr_write_builtin(x.a) && !x.kids.empty()) {
-                    each_expr(x.kids[0].get(), [&](const Expr &r) {
-                        if (r.k == EK::Var) note(r.a);
-                    });
-                } else if (x.k == EK::Call && funcs != nullptr && funcs->sigs.count(x.a)) {
-                    const auto &ps = funcs->sigs.at(x.a);
-                    for (size_t i = 0; i < ps.size() && i < x.kids.size(); i++) {
-                        if (ps[i].mode == Mode::Mut) {
-                            each_expr(x.kids[i].get(), [&](const Expr &r) {
-                                if (r.k == EK::Var) note(r.a);
-                            });
-                        }
-                    }
-                }
-            });
-    });
+    };
+    walk_block(body, local);
     return hits;
 }
 

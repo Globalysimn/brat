@@ -135,6 +135,42 @@ fn main() -> i64 {
   return 0
 }
 ''', "`bump` is registered as a callback of `call_cb`, which declares `thread(any)`, but it touches `total`", ""),
+    "any_thread_set_only_refused": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64 thread(any), v: i64) -> i64
+let mut total = 100
+fn bump(x: i64) -> i64 {
+  total = x
+  return x
+}
+fn main() -> i64 {
+  print(call_cb("bump", 1))
+  return 0
+}
+''', "`bump` is registered as a callback of `call_cb`, which declares `thread(any)`, but it touches `total`", ""),
+    "any_thread_inner_shadow_refused": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64 thread(any), v: i64) -> i64
+let mut total = 100
+fn bump(x: i64) -> i64 {
+  if false {
+    let total = 0
+    print(total)
+  }
+  return total + x
+}
+fn main() -> i64 {
+  print(call_cb("bump", 1))
+  return 0
+}
+''', "`bump` is registered as a callback of `call_cb`, which declares `thread(any)`, but it touches `total`", ""),
+    "any_thread_self_init_refused": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64 thread(any), v: i64) -> i64
+let mut total = 100
+fn bump(x: i64) -> i64 {
+  let total = total + x
+  return total
+}
+fn main() -> i64 {
+  print(call_cb("bump", 1))
+  return 0
+}
+''', "`bump` is registered as a callback of `call_cb`, which declares `thread(any)`, but it touches `total`", ""),
     # A `thread(any)` callback that only uses what it is given is accepted.
     "any_thread_self_contained_ok": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64 thread(any), v: i64) -> i64
 fn pure_cb(x: i64) -> i64 {

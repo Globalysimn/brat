@@ -146,6 +146,62 @@ fn main() -> i64 {
   return 0
 }
 ''', ["use of moved `p`"]),
+    ("alias_dies_in_three_arm_match", '''fn step(k: i64) -> i64 {
+  let mut v = [1, 2]
+  match k {
+    0 => {
+      let y = v
+      print(len(y))
+    },
+    1 => {
+      let a = 1
+      let b = 2
+      let c = 3
+      print(a + b + c)
+    },
+    _ => {
+      print(0)
+    }
+  }
+  v.push(3)
+  return len(v)
+}
+
+fn main() -> i64 {
+  return step(0) - 3
+}
+''', []),
+    ("view_live_across_three_arm_match", '''fn step(k: i64) -> i64 {
+  let mut v = [1, 2]
+  let r = v
+  match k {
+    0 => { print(0) },
+    1 => {
+      let a1 = 1
+      let a2 = 2
+      let a3 = 3
+      let a4 = 4
+      let a5 = 5
+      print(a1 + a2 + a3 + a4 + a5)
+    },
+    _ => { print(9) }
+  }
+  v.push(3)
+  return len(r)
+}
+
+fn main() -> i64 {
+  return step(0)
+}
+''', ["while borrowed by `r`"]),
+    ("view_used_twice_still_live", '''fn main() -> i64 {
+  let mut v = [1, 2]
+  let y = v
+  let first = len(y)
+  v.push(3)
+  return first + len(y)
+}
+''', ["while borrowed by `y`"]),
 ]
 
 FAILED = []
