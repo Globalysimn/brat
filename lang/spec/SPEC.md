@@ -81,9 +81,10 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 
 - `i64` `+`, `-`, `*`, and unary `-` wrap in two's-complement (`uint64_t` casts
   plus `-fwrapv`).
-- `/` and `%` on `i64` raise a catchable runtime error when the divisor is `0`
-  or on `INT64_MIN / -1` (`INT64_MIN % -1` evaluates to `0`).
-- Shift counts outside `0..63` raise a catchable runtime error.
+- `/` and `%` on `i64` raise a catchable runtime error when the divisor is `0`.
+  `INT64_MIN / -1` wraps to `INT64_MIN` and `INT64_MIN % -1` evaluates to `0`.
+- A shift uses the low six bits of its count, so `1 << 64` is `1`; `>>`
+  sign-extends.
 - `f64` follows IEEE-754; `NaN == NaN` is `false`.
 - `==` and `!=` compare structural value equality on primitives, strings,
   vectors, maps, structs, and enums without implicit type coercion (`1 == "1"`
