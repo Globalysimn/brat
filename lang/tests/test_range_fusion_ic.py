@@ -182,20 +182,140 @@ check("->items[" in c_o2, "expected unchecked SetIdx store in -O2 emitted C")
 # Verify floored negative division (-7 / 2 == -4, -7 % 2 == 1 -> -39) was NOT mis-lowered to C truncating div!
 check("-39" in ex_o2.stdout.splitlines(), f"floored negative division corrupted: {ex_o2.stdout}")
 
-# Verify unproven division by zero still traps cleanly under -O2!
+# Checks that are not proven still raise under -O2: a plain division, an index
+# bounded only on the other branch of an `if`, and operands narrowed by a guard
+# inside a loop that runs zero times. A failed operand stops the statement: the
+# call it feeds does not run, the store after it does not happen, and a callee
+# that failed is not divided by as if it had returned inside its summary.
 trap_src = write_src("o2_trap.brat", """
 fn bad_div(x: i64, y: i64) -> i64 {
   return x / y
 }
-try {
-  print(bad_div(10, 0))
-} catch e {
-  print("caught:" + e)
+
+fn other_branch(v: vec[i64], y: i64, z: i64) -> i64 {
+  if len(v) < 10 {
+    return 0
+  }
+  if z < 0 {
+    return 0
+  }
+  if z > 10 {
+    return 0
+  }
+  if y < z {
+    return 1
+  }
+  return v[y]
+}
+
+fn after_while(v: vec[i64], x: i64, n: i64) -> i64 {
+  let mut i = 0
+  while i < n {
+    if x > 3 {
+      break
+    }
+    i = i + 1
+  }
+  if x >= 0 {
+    if len(v) > 3 {
+      return v[x]
+    }
+  }
+  return 0
+}
+
+fn after_for(a: i64, n: i64) -> i64 {
+  for i in 0..n {
+    if a < 1 {
+      return 0
+    }
+  }
+  return 100 / a
+}
+
+fn after_each(v: vec[i64], a: i64) -> i64 {
+  for x in v {
+    if a < 1 {
+      return x
+    }
+  }
+  return 100 / a
+}
+
+fn id(p: i64) -> i64 {
+  return p
+}
+
+fn failed_arg(mut v: vec[i64], a: i64, b: i64) -> i64 {
+  let x = id(a / b)
+  v[0] = 55
+  return x
+}
+
+fn clamp_div(x: i64, d: i64) -> i64 {
+  let t = x / d
+  if t < 3 {
+    return 3
+  }
+  if t > 12 {
+    return 12
+  }
+  return t
+}
+
+fn failed_callee(x: i64, d: i64) -> i64 {
+  return 100 / clamp_div(x, d)
+}
+
+fn main() -> i64 {
+  let v = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  let none: vec[i64] = []
+  let mut kept = [1, 2, 3]
+  try {
+    print(failed_arg(kept, 1, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  print(kept)
+  try {
+    print(failed_callee(1, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  try {
+    print(bad_div(10, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  try {
+    print(other_branch(v, 1000000, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  try {
+    print(after_while(v, 1000000, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  try {
+    print(after_for(0, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  try {
+    print(after_each(none, 0))
+  } catch e {
+    print("caught:" + e)
+  }
+  return 0
 }
 """)
-_, ex_trap = compile_and_run(trap_src, "-O2")
-check(ex_trap.returncode == 0 and "caught:" in ex_trap.stdout,
-      f"unproven div-by-zero failed to raise under -O2: {ex_trap.stdout}")
+_, ex_trap = compile_and_run(trap_src, "-O2", sanitize=True)
+want_trap = ("caught:div by zero\n[1, 2, 3]\ncaught:div by zero\n"
+             "caught:div by zero\ncaught:index out of range\ncaught:index out of range\n"
+             "caught:div by zero\ncaught:div by zero\n")
+check(ex_trap.returncode == 0 and ex_trap.stdout == want_trap,
+      f"an unproven check failed to raise under -O2: {ex_trap.stdout}{ex_trap.stderr[:600]}")
 
 
 # Stream Deforestation (`.map`/`.filter`/`.fold` single-pass fusion)

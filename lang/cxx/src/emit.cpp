@@ -940,7 +940,7 @@ struct Emitter {
     // A fast-path call to one of them needs a verr_pending() check; a call to a
     // plain arithmetic helper does not.
     std::set<std::string> may_fail();
-    bool has_rec_call(const Expr &e) const;
+    bool has_call(const Expr &e) const;
     std::string fret_bail() const;
     std::string fchk(const Expr &e, const std::string &ind);
     std::string slot_cn(const std::string &name) const {
@@ -2094,17 +2094,20 @@ bool Emitter::fraise(const Expr &e) {
     if (e.k == EK::Idx) return true;
     if (e.k == EK::Call) {
         if (e.a == "len") return false;   // a length is a field read, it cannot fail
-        return !fastc.count(e.a) || fails.count(e.a) > 0;
+        if (!fastc.count(e.a) || fails.count(e.a) > 0) return true;
     }
     for (const auto &k : e.kids)
         if (fraise(*k)) return true;
     return false;
 }
 
-bool Emitter::has_rec_call(const Expr &e) const {
-    if (e.k == EK::Call && rec_fast.count(e.a)) return true;
+// A call must not run once an operand before it has failed, and a failed call
+// returns 0 whatever range its summary promised, so an expression holding one
+// is checked operand by operand instead of once at the end.
+bool Emitter::has_call(const Expr &e) const {
+    if (e.k == EK::Call && e.a != "len") return true;
     for (const auto &k : e.kids)
-        if (has_rec_call(*k)) return true;
+        if (has_call(*k)) return true;
     return false;
 }
 
@@ -2112,7 +2115,7 @@ std::string Emitter::fchk(const Expr &e, const std::string &ind) {
     if (!fraise(e)) return fx(e);
     const bool dbl = fkind == "f64";
     const char *ect = (dbl && !fint(e)) ? "double" : "int64_t";
-    if (!has_rec_call(e)) {
+    if (!has_call(e)) {
         std::string t = new_tmp("t");
         ln(ind, cat(ect, " ", t, " = ", fx(e), ";"));
         ln(ind, cat("if (bverr_unlikely()) ", fret_bail()));
