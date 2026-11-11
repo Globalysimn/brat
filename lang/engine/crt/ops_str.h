@@ -2727,8 +2727,6 @@ BFN Val venv_get(Val v) { return _venv_lookup(v, 0); }
 BFN Val venv_get_bytes(Val v) { return _venv_lookup(v, 1); }
 
 #if (BRAT_CRT_MASK & BRAT_CRT_RE)
-typedef struct { char kind; char q; char ch; const char *body; } RTok;
-
 static int r_cls_shorthand(char esc, unsigned uch) {
     int is_d = (uch >= '0' && uch <= '9');
     int is_w = is_d || (uch >= 'a' && uch <= 'z') || (uch >= 'A' && uch <= 'Z') || uch == '_';
@@ -2768,37 +2766,31 @@ static int r_cls_next(const char **bp, unsigned *out, char *shorthand) {
     return 1;
 }
 
-static int rtok_match(RTok *t, unsigned uch) {
-    if (t->kind == 'l') return uch == (unsigned char)t->ch;
-    if (t->kind == 'd') return 1;
-    if (t->kind == 's') {
-        const char *body = t->body;
-        int neg = 0, found = 0;
-        if (*body == '^') { neg = 1; body++; }
-        while (*body) {
-            unsigned lo = 0;
-            char sh = 0;
-            r_cls_next(&body, &lo, &sh);
-            if (sh) {
-                if (r_cls_shorthand(sh, uch) == 1) { found = 1; break; }
+static int r_cls_match(const char *body, unsigned uch) {
+    int neg = 0, found = 0;
+    if (*body == '^') { neg = 1; body++; }
+    while (*body) {
+        unsigned lo = 0;
+        char sh = 0;
+        r_cls_next(&body, &lo, &sh);
+        if (sh) {
+            if (r_cls_shorthand(sh, uch) == 1) { found = 1; break; }
+            continue;
+        }
+        if (*body == '-' && body[1]) {
+            const char *peek = body + 1;
+            unsigned hi = 0;
+            char sh2 = 0;
+            r_cls_next(&peek, &hi, &sh2);
+            if (!sh2) {
+                body = peek;
+                if (uch >= lo && uch <= hi) { found = 1; break; }
                 continue;
             }
-            if (*body == '-' && body[1]) {
-                const char *peek = body + 1;
-                unsigned hi = 0;
-                char sh2 = 0;
-                r_cls_next(&peek, &hi, &sh2);
-                if (!sh2) {
-                    body = peek;
-                    if (uch >= lo && uch <= hi) { found = 1; break; }
-                    continue;
-                }
-            }
-            if (uch == lo) { found = 1; break; }
         }
-        return neg ? !found : found;
+        if (uch == lo) { found = 1; break; }
     }
-    return 0;
+    return neg ? !found : found;
 }
 
 
@@ -3238,8 +3230,7 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
                 if (in->q != 'd' && ((unsigned char)s[si] & 0xC0) != 0x80) {
                     unsigned cp = 0;
                     vcp_next(s + si, &cp);
-                    RTok t; t.kind = 's'; t.q = 0; t.ch = 0; t.body = in->body;
-                    if (!rtok_match(&t, cp)) continue;
+                    if (!r_cls_match(in->body, cp)) continue;
                 }
                 if (si + 1 < slen && ((unsigned char)s[si + 1] & 0xC0) == 0x80) to = pc;
             }
