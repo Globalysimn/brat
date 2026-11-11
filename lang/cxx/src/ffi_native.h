@@ -22,12 +22,6 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
                            const std::vector<std::string> &include_dirs = {},
                            const std::vector<std::string> &defines = {});
 
-bool verify_module_header(const std::vector<StmtP> &body,
-                          std::string_view header_text,
-                          std::string_view header_name,
-                          std::string_view target,
-                          std::string &error);
-
 bool verify_bratbind_bytes(std::string_view brat_bytes,
                            std::string_view bind_bytes,
                            std::string_view target,

@@ -2244,28 +2244,6 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
     return res;
 }
 
-bool verify_module_header(const std::vector<StmtP> &body,
-                          std::string_view header_text,
-                          std::string_view header_name,
-                          std::string_view target,
-                          std::string &error) {
-    TargetModel tm = make_target_model(target);
-    CDecl cd;
-    if (!parse_c_header(header_text, tm, false, cd, error)) return false;
-    auto surf = extract_surface(body);
-    auto rep = check_declarations(surf, cd, header_name, tm);
-    if (rep.errors > 0) {
-        std::ostringstream oss;
-        for (size_t i = 0; i < rep.lines.size(); ++i) {
-            if (i) oss << "\n";
-            oss << rep.lines[i];
-        }
-        error = oss.str();
-        return false;
-    }
-    return true;
-}
-
 bool verify_bratbind_bytes(std::string_view brat_bytes,
                            std::string_view bind_bytes,
                            std::string_view target,

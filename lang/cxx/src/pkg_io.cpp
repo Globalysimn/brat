@@ -287,12 +287,6 @@ std::string sha256_hex(std::string_view data) {
     return st.hex();
 }
 
-bool sha256_file(const std::string &path, std::string &hex_out) {
-    uint64_t sz = 0;
-    std::string err;
-    return sha256_file_sized(std::filesystem::path(path), hex_out, sz, err);
-}
-
 bool sha256_file_sized(const std::filesystem::path &path, std::string &digest,
                        uint64_t &size, std::string &error) {
     std::ifstream in(path, std::ios::binary);

@@ -1121,12 +1121,6 @@ void reduce_iv_cong(IV &iv, Cong &cg) {
     if (iv.lo == iv.hi) cg = cst_cong(iv.lo);
 }
 
-bool cong_nonzero(const Cong &c) {
-    if (c.bot) return true;
-    if (c.m == 0) return static_cast<int64_t>(c.r) != 0;
-    return c.m >= 2 && c.r != 0;
-}
-
 // Difference-Bound Matrix (Potential Graph Zone Domain) over __int128
 static constexpr int MAX_DBM = 48;
 static const __int128 DBM_INF = (static_cast<__int128>(1) << 110);

@@ -17,7 +17,6 @@ inline constexpr size_t kMaxGraphFiles = 4096u;
 inline constexpr size_t kMaxIndexGraphPackages = 256u;
 
 std::string sha256_hex(std::string_view data);
-bool sha256_file(const std::string &path, std::string &hex_out);
 bool sha256_file_sized(const std::filesystem::path &path, std::string &digest,
                        uint64_t &size, std::string &error);
 
