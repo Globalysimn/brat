@@ -155,6 +155,25 @@ BFN Val vslice_of(Val v, Val a, Val b) {
     return vslice_make(v, a, vint(b.as.ival - a.as.ival), vint(0));
 }
 
+static inline int _vslice_check_ptr(Val p, Val n, const char *bad_arg, const char *neg_n) {
+    if (p.tag != V_INT || n.tag != V_INT) { vraise(bad_arg); return 0; }
+    if (n.as.ival < 0) { vraise(neg_n); return 0; }
+    if (p.as.ival < 0) { vraise("pointer is negative"); return 0; }
+    if (p.as.ival == 0 && n.as.ival > 0) { vraise("null pointer dereference"); return 0; }
+    return 1;
+}
+
+static inline int _vslice_check_idx(bint idx, bint n) {
+    if (idx < 0 || idx >= n) {
+        char m[96];
+        snprintf(m, sizeof m, "slice index %" PRId64 " out of range 0..%" PRId64,
+                 (int64_t)idx, (int64_t)n);
+        vraise(m);
+        return 0;
+    }
+    return 1;
+}
+
 BFN Val vslice_of_ptr(Val p, Val n, Val kind) {
     if (verr_pending()) return vunwind;
     if (p.tag != V_INT || n.tag != V_INT) { vraise("slice_of_ptr: invalid arguments"); return vunwind; }
@@ -163,9 +182,8 @@ BFN Val vslice_of_ptr(Val p, Val n, Val kind) {
         vraise("slice_of_ptr: kind must be i64, f64, u8, i32 or f32");
         return vunwind;
     }
-    if (n.as.ival < 0) { vraise("slice_of_ptr: n must be >= 0"); return vunwind; }
-    if (p.as.ival < 0) { vraise("pointer is negative"); return vunwind; }
-    if (p.as.ival == 0 && n.as.ival > 0) { vraise("null pointer dereference"); return vunwind; }
+    if (!_vslice_check_ptr(p, n, "slice_of_ptr: invalid arguments", "slice_of_ptr: n must be >= 0"))
+        return vunwind;
     return vslice_make(p, vint(0), n, vint(k));
 }
 
@@ -187,10 +205,8 @@ BFN Val vslice_elems(_Elems e) {
 
 BFN Val vslice_of_struct(Val p, Val n, Val esize) {
     if (verr_pending()) return vunwind;
-    if (p.tag != V_INT || n.tag != V_INT) { vraise("slice_of_struct: invalid arguments"); return vunwind; }
-    if (n.as.ival < 0) { vraise("slice_of_struct: n must be >= 0"); return vunwind; }
-    if (p.as.ival < 0) { vraise("pointer is negative"); return vunwind; }
-    if (p.as.ival == 0 && n.as.ival > 0) { vraise("null pointer dereference"); return vunwind; }
+    if (!_vslice_check_ptr(p, n, "slice_of_struct: invalid arguments", "slice_of_struct: n must be >= 0"))
+        return vunwind;
     if (esize.as.ival <= 0) { vraise("slice_of_struct: element size must be > 0"); return vunwind; }
     Vec *s = vvec();
     vec_push(s, vrc_inc(p));
@@ -213,13 +229,7 @@ BFN Val vslice_at(Val s, Val i) {
     if (i.tag != V_INT) { vraise("slice_get: index wants i64"); return vunwind; }
     Val base = sv->items[0];
     bint start = sv->items[1].as.ival, n = sv->items[2].as.ival, k, idx = i.as.ival;
-    if (idx < 0 || idx >= n) {
-        char m[96];
-        snprintf(m, sizeof m, "slice index %" PRId64 " out of range 0..%" PRId64,
-                 (int64_t)idx, (int64_t)n);
-        vraise(m);
-        return vunwind;
-    }
+    if (!_vslice_check_idx(idx, n)) return vunwind;
     if (base.tag == V_VEC) return vat_owned(base, vint(start + idx));
     k = sv->items[3].as.ival;
     if (k == 7) {
@@ -245,14 +255,7 @@ BFN Val vslice_set(Val s, Val i, Val v) {
     if (i.tag != V_INT) { vrc_dec(v); vraise("slice_set: index wants i64"); return vunwind; }
     Val base = sv->items[0];
     bint start = sv->items[1].as.ival, n = sv->items[2].as.ival, k, idx = i.as.ival;
-    if (idx < 0 || idx >= n) {
-        vrc_dec(v);
-        char m[96];
-        snprintf(m, sizeof m, "slice index %" PRId64 " out of range 0..%" PRId64,
-                 (int64_t)idx, (int64_t)n);
-        vraise(m);
-        return vunwind;
-    }
+    if (!_vslice_check_idx(idx, n)) { vrc_dec(v); return vunwind; }
     if (base.tag == V_VEC) {
         (void)vset_at(base, vint(start + idx), v);
         return verr_pending() ? vunwind : vint(0);
@@ -2235,6 +2238,14 @@ static int _vhandle_confined(HANDLE h) {
     return _vunder_base(target, NULL);
 }
 
+static inline HANDLE _vwin_open_attr(const wchar_t *wp, DWORD share, DWORD flags) {
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = FALSE;
+    return CreateFileW(wp, FILE_READ_ATTRIBUTES, share, &sa, OPEN_EXISTING, flags, NULL);
+}
+
 static HANDLE _vwin_open_parent_confined(const wchar_t *wpath, int *escaped) {
     if (escaped) *escaped = 0;
     wchar_t wpar[4096];
@@ -2254,14 +2265,8 @@ static HANDLE _vwin_open_parent_confined(const wchar_t *wpath, int *escaped) {
     } else {
         wpar[sep - 1] = 0;
     }
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    HANDLE ph = CreateFileW(wpar, FILE_READ_ATTRIBUTES,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            &sa, OPEN_EXISTING,
-                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    HANDLE ph = _vwin_open_attr(wpar, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
     if (ph == INVALID_HANDLE_VALUE) {
         DWORD le = GetLastError();
         if (le == ERROR_CANT_ACCESS_FILE && escaped) *escaped = 1;

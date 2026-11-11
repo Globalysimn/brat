@@ -586,36 +586,24 @@ BFN Val vsum(Val v) {
     if (isf) return vfloat(dl + (double)(bint)acc);
     return vint((bint)acc);
 }
-BFN Val vmin(Val v) {
-    Vec *w = vvec_of_m(v, "min");
+static inline Val _vextremum(Val v, const char *mname, int dir) {
+    Vec *w = vvec_of_m(v, mname);
     if (verr_pending()) return vunwind;
     BRAT_CTR_LOCK_OBJ(w);
     if (vmixed(w)) { BRAT_CTR_UNLOCK_OBJ(w); vraise("type error in <"); return vunwind; }
     if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
     Val r = w->items[0];
     for (bint i = 1; i < w->len; i++) {
-        if (vcmp(w->items[i], r) < 0) r = w->items[i];
+        int c = vcmp(w->items[i], r);
         if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
+        if (dir < 0 ? (c < 0) : (c > 0)) r = w->items[i];
     }
     r = vrc_inc(r);
     BRAT_CTR_UNLOCK_OBJ(w);
     return r;
 }
-BFN Val vmax(Val v) {
-    Vec *w = vvec_of_m(v, "max");
-    if (verr_pending()) return vunwind;
-    BRAT_CTR_LOCK_OBJ(w);
-    if (vmixed(w)) { BRAT_CTR_UNLOCK_OBJ(w); vraise("type error in <"); return vunwind; }
-    if (!w->len) { BRAT_CTR_UNLOCK_OBJ(w); return vnil(); }
-    Val r = w->items[0];
-    for (bint i = 1; i < w->len; i++) {
-        if (vcmp(w->items[i], r) > 0) r = w->items[i];
-        if (verr_pending()) { BRAT_CTR_UNLOCK_OBJ(w); return vunwind; }
-    }
-    r = vrc_inc(r);
-    BRAT_CTR_UNLOCK_OBJ(w);
-    return r;
-}
+BFN Val vmin(Val v) { return _vextremum(v, "min", -1); }
+BFN Val vmax(Val v) { return _vextremum(v, "max", 1); }
 BFN Val venum(Val v) {
     Vec *w = vvec_of_m(v, "enumerate");
     if (verr_pending()) return vunwind;
@@ -632,8 +620,8 @@ BFN Val venum(Val v) {
 }
 BFN Val vmap_get_or(Val m, Val k, Val d) {
     if (m.tag != V_STRUCT) { vraise("get_or of non-map"); return vunwind; }
-    if (vmapkey_reserved(k)) { return vmapkey_err(); }
-    if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    Val ke;
+    if (!_vmap_key_guard(k, &ke)) return ke;
     BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
     Val r = o ? vrc_inc(*o) : vrc_inc(d);
@@ -970,73 +958,36 @@ BFN_HOT void vstruct_slot_set(Val s, const BShape *shp, bint slot, const char *k
 BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic) {
     if (s.tag != V_STRUCT) { vrelease1(v); vraise("bad field set"); return; }
     Map *m = s.as.map;
+    size_t kl = 0;
+    int have_kl = 0;
+    BRAT_CTR_LOCK_OBJ(m);
     if (ic) {
+        bint sl = -1;
         const BShape *sh = m->shape;
         if (sh) {
-            bint hit_sl = -1;
-            if (sh == ic->shapes[0]) hit_sl = ic->slots[0];
-            else if (sh == ic->shapes[1]) hit_sl = ic->slots[1];
-            else if (sh == ic->shapes[2]) hit_sl = ic->slots[2];
-            else if (sh == ic->shapes[3]) hit_sl = ic->slots[3];
-            if (hit_sl >= 0) {
-                BRAT_CTR_LOCK_OBJ(m);
-                Val old = m->vals[hit_sl];
-                m->vals[hit_sl] = v;
+            if (_bic_match_shape(ic, sh, &sl) && sl >= 0) {
+                Val old = m->vals[sl];
+                m->vals[sl] = v;
                 BRAT_CTR_UNLOCK_OBJ(m);
                 vrelease1(old);
                 return;
             }
-        } else {
-            BRAT_CTR_LOCK_OBJ(m);
-            bint sl = ic->slots[0];
-            if (!ic->shapes[0] && sl >= 0 && sl < m->used) {
-                Val kv = m->keys[sl];
-                if (kv.tag == V_STR) {
-                    const char *ks = vstr_c(&kv);
-                    if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
-                        Val old = m->vals[sl];
-                        m->vals[sl] = v;
-                        BRAT_CTR_UNLOCK_OBJ(m);
-                        vrelease1(old);
-                        return;
-                    }
-                }
-            }
-            bint at = map_find_cstr(m, k, strlen(k));
-            if (at < 0) {
-                BRAT_CTR_UNLOCK_OBJ(m);
-                vrelease1(v);
-                vraise("bad field set");
-                return;
-            }
-            ic->shapes[0] = 0;
-            ic->slots[0] = at;
-            Val old = m->vals[at];
-            m->vals[at] = v;
+        } else if (_bic_match_unshaped(ic, m, k, &kl, &have_kl, &sl)) {
+            Val old = m->vals[sl];
+            m->vals[sl] = v;
             BRAT_CTR_UNLOCK_OBJ(m);
             vrelease1(old);
             return;
         }
     }
-    BRAT_CTR_LOCK_OBJ(m);
-    bint at = map_find_cstr(m, k, strlen(k));
+    bint at = map_find_cstr(m, k, have_kl ? kl : strlen(k));
     if (at < 0) {
         BRAT_CTR_UNLOCK_OBJ(m);
         vrelease1(v);
         vraise("bad field set");
         return;
     }
-    if (ic) {
-        if (m->shape) {
-            unsigned w = (unsigned)(ic->next & 3u);
-            ic->shapes[w] = m->shape;
-            ic->slots[w] = at;
-            ic->next = (unsigned char)((w + 1u) & 3u);
-        } else {
-            ic->shapes[0] = 0;
-            ic->slots[0] = at;
-        }
-    }
+    _bic_record(ic, m->shape, at);
     Val old = m->vals[at];
     m->vals[at] = v;
     BRAT_CTR_UNLOCK_OBJ(m);

@@ -399,6 +399,17 @@ BFN Val vsql_exec(Val sv, Val sqlv) {
 #endif
 }
 
+#if !defined(_WIN32)
+static inline Val _vsql_qfail(Map *row, void *stmt, BSqlSlot *slot, Vec *rows, const char *msg) {
+    Val errv = verr(msg);
+    if (row) vrc_dec(vstruct(row));
+    if (stmt) _bsql.finalize(stmt);
+    if (slot) _vsql_release(slot);
+    if (rows) vrc_dec(vvecv(rows));
+    return errv;
+}
+#endif
+
 BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
     if (sv.tag != V_INT || sqlv.tag != V_STR || paramv.tag != V_VEC)
         return verr("sql_query wants (handle, sql, params_vec)");
@@ -413,23 +424,14 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
     void *db = slot->db;
     void *stmt = NULL;
     const char *tail = NULL;
-    if (_bsql.prepare_v2(db, vstr_c(&sqlv), (int)sql_len, &stmt, &tail) != 0 || !stmt) {
-        Val errv = verr(_bsql.errmsg(db));
-        _vsql_release(slot);
-        return errv;
-    }
-    if (!_bsql_tail_empty(tail)) {
-        _bsql.finalize(stmt);
-        _vsql_release(slot);
-        return verr("sql_query wants one statement");
-    }
+    if (_bsql.prepare_v2(db, vstr_c(&sqlv), (int)sql_len, &stmt, &tail) != 0 || !stmt)
+        return _vsql_qfail(NULL, NULL, slot, NULL, _bsql.errmsg(db));
+    if (!_bsql_tail_empty(tail))
+        return _vsql_qfail(NULL, stmt, slot, NULL, "sql_query wants one statement");
     Vec *pv = paramv.as.vec;
     for (bint i = 0; i < pv->len; i++) {
-        if (i >= 0x7ffffffe) {
-            _bsql.finalize(stmt);
-            _vsql_release(slot);
-            return verr("too many sqlite parameters");
-        }
+        if (i >= 0x7ffffffe)
+            return _vsql_qfail(NULL, stmt, slot, NULL, "too many sqlite parameters");
         Val el = pv->items[i];
         int idx = (int)(i + 1);
         int brc = 0;
@@ -439,24 +441,13 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
         else if (el.tag == V_STR) {
             const char *sp = vstr_c(&el);
             size_t slen = vstr_len_fast(&el);
-            if (slen > 0x3fffffffu) {
-                _bsql.finalize(stmt);
-                _vsql_release(slot);
-                return verr("sqlite text parameter too large");
-            }
+            if (slen > 0x3fffffffu)
+                return _vsql_qfail(NULL, stmt, slot, NULL, "sqlite text parameter too large");
             brc = _bsql.bind_text(stmt, idx, sp, (int)slen, (void (*)(void *))(intptr_t)-1);
         } else if (el.tag == V_NIL) brc = _bsql.bind_null(stmt, idx);
-        else {
-            _bsql.finalize(stmt);
-            _vsql_release(slot);
-            return verr("unsupported sqlite parameter type");
-        }
-        if (brc != 0) {
-            Val errv = verr(_bsql.errmsg(db));
-            _bsql.finalize(stmt);
-            _vsql_release(slot);
-            return errv;
-        }
+        else return _vsql_qfail(NULL, stmt, slot, NULL, "unsupported sqlite parameter type");
+        if (brc != 0)
+            return _vsql_qfail(NULL, stmt, slot, NULL, _bsql.errmsg(db));
     }
     Vec *rows = vvec();
     size_t nrows = 0;
@@ -464,38 +455,20 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
     for (;;) {
         int s = _bsql.step(stmt);
         if (s == 100 /* SQLITE_ROW */) {
-            if (++nrows > (size_t)BRAT_MAX_SQL_ROWS) {
-                _bsql.finalize(stmt);
-                _vsql_release(slot);
-                vrc_dec(vvecv(rows));
-                return verr("sql_query exceeded maximum row limit");
-            }
+            if (++nrows > (size_t)BRAT_MAX_SQL_ROWS)
+                return _vsql_qfail(NULL, stmt, slot, rows, "sql_query exceeded maximum row limit");
             int ncols = _bsql.column_count(stmt);
-            if (ncols < 0 || ncols > BRAT_MAX_SQL_COLS) {
-                _bsql.finalize(stmt);
-                _vsql_release(slot);
-                vrc_dec(vvecv(rows));
-                return verr("sql_query exceeded maximum column limit");
-            }
+            if (ncols < 0 || ncols > BRAT_MAX_SQL_COLS)
+                return _vsql_qfail(NULL, stmt, slot, rows, "sql_query exceeded maximum column limit");
             Map *row = vmap("");
             for (int c = 0; c < ncols; c++) {
                 const char *cname = _bsql.column_name(stmt, c);
                 if (!cname) cname = "";
                 size_t cnlen = strlen(cname);
-                if (!utf8_valid(cname, (bint)cnlen)) {
-                    vrc_dec(vstruct(row));
-                    _bsql.finalize(stmt);
-                    _vsql_release(slot);
-                    vrc_dec(vvecv(rows));
-                    return verr("invalid utf-8 in sqlite column name");
-                }
-                if (cnlen == 5 && memcmp(cname, "$type", 5) == 0) {
-                    vrc_dec(vstruct(row));
-                    _bsql.finalize(stmt);
-                    _vsql_release(slot);
-                    vrc_dec(vvecv(rows));
-                    return verr("map key \"$type\" is reserved");
-                }
+                if (!utf8_valid(cname, (bint)cnlen))
+                    return _vsql_qfail(row, stmt, slot, rows, "invalid utf-8 in sqlite column name");
+                if (cnlen == 5 && memcmp(cname, "$type", 5) == 0)
+                    return _vsql_qfail(row, stmt, slot, rows, "map key \"$type\" is reserved");
                 int cty = _bsql.column_type(stmt, c);
                 Val cv = vnil();
                 size_t cell_cost = cnlen + 32;
@@ -504,53 +477,29 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
                 else if (cty == 3) {
                     const unsigned char *txt = _bsql.column_text(stmt, c);
                     int nb = _bsql.column_bytes(stmt, c);
-                    if (nb < 0 || (size_t)nb > (size_t)BRAT_MAX_SQL_RESULT_BYTES) {
-                        vrc_dec(vstruct(row));
-                        _bsql.finalize(stmt);
-                        _vsql_release(slot);
-                        vrc_dec(vvecv(rows));
-                        return verr("sql_query exceeded result size limit");
-                    }
+                    if (nb < 0 || (size_t)nb > (size_t)BRAT_MAX_SQL_RESULT_BYTES)
+                        return _vsql_qfail(row, stmt, slot, rows, "sql_query exceeded result size limit");
                     if (txt && nb > 0 &&
                         (memchr(txt, 0, (size_t)nb) != NULL ||
-                         !utf8_valid((const char *)txt, (bint)nb))) {
-                        vrc_dec(vstruct(row));
-                        _bsql.finalize(stmt);
-                        _vsql_release(slot);
-                        vrc_dec(vvecv(rows));
-                        return verr("invalid utf-8 or embedded NUL in sqlite text result");
-                    }
+                         !utf8_valid((const char *)txt, (bint)nb)))
+                        return _vsql_qfail(row, stmt, slot, rows, "invalid utf-8 or embedded NUL in sqlite text result");
                     cell_cost += (size_t)nb;
                     cv = txt ? vstrn((const char *)txt, (bint)nb) : vlit("");
                 } else if (cty == 4) {
                     const unsigned char *bl = (const unsigned char *)_bsql.column_blob(stmt, c);
                     int nb = _bsql.column_bytes(stmt, c);
-                    if (nb < 0 || nb > BRAT_MAX_SQL_BLOB) {
-                        vrc_dec(vstruct(row));
-                        _bsql.finalize(stmt);
-                        _vsql_release(slot);
-                        vrc_dec(vvecv(rows));
-                        return verr("sql_query blob exceeds 4 MiB limit");
-                    }
+                    if (nb < 0 || nb > BRAT_MAX_SQL_BLOB)
+                        return _vsql_qfail(row, stmt, slot, rows, "sql_query blob exceeds 4 MiB limit");
                     cell_cost += (size_t)nb * sizeof(Val);
-                    if (total_bytes + cell_cost > (size_t)BRAT_MAX_SQL_RESULT_BYTES) {
-                        vrc_dec(vstruct(row));
-                        _bsql.finalize(stmt);
-                        _vsql_release(slot);
-                        vrc_dec(vvecv(rows));
-                        return verr("sql_query exceeded result size limit");
-                    }
+                    if (total_bytes + cell_cost > (size_t)BRAT_MAX_SQL_RESULT_BYTES)
+                        return _vsql_qfail(row, stmt, slot, rows, "sql_query exceeded result size limit");
                     Vec *bv = vvec_cap((bint)nb);
                     for (int k = 0; k < nb; k++) vec_push(bv, vint((bint)(bl ? bl[k] : 0)));
                     cv = vvecv(bv);
                 }
                 if (total_bytes + cell_cost > (size_t)BRAT_MAX_SQL_RESULT_BYTES) {
                     vrc_dec(cv);
-                    vrc_dec(vstruct(row));
-                    _bsql.finalize(stmt);
-                    _vsql_release(slot);
-                    vrc_dec(vvecv(rows));
-                    return verr("sql_query exceeded result size limit");
+                    return _vsql_qfail(row, stmt, slot, rows, "sql_query exceeded result size limit");
                 }
                 total_bytes += cell_cost;
                 map_set_v(row, cnlen ? vstrn(cname, (bint)cnlen) : vstr_sso("", 0), cv);
@@ -559,11 +508,7 @@ BFN Val vsql_query(Val sv, Val sqlv, Val paramv) {
         } else if (s == 101 /* SQLITE_DONE */) {
             break;
         } else {
-            Val errv = verr(_bsql.errmsg(db));
-            _bsql.finalize(stmt);
-            _vsql_release(slot);
-            vrc_dec(vvecv(rows));
-            return errv;
+            return _vsql_qfail(NULL, stmt, slot, rows, _bsql.errmsg(db));
         }
     }
     _bsql.finalize(stmt);
@@ -697,6 +642,24 @@ static int _vpipe_cloexec(int p[2]) {
 }
 #endif
 
+#if !defined(_WIN32)
+static inline void _vproc_close3(int a[2], int b[2], int c[2]) {
+    if (a[0] >= 0) close(a[0]);
+    if (a[1] >= 0) close(a[1]);
+    if (b[0] >= 0) close(b[0]);
+    if (b[1] >= 0) close(b[1]);
+    if (c[0] >= 0) close(c[0]);
+    if (c[1] >= 0) close(c[1]);
+}
+static inline void _vproc_free_argv(char **cargv, char **cowned, bint n) {
+    if (cowned) {
+        for (bint i = 0; i < n; i++) free(cowned[i]);
+        free(cowned);
+    }
+    free(cargv);
+}
+#endif
+
 BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     if (cmd.tag != V_STR || vstr_empty(cmd)) return verr("proc_run wants non-empty command string");
     if (vstr_has_nul(&cmd)) return verr("embedded NUL in command string");
@@ -733,57 +696,42 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
     return verr("proc_run unsupported on this platform");
 #else
     int out_p[2] = {-1, -1}, err_p[2] = {-1, -1}, ex_p[2] = {-1, -1};
-    if (_vpipe_cloexec(out_p) != 0) return verr_os("pipe");
-    if (_vpipe_cloexec(err_p) != 0) { close(out_p[0]); close(out_p[1]); return verr_os("pipe"); }
-    if (_vpipe_cloexec(ex_p) != 0) {
-        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+    if (_vpipe_cloexec(out_p) != 0 || _vpipe_cloexec(err_p) != 0 || _vpipe_cloexec(ex_p) != 0) {
+        int e = errno;
+        _vproc_close3(out_p, err_p, ex_p);
+        errno = e;
         return verr_os("pipe");
     }
     char **cargv = (char **)calloc((size_t)av->len + 2, sizeof(char *));
-    if (!cargv) {
-        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
-        close(ex_p[0]); close(ex_p[1]);
-        vraise("out of memory");
-        return vunwind;
-    }
-    char **cowned = (char **)calloc((size_t)av->len + 1, sizeof(char *));
-    if (!cowned) {
-        free(cargv);
-        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
-        close(ex_p[0]); close(ex_p[1]);
+    char **cowned = cargv ? (char **)calloc((size_t)av->len + 1, sizeof(char *)) : NULL;
+    if (!cargv || !cowned) {
+        _vproc_free_argv(cargv, cowned, av->len);
+        _vproc_close3(out_p, err_p, ex_p);
         vraise("out of memory");
         return vunwind;
     }
     cargv[0] = (char *)vstr_c(&cmd);
-    int cargv_oom = 0;
     for (bint i = 0; i < av->len; i++) {
         if (av->items[i].tag == V_STR) {
             cargv[i + 1] = (char *)vstr_c(&av->items[i]);
         } else {
             cowned[i] = _vbytes_to_cstr(av->items[i].as.vec);
-            if (!cowned[i]) { cargv_oom = 1; break; }
+            if (!cowned[i]) {
+                _vproc_free_argv(cargv, cowned, av->len);
+                _vproc_close3(out_p, err_p, ex_p);
+                vraise("out of memory");
+                return vunwind;
+            }
             cargv[i + 1] = cowned[i];
         }
-    }
-    if (cargv_oom) {
-        for (bint i = 0; i < av->len; i++) free(cowned[i]);
-        free(cowned);
-        free(cargv);
-        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
-        close(ex_p[0]); close(ex_p[1]);
-        vraise("out of memory");
-        return vunwind;
     }
     cargv[av->len + 1] = NULL;
 
     pid_t pid = fork();
     if (pid < 0) {
         int e = errno;
-        for (bint i = 0; i < av->len; i++) free(cowned[i]);
-        free(cowned);
-        free(cargv);
-        close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
-        close(ex_p[0]); close(ex_p[1]);
+        _vproc_free_argv(cargv, cowned, av->len);
+        _vproc_close3(out_p, err_p, ex_p);
         errno = e;
         return verr_os("fork");
     }
@@ -847,9 +795,7 @@ BFN Val vproc_run_to(Val cmd, Val argv, Val tmo_v) {
         _exit(127);
     }
     setpgid(pid, pid);
-    for (bint i = 0; i < av->len; i++) free(cowned[i]);
-    free(cowned);
-    free(cargv);
+    _vproc_free_argv(cargv, cowned, av->len);
     close(out_p[1]);
     close(err_p[1]);
     close(ex_p[1]);

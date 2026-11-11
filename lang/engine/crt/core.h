@@ -491,8 +491,6 @@ static size_t _bvpin_lbytes = 0;
 static int _bvpin_inited = 0;
 static bmutex_t _bvpin_mu = BMUTEX_INIT;
 
-static void vraise(const char *msg);
-
 static uint64_t _bvpin_hash_bytes(const char *s, size_t n) {
     uint64_t h = 0xcbf29ce484222325ULL ^ (uint64_t)n;
     for (size_t i = 0; i < n; i++) {
@@ -2421,52 +2419,60 @@ BFN_HOT Val *map_get(Map *m, const char *k) {
     bint at = map_find_cstr(m, k, strlen(k));
     return at >= 0 ? &m->vals[at] : 0;
 }
+static inline int _bic_match_shape(const BFieldIC *ic, const BShape *sh, bint *slot_out) {
+    if (sh == ic->shapes[0]) { *slot_out = ic->slots[0]; return 1; }
+    if (sh == ic->shapes[1]) { *slot_out = ic->slots[1]; return 1; }
+    if (sh == ic->shapes[2]) { *slot_out = ic->slots[2]; return 1; }
+    if (sh == ic->shapes[3]) { *slot_out = ic->slots[3]; return 1; }
+    return 0;
+}
+static inline int _bic_match_unshaped(const BFieldIC *ic, const Map *m, const char *k,
+                                      size_t *kl_io, int *have_kl, bint *slot_out) {
+    bint sl = ic->slots[0];
+    if (!ic->shapes[0] && sl >= 0 && sl < m->used) {
+        Val kv = m->keys[sl];
+        if (kv.tag == V_STR) {
+            const char *ks = vstr_c(&kv);
+            if (ks == k) { *slot_out = sl; return 1; }
+            size_t kl = *have_kl ? *kl_io : (*have_kl = 1, *kl_io = strlen(k));
+            if (vstr_len_fast(&kv) == kl && (kl == 0 || (ks[0] == k[0] && memcmp(ks, k, kl) == 0))) {
+                *slot_out = sl;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+static inline void _bic_record(BFieldIC *ic, const BShape *sh, bint at) {
+    if (!ic) return;
+    if (sh) {
+        unsigned w = (unsigned)(ic->next & 3u);
+        ic->shapes[w] = sh;
+        ic->slots[w] = at;
+        ic->next = (unsigned char)((w + 1u) & 3u);
+    } else {
+        ic->shapes[0] = 0;
+        ic->slots[0] = at;
+    }
+}
 BFN_HOT Val *map_get_ic(Map *m, const char *k, BFieldIC *ic) {
     size_t kl = 0;
     int have_kl = 0;
     if (ic) {
+        bint sl = -1;
         const BShape *sh = m->shape;
         if (sh) {
-            if (sh == ic->shapes[0]) { bint sl = ic->slots[0]; return sl >= 0 ? &m->vals[sl] : 0; }
-            if (sh == ic->shapes[1]) { bint sl = ic->slots[1]; return sl >= 0 ? &m->vals[sl] : 0; }
-            if (sh == ic->shapes[2]) { bint sl = ic->slots[2]; return sl >= 0 ? &m->vals[sl] : 0; }
-            if (sh == ic->shapes[3]) { bint sl = ic->slots[3]; return sl >= 0 ? &m->vals[sl] : 0; }
-        } else {
-            bint sl = ic->slots[0];
-            if (!ic->shapes[0] && sl >= 0 && sl < m->used) {
-                Val kv = m->keys[sl];
-                if (kv.tag == V_STR) {
-                    const char *ks = vstr_c(&kv);
-                    if (ks == k) return &m->vals[sl];
-                    kl = strlen(k);
-                    have_kl = 1;
-                    if (vstr_len_fast(&kv) == kl && ks[0] == k[0] && memcmp(ks, k, kl) == 0)
-                        return &m->vals[sl];
-                }
-            }
+            if (_bic_match_shape(ic, sh, &sl)) return sl >= 0 ? &m->vals[sl] : 0;
+        } else if (_bic_match_unshaped(ic, m, k, &kl, &have_kl, &sl)) {
+            return &m->vals[sl];
         }
     }
     bint at = map_find_cstr(m, k, have_kl ? kl : strlen(k));
     if (at < 0) {
-        if (ic && m->shape) {
-            unsigned w = (unsigned)(ic->next & 3u);
-            ic->shapes[w] = m->shape;
-            ic->slots[w] = -1;
-            ic->next = (unsigned char)((w + 1u) & 3u);
-        }
+        if (ic && m->shape) _bic_record(ic, m->shape, -1);
         return 0;
     }
-    if (ic) {
-        if (m->shape) {
-            unsigned w = (unsigned)(ic->next & 3u);
-            ic->shapes[w] = m->shape;
-            ic->slots[w] = at;
-            ic->next = (unsigned char)((w + 1u) & 3u);
-        } else {
-            ic->shapes[0] = 0;
-            ic->slots[0] = at;
-        }
-    }
+    _bic_record(ic, m->shape, at);
     return &m->vals[at];
 }
 BFN bint map_del_v(Map *m, Val k) {
@@ -2533,10 +2539,15 @@ BFN char *vkey(Val k) {
    refused by `get`, `has`, `del` and `get_or` as a value, never a raise. */
 BFN bint vmapkey_reserved(Val k);
 BFN Val vmapkey_err(void);
+static inline int _vmap_key_guard(Val k, Val *err_out) {
+    if (vmapkey_reserved(k)) { *err_out = vmapkey_err(); return 0; }
+    if (vmap_key_bad(k)) { *err_out = vmap_bad_key_err(); return 0; }
+    return 1;
+}
 BFN Val vmap_getv(Val m, Val k) {
     if (m.tag != V_STRUCT) { vraise("no method get"); return vunwind; }
-    if (vmapkey_reserved(k)) { return vmapkey_err(); }
-    if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    Val ke;
+    if (!_vmap_key_guard(k, &ke)) return ke;
     BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
     Val r = o ? vrc_inc(*o) : vnil();
@@ -2553,8 +2564,8 @@ BFN_HOT Val vmap_get_ic(Val m, const char *k, BFieldIC *ic) {
 }
 BFN Val vmap_has(Val m, Val k) {
     if (m.tag != V_STRUCT) { vraise("no method has"); return vunwind; }
-    if (vmapkey_reserved(k)) { return vmapkey_err(); }
-    if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    Val ke;
+    if (!_vmap_key_guard(k, &ke)) return ke;
     BRAT_CTR_LOCK_OBJ(m.as.map);
     Val *o = map_get_v(m.as.map, k);
     BRAT_CTR_UNLOCK_OBJ(m.as.map);
@@ -2588,8 +2599,8 @@ BFN Val vmap_keys(Val m) {
 }
 BFN Val vmap_del(Val m, Val k) {
     if (m.tag != V_STRUCT) { vraise("no method del"); return vunwind; }
-    if (vmapkey_reserved(k)) { return vmapkey_err(); }
-    if (vmap_key_bad(k)) { return vmap_bad_key_err(); }
+    Val ke;
+    if (!_vmap_key_guard(k, &ke)) return ke;
     return vbool(map_del_v(m.as.map, k));
 }
 
@@ -2610,8 +2621,8 @@ BFN bint vmap_has_reserved(Map *m) {
 
 BFN Val vmap_setv(Val m, Val k, Val v) {
     if (m.tag != V_STRUCT) { vrc_dec(k); vrc_dec(v); vraise("no method set"); return vunwind; }
-    if (vmapkey_reserved(k)) { vrc_dec(k); vrc_dec(v); return vmapkey_err(); }
-    if (vmap_key_bad(k)) { vrc_dec(k); vrc_dec(v); return vmap_bad_key_err(); }
+    Val ke;
+    if (!_vmap_key_guard(k, &ke)) { vrc_dec(k); vrc_dec(v); return ke; }
     Val ret = vrc_inc(v);
     map_set_v(m.as.map, k, v);
     return ret;

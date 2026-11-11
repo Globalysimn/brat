@@ -123,130 +123,50 @@ BFN_HOT Val vfield(Val v, const char *k) {
     vraisef("no field %s\n", k); return vunwind;
 }
 
-BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
+static inline Val _vfield_ic_load(Val v, const char *k, BFieldIC *ic, int retain, int err_nl) {
     if (v.tag == V_STRUCT) {
         Map *m = v.as.map;
+        size_t kl = 0;
+        int have_kl = 0;
+        BRAT_CTR_LOCK_OBJ(m);
         if (ic) {
+            bint sl = -1;
             const BShape *sh = m->shape;
             if (sh) {
-                bint slot = -1;
-                if (sh == ic->shapes[0]) slot = ic->slots[0];
-                else if (sh == ic->shapes[1]) slot = ic->slots[1];
-                else if (sh == ic->shapes[2]) slot = ic->slots[2];
-                else if (sh == ic->shapes[3]) slot = ic->slots[3];
-                if (slot >= 0) {
-                    BRAT_CTR_LOCK_OBJ(m);
-                    Val r = m->vals[slot];
+                if (_bic_match_shape(ic, sh, &sl) && sl >= 0) {
+                    Val r = retain ? vrc_inc(m->vals[sl]) : m->vals[sl];
                     BRAT_CTR_UNLOCK_OBJ(m);
                     return r;
                 }
-            } else {
-                BRAT_CTR_LOCK_OBJ(m);
-                bint s = ic->slots[0];
-                if (!ic->shapes[0] && s >= 0 && s < m->used) {
-                    Val kv = m->keys[s];
-                    if (kv.tag == V_STR) {
-                        const char *ks = vstr_c(&kv);
-                        if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
-                            Val r = m->vals[s];
-                            BRAT_CTR_UNLOCK_OBJ(m);
-                            return r;
-                        }
-                    }
-                }
-                bint at = map_find_cstr(m, k, strlen(k));
-                if (at < 0) {
-                    BRAT_CTR_UNLOCK_OBJ(m);
-                    vraisef("no field %s\n", k);
-                    return vunwind;
-                }
-                ic->shapes[0] = 0;
-                ic->slots[0] = at;
-                Val r = m->vals[at];
+            } else if (_bic_match_unshaped(ic, m, k, &kl, &have_kl, &sl)) {
+                Val r = retain ? vrc_inc(m->vals[sl]) : m->vals[sl];
                 BRAT_CTR_UNLOCK_OBJ(m);
                 return r;
             }
         }
-        BRAT_CTR_LOCK_OBJ(m);
-        bint at = map_find_cstr(m, k, strlen(k));
+        bint at = map_find_cstr(m, k, have_kl ? kl : strlen(k));
         if (at < 0) {
             BRAT_CTR_UNLOCK_OBJ(m);
-            vraisef("no field %s\n", k);
+            if (err_nl) vraisef("no field %s\n", k);
+            else vraisef("no field %s", k);
             return vunwind;
         }
-        if (ic) {
-            if (m->shape) {
-                unsigned w = (unsigned)(ic->next & 3u);
-                ic->shapes[w] = m->shape;
-                ic->slots[w] = at;
-                ic->next = (unsigned char)((w + 1u) & 3u);
-            } else {
-                ic->shapes[0] = 0;
-                ic->slots[0] = at;
-            }
-        }
-        Val r = m->vals[at];
+        _bic_record(ic, m->shape, at);
+        Val r = retain ? vrc_inc(m->vals[at]) : m->vals[at];
         BRAT_CTR_UNLOCK_OBJ(m);
         return r;
     }
-    vraisef("no field %s\n", k); return vunwind;
+    if (err_nl) vraisef("no field %s\n", k);
+    else vraisef("no field %s", k);
+    return vunwind;
+}
+
+BFN_HOT Val vfield_ic(Val v, const char *k, BFieldIC *ic) {
+    return _vfield_ic_load(v, k, ic, 0, 1);
 }
 
 BFN_HOT Val vfield_map_get_ic(Val v, const char *k, BFieldIC *ic) {
-    if (v.tag == V_STRUCT) {
-        Map *m = v.as.map;
-        BRAT_CTR_LOCK_OBJ(m);
-        if (ic) {
-            const BShape *sh = m->shape;
-            if (sh) {
-                bint slot = -1;
-                if (sh == ic->shapes[0]) slot = ic->slots[0];
-                else if (sh == ic->shapes[1]) slot = ic->slots[1];
-                else if (sh == ic->shapes[2]) slot = ic->slots[2];
-                else if (sh == ic->shapes[3]) slot = ic->slots[3];
-                if (slot >= 0) {
-                    Val r = vrc_inc(m->vals[slot]);
-                    BRAT_CTR_UNLOCK_OBJ(m);
-                    return r;
-                }
-            } else {
-                bint s = ic->slots[0];
-                if (!ic->shapes[0] && s >= 0 && s < m->used) {
-                    Val kv = m->keys[s];
-                    if (kv.tag == V_STR) {
-                        const char *ks = vstr_c(&kv);
-                        if (ks == k || (ks[0] == k[0] && strcmp(ks, k) == 0)) {
-                            Val r = vrc_inc(m->vals[s]);
-                            BRAT_CTR_UNLOCK_OBJ(m);
-                            return r;
-                        }
-                    }
-                }
-            }
-        }
-        bint at = map_find_cstr(m, k, strlen(k));
-        if (at < 0) {
-            BRAT_CTR_UNLOCK_OBJ(m);
-            vraisef("no field %s", k);
-            return vunwind;
-        }
-        if (ic) {
-            if (m->shape) {
-                unsigned w = (unsigned)(ic->next & 3u);
-                ic->shapes[w] = m->shape;
-                ic->slots[w] = at;
-                ic->next = (unsigned char)((w + 1u) & 3u);
-            } else {
-                ic->shapes[0] = 0;
-                ic->slots[0] = at;
-            }
-        }
-        Val r = vrc_inc(m->vals[at]);
-        BRAT_CTR_UNLOCK_OBJ(m);
-        return r;
-    }
-    vraisef("no field %s", k);
-    return vunwind;
+    return _vfield_ic_load(v, k, ic, 1, 0);
 }
 
 BFN_HOT Val *vstruct_slot_ptr(Val s, const BShape *shp, bint slot, const char *k) {
@@ -326,14 +246,24 @@ static const char *_vconfine_path(const Val *p, char *buf, size_t cap, int *bad)
     if (*bad) return NULL;
     return vconfine(raw);
 }
+static inline const char *_vconfine_req(const Val *p, char *buf, size_t cap,
+                                        const char *want_msg, const char *byte_msg,
+                                        Val *err_out) {
+    int pbad = 0;
+    const char *rp = _vconfine_path(p, buf, cap, &pbad);
+    if (pbad == 1) { *err_out = verr(want_msg); return NULL; }
+    if (pbad == 2) { *err_out = verr("embedded NUL in file path"); return NULL; }
+    if (pbad == 4) { *err_out = verr(byte_msg); return NULL; }
+    if (!rp) { *err_out = verr("path outside the program directory"); return NULL; }
+    return rp;
+}
 BFN Val vreadfile(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("read_file wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("read_file byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "read_file wants a string path",
+                                   "read_file byte out of range 0..255", &perr);
+    if (!rp) return perr;
     int escaped = 0, too_large = 0;
     FILE *f = _vopen_confined_stream(rp, 0, BRAT_MAX_FILE_BYTES, &escaped, &too_large);
     if (!f) {
@@ -902,25 +832,41 @@ BFN int _vparse_ipv4_strict(const char *s, bin_addr_t *out_net) {
     return 1;
 }
 
-BFN Val vtcp_listen(Val addr) {
-    if (addr.tag != V_STR) return _verr_c("tcp_listen wants a string address");
-    char host[256]; int port = 0;
-    if (!_vhost_port(vstr_c(&addr), host, sizeof host, &port))
-        return _verr_c("address wants host:port with port 1..65535");
-    if (!_vsk_init_net()) return _verr_c("socket init failed");
+static inline int _vtcp_open_sa(Val addr, const char *want_msg,
+                                bsock_t *fd_out, struct sockaddr_in *sa_out, Val *err_out) {
+    if (addr.tag != V_STR) { *err_out = _verr_c(want_msg); return 0; }
+    char host[256];
+    int port = 0;
+    if (!_vhost_port(vstr_c(&addr), host, sizeof host, &port)) {
+        *err_out = _verr_c("address wants host:port with port 1..65535");
+        return 0;
+    }
+    if (!_vsk_init_net()) { *err_out = _verr_c("socket init failed"); return 0; }
     bin_addr_t ip = 0;
-    if (!_vparse_ipv4_strict(host, &ip)) return _verr_c("host must be an IPv4 address");
+    if (!_vparse_ipv4_strict(host, &ip)) {
+        *err_out = _verr_c("host must be an IPv4 address");
+        return 0;
+    }
     bsock_t fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == BSOCK_INVALID) return _verr_c("socket failed");
+    if (fd == BSOCK_INVALID) { *err_out = _verr_c("socket failed"); return 0; }
     _vsk_confine(fd);
     _vsk_nosigpipe(fd);
+    memset(sa_out, 0, sizeof(*sa_out));
+    sa_out->sin_family = AF_INET;
+    sa_out->sin_port = htons((unsigned short)port);
+    sa_out->sin_addr.s_addr = (bin_addr_t)ip;
+    *fd_out = fd;
+    return 1;
+}
+
+BFN Val vtcp_listen(Val addr) {
+    bsock_t fd;
+    struct sockaddr_in sa;
+    Val err;
+    if (!_vtcp_open_sa(addr, "tcp_listen wants a string address", &fd, &sa, &err))
+        return err;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((unsigned short)port);
-    sa.sin_addr.s_addr = (bin_addr_t)ip;
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) { bsock_close(fd); return _verr_c("bind failed"); }
     if (listen(fd, 16) != 0) { bsock_close(fd); return _verr_c("listen failed"); }
     bint slot = _vsk_put(fd);
@@ -928,23 +874,12 @@ BFN Val vtcp_listen(Val addr) {
     return _vok_int(slot);
 }
 BFN Val vtcp_connect(Val addr) {
-    if (addr.tag != V_STR) return _verr_c("tcp_connect wants a string address");
-    char host[256]; int port = 0;
-    if (!_vhost_port(vstr_c(&addr), host, sizeof host, &port))
-        return _verr_c("address wants host:port with port 1..65535");
-    if (!_vsk_init_net()) return _verr_c("socket init failed");
-    bin_addr_t ip = 0;
-    if (!_vparse_ipv4_strict(host, &ip)) return _verr_c("host must be an IPv4 address");
-    bsock_t fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd == BSOCK_INVALID) return _verr_c("socket failed");
-    _vsk_confine(fd);
-    _vsk_nosigpipe(fd);
-    _vsk_timeouts(fd);
+    bsock_t fd;
     struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((unsigned short)port);
-    sa.sin_addr.s_addr = (bin_addr_t)ip;
+    Val err;
+    if (!_vtcp_open_sa(addr, "tcp_connect wants a string address", &fd, &sa, &err))
+        return err;
+    _vsk_timeouts(fd);
     if (_vsk_connect_timeout(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
         bsock_close(fd);
         return _verr_c("connect failed");
@@ -1147,21 +1082,16 @@ BFN Val vown(Val v) {
     return r;
 }
 
-BFN Val vwritefile(Val p, Val t) {
-    if (t.tag != V_STR) return verr("write_file wants string path and text");
+static inline Val _vwritetext_mode(Val p, Val t, int mode,
+                                   const char *want_msg, const char *byte_msg) {
+    if (t.tag != V_STR) return verr(want_msg);
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("write_file wants string path and text");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("write_file byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf, want_msg, byte_msg, &perr);
+    if (!rp) return perr;
     int escaped = 0;
-    FILE *f = _vopen_confined_stream(rp, 1, 0, &escaped, NULL);
-    if (!f) {
-        if (escaped) return verr("path escaped during open");
-        return verr_os(rp);
-    }
+    FILE *f = _vopen_confined_stream(rp, mode, 0, &escaped, NULL);
+    if (!f) return escaped ? verr("path escaped during open") : verr_os(rp);
     const char *ts = vstr_c(&t);
     size_t n = vstr_len_fast(&t);
     errno = 0;
@@ -1173,40 +1103,17 @@ BFN Val vwritefile(Val p, Val t) {
     int clerr = errno;
     if (w != n || ferr) { errno = werr ? werr : EIO; return verr_os(rp); }
     if (cerr != 0) { errno = clerr ? clerr : EIO; return verr_os(rp); }
-    Vec *a = vvec();
-    vec_push(a, vint((bint)n));
-    return vtagv("ok", a);
+    return _vok_int((bint)n);
+}
+
+BFN Val vwritefile(Val p, Val t) {
+    return _vwritetext_mode(p, t, 1, "write_file wants string path and text",
+                            "write_file byte out of range 0..255");
 }
 
 BFN Val vappendfile(Val p, Val t) {
-    if (t.tag != V_STR) return verr("append_file wants string path and text");
-    char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("append_file wants string path and text");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("append_file byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
-    int escaped = 0;
-    FILE *f = _vopen_confined_stream(rp, 2, 0, &escaped, NULL);
-    if (!f) {
-        if (escaped) return verr("path escaped during open");
-        return verr_os(rp);
-    }
-    const char *ts = vstr_c(&t);
-    size_t n = vstr_len_fast(&t);
-    errno = 0;
-    size_t w = n ? fwrite(ts, 1, n, f) : 0;
-    int werr = errno;
-    int ferr = ferror(f);
-    errno = 0;
-    int cerr = fclose(f);
-    int clerr = errno;
-    if (w != n || ferr) { errno = werr ? werr : EIO; return verr_os(rp); }
-    if (cerr != 0) { errno = clerr ? clerr : EIO; return verr_os(rp); }
-    Vec *a = vvec();
-    vec_push(a, vint((bint)n));
-    return vtagv("ok", a);
+    return _vwritetext_mode(p, t, 2, "append_file wants string path and text",
+                            "append_file byte out of range 0..255");
 }
 
 BFN Val vfs_exists(Val p) {
@@ -1218,15 +1125,8 @@ BFN Val vfs_exists(Val p) {
     wchar_t wp[4096];
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0)
         return vbool(0);
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    DWORD flags = FILE_ATTRIBUTE_NORMAL;
-    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           &sa, OPEN_EXISTING, flags, NULL);
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | (!_vfiles_free() ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
+    HANDLE h = _vwin_open_attr(wp, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, flags);
     if (h == INVALID_HANDLE_VALUE) return vbool(0);
     BY_HANDLE_FILE_INFORMATION fi;
     int ok = GetFileType(h) == FILE_TYPE_DISK &&
@@ -1333,12 +1233,11 @@ static Val _vok_line_opt(const char *data, size_t n, int is_eof) {
 
 BFN Val vfs_open(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_open wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_open byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_open wants a string path",
+                                   "fs_open byte out of range 0..255", &perr);
+    if (!rp) return perr;
     int escaped = 0;
     FILE *f = _vopen_confined_stream(rp, 0, 0, &escaped, NULL);
     if (!f) {
@@ -1592,12 +1491,11 @@ BFN Val vstdin_read_line(void) {
 
 BFN Val vreadbytes(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("read_bytes wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("read_bytes byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "read_bytes wants a string path",
+                                   "read_bytes byte out of range 0..255", &perr);
+    if (!rp) return perr;
     int escaped = 0, too_large = 0;
     FILE *f = _vopen_confined_stream(rp, 0, BRAT_MAX_READ_BYTES, &escaped, &too_large);
     if (!f) {
@@ -1762,14 +1660,33 @@ BFN Val vfs_rename(Val src, Val dst) {
     return vtagv("ok", a);
 }
 
+#if !defined(_WIN32)
+static inline Val _vfs_unlinkat_confined(const char *rp, int rm_flags) {
+    char leaf[1024];
+    int esc = 0;
+    int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
+    if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
+    struct stat lst;
+    if (!_vfd_confined(dfd) ||
+        (fstatat(dfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode))) {
+        close(dfd);
+        return verr("path escaped during open");
+    }
+    int rc = unlinkat(dfd, leaf, rm_flags);
+    int e = errno;
+    close(dfd);
+    if (rc != 0) { errno = e; return verr_os(rp); }
+    return _vok_int(0);
+}
+#endif
+
 BFN Val vfs_remove(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_remove wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_remove byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_remove wants a string path",
+                                   "fs_remove byte out of range 0..255", &perr);
+    if (!rp) return perr;
     errno = 0;
 #if defined(_WIN32)
     wchar_t wp[4096];
@@ -1790,29 +1707,11 @@ BFN Val vfs_remove(Val p) {
     BOOL del_ok = DeleteFileW(wp);
     if (ph != INVALID_HANDLE_VALUE) CloseHandle(ph);
     if (!del_ok) { errno = ENOENT; return verr_os(rp); }
+    return _vok_int(0);
 #else
-    if (_vfiles_free()) {
-        if (unlink(rp) != 0) return verr_os(rp);
-    } else {
-        char leaf[1024];
-        int esc = 0;
-        int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
-        if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
-        struct stat lst;
-        if (!_vfd_confined(dfd) ||
-            (fstatat(dfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode))) {
-            close(dfd);
-            return verr("path escaped during open");
-        }
-        int rc = unlinkat(dfd, leaf, 0);
-        int e = errno;
-        close(dfd);
-        if (rc != 0) { errno = e; return verr_os(rp); }
-    }
+    if (_vfiles_free()) return unlink(rp) != 0 ? verr_os(rp) : _vok_int(0);
+    return _vfs_unlinkat_confined(rp, 0);
 #endif
-    Vec *a = vvec();
-    vec_push(a, vint(0));
-    return vtagv("ok", a);
 }
 
 #ifndef BRAT_MAX_DIR_ENTRIES
@@ -1883,15 +1782,8 @@ BFN Val vfs_is_dir(Val p) {
     wchar_t wp[4096];
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096) <= 0)
         return vbool(0);
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           &sa, OPEN_EXISTING, flags, NULL);
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | (!_vfiles_free() ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
+    HANDLE h = _vwin_open_attr(wp, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, flags);
     if (h == INVALID_HANDLE_VALUE) return vbool(0);
     BY_HANDLE_FILE_INFORMATION fi;
     int ok = GetFileType(h) == FILE_TYPE_DISK &&
@@ -1916,12 +1808,11 @@ BFN Val vfs_is_dir(Val p) {
 
 BFN Val vfs_file_size(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_file_size wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_file_size byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_file_size wants a string path",
+                                   "fs_file_size byte out of range 0..255", &perr);
+    if (!rp) return perr;
     errno = 0;
 #if defined(_WIN32)
     wchar_t wp[4096];
@@ -1929,15 +1820,8 @@ BFN Val vfs_file_size(Val p) {
         errno = EINVAL;
         return verr_os(rp);
     }
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    DWORD flags = FILE_ATTRIBUTE_NORMAL;
-    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    HANDLE h = CreateFileW(wp, FILE_READ_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           &sa, OPEN_EXISTING, flags, NULL);
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | (!_vfiles_free() ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
+    HANDLE h = _vwin_open_attr(wp, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, flags);
     if (h == INVALID_HANDLE_VALUE) {
         DWORD le = GetLastError();
         if (!_vfiles_free()) {
@@ -1971,9 +1855,7 @@ BFN Val vfs_file_size(Val p) {
     uint64_t sz = ((uint64_t)fi.nFileSizeHigh << 32) | (uint64_t)fi.nFileSizeLow;
     CloseHandle(h);
     if (sz > (uint64_t)INT64_MAX) return verr("fs_file_size exceeds i64");
-    Vec *a = vvec();
-    vec_push(a, vint((bint)sz));
-    return vtagv("ok", a);
+    return _vok_int((bint)sz);
 #else
     struct stat st;
     if (_vfiles_free()) {
@@ -2008,12 +1890,11 @@ BFN Val vfs_file_size(Val p) {
 
 BFN Val vfs_mkdir_all(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_mkdir_all wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_mkdir_all byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_mkdir_all wants a string path",
+                                   "fs_mkdir_all byte out of range 0..255", &perr);
+    if (!rp) return perr;
     errno = 0;
 #if defined(_WIN32)
     wchar_t wbuf[4096];
@@ -2054,14 +1935,9 @@ BFN Val vfs_mkdir_all(Val p) {
                     }
                 }
                 if (!_vfiles_free()) {
-                    SECURITY_ATTRIBUTES ssa;
-                    memset(&ssa, 0, sizeof ssa);
-                    ssa.nLength = sizeof ssa;
-                    ssa.bInheritHandle = FALSE;
-                    HANDLE sh = CreateFileW(wbuf, FILE_READ_ATTRIBUTES,
-                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                            &ssa, OPEN_EXISTING,
-                                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+                    HANDLE sh = _vwin_open_attr(wbuf,
+                                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
                     if (sh != INVALID_HANDLE_VALUE) {
                         BY_HANDLE_FILE_INFORMATION sfi;
                         int sesc = GetFileInformationByHandle(sh, &sfi) &&
@@ -2076,15 +1952,8 @@ BFN Val vfs_mkdir_all(Val p) {
             if (ch == 0) break;
         }
     }
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    HANDLE h = CreateFileW(wbuf, FILE_READ_ATTRIBUTES,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           &sa, OPEN_EXISTING, flags, NULL);
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | (!_vfiles_free() ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
+    HANDLE h = _vwin_open_attr(wbuf, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, flags);
     if (h == INVALID_HANDLE_VALUE) { errno = EACCES; return verr_os(rp); }
     BY_HANDLE_FILE_INFORMATION fi;
     int ok = GetFileType(h) == FILE_TYPE_DISK &&
@@ -2098,11 +1967,7 @@ BFN Val vfs_mkdir_all(Val p) {
 #else
     if (_vfiles_free()) {
         struct stat st;
-        if (stat(rp, &st) == 0 && S_ISDIR(st.st_mode)) {
-            Vec *a0 = vvec();
-            vec_push(a0, vint(0));
-            return vtagv("ok", a0);
-        }
+        if (stat(rp, &st) == 0 && S_ISDIR(st.st_mode)) return _vok_int(0);
         char buf[8192];
         size_t len = strlen(rp);
         if (len == 0 || len >= sizeof buf) { errno = EINVAL; return verr_os(rp); }
@@ -2185,12 +2050,11 @@ BFN Val vfs_mkdir_all(Val p) {
 
 BFN Val vfs_list_dir(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_list_dir wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_list_dir byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_list_dir wants a string path",
+                                   "fs_list_dir byte out of range 0..255", &perr);
+    if (!rp) return perr;
     char **names = NULL;
     size_t count = 0, cap = 0;
     errno = 0;
@@ -2198,15 +2062,8 @@ BFN Val vfs_list_dir(Val p) {
     wchar_t wp[4096];
     int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, rp, -1, wp, 4096);
     if (wn <= 0) { errno = EINVAL; return verr_os(rp); }
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-    sa.nLength = sizeof sa;
-    sa.bInheritHandle = FALSE;
-    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS;
-    if (!_vfiles_free()) flags |= FILE_FLAG_OPEN_REPARSE_POINT;
-    HANDLE dh = CreateFileW(wp, FILE_READ_ATTRIBUTES,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                            &sa, OPEN_EXISTING, flags, NULL);
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | (!_vfiles_free() ? FILE_FLAG_OPEN_REPARSE_POINT : 0);
+    HANDLE dh = _vwin_open_attr(wp, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, flags);
     if (dh == INVALID_HANDLE_VALUE) {
         DWORD le = GetLastError();
         if (!_vfiles_free()) {
@@ -2368,12 +2225,11 @@ BFN Val vfs_list_dir(Val p) {
 
 BFN Val vfs_remove_dir(Val p) {
     char pbuf[8192];
-    int pbad = 0;
-    const char *rp = _vconfine_path(&p, pbuf, sizeof pbuf, &pbad);
-    if (pbad == 1) return verr("fs_remove_dir wants a string path");
-    if (pbad == 2) return verr("embedded NUL in file path");
-    if (pbad == 4) return verr("fs_remove_dir byte out of range 0..255");
-    if (!rp) return verr("path outside the program directory");
+    Val perr;
+    const char *rp = _vconfine_req(&p, pbuf, sizeof pbuf,
+                                   "fs_remove_dir wants a string path",
+                                   "fs_remove_dir byte out of range 0..255", &perr);
+    if (!rp) return perr;
     errno = 0;
 #if defined(_WIN32)
     if (!_vfiles_free() && strlen(rp) == strlen(vbase_g) &&
@@ -2404,30 +2260,12 @@ BFN Val vfs_remove_dir(Val p) {
               : ((le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND) ? ENOENT : EACCES);
         return verr_os(rp);
     }
+    return _vok_int(0);
 #else
-    if (_vfiles_free()) {
-        if (rmdir(rp) != 0) return verr_os(rp);
-    } else {
-        if (strcmp(rp, vbase_g) == 0) return verr("cannot remove program base directory");
-        char leaf[1024];
-        int esc = 0;
-        int dfd = _vopen_parent_confined(rp, leaf, sizeof leaf, &esc);
-        if (dfd < 0) return esc ? verr("path escaped during open") : verr_os(rp);
-        struct stat lst;
-        if (!_vfd_confined(dfd) ||
-            (fstatat(dfd, leaf, &lst, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(lst.st_mode))) {
-            close(dfd);
-            return verr("path escaped during open");
-        }
-        int rc = unlinkat(dfd, leaf, AT_REMOVEDIR);
-        int e = errno;
-        close(dfd);
-        if (rc != 0) { errno = e; return verr_os(rp); }
-    }
+    if (_vfiles_free()) return rmdir(rp) != 0 ? verr_os(rp) : _vok_int(0);
+    if (strcmp(rp, vbase_g) == 0) return verr("cannot remove program base directory");
+    return _vfs_unlinkat_confined(rp, AT_REMOVEDIR);
 #endif
-    Vec *a = vvec();
-    vec_push(a, vint(0));
-    return vtagv("ok", a);
 }
 
 #if (BRAT_CRT_MASK & BRAT_CRT_TLS)
