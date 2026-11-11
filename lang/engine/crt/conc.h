@@ -573,17 +573,18 @@ BFN Val vsum(Val v) {
     Vec *w = vvec_of_m(v, "sum");
     if (verr_pending()) return vunwind;
     uint64_t acc = 0;
-    double dl = 0;
+    double dl = 0, di = 0;
     int isf = 0;
     BRAT_CTR_LOCK_OBJ(w);
     for (bint i = 0; i < w->len; i++) {
         Val x = w->items[i];
-        if (x.tag == V_INT || x.tag == V_BOOL) acc += (uint64_t)x.as.ival;
+        if (x.tag == V_INT || x.tag == V_BOOL) { acc += (uint64_t)x.as.ival; di += (double)x.as.ival; }
         else if (x.tag == V_FLOAT) { dl += x.as.fval; isf = 1; }
         else { BRAT_CTR_UNLOCK_OBJ(w); vraise("sum of non-numeric"); return vunwind; }
     }
     BRAT_CTR_UNLOCK_OBJ(w);
-    if (isf) return vfloat(dl + (double)(bint)acc);
+    /* Next to a float the integers add up as floats: their 64-bit sum may have wrapped. */
+    if (isf) return vfloat(dl + di);
     return vint((bint)acc);
 }
 static inline Val _vextremum(Val v, const char *mname, int dir) {

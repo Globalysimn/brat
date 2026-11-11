@@ -113,6 +113,13 @@ CASES = {
     'regex_dot_bytes': ('print(re_match("a\\nb", "a.b"))\n', 'true\n'),
     # `^` anchors the whole input, not each line.
     'regex_anchor_input': ('print(re_match("foo\\nbar", "^bar"))\n', 'false\n'),
+    # A float in the vector makes the sum a float. The integers used to be added
+    # in 64 bits first, so two large ones wrapped and the total came out -1.75.
+    'sum_mixed_large': ('fn id(v) {\n  return v\n}\n'
+                        'print(id([0.25, 9223372036854775807, 9223372036854775807]).sum())\n'
+                        'print(id([1, 0.1, 2, 0.2]).sum())\n'
+                        'print(id([9223372036854775807, 1]).sum())\n',
+                        '1.8446744073709552e+19\n3.3\n-9223372036854775808\n'),
     # read_file() resolves symlinks and refuses any target outside the program
     # directory; the inside_link and ../ reads are the positive controls.
     'fs_sandbox_links': ('''fn main() -> i64 {
