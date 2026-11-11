@@ -3,7 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <chrono>
+#include <cerrno>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
@@ -13,63 +13,19 @@
 #include <functional>
 #include <sstream>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <thread>
-#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-#include <windows.h>
 #ifdef cdecl
 #undef cdecl
 #endif
-#else
-#include <cerrno>
-#include <csignal>
-#include <fcntl.h>
-#include <poll.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
 
 namespace native_ffi {
-namespace {
 
-namespace fs = std::filesystem;
-constexpr size_t kMaxHeaderBytes = 16 * 1024 * 1024;
-
-static std::string trim_sv(std::string_view s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
-    return std::string(s);
-}
-
-static bool is_ident0(char c) {
-    return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
-}
-static bool is_identc(char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
-static bool is_valid_ident(std::string_view s) {
-    if (s.empty() || !is_ident0(s[0])) return false;
-    for (size_t i = 1; i < s.size(); ++i)
-        if (!is_identc(s[i])) return false;
-    return true;
-}
-
-static std::vector<std::string> ident_words(std::string_view s) {
+std::vector<std::string> c_ident_words(std::string_view s) {
     std::vector<std::string> out;
     size_t i = 0;
     while (i < s.size()) {
-        if (is_ident0(s[i])) {
+        if (is_c_ident0(s[i])) {
             size_t j = i + 1;
-            while (j < s.size() && is_identc(s[j])) ++j;
+            while (j < s.size() && is_c_identc(s[j])) ++j;
             out.emplace_back(s.substr(i, j - i));
             i = j;
         } else {
@@ -78,6 +34,81 @@ static std::vector<std::string> ident_words(std::string_view s) {
     }
     return out;
 }
+
+bool spelled_plain_char(std::string_view ctype) {
+    bool has_char = false;
+    for (const auto &w : c_ident_words(ctype)) {
+        if (w == "char") has_char = true;
+        if (w == "signed" || w == "unsigned" || w == "int8_t" || w == "uint8_t") return false;
+    }
+    return has_char;
+}
+
+bool is_valid_brat_ffi_ident(std::string_view name, bool reject_c_kw) {
+    if (!is_valid_c_ident(name)) return false;
+    static const std::set<std::string_view> kBratKw = {
+        "fn", "let", "mut", "ref", "move", "if", "else", "while", "for", "in", "return",
+        "match", "struct", "enum", "impl", "trait", "import", "pub", "use", "const",
+        "extern", "export", "packed", "spawn", "scope", "arena", "unsafe", "defer",
+        "try", "catch", "break", "continue", "par", "as", "true", "false", "none",
+        "and", "or", "not", "is",
+    };
+    static const std::set<std::string_view> kCKw = {
+        "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+        "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+        "register", "restrict", "return", "short", "signed", "sizeof", "static",
+        "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
+        "_Bool", "_Complex", "_Imaginary", "_Static_assert", "_Thread_local",
+    };
+    if (kBratKw.count(name)) return false;
+    if (reject_c_kw && kCKw.count(name)) return false;
+    return true;
+}
+
+std::string find_tool_in_path(std::string_view bin) {
+    const char *path_env = std::getenv("PATH");
+    if (!path_env || !*path_env) return {};
+#ifdef _WIN32
+    constexpr char sep_ch = ';';
+#else
+    constexpr char sep_ch = ':';
+#endif
+    namespace fs = std::filesystem;
+    std::string_view pv(path_env);
+    size_t pos = 0;
+    while (pos <= pv.size()) {
+        size_t sep = pv.find(sep_ch, pos);
+        std::string_view dir = (sep == std::string_view::npos) ? pv.substr(pos) : pv.substr(pos, sep - pos);
+        if (!dir.empty()) {
+#ifdef _WIN32
+            if (fs::path(bin).extension().empty()) {
+                fs::path cand_exe = fs::path(dir) / (std::string(bin) + ".exe");
+                std::error_code ec_exe;
+                if (fs::is_regular_file(cand_exe, ec_exe)) return cand_exe.string();
+            }
+#endif
+            fs::path cand = fs::path(dir) / std::string(bin);
+            std::error_code ec;
+            if (fs::is_regular_file(cand, ec)) return cand.string();
+        }
+        if (sep == std::string_view::npos) break;
+        pos = sep + 1;
+    }
+    return {};
+}
+
+namespace {
+
+namespace fs = std::filesystem;
+constexpr size_t kMaxHeaderBytes = 16 * 1024 * 1024;
+constexpr size_t kMaxExpandedLineBytes = 256 * 1024;
+constexpr size_t kMaxExpandedHeaderBytes = 64u * 1024u * 1024u;
+
+static std::string trim_sv(std::string_view s) { return trim_c_ws(s); }
+static bool is_ident0(char c) { return is_c_ident0(c); }
+static bool is_identc(char c) { return is_c_identc(c); }
+static bool is_valid_ident(std::string_view s) { return is_valid_c_ident(s); }
+static std::vector<std::string> ident_words(std::string_view s) { return c_ident_words(s); }
 
 static std::string strip_comments(std::string_view src) {
     std::string out;
@@ -258,37 +289,6 @@ bool read_header_inlined(const std::string &path, std::string &out, std::string 
     return read_header_rec(fs::path(path), seen, out, err);
 }
 
-[[maybe_unused]] static std::string find_in_path(std::string_view bin) {
-    const char *path_env = std::getenv("PATH");
-    if (!path_env || !*path_env) return {};
-#ifdef _WIN32
-    constexpr char sep_ch = ';';
-#else
-    constexpr char sep_ch = ':';
-#endif
-    std::string_view pv(path_env);
-    size_t pos = 0;
-    while (pos <= pv.size()) {
-        size_t sep = pv.find(sep_ch, pos);
-        std::string_view dir = (sep == std::string_view::npos) ? pv.substr(pos) : pv.substr(pos, sep - pos);
-        if (!dir.empty()) {
-#ifdef _WIN32
-            if (fs::path(bin).extension().empty()) {
-                fs::path cand_exe = fs::path(dir) / (std::string(bin) + ".exe");
-                std::error_code ec_exe;
-                if (fs::is_regular_file(cand_exe, ec_exe)) return cand_exe.string();
-            }
-#endif
-            fs::path cand = fs::path(dir) / std::string(bin);
-            std::error_code ec;
-            if (fs::is_regular_file(cand, ec)) return cand.string();
-        }
-        if (sep == std::string_view::npos) break;
-        pos = sep + 1;
-    }
-    return {};
-}
-
 static std::string unescape_linemarker_path(std::string_view raw) {
     std::string out;
     out.reserve(raw.size());
@@ -311,11 +311,11 @@ bool preprocess_header_cc(const std::string &path,
                           std::string *root_only_out) {
     std::vector<std::string> argv;
     if (!target.empty()) {
-        std::string zig = find_in_path("zig");
+        std::string zig = find_tool_in_path("zig");
         if (!zig.empty()) {
             argv = {zig, "cc", "-target", std::string(target)};
         } else {
-            std::string clang = find_in_path("clang");
+            std::string clang = find_tool_in_path("clang");
             if (!clang.empty()) argv = {clang, "--target=" + std::string(target)};
         }
     }
@@ -324,7 +324,7 @@ bool preprocess_header_cc(const std::string &path,
             if (const char *ov = std::getenv(env_var); ov && *ov) {
                 std::vector<std::string> parts = pkg_io::split_compiler_cmd(ov);
                 if (!parts.empty()) {
-                    std::string p = fs::path(parts[0]).has_parent_path() ? parts[0] : find_in_path(parts[0]);
+                    std::string p = fs::path(parts[0]).has_parent_path() ? parts[0] : find_tool_in_path(parts[0]);
                     if (!p.empty()) {
                         argv = std::move(parts);
                         argv[0] = std::move(p);
@@ -340,7 +340,7 @@ bool preprocess_header_cc(const std::string &path,
     }
     if (argv.empty()) {
         for (const char *cand : {"cc", "clang", "gcc"}) {
-            std::string p = find_in_path(cand);
+            std::string p = find_tool_in_path(cand);
             if (!p.empty()) { argv = {p}; break; }
         }
     }
@@ -458,6 +458,14 @@ bool preprocess_header_cc(const std::string &path,
     enum class PpMode { Keep, SysKeep, CmdLine, Skip };
     PpMode mode = PpMode::Keep;
     bool in_root_file = false;
+    auto emit_pp_line = [&](const std::string &ln) {
+        out += ln;
+        out.push_back('\n');
+        if (root_only_out && in_root_file) {
+            *root_only_out += ln;
+            root_only_out->push_back('\n');
+        }
+    };
     std::istringstream iss(raw_out);
     std::string line;
     while (std::getline(iss, line)) {
@@ -501,28 +509,13 @@ bool preprocess_header_cc(const std::string &path,
             if (body.rfind("define", 0) == 0) {
                 std::string rest = trim_sv(std::string_view(body).substr(6));
                 if (mode == PpMode::SysKeep && is_reserved_sys_macro(rest)) continue;
-                out += line;
-                out.push_back('\n');
-                if (root_only_out && in_root_file) {
-                    *root_only_out += line;
-                    root_only_out->push_back('\n');
-                }
+                emit_pp_line(line);
             } else if (body.rfind("pragma", 0) == 0) {
-                out += line;
-                out.push_back('\n');
-                if (root_only_out && in_root_file) {
-                    *root_only_out += line;
-                    root_only_out->push_back('\n');
-                }
+                emit_pp_line(line);
             }
             continue;
         }
-        out += line;
-        out.push_back('\n');
-        if (root_only_out && in_root_file) {
-            *root_only_out += line;
-            root_only_out->push_back('\n');
-        }
+        emit_pp_line(line);
     }
     return true;
 }
@@ -844,59 +837,42 @@ static std::string detect_abi_attr(std::string_view s) {
     return {};
 }
 
+static void strip_kw_clause(std::string &s, std::string_view kw) {
+    for (;;) {
+        size_t p = s.find(kw);
+        if (p == std::string::npos) break;
+        size_t q = p + kw.size();
+        while (q < s.size() && std::isspace(static_cast<unsigned char>(s[q]))) ++q;
+        if (q < s.size() && s[q] == '(') {
+            int d = 0;
+            while (q < s.size()) {
+                if (s[q] == '(') ++d;
+                else if (s[q] == ')') { --d; if (d == 0) { ++q; break; } }
+                ++q;
+            }
+            s.replace(p, q - p, " ");
+        } else {
+            s.replace(p, kw.size(), " ");
+        }
+    }
+}
+
+static bool is_c_decl_type_keyword(std::string_view w) {
+    static const std::set<std::string_view> kKw = {
+        "void", "char", "short", "int", "long", "float", "double",
+        "signed", "unsigned", "const", "volatile", "_Bool", "bool",
+        "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
+        "off_t", "time_t", "pid_t", "uid_t", "gid_t", "mode_t", "socklen_t",
+        "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"
+    };
+    return kKw.count(w) > 0;
+}
+
 static std::string strip_c_attrs(std::string_view src) {
     std::string s(src);
-    for (;;) {
-        size_t p = s.find("__attribute__");
-        if (p == std::string::npos) break;
-        size_t q = p + 13;
-        while (q < s.size() && std::isspace(static_cast<unsigned char>(s[q]))) ++q;
-        if (q < s.size() && s[q] == '(') {
-            int d = 0;
-            while (q < s.size()) {
-                if (s[q] == '(') ++d;
-                else if (s[q] == ')') { --d; if (d == 0) { ++q; break; } }
-                ++q;
-            }
-            s.replace(p, q - p, " ");
-        } else {
-            s.replace(p, 13, " ");
-        }
-    }
-    for (;;) {
-        size_t p = s.find("__declspec");
-        if (p == std::string::npos) break;
-        size_t q = p + 10;
-        while (q < s.size() && std::isspace(static_cast<unsigned char>(s[q]))) ++q;
-        if (q < s.size() && s[q] == '(') {
-            int d = 0;
-            while (q < s.size()) {
-                if (s[q] == '(') ++d;
-                else if (s[q] == ')') { --d; if (d == 0) { ++q; break; } }
-                ++q;
-            }
-            s.replace(p, q - p, " ");
-        } else {
-            s.replace(p, 10, " ");
-        }
-    }
-    for (;;) {
-        size_t p = s.find("_Alignas");
-        if (p == std::string::npos) break;
-        size_t q = p + 8;
-        while (q < s.size() && std::isspace(static_cast<unsigned char>(s[q]))) ++q;
-        if (q < s.size() && s[q] == '(') {
-            int d = 0;
-            while (q < s.size()) {
-                if (s[q] == '(') ++d;
-                else if (s[q] == ')') { --d; if (d == 0) { ++q; break; } }
-                ++q;
-            }
-            s.replace(p, q - p, " ");
-        } else {
-            s.replace(p, 8, " ");
-        }
-    }
+    strip_kw_clause(s, "__attribute__");
+    strip_kw_clause(s, "__declspec");
+    strip_kw_clause(s, "_Alignas");
     // Unwrap C11 `_Atomic(T)` specifier form into `T`.
     for (;;) {
         size_t p = s.find("_Atomic");
@@ -1020,7 +996,8 @@ static bool ends_in_type_name(std::string_view head) {
     return last.empty() || last == "struct" || last == "union" || last == "enum";
 }
 
-static bool parse_fnptr_decl(std::string_view raw, std::string &norm_type, std::string &name_out) {
+static bool parse_fnptr_decl(std::string_view raw, std::string &norm_type, std::string &name_out, int depth = 0) {
+    if (depth > 32) return false;
     std::string s = trim_sv(strip_c_attrs(raw));
     size_t lp1 = std::string::npos;
     int d = 0;
@@ -1079,7 +1056,7 @@ static bool parse_fnptr_decl(std::string_view raw, std::string &norm_type, std::
             if (part.empty()) continue;
             if (part == "...") return false;
             std::string p_norm, p_nm;
-            if (parse_fnptr_decl(part, p_norm, p_nm)) {
+            if (parse_fnptr_decl(part, p_norm, p_nm, depth + 1)) {
                 clean_args.push_back(p_norm);
                 continue;
             }
@@ -1099,14 +1076,7 @@ static bool parse_fnptr_decl(std::string_view raw, std::string &norm_type, std::
                 if (id_pos < pt.size() && is_ident0(pt[id_pos])) {
                     std::string head = trim_sv(std::string_view(pt).substr(0, id_pos));
                     std::string tail = pt.substr(id_pos);
-                    static const std::set<std::string> kTypeKeywords = {
-                        "void", "char", "short", "int", "long", "float", "double",
-                        "signed", "unsigned", "const", "volatile", "_Bool", "bool",
-                        "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
-                        "off_t", "time_t", "pid_t", "uid_t", "gid_t", "mode_t", "socklen_t",
-                        "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"
-                    };
-                    if (!head.empty() && !kTypeKeywords.count(tail) && !ends_in_type_name(head)) pt = head;
+                    if (!head.empty() && !is_c_decl_type_keyword(tail) && !ends_in_type_name(head)) pt = head;
                 }
             }
             clean_args.push_back(trim_sv(pt));
@@ -1172,14 +1142,7 @@ static bool split_c_decl_type_and_name(std::string_view raw,
     if (id_pos < s.size() && is_ident0(s[id_pos])) {
         std::string cand = s.substr(id_pos);
         std::string head = trim_sv(std::string_view(s).substr(0, id_pos));
-        static const std::set<std::string> kTypeWords = {
-            "void", "char", "short", "int", "long", "float", "double",
-            "signed", "unsigned", "const", "volatile", "_Bool", "bool",
-            "size_t", "ssize_t", "intptr_t", "uintptr_t", "ptrdiff_t",
-            "off_t", "time_t", "pid_t", "uid_t", "gid_t", "mode_t", "socklen_t",
-            "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t", "int64_t", "uint64_t"
-        };
-        if (!head.empty() && !kTypeWords.count(cand) && !ends_in_type_name(head)) {
+        if (!head.empty() && !is_c_decl_type_keyword(cand) && !ends_in_type_name(head)) {
             name_out = cand;
             type_out = head + (had_array ? arr_suffix : "");
             return true;
@@ -1190,7 +1153,8 @@ static bool split_c_decl_type_and_name(std::string_view raw,
     return true;
 }
 
-static ResolvedCType base_c_type(std::string_view raw, const TargetModel &tm) {
+static ResolvedCType base_c_type(std::string_view raw, const TargetModel &tm, int depth = 0) {
+    if (depth > 32) return {"invalid", {}, {}, {}, 0};
     std::string fn_t, fn_nm;
     if (parse_fnptr_decl(raw, fn_t, fn_nm)) return {"fn", fn_t, {}, {}, 0};
 
@@ -1204,7 +1168,7 @@ static ResolvedCType base_c_type(std::string_view raw, const TargetModel &tm) {
         std::string cnt_s = trim_sv(std::string_view(s).substr(lb + 1, s.size() - lb - 2));
         if (!elem.empty()) {
             if (auto cnt = eval_pos_dim(cnt_s, nullptr)) {
-                auto ek = base_c_type(elem, tm);
+                auto ek = base_c_type(elem, tm, depth + 1);
                 if (ek.kind == "array") {
                     int64_t total = 0;
                     if (!__builtin_mul_overflow(*cnt, ek.arr_count, &total) && total <= (1LL << 30))
@@ -1332,8 +1296,14 @@ static void parse_struct_body(const std::string &rec_name,
                               bool is_packed,
                               int active_pack,
                               CDecl &out,
-                              const std::map<std::string, CInt> &consts) {
+                              const std::map<std::string, CInt> &consts,
+                              int depth = 0) {
     if (rec_name.empty()) return;
+    if (depth > 32) {
+        out.anon.insert(rec_name);
+        out.structs[rec_name] = {};
+        return;
+    }
     if (is_union) out.unions.insert(rec_name);
     if (is_packed || active_pack == 1) out.packed.insert(rec_name);
     if (active_pack > 0) out.pack_align[rec_name] = active_pack;
@@ -1380,7 +1350,7 @@ static void parse_struct_body(const std::string &rec_name,
                     out.inline_structs.insert(synth);
                     out.aliases.insert(synth);
                     out.anon_members[{rec_name, af}] = synth;
-                    parse_struct_body(synth, inner, sub_union, sub_packed, active_pack, out, consts);
+                    parse_struct_body(synth, inner, sub_union, sub_packed, active_pack, out, consts, depth + 1);
                     fields.emplace_back(af, synth);
                 } else {
                     std::string ftype, fname;
@@ -1389,7 +1359,7 @@ static void parse_struct_body(const std::string &rec_name,
                         std::string synth = rec_name + "__" + fname;
                         out.inline_structs.insert(synth);
                         out.aliases.insert(synth);
-                        parse_struct_body(synth, inner, sub_union, sub_packed, active_pack, out, consts);
+                        parse_struct_body(synth, inner, sub_union, sub_packed, active_pack, out, consts, depth + 1);
                         std::string arr_part;
                         if (ftype.size() > 3 && ftype.rfind("int", 0) == 0) arr_part = trim_sv(std::string_view(ftype).substr(3));
                         if (!arr_part.empty()) out.arrays.insert(rec_name);
@@ -1487,8 +1457,11 @@ bool parse_c_header(std::string_view raw_text,
             if (!acc.empty()) raw_lines.push_back(std::move(acc));
         }
 
-        auto expand_obj_macros = [&](const std::string &src_ln) -> std::string {
-            if (obj_macros.empty()) return src_ln;
+        auto expand_obj_macros = [&](const std::string &src_ln, std::string &out_ln) -> bool {
+            if (obj_macros.empty()) {
+                out_ln = src_ln;
+                return out_ln.size() <= kMaxExpandedLineBytes;
+            }
             std::string cur = src_ln;
             for (int depth = 0; depth < 8; ++depth) {
                 std::string next;
@@ -1520,17 +1493,20 @@ bool parse_c_header(std::string_view raw_text,
                             next += id;
                         }
                         i = j;
-                        continue;
+                    } else {
+                        next.push_back(c);
+                        ++i;
                     }
-                    next.push_back(c);
-                    ++i;
+                    if (next.size() > kMaxExpandedLineBytes) return false;
                 }
                 cur = std::move(next);
                 if (!changed) break;
             }
-            return cur;
+            out_ln = std::move(cur);
+            return out_ln.size() <= kMaxExpandedLineBytes;
         };
 
+        size_t total_expanded_bytes = 0;
         for (size_t li = 0; li < raw_lines.size(); ++li) {
             std::string t = trim_sv(raw_lines[li]);
             // Recognize `#ifdef __cplusplus` / `#if defined(__cplusplus)` wrapping `extern "C" {` or `}`
@@ -1564,7 +1540,7 @@ bool parse_c_header(std::string_view raw_text,
                                 const_env[dname] = *v;
                                 if (fits_signed_i64(*v) && seen_consts.insert(dname).second)
                                     out.consts.emplace_back(dname, static_cast<int64_t>(*v));
-                            } else {
+                            } else if (drhs != dname) {
                                 obj_macros[dname] = drhs;
                             }
                         } else {
@@ -1597,7 +1573,17 @@ bool parse_c_header(std::string_view raw_text,
                 }
                 continue;
             }
-            clean_lines.push_back(expand_obj_macros(raw_lines[li]));
+            std::string expanded_ln;
+            if (!expand_obj_macros(raw_lines[li], expanded_ln)) {
+                err = "C header macro expansion exceeded size limit";
+                return false;
+            }
+            total_expanded_bytes += expanded_ln.size() + 1;
+            if (total_expanded_bytes > kMaxExpandedHeaderBytes) {
+                err = "C header macro expansion exceeded size limit";
+                return false;
+            }
+            clean_lines.push_back(std::move(expanded_ln));
         }
     }
 
@@ -1642,6 +1628,14 @@ bool parse_c_header(std::string_view raw_text,
     std::map<std::string, std::vector<std::string>> tag_aliases;
     std::vector<int> pack_stack;
     int active_pack = 0;
+    auto copy_record_flags = [&](const std::string &src, const std::string &dst) {
+        if (out.unions.count(src)) out.unions.insert(dst);
+        if (out.packed.count(src)) out.packed.insert(dst);
+        if (out.pack_align.count(src)) out.pack_align[dst] = out.pack_align[src];
+        if (out.bitfields.count(src)) out.bitfields[dst] = out.bitfields[src];
+        if (out.anon.count(src)) out.anon.insert(dst);
+        if (out.arrays.count(src)) out.arrays.insert(dst);
+    };
 
     size_t pos = 0;
     while (pos < flat_src.size()) {
@@ -1772,6 +1766,7 @@ bool parse_c_header(std::string_view raw_text,
                 bool epk = (has_packed_attr(head_raw) || has_packed_attr(tail_raw)) && ebase.empty();
                 std::vector<std::pair<std::string, CInt>> emembers;
                 CInt nxt = 0;
+                bool nxt_valid = true;
                 for (const auto &raw_m : split_top_level(body_raw, ',')) {
                     std::string m = trim_sv(strip_c_attrs(raw_m));
                     if (m.empty()) continue;
@@ -1781,14 +1776,14 @@ bool parse_c_header(std::string_view raw_text,
                         std::string rhs = trim_sv(std::string_view(m).substr(eq + 1));
                         if (!is_valid_ident(nm)) continue;
                         auto v = eval_c_int(rhs, const_env);
-                        if (!v) continue;
+                        if (!v) { nxt_valid = false; continue; }
                         const_env[nm] = *v;
                         emembers.emplace_back(nm, *v);
-                        nxt = *v + 1;
-                    } else if (is_valid_ident(m)) {
+                        nxt_valid = !__builtin_add_overflow(*v, CInt(1), &nxt);
+                    } else if (is_valid_ident(m) && nxt_valid) {
                         const_env[m] = nxt;
                         emembers.emplace_back(m, nxt);
-                        nxt = nxt + 1;
+                        nxt_valid = !__builtin_add_overflow(nxt, CInt(1), &nxt);
                     }
                 }
                 std::string ename = !ealias.empty() ? ealias : (!etag.empty() ? etag : "_enum");
@@ -1839,12 +1834,7 @@ bool parse_c_header(std::string_view raw_text,
                     if (al) out.anon.insert(primary);
                     if (!tag.empty() && tag != primary) {
                         out.structs[tag] = out.structs[primary];
-                        if (is_union) out.unions.insert(tag);
-                        if (out.packed.count(primary)) out.packed.insert(tag);
-                        if (out.pack_align.count(primary)) out.pack_align[tag] = out.pack_align[primary];
-                        if (out.bitfields.count(primary)) out.bitfields[tag] = out.bitfields[primary];
-                        if (out.anon.count(primary)) out.anon.insert(tag);
-                        if (out.arrays.count(primary)) out.arrays.insert(tag);
+                        copy_record_flags(primary, tag);
                     }
                 }
                 continue;
@@ -2028,12 +2018,7 @@ bool parse_c_header(std::string_view raw_text,
         if (sit == out.structs.end() || sit->second.empty()) continue;
         for (const auto &al : als) {
             if (out.structs[al].empty()) out.structs[al] = sit->second;
-            if (out.unions.count(tag)) out.unions.insert(al);
-            if (out.packed.count(tag)) out.packed.insert(al);
-            if (out.pack_align.count(tag)) out.pack_align[al] = out.pack_align[tag];
-            if (out.bitfields.count(tag)) out.bitfields[al] = out.bitfields[tag];
-            if (out.anon.count(tag)) out.anon.insert(al);
-            if (out.arrays.count(tag)) out.arrays.insert(al);
+            copy_record_flags(tag, al);
         }
     }
     return true;
@@ -2276,13 +2261,54 @@ bool pointee_ok(std::string_view elem,
 }
 
 namespace {
-static int64_t align_up_i64(int64_t off, int64_t al) {
-    return (al <= 1) ? off : ((off + al - 1) / al) * al;
+constexpr int64_t kMaxRecordBytes = (1LL << 40);
+
+static std::optional<int64_t> checked_align_up_i64(int64_t off, int64_t al) {
+    if (off < 0 || al < 1) return std::nullopt;
+    if (al == 1) return off;
+    int64_t rem = off % al;
+    if (rem == 0) return off;
+    int64_t res = 0;
+    if (__builtin_add_overflow(off, al - rem, &res) || res > kMaxRecordBytes)
+        return std::nullopt;
+    return res;
 }
 
 static int64_t scalar_nat_align(std::string_view k, int64_t sz, const TargetModel &tm) {
     if ((k == "i64" || k == "u64" || k == "f64") && tm.wide_align == 4) return 4;
     return sz;
+}
+
+static std::optional<RecordLayout> pack_record_slots(
+    const std::vector<std::tuple<std::string, int64_t, int64_t>> &items,
+    bool is_un,
+    int64_t final_align_cap) {
+    int64_t off = 0, max_end = 0, max_al = 1;
+    std::vector<std::pair<std::string, int64_t>> slots;
+    slots.reserve(items.size());
+    for (const auto &[fnm, sz, al] : items) {
+        if (sz < 0 || sz > kMaxRecordBytes || al < 1) return std::nullopt;
+        if (is_un) {
+            slots.emplace_back(fnm, 0);
+            max_end = std::max(max_end, sz);
+            max_al = std::max(max_al, al);
+        } else {
+            auto aligned = checked_align_up_i64(off, al);
+            int64_t next_off = 0;
+            if (!aligned || __builtin_add_overflow(*aligned, sz, &next_off) || next_off > kMaxRecordBytes)
+                return std::nullopt;
+            slots.emplace_back(fnm, *aligned);
+            off = next_off;
+            max_al = std::max(max_al, al);
+        }
+    }
+    RecordLayout rl;
+    rl.align = (final_align_cap > 0) ? std::min(max_al, final_align_cap) : max_al;
+    auto total = checked_align_up_i64(is_un ? max_end : off, rl.align);
+    if (!total) return std::nullopt;
+    rl.size = *total;
+    rl.slots = std::move(slots);
+    return rl;
 }
 }  // namespace
 
@@ -2294,7 +2320,8 @@ std::map<std::string, RecordLayout> compute_brat_struct_layout(
     std::map<std::string, RecordLayout> out;
     std::set<std::string> visiting;
 
-    auto measure = [&](auto &self, const std::string &name) -> std::optional<RecordLayout> {
+    auto measure = [&](auto &self, const std::string &name, int depth) -> std::optional<RecordLayout> {
+        if (depth > 64) return std::nullopt;
         if (out.count(name)) return out[name];
         if (!structs.count(name) || visiting.count(name)) return std::nullopt;
         const auto &fields = structs.at(name);
@@ -2302,16 +2329,15 @@ std::map<std::string, RecordLayout> compute_brat_struct_layout(
         visiting.insert(name);
         bool is_pk = packed.count(name) > 0;
         bool is_un = unions.count(name) > 0;
-        int64_t off = 0, max_end = 0, max_al = 1;
-        std::vector<std::pair<std::string, int64_t>> slots;
 
-        std::function<std::optional<std::pair<int64_t, int64_t>>(const std::string &)> field_sa =
-            [&](const std::string &ft) -> std::optional<std::pair<int64_t, int64_t>> {
+        std::function<std::optional<std::pair<int64_t, int64_t>>(const std::string &, int)> field_sa =
+            [&](const std::string &ft, int fdepth) -> std::optional<std::pair<int64_t, int64_t>> {
+            if (fdepth > 64) return std::nullopt;
             if (auto arr = parse_array_field_type(ft)) {
-                auto sub = field_sa(arr->first);
+                auto sub = field_sa(arr->first, fdepth + 1);
                 if (!sub) return std::nullopt;
                 int64_t total_sz = 0;
-                if (__builtin_mul_overflow(sub->first, arr->second, &total_sz) || total_sz > (1LL << 40))
+                if (__builtin_mul_overflow(sub->first, arr->second, &total_sz) || total_sz > kMaxRecordBytes)
                     return std::nullopt;
                 return std::make_pair(total_sz, sub->second);
             }
@@ -2319,38 +2345,28 @@ std::map<std::string, RecordLayout> compute_brat_struct_layout(
                 return std::make_pair(*w, is_pk ? int64_t(1) : scalar_nat_align(ft, *w, tm));
             }
             if (structs.count(ft)) {
-                auto sub = self(self, ft);
+                auto sub = self(self, ft, depth + 1);
                 if (!sub) return std::nullopt;
                 return std::make_pair(sub->size, is_pk ? int64_t(1) : sub->align);
             }
             return std::nullopt;
         };
 
+        std::vector<std::tuple<std::string, int64_t, int64_t>> items;
+        items.reserve(fields.size());
         for (const auto &[fnm, ft] : fields) {
-            auto sa = field_sa(ft);
+            auto sa = field_sa(ft, 0);
             if (!sa) { visiting.erase(name); return std::nullopt; }
-            auto [sz, al] = *sa;
-            if (is_un) {
-                slots.emplace_back(fnm, 0);
-                max_end = std::max(max_end, sz);
-                max_al = std::max(max_al, al);
-            } else {
-                off = align_up_i64(off, al);
-                slots.emplace_back(fnm, off);
-                off += sz;
-                max_al = std::max(max_al, al);
-            }
+            items.emplace_back(fnm, sa->first, sa->second);
         }
         visiting.erase(name);
-        RecordLayout rl;
-        rl.align = is_pk ? 1 : max_al;
-        rl.size = align_up_i64(is_un ? max_end : off, rl.align);
-        rl.slots = std::move(slots);
-        out[name] = rl;
+        auto rl = pack_record_slots(items, is_un, is_pk ? 1 : 0);
+        if (!rl) return std::nullopt;
+        out[name] = std::move(*rl);
         return out[name];
     };
 
-    for (const auto &[nm, _] : structs) measure(measure, nm);
+    for (const auto &[nm, _] : structs) measure(measure, nm, 0);
     return out;
 }
 
@@ -2359,7 +2375,8 @@ std::map<std::string, RecordLayout> compute_c_struct_layout(const CDecl &cdecl,
     std::map<std::string, RecordLayout> out;
     std::set<std::string> visiting;
 
-    auto measure = [&](auto &self, const std::string &name) -> std::optional<RecordLayout> {
+    auto measure = [&](auto &self, const std::string &name, int depth) -> std::optional<RecordLayout> {
+        if (depth > 64) return std::nullopt;
         if (out.count(name)) return out[name];
         if (!cdecl.structs.count(name) || visiting.count(name)) return std::nullopt;
         if (cdecl.anon.count(name) || cdecl.bitfields.count(name)) return std::nullopt;
@@ -2376,15 +2393,16 @@ std::map<std::string, RecordLayout> compute_c_struct_layout(const CDecl &cdecl,
             return a;
         };
 
-        std::function<std::optional<std::pair<int64_t, int64_t>>(const ResolvedCType &)> res_sa =
-            [&](const ResolvedCType &rc) -> std::optional<std::pair<int64_t, int64_t>> {
+        std::function<std::optional<std::pair<int64_t, int64_t>>(const ResolvedCType &, int)> res_sa =
+            [&](const ResolvedCType &rc, int rdepth) -> std::optional<std::pair<int64_t, int64_t>> {
+            if (rdepth > 64) return std::nullopt;
             if (rc.kind == "array") {
                 ResolvedCType sub{rc.arr_elem_k, rc.arr_elem_e, {}, {}, 0};
                 if (rc.arr_elem_k == "array") return std::nullopt;
-                auto es = res_sa(sub);
+                auto es = res_sa(sub, rdepth + 1);
                 if (!es) return std::nullopt;
                 int64_t total_sz = 0;
-                if (__builtin_mul_overflow(es->first, rc.arr_count, &total_sz) || total_sz > (1LL << 40))
+                if (__builtin_mul_overflow(es->first, rc.arr_count, &total_sz) || total_sz > kMaxRecordBytes)
                     return std::nullopt;
                 return std::make_pair(total_sz, es->second);
             }
@@ -2393,15 +2411,15 @@ std::map<std::string, RecordLayout> compute_c_struct_layout(const CDecl &cdecl,
                 return std::make_pair(*w, cap_al(scalar_nat_align(rc.kind, *w, tm)));
             }
             if (rc.kind == "struct") {
-                auto sub = self(self, rc.extra);
+                auto sub = self(self, rc.extra, depth + 1);
                 if (!sub) return std::nullopt;
                 return std::make_pair(sub->size, cap_al(sub->align));
             }
             return std::nullopt;
         };
 
-        int64_t off = 0, max_end = 0, max_al = 1;
-        std::vector<std::pair<std::string, int64_t>> slots;
+        std::vector<std::tuple<std::string, int64_t, int64_t>> items;
+        items.reserve(fields.size());
         for (const auto &[fnm, ctype] : fields) {
             auto rc = resolve_c_type(&cdecl, ctype, tm);
             // Multi-dimensional C array `int m[2][3]`
@@ -2410,7 +2428,9 @@ std::map<std::string, RecordLayout> compute_c_struct_layout(const CDecl &cdecl,
                 int64_t mult = 1;
                 std::string cur = ctype;
                 bool ok_dims = true;
+                int dims_seen = 0;
                 while (!cur.empty() && cur.back() == ']') {
+                    if (++dims_seen > 32) { ok_dims = false; break; }
                     size_t lb = cur.rfind('[');
                     if (lb == std::string::npos) { ok_dims = false; break; }
                     std::string ds = trim_sv(std::string_view(cur).substr(lb + 1, cur.size() - lb - 2));
@@ -2423,37 +2443,25 @@ std::map<std::string, RecordLayout> compute_c_struct_layout(const CDecl &cdecl,
                 }
                 if (ok_dims) {
                     auto base_rc = resolve_c_type(&cdecl, cur, tm);
-                    auto bs = res_sa(base_rc);
+                    auto bs = res_sa(base_rc, 0);
                     int64_t total_sz = 0;
-                    if (bs && !__builtin_mul_overflow(bs->first, mult, &total_sz) && total_sz <= (1LL << 40))
+                    if (bs && !__builtin_mul_overflow(bs->first, mult, &total_sz) && total_sz <= kMaxRecordBytes)
                         sa = std::make_pair(total_sz, bs->second);
                 }
             } else {
-                sa = res_sa(rc);
+                sa = res_sa(rc, 0);
             }
             if (!sa) { visiting.erase(name); return std::nullopt; }
-            auto [sz, al] = *sa;
-            if (is_un) {
-                slots.emplace_back(fnm, 0);
-                max_end = std::max(max_end, sz);
-                max_al = std::max(max_al, al);
-            } else {
-                off = align_up_i64(off, al);
-                slots.emplace_back(fnm, off);
-                off += sz;
-                max_al = std::max(max_al, al);
-            }
+            items.emplace_back(fnm, sa->first, sa->second);
         }
         visiting.erase(name);
-        RecordLayout rl;
-        rl.align = cap_al(max_al);
-        rl.size = align_up_i64(is_un ? max_end : off, rl.align);
-        rl.slots = std::move(slots);
-        out[name] = rl;
+        auto rl = pack_record_slots(items, is_un, is_pk ? 1 : pack_cap);
+        if (!rl) return std::nullopt;
+        out[name] = std::move(*rl);
         return out[name];
     };
 
-    for (const auto &[nm, _] : cdecl.structs) measure(measure, nm);
+    for (const auto &[nm, _] : cdecl.structs) measure(measure, nm, 0);
     return out;
 }
 

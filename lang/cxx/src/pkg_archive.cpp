@@ -3,16 +3,12 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdint>
 #include <cctype>
-#include <cerrno>
-#include <chrono>
-#include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <set>
-#include <thread>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -24,16 +20,11 @@
 #endif
 #include <windows.h>
 #else
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
 #include "ffi_native.h"
 #include "parser.h"
-#include "pkg_io.h"
 
 namespace pkg_archive {
 

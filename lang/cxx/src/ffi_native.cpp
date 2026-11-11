@@ -11,8 +11,6 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
-#include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,7 +31,6 @@
 #define NOMINMAX
 #endif
 #include <atomic>
-#include <thread>
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
 #undef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
@@ -44,12 +41,9 @@
 #endif
 #else
 #include <dlfcn.h>
-#include <fcntl.h>
 #if defined(__linux__) && defined(__GLIBC__)
 #include <link.h>
 #endif
-#include <poll.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -58,16 +52,16 @@ namespace {
 
 namespace fs = std::filesystem;
 constexpr size_t kMaxFileBytes = 16 * 1024 * 1024;
+constexpr size_t kMaxObjInspectBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr std::string_view kContractMagic = "BRATFFI1 ";
 constexpr std::string_view kContractEnd = "BRATFFI1-END";
 
-static std::string trim_sv(std::string_view s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
-    return std::string(s);
-}
+static std::string trim_sv(std::string_view s) { return trim_c_ws(s); }
 
-static bool read_file_bytes(const std::string &path, std::string &out, std::string &err) {
+static bool read_file_bytes(const std::string &path,
+                            std::string &out,
+                            std::string &err,
+                            size_t max_bytes = kMaxFileBytes) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         err = "cannot read " + path;
@@ -75,13 +69,33 @@ static bool read_file_bytes(const std::string &path, std::string &out, std::stri
     }
     in.seekg(0, std::ios::end);
     std::streamoff sz = in.tellg();
-    if (sz < 0 || static_cast<size_t>(sz) > kMaxFileBytes) {
+    if (sz < 0 || static_cast<size_t>(sz) > max_bytes) {
         err = "file too large: " + path;
         return false;
     }
     in.seekg(0, std::ios::beg);
     out.resize(static_cast<size_t>(sz));
-    if (!out.empty()) in.read(out.data(), static_cast<std::streamsize>(out.size()));
+    if (!out.empty() && !in.read(out.data(), static_cast<std::streamsize>(out.size()))) {
+        err = "cannot read " + path;
+        return false;
+    }
+    return true;
+}
+
+static bool load_c_header_source(const std::string &header_path,
+                                 bool preprocess,
+                                 const std::vector<std::string> &include_dirs,
+                                 const std::vector<std::string> &defines,
+                                 std::string_view target,
+                                 std::string &hdr_text,
+                                 std::string &err,
+                                 std::string *root_only_out = nullptr) {
+    if (preprocess || !include_dirs.empty() || !defines.empty())
+        return preprocess_header_cc(header_path, include_dirs, defines, target, hdr_text, err, root_only_out);
+    if (!read_header_inlined(header_path, hdr_text, err))
+        return false;
+    if (root_only_out && !read_file_bytes(header_path, *root_only_out, err))
+        return false;
     return true;
 }
 
@@ -99,36 +113,7 @@ static std::string norm_lf(std::string_view s) {
     return out;
 }
 
-static std::string find_bin_in_path(std::string_view bin) {
-    const char *path_env = std::getenv("PATH");
-    if (!path_env || !*path_env) return {};
-#ifdef _WIN32
-    constexpr char sep_ch = ';';
-#else
-    constexpr char sep_ch = ':';
-#endif
-    std::string_view pv(path_env);
-    size_t pos = 0;
-    while (pos <= pv.size()) {
-        size_t sep = pv.find(sep_ch, pos);
-        std::string_view dir = (sep == std::string_view::npos) ? pv.substr(pos) : pv.substr(pos, sep - pos);
-        if (!dir.empty()) {
-#ifdef _WIN32
-            if (fs::path(bin).extension().empty()) {
-                fs::path cand_exe = fs::path(dir) / (std::string(bin) + ".exe");
-                std::error_code ec_exe;
-                if (fs::is_regular_file(cand_exe, ec_exe)) return cand_exe.string();
-            }
-#endif
-            fs::path cand = fs::path(dir) / std::string(bin);
-            std::error_code ec;
-            if (fs::is_regular_file(cand, ec)) return cand.string();
-        }
-        if (sep == std::string_view::npos) break;
-        pos = sep + 1;
-    }
-    return {};
-}
+static std::string find_bin_in_path(std::string_view bin) { return find_tool_in_path(bin); }
 
 // Collect `extern struct` / `extern union` / `extern packed struct`, `extern fn`, `pub` wrappers,
 // and literal `lib_open("...")` / `lib_sym(h, "sym", "sig")` dynamic plugin declarations.
@@ -458,30 +443,6 @@ static bool same_type_check(std::string_view btype_raw,
         rc.kind == "typedef" || rc.kind == "long_double" || rc.kind == "invalid")
         return false;
     return same_brat_ffi_scalar(btype, rc.kind, tm);
-}
-
-static std::vector<std::string> ident_words_of(std::string_view s) {
-    std::vector<std::string> out;
-    std::string cur;
-    for (char ch : s) {
-        if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_') {
-            cur.push_back(ch);
-        } else if (!cur.empty()) {
-            out.push_back(std::move(cur));
-            cur.clear();
-        }
-    }
-    if (!cur.empty()) out.push_back(std::move(cur));
-    return out;
-}
-
-static bool spelled_plain_char(std::string_view ctype) {
-    bool has_char = false;
-    for (const auto &w : ident_words_of(ctype)) {
-        if (w == "char") has_char = true;
-        if (w == "signed" || w == "unsigned" || w == "int8_t" || w == "uint8_t") return false;
-    }
-    return has_char;
 }
 
 // A callback slot is stricter than a top-level parameter: the callee, not BRAT, chooses what arrives. `str` is a
@@ -1052,6 +1013,46 @@ struct CompilerProbeResult {
     std::string output;
 };
 
+static void emit_c_layout_static_asserts(std::ostringstream &src,
+                                         const BratFfiSurface &surf,
+                                         const CDecl &cdecl,
+                                         const std::map<std::string, RecordLayout> &b_layouts) {
+    auto emit_leaf = [&](auto &self,
+                         const std::string &cn,
+                         const std::string &rec,
+                         const std::string &c_prefix,
+                         int64_t base_off,
+                         int depth) -> void {
+        if (depth > 64 || !b_layouts.count(rec) || !surf.structs.count(rec)) return;
+        const auto &bl = b_layouts.at(rec);
+        const auto &bfields = surf.structs.at(rec);
+        std::map<std::string, std::string> ftypes(bfields.begin(), bfields.end());
+        for (const auto &[fnm, foff] : bl.slots) {
+            std::string ft = ftypes[fnm];
+            auto ait = cdecl.anon_members.find({rec, fnm});
+            if (ait != cdecl.anon_members.end() && surf.structs.count(ait->second)) {
+                self(self, cn, ait->second, c_prefix, base_off + foff, depth + 1);
+            } else if (cdecl.inline_structs.count(ft) && surf.structs.count(ft)) {
+                std::string next_cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
+                self(self, cn, ft, next_cp, base_off + foff, depth + 1);
+            } else {
+                std::string cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
+                src << "_Static_assert(offsetof(" << cn << ", " << cp << ") == " << (base_off + foff)
+                    << ", \"offsetof " << cn << "." << cp << "\");\n";
+            }
+        }
+    };
+
+    for (const auto &[sn, _] : surf.structs) {
+        if (!b_layouts.count(sn) || !cdecl.structs.count(sn) || cdecl.inline_structs.count(sn)) continue;
+        const auto &bl = b_layouts.at(sn);
+        std::string cn = cdecl.c_name(sn);
+        src << "_Static_assert(sizeof(" << cn << ") == " << bl.size << ", \"sizeof " << sn << "\");\n";
+        src << "_Static_assert(_Alignof(" << cn << ") == " << bl.align << ", \"alignof " << sn << "\");\n";
+        emit_leaf(emit_leaf, cn, sn, "", 0, 0);
+    }
+}
+
 static CompilerProbeResult compile_probe(const BratFfiSurface &surf,
                                          const CDecl &cdecl,
                                          const std::string &header_path,
@@ -1103,41 +1104,7 @@ static CompilerProbeResult compile_probe(const BratFfiSurface &surf,
     std::ostringstream src;
     src << "#include <stddef.h>\n#include <stdint.h>\n#include <stdbool.h>\n";
     src << "#include \"" << esc_hdr << "\"\n\n";
-
-    auto emit_leaf_offsets = [&](auto &self,
-                                 const std::string &cn,
-                                 const std::string &rec,
-                                 const std::string &c_prefix,
-                                 int64_t base_off) -> void {
-        if (!b_layouts.count(rec) || !surf.structs.count(rec)) return;
-        const auto &bl = b_layouts.at(rec);
-        const auto &bfields = surf.structs.at(rec);
-        std::map<std::string, std::string> ftypes(bfields.begin(), bfields.end());
-        for (const auto &[fnm, foff] : bl.slots) {
-            std::string ft = ftypes[fnm];
-            auto ait = cdecl.anon_members.find({rec, fnm});
-            if (ait != cdecl.anon_members.end() && surf.structs.count(ait->second)) {
-                self(self, cn, ait->second, c_prefix, base_off + foff);
-            } else if (cdecl.inline_structs.count(ft) && surf.structs.count(ft)) {
-                std::string next_cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
-                self(self, cn, ft, next_cp, base_off + foff);
-            } else {
-                std::string cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
-                src << "_Static_assert(offsetof(" << cn << ", " << cp << ") == " << (base_off + foff)
-                    << ", \"offsetof " << cn << "." << cp << "\");\n";
-            }
-        }
-    };
-
-    for (const auto &[sn, _] : surf.structs) {
-        if (!b_layouts.count(sn) || !cdecl.structs.count(sn)) continue;
-        if (cdecl.inline_structs.count(sn)) continue;
-        const auto &bl = b_layouts.at(sn);
-        std::string cn = cdecl.c_name(sn);
-        src << "_Static_assert(sizeof(" << cn << ") == " << bl.size << ", \"sizeof " << sn << "\");\n";
-        src << "_Static_assert(_Alignof(" << cn << ") == " << bl.align << ", \"alignof " << sn << "\");\n";
-        emit_leaf_offsets(emit_leaf_offsets, cn, sn, "", 0);
-    }
+    emit_c_layout_static_asserts(src, surf, cdecl, b_layouts);
 
     int probe_idx = 0;
     for (const auto &d : surf.fns) {
@@ -1211,8 +1178,10 @@ static CompilerProbeResult compile_probe(const BratFfiSurface &surf,
 static DwarfSlot brat_to_expected_dwarf(std::string_view bt,
                                         const std::map<std::string, RecordLayout> &b_layouts,
                                         const std::set<std::string> &b_unions,
-                                        const TargetModel &tm) {
+                                        const TargetModel &tm,
+                                        int depth = 0) {
     DwarfSlot s;
+    if (depth > 32) { s.category = "unknown"; return s; }
     if (bt == "none") { s.category = "void"; s.byte_width = 0; return s; }
     if (bt == "f32") { s.category = "float"; s.byte_width = 4; return s; }
     if (bt == "f64") { s.category = "float"; s.byte_width = 8; return s; }
@@ -1229,16 +1198,21 @@ static DwarfSlot brat_to_expected_dwarf(std::string_view bt,
         std::vector<std::string> bps;
         if (parse_brat_callback(bt, bret, bps)) {
             auto f = std::make_shared<DwarfFnSig>();
-            f->ret = std::make_shared<DwarfSlot>(brat_to_expected_dwarf(bret, b_layouts, b_unions, tm));
-            for (const auto &p : bps) f->params.push_back(brat_to_expected_dwarf(p, b_layouts, b_unions, tm));
+            f->ret = std::make_shared<DwarfSlot>(brat_to_expected_dwarf(bret, b_layouts, b_unions, tm, depth + 1));
+            for (const auto &p : bps)
+                f->params.push_back(brat_to_expected_dwarf(p, b_layouts, b_unions, tm, depth + 1));
             s.fn = std::move(f);
         }
         return s;
     }
     if (auto arr = parse_array_field_type(bt)) {
-        auto sub = brat_to_expected_dwarf(arr->first, b_layouts, b_unions, tm);
+        auto sub = brat_to_expected_dwarf(arr->first, b_layouts, b_unions, tm, depth + 1);
         s.category = "array";
-        if (sub.byte_width) s.byte_width = *sub.byte_width * arr->second;
+        int64_t total_bw = 0;
+        if (sub.byte_width && !__builtin_mul_overflow(*sub.byte_width, arr->second, &total_bw) &&
+            total_bw <= (1LL << 40)) {
+            s.byte_width = total_bw;
+        }
         return s;
     }
     if (auto w = brat_abi_width(bt, tm)) {
@@ -1255,8 +1229,8 @@ static DwarfSlot brat_to_expected_dwarf(std::string_view bt,
     return s;
 }
 
-static bool dwarf_slot_matches(const DwarfSlot &want, const DwarfSlot &got, std::string &why) {
-    if (want.category == "unknown" || got.category == "unknown") return true;
+static bool dwarf_slot_matches(const DwarfSlot &want, const DwarfSlot &got, std::string &why, int depth = 0) {
+    if (depth > 32 || want.category == "unknown" || got.category == "unknown") return true;
     // Only erased `ptr` accepts an opaque or variadic C function pointer; typed `ptr[T]` and `str` do not.
     if (want.category == "pointer" && got.category == "fn" && want.name == "ptr") return true;
     if (want.category == "fn" && got.category == "fn") {
@@ -1273,9 +1247,9 @@ static bool dwarf_slot_matches(const DwarfSlot &want, const DwarfSlot &got, std:
                 return false;
             }
             for (size_t i = 0; i < want.fn->params.size(); ++i) {
-                if (!dwarf_slot_matches(want.fn->params[i], got.fn->params[i], why)) return false;
+                if (!dwarf_slot_matches(want.fn->params[i], got.fn->params[i], why, depth + 1)) return false;
             }
-            if (want.fn->ret && got.fn->ret && !dwarf_slot_matches(*want.fn->ret, *got.fn->ret, why))
+            if (want.fn->ret && got.fn->ret && !dwarf_slot_matches(*want.fn->ret, *got.fn->ret, why, depth + 1))
                 return false;
         }
         return true;
@@ -1292,17 +1266,11 @@ static bool dwarf_slot_matches(const DwarfSlot &want, const DwarfSlot &got, std:
     return true;
 }
 
-static CheckReport verify_object_against_surface(const BratFfiSurface &surf,
-                                                 const std::string &obj_path,
-                                                 const TargetModel &tm) {
+static CheckReport verify_object_info_against_surface(const BratFfiSurface &surf,
+                                                      const ObjectInfo &info,
+                                                      const std::string &obj_label,
+                                                      const TargetModel &tm) {
     CheckReport rep;
-    ObjectInfo info;
-    std::string ierr;
-    if (!inspect_object_file(obj_path, info, ierr)) {
-        rep.fail(fs::path(obj_path).filename().string(), ierr);
-        return rep;
-    }
-    std::string obj_label = fs::path(obj_path).filename().string();
     if (info.ptr_width != 0 && info.ptr_width != tm.ptr) {
         rep.fail(obj_label, "pointer width mismatch: target is " + std::to_string(tm.ptr * 8) +
                  "-bit, object is " + std::to_string(info.ptr_width * 8) + "-bit (" + info.arch + ")");
@@ -1426,6 +1394,20 @@ static CheckReport verify_object_against_surface(const BratFfiSurface &surf,
         if (!bad) ++rep.proven;
     }
     return rep;
+}
+
+static CheckReport verify_object_against_surface(const BratFfiSurface &surf,
+                                                 const std::string &obj_path,
+                                                 const TargetModel &tm) {
+    ObjectInfo info;
+    std::string ierr;
+    std::string obj_label = fs::path(obj_path).filename().string();
+    if (!inspect_object_file(obj_path, info, ierr)) {
+        CheckReport rep;
+        rep.fail(obj_label, ierr);
+        return rep;
+    }
+    return verify_object_info_against_surface(surf, info, obj_label, tm);
 }
 
 // Check exported symbols in `extern "<lib>"` shared libraries via dlopen/dlsym (host) or `inspect_object_file`.
@@ -1914,11 +1896,8 @@ static bool make_bratbind_json(const std::string &brat_path,
     std::string hdr_file_sha = pkg_io::sha256_hex(raw_hdr_disk);
 
     std::string hdr_text;
-    if (preprocess || !include_dirs.empty() || !defines.empty()) {
-        if (!preprocess_header_cc(header_path, include_dirs, defines, target, hdr_text, err)) return false;
-    } else {
-        if (!read_header_inlined(header_path, hdr_text, err)) return false;
-    }
+    if (!load_c_header_source(header_path, preprocess, include_dirs, defines, target, hdr_text, err))
+        return false;
     std::string hdr_text_sha = pkg_io::sha256_hex(hdr_text);
 
     // Prove across all 3 ABI data models (`lp64`, `llp64`, `ilp32`) unless a single `--target` was requested
@@ -1957,16 +1936,20 @@ static bool make_bratbind_json(const std::string &brat_path,
     std::vector<std::tuple<std::string, std::string, bool>> obj_entries;
     for (const auto &op : objects) {
         std::string obytes;
-        if (!read_file_bytes(op, obytes, err)) return false;
-        auto orep = verify_object_against_surface(surf, op, host_tm);
+        if (!read_file_bytes(op, obytes, err, kMaxObjInspectBytes)) return false;
+        ObjectInfo oi;
+        std::string ierr;
+        std::string olabel = fs::path(op).filename().string();
+        if (!inspect_object_bytes(obytes, op, oi, ierr)) {
+            err = "  error: " + olabel + ": " + ierr;
+            return false;
+        }
+        auto orep = verify_object_info_against_surface(surf, oi, olabel, host_tm);
         if (orep.errors > 0) {
             err = orep.lines.empty() ? ("object proof failed: " + op) : orep.lines[0];
             return false;
         }
-        ObjectInfo oi;
-        std::string ierr;
-        inspect_object_file(op, oi, ierr);
-        obj_entries.emplace_back(fs::path(op).filename().string(), pkg_io::sha256_hex(obytes),
+        obj_entries.emplace_back(std::move(olabel), pkg_io::sha256_hex(obytes),
                                  !oi.dwarf_fns.empty() || !oi.dwarf_structs.empty());
     }
 
@@ -2075,36 +2058,7 @@ static std::optional<bool> run_freestanding_cc_check(const BratFfiSurface &surf,
             src << ln << "\n";
         }
     }
-    auto emit_abi_leaf_offsets = [&](auto &self,
-                                     const std::string &cn,
-                                     const std::string &rec,
-                                     const std::string &c_prefix,
-                                     int64_t base_off) -> void {
-        if (!b_layouts.count(rec) || !surf.structs.count(rec)) return;
-        const auto &bl = b_layouts.at(rec);
-        const auto &bfields = surf.structs.at(rec);
-        std::map<std::string, std::string> ftypes(bfields.begin(), bfields.end());
-        for (const auto &[fnm, foff] : bl.slots) {
-            std::string ft = ftypes[fnm];
-            auto ait = cdecl.anon_members.find({rec, fnm});
-            if (ait != cdecl.anon_members.end() && surf.structs.count(ait->second)) {
-                self(self, cn, ait->second, c_prefix, base_off + foff);
-            } else if (cdecl.inline_structs.count(ft) && surf.structs.count(ft)) {
-                std::string next_cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
-                self(self, cn, ft, next_cp, base_off + foff);
-            } else {
-                std::string cp = c_prefix.empty() ? fnm : (c_prefix + "." + fnm);
-                src << "_Static_assert(offsetof(" << cn << ", " << cp << ") == " << (base_off + foff) << ", \"offsetof\");\n";
-            }
-        }
-    };
-    for (const auto &[sn, bl] : b_layouts) {
-        if (!cdecl.structs.count(sn) || cdecl.inline_structs.count(sn)) continue;
-        std::string cn = cdecl.c_name(sn);
-        src << "_Static_assert(sizeof(" << cn << ") == " << bl.size << ", \"sizeof " << sn << "\");\n";
-        src << "_Static_assert(_Alignof(" << cn << ") == " << bl.align << ", \"alignof " << sn << "\");\n";
-        emit_abi_leaf_offsets(emit_abi_leaf_offsets, cn, sn, "", 0);
-    }
+    emit_c_layout_static_asserts(src, surf, cdecl, b_layouts);
 
     std::string tmp_c;
     if (!write_temp_probe_c("brat-abi-cc-", src.str(), tmp_c)) return std::nullopt;
@@ -2147,10 +2101,9 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
 
     std::string hdr_text;
     bool strict = !(preprocess || !include_dirs.empty() || !defines.empty());
-    if (!strict) {
-        if (!preprocess_header_cc(header_path, include_dirs, defines, "", hdr_text, err)) { res.error = err; return res; }
-    } else {
-        if (!read_header_inlined(header_path, hdr_text, err)) { res.error = err; return res; }
+    if (!load_c_header_source(header_path, preprocess, include_dirs, defines, "", hdr_text, err)) {
+        res.error = err;
+        return res;
     }
 
     static const std::array<const char *, 5> kTriples = {
@@ -2191,6 +2144,27 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
     }
 
     lsp_wire::JsonWriter w;
+    auto write_layout_pair_json = [&](const std::string &sn,
+                                      const std::map<std::string, RecordLayout> &b_lay,
+                                      const std::map<std::string, RecordLayout> &c_lay) {
+        w.begin_obj();
+        auto emit_l = [&](const char *k, const std::map<std::string, RecordLayout> &mp) {
+            w.key(k);
+            auto it = mp.find(sn);
+            if (it == mp.end()) { w.null_val(); return; }
+            w.begin_obj();
+            w.key_lit("size"); w.int64(it->second.size);
+            w.key_lit("align"); w.int64(it->second.align);
+            w.key_lit("offsets");
+            w.begin_obj();
+            for (const auto &[fn, fo] : it->second.slots) { w.key(fn); w.int64(fo); }
+            w.end_obj();
+            w.end_obj();
+        };
+        emit_l("brat", b_lay);
+        emit_l("c", c_lay);
+        w.end_obj();
+    };
     w.begin_obj();
     w.key_lit("version"); w.int64(1);
     w.key_lit("file"); w.str(source_path);
@@ -2217,23 +2191,7 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
         w.begin_obj();
         for (const auto &[sn, _] : surf.structs) {
             w.key(sn);
-            w.begin_obj();
-            auto emit_l = [&](const char *k, const std::map<std::string, RecordLayout> &mp) {
-                w.key(k);
-                auto it = mp.find(sn);
-                if (it == mp.end()) { w.null_val(); return; }
-                w.begin_obj();
-                w.key_lit("size"); w.int64(it->second.size);
-                w.key_lit("align"); w.int64(it->second.align);
-                w.key_lit("offsets");
-                w.begin_obj();
-                for (const auto &[fn, fo] : it->second.slots) { w.key(fn); w.int64(fo); }
-                w.end_obj();
-                w.end_obj();
-            };
-            emit_l("brat", r.b_lay);
-            emit_l("c", r.c_lay);
-            w.end_obj();
+            write_layout_pair_json(sn, r.b_lay, r.c_lay);
         }
         w.end_obj();
         w.end_obj();
@@ -2247,23 +2205,7 @@ AbiMatrixResult abi_matrix(const std::string &source_path,
         w.begin_obj();
         for (const auto &r : rows) {
             w.key(r.tm.triple);
-            w.begin_obj();
-            auto emit_l = [&](const char *k, const std::map<std::string, RecordLayout> &mp) {
-                w.key(k);
-                auto it = mp.find(sn);
-                if (it == mp.end()) { w.null_val(); return; }
-                w.begin_obj();
-                w.key_lit("size"); w.int64(it->second.size);
-                w.key_lit("align"); w.int64(it->second.align);
-                w.key_lit("offsets");
-                w.begin_obj();
-                for (const auto &[fn, fo] : it->second.slots) { w.key(fn); w.int64(fo); }
-                w.end_obj();
-                w.end_obj();
-            };
-            emit_l("brat", r.b_lay);
-            emit_l("c", r.c_lay);
-            w.end_obj();
+            write_layout_pair_json(sn, r.b_lay, r.c_lay);
         }
         w.end_obj();
     }
@@ -2429,12 +2371,19 @@ bool verify_bratbind_bytes(std::string_view brat_bytes,
             auto oit = object_files.find(oname);
             if (oit != object_files.end()) {
                 std::string obytes, rerr;
-                if (!read_file_bytes(oit->second, obytes, rerr)) { error = rerr; return false; }
+                if (!read_file_bytes(oit->second, obytes, rerr, kMaxObjInspectBytes)) { error = rerr; return false; }
                 if (pkg_io::sha256_hex(obytes) != tape.str_view(tape.get(cur, "sha256"))) {
                     error = std::string(label) + ": bundled object " + oname + " SHA-256 mismatch";
                     return false;
                 }
-                auto orep = verify_object_against_surface(surf, oit->second, req_tm);
+                ObjectInfo oi;
+                std::string ierr;
+                std::string olabel = fs::path(oit->second).filename().string();
+                if (!inspect_object_bytes(obytes, oit->second, oi, ierr)) {
+                    error = std::string(label) + ": binary object check failed:\n  error: " + olabel + ": " + ierr;
+                    return false;
+                }
+                auto orep = verify_object_info_against_surface(surf, oi, olabel, req_tm);
                 if (orep.errors > 0) {
                     error = std::string(label) + ": binary object check failed:\n" + orep.lines[0];
                     return false;
@@ -2700,12 +2649,7 @@ int cmd_ffi(int argc, char **argv) {
         }
         TargetModel tm = make_target_model(target);
         std::string hdr_text, err;
-        if (preprocess || !inc_dirs.empty() || !defines.empty()) {
-            if (!preprocess_header_cc(header, inc_dirs, defines, target, hdr_text, err)) {
-                std::fprintf(stderr, "ffi: %s\n", err.c_str());
-                return 1;
-            }
-        } else if (!read_header_inlined(header, hdr_text, err)) {
+        if (!load_c_header_source(header, preprocess, inc_dirs, defines, target, hdr_text, err)) {
             std::fprintf(stderr, "ffi: %s\n", err.c_str());
             return 1;
         }
@@ -2798,12 +2742,7 @@ int cmd_ffi(int argc, char **argv) {
 
         std::string hdr_text;
         bool strict = !(preprocess || !inc_dirs.empty() || !defines.empty());
-        if (!strict) {
-            if (!preprocess_header_cc(header, inc_dirs, defines, target, hdr_text, err)) {
-                std::fprintf(stderr, "ffi: %s\n", err.c_str());
-                return 1;
-            }
-        } else if (!read_header_inlined(header, hdr_text, err)) {
+        if (!load_c_header_source(header, preprocess, inc_dirs, defines, target, hdr_text, err)) {
             std::fprintf(stderr, "ffi: %s\n", err.c_str());
             return 1;
         }
@@ -3034,21 +2973,10 @@ int cmd_bindgen(int argc, char **argv) {
 
     TargetModel tm = make_target_model(target);
     std::string hdr_text, root_only_text, err;
-    if (preprocess || !inc_dirs.empty() || !defines.empty()) {
-        if (!preprocess_header_cc(path, inc_dirs, defines, target, hdr_text, err,
-                                  header_only ? &root_only_text : nullptr)) {
-            std::fprintf(stderr, "bindgen: %s\n", err.c_str());
-            return 1;
-        }
-    } else {
-        if (!read_header_inlined(path, hdr_text, err)) {
-            std::fprintf(stderr, "bindgen: %s\n", err.c_str());
-            return 1;
-        }
-        if (header_only && !read_file_bytes(path, root_only_text, err)) {
-            std::fprintf(stderr, "bindgen: %s\n", err.c_str());
-            return 1;
-        }
+    if (!load_c_header_source(path, preprocess, inc_dirs, defines, target, hdr_text, err,
+                              header_only ? &root_only_text : nullptr)) {
+        std::fprintf(stderr, "bindgen: %s\n", err.c_str());
+        return 1;
     }
 
     CDecl cd;

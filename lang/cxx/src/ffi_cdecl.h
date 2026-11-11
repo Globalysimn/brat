@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -10,6 +11,32 @@
 #include <vector>
 
 namespace native_ffi {
+
+inline std::string trim_c_ws(std::string_view s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
+    return std::string(s);
+}
+
+inline bool is_c_ident0(char c) {
+    return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+}
+
+inline bool is_c_identc(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+inline bool is_valid_c_ident(std::string_view s) {
+    if (s.empty() || !is_c_ident0(s[0])) return false;
+    for (size_t i = 1; i < s.size(); ++i)
+        if (!is_c_identc(s[i])) return false;
+    return true;
+}
+
+std::vector<std::string> c_ident_words(std::string_view s);
+bool spelled_plain_char(std::string_view ctype);
+bool is_valid_brat_ffi_ident(std::string_view name, bool reject_c_kw = false);
+std::string find_tool_in_path(std::string_view bin);
 
 struct TargetModel {
     std::string triple;      // empty means host

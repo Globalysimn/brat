@@ -6,6 +6,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace native_ffi {
@@ -56,6 +57,10 @@ struct ObjectInfo {
     std::map<std::string, DwarfRecord> dwarf_structs;
 };
 
+bool inspect_object_bytes(std::string_view data,
+                          std::string_view label,
+                          ObjectInfo &out,
+                          std::string &err);
 bool inspect_object_file(const std::string &path, ObjectInfo &out, std::string &err);
 
 }  // namespace native_ffi

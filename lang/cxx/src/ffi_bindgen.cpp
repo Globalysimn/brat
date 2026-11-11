@@ -13,54 +13,28 @@ namespace {
 
 namespace fs = std::filesystem;
 
-static std::string trim_s(std::string_view s) {
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
-    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
-    return std::string(s);
-}
-
-static bool ident0(char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; }
-static bool identc(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
-
+static std::string trim_s(std::string_view s) { return trim_c_ws(s); }
+static bool ident0(char c) { return is_c_ident0(c); }
+static bool identc(char c) { return is_c_identc(c); }
 static bool bindgen_name_ok(std::string_view name, bool is_fn = false) {
-    if (name.empty() || !ident0(name[0])) return false;
-    for (size_t i = 1; i < name.size(); ++i)
-        if (!identc(name[i])) return false;
-
-    static const std::set<std::string_view> kBratKw = {
-        "fn", "let", "mut", "ref", "move", "if", "else", "while", "for", "in", "return",
-        "match", "struct", "enum", "impl", "trait", "import", "pub", "use", "const",
-        "extern", "export", "packed", "spawn", "scope", "arena", "unsafe", "defer",
-        "try", "catch", "break", "continue", "par", "as", "true", "false", "none",
-        "and", "or", "not", "is",
-    };
-    static const std::set<std::string_view> kCKw = {
-        "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
-        "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
-        "register", "restrict", "return", "short", "signed", "sizeof", "static",
-        "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
-        "_Bool", "_Complex", "_Imaginary", "_Static_assert", "_Thread_local",
-    };
-    if (kBratKw.count(name)) return false;
-    if (is_fn && kCKw.count(name)) return false;
-    return true;
+    return is_valid_brat_ffi_ident(name, is_fn);
 }
 
 static std::vector<std::string> struct_topo_order(const CDecl &cdecl, const TargetModel &tm) {
     std::vector<std::string> order;
     std::set<std::string> seen;
-    std::function<void(const std::string &)> visit = [&](const std::string &name) {
-        if (seen.count(name) || !cdecl.structs.count(name)) return;
+    std::function<void(const std::string &, int)> visit = [&](const std::string &name, int depth) {
+        if (depth > 64 || seen.count(name) || !cdecl.structs.count(name)) return;
         seen.insert(name);
         for (const auto &[_, ctype] : cdecl.structs.at(name)) {
             auto r = resolve_c_type(&cdecl, ctype, tm);
-            if (r.kind == "struct" && !r.extra.empty() && r.extra != name) visit(r.extra);
+            if (r.kind == "struct" && !r.extra.empty() && r.extra != name) visit(r.extra, depth + 1);
             else if (r.kind == "array" && r.arr_elem_k == "struct" && !r.arr_elem_e.empty() && r.arr_elem_e != name)
-                visit(r.arr_elem_e);
+                visit(r.arr_elem_e, depth + 1);
         }
         order.push_back(name);
     };
-    for (const auto &[nm, _] : cdecl.structs) visit(nm);
+    for (const auto &[nm, _] : cdecl.structs) visit(nm, 0);
     return order;
 }
 
@@ -73,24 +47,6 @@ static std::optional<std::string> brat_scalar_of(std::string_view k) {
     return std::nullopt;
 }
 
-static bool cb_spelled_plain_char(std::string_view ctype) {
-    bool has_char = false;
-    size_t i = 0;
-    while (i < ctype.size()) {
-        if (ident0(ctype[i])) {
-            size_t j = i + 1;
-            while (j < ctype.size() && identc(ctype[j])) ++j;
-            std::string_view w = ctype.substr(i, j - i);
-            if (w == "char") has_char = true;
-            if (w == "signed" || w == "unsigned" || w == "int8_t" || w == "uint8_t") return false;
-            i = j;
-        } else {
-            ++i;
-        }
-    }
-    return has_char;
-}
-
 static std::optional<std::string> cb_ptr_to_brat(const CDecl &cdecl,
                                                  std::string_view slot_ctype,
                                                  const ResolvedCType &rc) {
@@ -100,7 +56,7 @@ static std::optional<std::string> cb_ptr_to_brat(const CDecl &cdecl,
         "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "usize", "f32", "f64", "bool"
     };
     if (!kPrim.count(rc.extra)) return std::nullopt;
-    if ((rc.extra == "u8" || rc.extra == "i8") && cb_spelled_plain_char(slot_ctype))
+    if ((rc.extra == "u8" || rc.extra == "i8") && spelled_plain_char(slot_ctype))
         return std::nullopt;
     return "ptr[" + rc.extra + "]";
 }

@@ -10,9 +10,11 @@
 """
 import _cxx
 import _scratch
+import gzip
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -643,6 +645,179 @@ def main():
         assert bad_ok is False, "the host layout must fail a 32-bit compiler"
         n += 1
         print("ffihard ok: a 32-bit compiler accepts the 32-bit layout, and only that")
+
+    # Signed overflow and stack/memory bounds in C header parser and struct layout.
+    ovf_hdr = os.path.join(TMP, "ovf_bounds.h")
+    with open(ovf_hdr, "w", encoding="utf-8") as f:
+        f.write(
+            "#define keep_self keep_self\n"
+            "struct Big { char a[1073741824]; };\n"
+            "struct Huge { struct Big x[1073741824]; char tail; };\n"
+            "enum Wide { W0 = (0x7FFFFFFFFFFFFFFFULL << 64) | 0xFFFFFFFFFFFFFFFFULL, W1, W2 };\n"
+            "int keep_self(int x);\n"
+        )
+    r_ovf = subprocess.run(_cxx.cli_args("bindgen", "--inline-arrays", ovf_hdr),
+                           capture_output=True, text=True, timeout=60)
+    assert r_ovf.returncode == 0 and "extern fn keep_self(" in r_ovf.stdout, \
+        "bindgen overflow/self-macro header failed: %r" % (r_ovf.stderr or r_ovf.stdout)
+    n += 1
+    print("ffihard ok: oversized nested struct layout and 128-bit enum increment do not overflow")
+
+    bomb_hdr = os.path.join(TMP, "macro_bomb.h")
+    with open(bomb_hdr, "w", encoding="utf-8") as f:
+        f.write("#define X X X X X X X X X X X X X X X X X\nX;\n")
+    r_bomb = subprocess.run(_cxx.cli_args("bindgen", bomb_hdr),
+                            capture_output=True, text=True, timeout=30)
+    assert r_bomb.returncode != 0 and "size limit" in r_bomb.stderr, \
+        "macro bomb must fail fast with size limit: %r" % r_bomb.stderr
+    n += 1
+    print("ffihard ok: exponential object-macro expansion is bounded")
+
+    deep_hdr = os.path.join(TMP, "deep_types.h")
+    nested_s = "int leaf;"
+    for _ in range(256):
+        nested_s = "struct { " + nested_s + " } v;"
+    nested_fp = "int"
+    for _ in range(256):
+        nested_fp = "void (*)(" + nested_fp + ")"
+    with open(deep_hdr, "w", encoding="utf-8") as f:
+        f.write("struct Root { %s };\ntypedef %s deep_cb_t;\nint ok_fn(int a);\n" % (nested_s, nested_fp))
+    r_deep = subprocess.run(_cxx.cli_args("bindgen", deep_hdr),
+                            capture_output=True, text=True, timeout=60)
+    assert r_deep.returncode == 0 and "extern fn ok_fn(" in r_deep.stdout, \
+        "deep struct/fnptr header crashed or failed: %r" % r_deep.stderr
+    n += 1
+    print("ffihard ok: deep inline struct and fnptr recursion is bounded")
+
+    # Crafted ELF64 DWARF v4: positive DW_AT_byte_size (+8) proves layout, while
+    # negative DW_AT_byte_size (-8, SLEB 0x78) is rejected instead of stored.
+    def make_dwarf_box_elf(size_sleb_byte):
+        shstr = b"\x00.shstrtab\x00.strtab\x00.symtab\x00.debug_abbrev\x00.debug_info\x00"
+        strtab = b"\x00box_touch\x00"
+        sym0 = b"\x00" * 24
+        sym1 = struct.pack("<IBBHQQ", 1, 0x12, 0, 1, 0, 4)
+        symtab = sym0 + sym1
+        abbrev = bytes([
+            1, 0x11, 1, 0x00, 0x00,
+            2, 0x13, 1, 0x03, 0x08, 0x0b, 0x0d, 0x00, 0x00,
+            3, 0x0d, 0, 0x03, 0x08, 0x49, 0x13, 0x38, 0x0b, 0x00, 0x00,
+            4, 0x24, 0, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00, 0x00,
+            0,
+        ])
+        cu_hdr_len = 11
+        die_cu = b"\x01"
+        die_st = b"\x02Box\x00" + bytes([size_sleb_byte])
+        type_off = cu_hdr_len + len(die_cu) + len(die_st) + len(b"\x03x\x00") + 4 + 1 + 1
+        die_mem = b"\x03x\x00" + struct.pack("<I", type_off) + b"\x00\x00"
+        die_bt = b"\x04long\x00\x08\x05"
+        cu_payload = struct.pack("<HI", 4, 0) + b"\x08" + die_cu + die_st + die_mem + die_bt + b"\x00"
+        debug_info = struct.pack("<I", len(cu_payload)) + cu_payload
+
+        ehdr_sz = 64
+        off = ehdr_sz
+        secs = []
+        for blob in (b"\x90\x90\x90\x90", shstr, strtab, symtab, abbrev, debug_info):
+            if off % 8:
+                off += 8 - (off % 8)
+            secs.append((off, blob))
+            off += len(blob)
+        if off % 8:
+            off += 8 - (off % 8)
+        shoff = off
+
+        def sh64(name, stype, flags, s_off, size, link=0, info=0, align=1, entsize=0):
+            return struct.pack("<IIQQQQIIQQ", name, stype, flags, 0, s_off, size, link, info, align, entsize)
+
+        shdrs = b"".join([
+            sh64(0, 0, 0, 0, 0),
+            sh64(0, 1, 6, secs[0][0], len(secs[0][1]), align=4),
+            sh64(1, 3, 0, secs[1][0], len(secs[1][1])),
+            sh64(11, 3, 0, secs[2][0], len(secs[2][1])),
+            sh64(19, 2, 0, secs[3][0], len(secs[3][1]), link=3, info=1, align=8, entsize=24),
+            sh64(27, 1, 0, secs[4][0], len(secs[4][1])),
+            sh64(41, 1, 0, secs[5][0], len(secs[5][1])),
+        ])
+        e_ident = b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+        ehdr = e_ident + struct.pack("<HHIQQQIHHHHHH", 1, 62, 1, 0, 0, shoff, 0, 64, 0, 0, 64, 7, 2)
+        out_b = bytearray(ehdr)
+        for s_off, blob in secs:
+            out_b.extend(b"\x00" * (s_off - len(out_b)))
+            out_b.extend(blob)
+        out_b.extend(b"\x00" * (shoff - len(out_b)))
+        out_b.extend(shdrs)
+        return bytes(out_b)
+
+    box_brat = os.path.join(TMP, "dwarf_box.brat")
+    with open(box_brat, "w", encoding="utf-8") as f:
+        f.write("extern struct Box { x: i64 }\nextern fn box_touch(p: ptr[Box]) -> none\n")
+    pos_o = os.path.join(TMP, "dwarf_pos.o")
+    neg_o = os.path.join(TMP, "dwarf_neg.o")
+    with open(pos_o, "wb") as f:
+        f.write(make_dwarf_box_elf(0x08))
+    with open(neg_o, "wb") as f:
+        f.write(make_dwarf_box_elf(0x78))
+
+    r_pos = subprocess.run(
+        _cxx.cli_args("ffi", box_brat, "--object", pos_o, "--target", "x86_64-unknown-linux-gnu", "--json"),
+        capture_output=True, text=True, timeout=60)
+    r_neg = subprocess.run(
+        _cxx.cli_args("ffi", box_brat, "--object", neg_o, "--target", "x86_64-unknown-linux-gnu", "--json"),
+        capture_output=True, text=True, timeout=60)
+    j_pos = json.loads(r_pos.stdout)
+    j_neg = json.loads(r_neg.stdout)
+    assert j_pos["errors"] == 0 and j_pos["proven"] >= 2, "pos DWARF expected struct+fn proven: %r" % j_pos
+    assert j_neg["errors"] == 0 and j_neg["proven"] == j_pos["proven"] - 1, \
+        "neg DWARF byte_size=-8 must not be accepted as a valid struct record: %r" % j_neg
+    n += 1
+    print("ffihard ok: negative DWARF DW_AT_byte_size is rejected")
+
+    # PAX `size=` record followed by GNU `'L'` longname record must apply `size=`
+    # to the file entry (`'0'`), not truncate `'L'`.
+    def make_tar_hdr(name_b, size_val, typeflag_b):
+        blk = bytearray(512)
+        blk[0:len(name_b)] = name_b[:100]
+        blk[100:108] = b"0000644\x00"
+        blk[108:116] = b"0000000\x00"
+        blk[116:124] = b"0000000\x00"
+        blk[124:136] = ("%011o\x00" % size_val).encode("ascii")
+        blk[136:148] = b"00000000000\x00"
+        blk[148:156] = b"        "
+        blk[156:157] = typeflag_b
+        blk[257:263] = b"ustar\x00"
+        blk[263:265] = b"00"
+        csum = sum(blk)
+        blk[148:156] = ("%06o\x00 " % csum).encode("ascii")
+        return bytes(blk)
+
+    def pad512(b):
+        rem = len(b) % 512
+        return b if rem == 0 else b + b"\x00" * (512 - rem)
+
+    brat_payload = b"pub fn answer() -> i64 { return 42 }\n"
+    pax_rec = ("11 size=%d\n" % len(brat_payload)).encode("ascii")
+    assert len(pax_rec) == 11
+    gnu_long = b"paxpkg/long_module_entry.brat\x00"
+    tar_stream = (
+        make_tar_hdr(b"PaxHeader/entry", len(pax_rec), b"x") + pad512(pax_rec) +
+        make_tar_hdr(b"././@LongLink", len(gnu_long), b"L") + pad512(gnu_long) +
+        make_tar_hdr(b"paxpkg/short", 0, b"0") + pad512(brat_payload) +
+        b"\x00" * 1024
+    )
+    pax_tgz = os.path.join(TMP, "paxpkg.tar.gz")
+    with gzip.open(pax_tgz, "wb") as gz:
+        gz.write(tar_stream)
+    pax_proj = os.path.join(TMP, "pax_proj")
+    os.makedirs(pax_proj, exist_ok=True)
+    pax_uri = "file://" + (pax_tgz if pax_tgz.startswith("/") else "/" + pax_tgz.replace("\\", "/"))
+    r_pax = subprocess.run(_cxx.cli_args("pkg", "add", pax_uri),
+                           cwd=pax_proj, capture_output=True, text=True, timeout=60)
+    assert r_pax.returncode == 0, "pkg add PAX+GNU LongLink failed: %r" % (r_pax.stderr or r_pax.stdout)
+    installed_mod = os.path.join(pax_proj, "vendor", "paxpkg", "long_module_entry.brat")
+    assert os.path.isfile(installed_mod), "missing extracted longname module: %s" % installed_mod
+    with open(installed_mod, "rb") as f:
+        assert f.read() == brat_payload
+    n += 1
+    print("ffihard ok: PAX size override preserves intervening GNU LongLink record")
 
     print("FFI HARDENING ALL GREEN (%d asserts)" % n)
 

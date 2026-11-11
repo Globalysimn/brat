@@ -2542,10 +2542,15 @@ static int native_pkg_install(const std::string &target) {
             }
             std::map<std::string, std::string> locked_hashes;
             const uint32_t files_node = tape.get(item, "files");
+            if (!tape.is_object(files_node)) {
+                std::fprintf(stderr, "brat pkg: invalid lock: %s missing files object\n", pkg_name.c_str());
+                return 1;
+            }
             for (uint32_t k = tape.at(files_node).first_child; k != 0;) {
                 const uint32_t v = tape.at(k).next_sibling;
                 if (v == 0) break;
-                locked_hashes.emplace(std::string(tape.str_view(k)), std::string(tape.str_view(v)));
+                if (tape.is_string(k) && tape.is_string(v))
+                    locked_hashes.emplace(std::string(tape.str_view(k)), std::string(tape.str_view(v)));
                 k = tape.at(v).next_sibling;
             }
             if (file_hashes != locked_hashes) {

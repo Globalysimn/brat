@@ -772,8 +772,10 @@ bool extract_targz_raw(std::string_view gz_bytes,
             err = "corrupt tar.gz archive: invalid member size";
             return false;
         }
-        if (next_pax_size >= 0) raw_size = static_cast<uint64_t>(next_pax_size);
         const char typeflag = hdr[156] ? static_cast<char>(hdr[156]) : '0';
+        if (next_pax_size >= 0 && typeflag != 'L' && typeflag != 'K' && typeflag != 'x' && typeflag != 'g') {
+            raw_size = static_cast<uint64_t>(next_pax_size);
+        }
 
         pos += 512;
         if (raw_size > n - pos) {

@@ -49,11 +49,19 @@ inline void wr64(uint8_t *p, uint64_t v, bool le) {
     }
 }
 
+constexpr size_t kMaxObjStrBytes = 65536;
+constexpr int64_t kMaxDwarfBytes = (1LL << 40);
+
+inline bool valid_dwarf_bytes(int64_t v) {
+    return v >= 0 && v <= kMaxDwarfBytes;
+}
+
 std::string cstr_at(std::string_view buf, size_t off) {
     if (off >= buf.size()) return {};
-    const size_t nul = buf.find('\0', off);
-    const size_t end = (nul == std::string_view::npos) ? buf.size() : nul;
-    return std::string(buf.substr(off, end - off));
+    const size_t max_scan = std::min(buf.size() - off, kMaxObjStrBytes);
+    const std::string_view win = buf.substr(off, max_scan);
+    const size_t nul = win.find('\0');
+    return std::string((nul == std::string_view::npos) ? win : win.substr(0, nul));
 }
 
 int sym_rank(const ObjectSym &s) {
@@ -91,6 +99,27 @@ struct DwarfSections {
     std::string debug_str;
     std::string debug_line_str;
     std::string debug_str_offsets;
+
+    std::string *slot_for(std::string_view sname, bool allow_zdebug = false, bool macho = false) {
+        std::string_view tail;
+        if (macho) {
+            if (sname.rfind("__debug_", 0) != 0) return nullptr;
+            tail = sname.substr(8);
+            if (tail == "str_offs") return &debug_str_offsets;
+        } else if (sname.rfind(".debug_", 0) == 0) {
+            tail = sname.substr(7);
+        } else if (allow_zdebug && sname.rfind(".zdebug_", 0) == 0) {
+            tail = sname.substr(8);
+        } else {
+            return nullptr;
+        }
+        if (tail == "info") return &debug_info;
+        if (tail == "abbrev") return &debug_abbrev;
+        if (tail == "str") return &debug_str;
+        if (tail == "line_str") return &debug_line_str;
+        if (tail == "str_offsets") return &debug_str_offsets;
+        return nullptr;
+    }
 };
 
 bool read_uleb(const uint8_t *p, size_t len, size_t &pos, uint64_t &out) {
@@ -148,6 +177,7 @@ bool parse_abbrev_table(std::string_view abbrev_sec, size_t offset, AbbrevTable 
     const size_t n = abbrev_sec.size();
     size_t pos = offset;
     while (pos < n) {
+        if (out.size() >= 262144u) return false;
         uint64_t code = 0;
         if (!read_uleb(p, n, pos, code)) return false;
         if (code == 0) break;
@@ -158,6 +188,7 @@ bool parse_abbrev_table(std::string_view abbrev_sec, size_t offset, AbbrevTable 
             uint64_t aname = 0, aform = 0;
             if (!read_uleb(p, n, pos, aname) || !read_uleb(p, n, pos, aform)) return false;
             if (aname == 0 && aform == 0) break;
+            if (decl.attrs.size() >= 4096u) return false;
             int64_t imp = 0;
             if (aform == 0x21u /* DW_FORM_implicit_const */) {
                 if (!read_sleb(p, n, pos, imp)) return false;
@@ -203,6 +234,8 @@ bool parse_dwarf_sections(const DwarfSections &sec,
 
     size_t cu_start = 0;
     bool parsed_any_cu = false;
+    size_t total_die_attrs = 0;
+    constexpr size_t kMaxTotalDieAttrs = 2000000u;
     while (cu_start < n) {
         bool rem_zero = true;
         for (size_t z = cu_start; z < n; ++z) {
@@ -303,9 +336,35 @@ bool parse_dwarf_sections(const DwarfSections &sec,
             return cstr_at(sec.debug_str, static_cast<size_t>(soff));
         };
 
+        auto decode_loc_block = [&](uint64_t bl, DieAttrVal &val) -> bool {
+            if (bl > cu_end - pos) return false;
+            if (bl >= 2 && p[pos] == 0x23u /* DW_OP_plus_uconst */) {
+                size_t bp = pos + 1;
+                uint64_t u = 0;
+                if (read_uleb(p, pos + static_cast<size_t>(bl), bp, u) &&
+                    u <= static_cast<uint64_t>(INT64_MAX)) {
+                    val.has_int = true;
+                    val.ival = static_cast<int64_t>(u);
+                }
+            } else if (bl >= 1 && p[pos] >= 0x30u && p[pos] <= 0x4Fu /* DW_OP_lit0..31 */) {
+                val.has_int = true;
+                val.ival = int64_t(p[pos] - 0x30u);
+            }
+            pos += static_cast<size_t>(bl);
+            return true;
+        };
+
+        auto set_cu_ref = [&](uint64_t rel, DieAttrVal &val) -> bool {
+            if (rel >= cu_end - cu_start) return false;
+            val.has_ref = true;
+            val.ref_off = cu_start + rel;
+            return true;
+        };
+
         auto read_form = [&](uint64_t form, int64_t imp_const, DieAttrVal &val) -> bool {
+            int ind_depth = 0;
             while (form == 0x16u /* DW_FORM_indirect */) {
-                if (!read_uleb(p, cu_end, pos, form)) return false;
+                if (++ind_depth > 8 || !read_uleb(p, cu_end, pos, form)) return false;
             }
             switch (form) {
                 case 0x01u: {  // DW_FORM_addr
@@ -320,22 +379,13 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                     if (cu_end - pos < 2) return false;
                     const uint16_t bl = rd16(p + pos, le);
                     pos += 2;
-                    if (cu_end - pos < bl) return false;
-                    if (bl >= 2 && p[pos] == 0x23u /* DW_OP_plus_uconst */) {
-                        size_t bp = pos + 1;
-                        uint64_t u = 0;
-                        if (read_uleb(p, pos + bl, bp, u)) { val.has_int = true; val.ival = static_cast<int64_t>(u); }
-                    }
-                    pos += bl;
-                    return true;
+                    return decode_loc_block(bl, val);
                 }
                 case 0x04u: {  // DW_FORM_block4
                     if (cu_end - pos < 4) return false;
                     const uint32_t bl = rd32(p + pos, le);
                     pos += 4;
-                    if (bl > cu_end - pos) return false;
-                    pos += bl;
-                    return true;
+                    return decode_loc_block(bl, val);
                 }
                 case 0x05u: {  // DW_FORM_data2
                     if (cu_end - pos < 2) return false;
@@ -362,40 +412,22 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                     const size_t start = pos;
                     while (pos < cu_end && p[pos] != 0) ++pos;
                     if (pos >= cu_end) return false;
+                    const size_t slen = std::min(pos - start, kMaxObjStrBytes);
                     val.has_str = true;
-                    val.sval.assign(reinterpret_cast<const char *>(p + start), pos - start);
+                    val.sval.assign(reinterpret_cast<const char *>(p + start), slen);
                     ++pos;
                     return true;
                 }
                 case 0x09u:    // DW_FORM_block
                 case 0x18u: {  // DW_FORM_exprloc
                     uint64_t bl = 0;
-                    if (!read_uleb(p, cu_end, pos, bl) || bl > cu_end - pos) return false;
-                    if (bl >= 2 && p[pos] == 0x23u /* DW_OP_plus_uconst */) {
-                        size_t bp = pos + 1;
-                        uint64_t u = 0;
-                        if (read_uleb(p, pos + static_cast<size_t>(bl), bp, u)) {
-                            val.has_int = true;
-                            val.ival = static_cast<int64_t>(u);
-                        }
-                    } else if (bl >= 1 && p[pos] >= 0x30u && p[pos] <= 0x4Fu /* DW_OP_lit0..31 */) {
-                        val.has_int = true;
-                        val.ival = int64_t(p[pos] - 0x30u);
-                    }
-                    pos += static_cast<size_t>(bl);
-                    return true;
+                    if (!read_uleb(p, cu_end, pos, bl)) return false;
+                    return decode_loc_block(bl, val);
                 }
                 case 0x0Au: {  // DW_FORM_block1
                     if (pos >= cu_end) return false;
                     const uint8_t bl = p[pos++];
-                    if (cu_end - pos < bl) return false;
-                    if (bl >= 2 && p[pos] == 0x23u) {
-                        size_t bp = pos + 1;
-                        uint64_t u = 0;
-                        if (read_uleb(p, pos + bl, bp, u)) { val.has_int = true; val.ival = static_cast<int64_t>(u); }
-                    }
-                    pos += bl;
-                    return true;
+                    return decode_loc_block(bl, val);
                 }
                 case 0x0Bu: {  // DW_FORM_data1
                     if (pos >= cu_end) return false;
@@ -426,51 +458,48 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                 case 0x0Fu: {  // DW_FORM_udata
                     uint64_t uv = 0;
                     if (!read_uleb(p, cu_end, pos, uv)) return false;
-                    val.has_int = true;
-                    val.ival = static_cast<int64_t>(uv);
+                    if (uv <= static_cast<uint64_t>(INT64_MAX)) {
+                        val.has_int = true;
+                        val.ival = static_cast<int64_t>(uv);
+                    }
                     return true;
                 }
                 case 0x10u: {  // DW_FORM_ref_addr
                     const size_t rsz = (version == 2) ? addr_size : off_sz;
                     if (cu_end - pos < rsz) return false;
-                    val.has_ref = true;
-                    val.ref_off = (rsz == 8) ? rd64(p + pos, le) : rd32(p + pos, le);
+                    const uint64_t roff = (rsz == 8) ? rd64(p + pos, le) : rd32(p + pos, le);
                     pos += rsz;
+                    if (roff >= n) return false;
+                    val.has_ref = true;
+                    val.ref_off = roff;
                     return true;
                 }
                 case 0x11u: {  // DW_FORM_ref1
                     if (pos >= cu_end) return false;
-                    val.has_ref = true;
-                    val.ref_off = cu_start + p[pos++];
-                    return true;
+                    return set_cu_ref(p[pos++], val);
                 }
                 case 0x12u: {  // DW_FORM_ref2
                     if (cu_end - pos < 2) return false;
-                    val.has_ref = true;
-                    val.ref_off = cu_start + rd16(p + pos, le);
+                    const uint16_t rel = rd16(p + pos, le);
                     pos += 2;
-                    return true;
+                    return set_cu_ref(rel, val);
                 }
                 case 0x13u: {  // DW_FORM_ref4
                     if (cu_end - pos < 4) return false;
-                    val.has_ref = true;
-                    val.ref_off = cu_start + rd32(p + pos, le);
+                    const uint32_t rel = rd32(p + pos, le);
                     pos += 4;
-                    return true;
+                    return set_cu_ref(rel, val);
                 }
                 case 0x14u: {  // DW_FORM_ref8
                     if (cu_end - pos < 8) return false;
-                    val.has_ref = true;
-                    val.ref_off = cu_start + rd64(p + pos, le);
+                    const uint64_t rel = rd64(p + pos, le);
                     pos += 8;
-                    return true;
+                    return set_cu_ref(rel, val);
                 }
                 case 0x15u: {  // DW_FORM_ref_udata
                     uint64_t u = 0;
                     if (!read_uleb(p, cu_end, pos, u)) return false;
-                    val.has_ref = true;
-                    val.ref_off = cu_start + u;
-                    return true;
+                    return set_cu_ref(u, val);
                 }
                 case 0x17u: {  // DW_FORM_sec_offset
                     if (cu_end - pos < off_sz) return false;
@@ -593,6 +622,7 @@ bool parse_dwarf_sections(const DwarfSections &sec,
             die.off = die_off;
             die.tag = ait->second.tag;
             for (const AbbrevAttr &aa : ait->second.attrs) {
+                if (++total_die_attrs > kMaxTotalDieAttrs) { cu_ok = false; break; }
                 DieAttrVal val;
                 if (!read_form(aa.form, aa.implicit_const, val)) { cu_ok = false; break; }
                 if (aa.name == 0x72u /* DW_AT_str_offsets_base */ && val.has_int && val.ival >= 0) {
@@ -752,7 +782,8 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                 if (ttag == 0x24u /* DW_TAG_base_type */) {
                     std::optional<int64_t> bsz;
                     auto sit = td->attrs.find(0x0Bu /* DW_AT_byte_size */);
-                    if (sit != td->attrs.end() && sit->second.has_int) bsz = sit->second.ival;
+                    if (sit != td->attrs.end() && sit->second.has_int && valid_dwarf_bytes(sit->second.ival))
+                        bsz = sit->second.ival;
                     bool is_flt = false;
                     auto eit = td->attrs.find(0x3Eu /* DW_AT_encoding */);
                     if (eit != td->attrs.end() && eit->second.has_int) {
@@ -767,7 +798,8 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                 if (ttag == 0x04u /* DW_TAG_enumeration_type */) {
                     std::optional<int64_t> bsz;
                     auto sit = td->attrs.find(0x0Bu);
-                    if (sit != td->attrs.end() && sit->second.has_int) bsz = sit->second.ival;
+                    if (sit != td->attrs.end() && sit->second.has_int && valid_dwarf_bytes(sit->second.ival))
+                        bsz = sit->second.ival;
                     if (!bsz && td->attrs.count(0x49u)) {
                         const DwarfSlot sub = self(self, td, false, depth + 1);
                         bsz = sub.byte_width;
@@ -780,7 +812,8 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                 if (ttag == 0x13u /* structure_type */ || ttag == 0x17u /* union_type */) {
                     std::optional<int64_t> bsz;
                     auto sit = td->attrs.find(0x0Bu);
-                    if (sit != td->attrs.end() && sit->second.has_int) bsz = sit->second.ival;
+                    if (sit != td->attrs.end() && sit->second.has_int && valid_dwarf_bytes(sit->second.ival))
+                        bsz = sit->second.ival;
                     std::string snm;
                     auto nit = td->attrs.find(0x03u);
                     if (nit != td->attrs.end() && nit->second.has_str) snm = nit->second.sval;
@@ -807,7 +840,8 @@ bool parse_dwarf_sections(const DwarfSections &sec,
 
             if (d.tag == 0x13u || d.tag == 0x17u) {
                 auto sit = d.attrs.find(0x0Bu /* DW_AT_byte_size */);
-                if (sit == d.attrs.end() || !sit->second.has_int) continue;
+                if (sit == d.attrs.end() || !sit->second.has_int || !valid_dwarf_bytes(sit->second.ival))
+                    continue;
                 const bool is_un = (d.tag == 0x17u);
                 std::vector<std::string> names;
                 auto nit = d.attrs.find(0x03u);
@@ -822,6 +856,7 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                 rec.size = sit->second.ival;
                 rec.is_union = is_un;
                 int anon_k = 0;
+                bool bad_rec = false;
                 for (uint64_t ch_off : d.children) {
                     const RawDie &ch = dies[ch_off];
                     if (ch.tag != 0x0Du /* DW_TAG_member */) continue;
@@ -839,11 +874,15 @@ bool parse_dwarf_sections(const DwarfSections &sec,
                     int64_t moff = 0;
                     if (!is_un) {
                         auto loit = ch.attrs.find(0x38u /* DW_AT_data_member_location */);
-                        if (loit != ch.attrs.end() && loit->second.has_int) moff = loit->second.ival;
+                        if (loit != ch.attrs.end() && loit->second.has_int) {
+                            if (!valid_dwarf_bytes(loit->second.ival)) { bad_rec = true; break; }
+                            moff = loit->second.ival;
+                        }
                     }
                     DwarfSlot mslot = type_shape(type_shape, &ch, true, 0);
                     rec.members.push_back(DwarfMember{mnm, moff, std::move(mslot)});
                 }
+                if (bad_rec) continue;
                 for (const std::string &snm : names) {
                     out_structs[snm] = rec;
                 }
@@ -1070,6 +1109,7 @@ bool parse_elf_bytes(std::string_view data, ObjectInfo &out, std::string &err) {
         return is64 ? rd64(p + pos + 8, le) : rd32(p + pos + 4, le);
     };
 
+    uint64_t total_elf_syms = 0;
     for (const ElfSec &s : shdrs) {
         if ((s.type != 2u && s.type != 11u) || s.link >= shdrs.size()) continue;
         const ElfSec &str_sec = shdrs[s.link];
@@ -1079,7 +1119,7 @@ bool parse_elf_bytes(std::string_view data, ObjectInfo &out, std::string &err) {
         const uint64_t entsz = s.entsize ? s.entsize : (is64 ? 24u : 16u);
         if (entsz < (is64 ? 24u : 16u)) continue;
         const uint64_t n_ent = s.size / entsz;
-        for (uint64_t ei = 0; ei < n_ent; ++ei) {
+        for (uint64_t ei = 0; ei < n_ent && total_elf_syms < 4000000u; ++ei, ++total_elf_syms) {
             const size_t pos = static_cast<size_t>(s.off) + static_cast<size_t>(ei * entsz);
             const uint8_t *ep = p + pos;
             uint32_t st_name = 0;
@@ -1118,28 +1158,17 @@ bool parse_elf_bytes(std::string_view data, ObjectInfo &out, std::string &err) {
         const ElfSec &s = shdrs[i];
         if (s.type == 0 || s.type == 8 /* SHT_NOBITS */) continue;
         const std::string sname = cstr_at(shstrtab, s.name_off);
-        if (sname == ".debug_info" || sname == ".zdebug_info") {
-            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, dw.debug_info, err))
+        if (std::string *dst = dw.slot_for(sname, true, false)) {
+            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, *dst, err))
                 return false;
-            info_idx = static_cast<int>(i);
-        } else if (sname == ".debug_abbrev" || sname == ".zdebug_abbrev") {
-            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, dw.debug_abbrev, err))
-                return false;
-        } else if (sname == ".debug_str" || sname == ".zdebug_str") {
-            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, dw.debug_str, err))
-                return false;
-        } else if (sname == ".debug_line_str" || sname == ".zdebug_line_str") {
-            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, dw.debug_line_str, err))
-                return false;
-        } else if (sname == ".debug_str_offsets" || sname == ".zdebug_str_offsets") {
-            if (!extract_elf_sec_bytes(data, s.flags, s.off, s.size, is64, le, sname, dw.debug_str_offsets, err))
-                return false;
-            str_offs_idx = static_cast<int>(i);
+            if (dst == &dw.debug_info) info_idx = static_cast<int>(i);
+            else if (dst == &dw.debug_str_offsets) str_offs_idx = static_cast<int>(i);
         }
     }
 
     auto apply_rela_to = [&](int target_shndx, std::string &sec_buf) {
         if (target_shndx < 0 || sec_buf.empty()) return;
+        uint64_t total_rels = 0;
         for (const ElfSec &rs : shdrs) {
             if ((rs.type != 4u /* SHT_RELA */ && rs.type != 9u /* SHT_REL */) ||
                 int(rs.info) != target_shndx)
@@ -1150,7 +1179,7 @@ bool parse_elf_bytes(std::string_view data, ObjectInfo &out, std::string &err) {
                                             : (is64 ? (is_rela ? 24u : 16u) : (is_rela ? 12u : 8u));
             if (rsz < (is64 ? (is_rela ? 24u : 16u) : (is_rela ? 12u : 8u))) continue;
             const uint64_t n_rel = rs.size / rsz;
-            for (uint64_t ri = 0; ri < n_rel; ++ri) {
+            for (uint64_t ri = 0; ri < n_rel && total_rels < 4000000u; ++ri, ++total_rels) {
                 const size_t pos = static_cast<size_t>(rs.off) + static_cast<size_t>(ri * rsz);
                 const uint8_t *rp = p + pos;
                 uint64_t r_off = 0, r_sym = 0, r_type = 0;
@@ -1227,7 +1256,7 @@ bool parse_macho_bytes(std::string_view data, ObjectInfo &out, std::string &err)
         case 0x0100000Cu: out.arch = "aarch64"; break;
         default: out.arch = "macho-" + std::to_string(int32_t(cputype)); break;
     }
-    const uint32_t ncmds = rd32(p + 16, le);
+    const uint32_t ncmds = std::min<uint32_t>(rd32(p + 16, le), 65536u);
     size_t off = is64 ? 32u : 28u;
     std::vector<std::string> sec_kinds{""};
     struct SymCmd { uint32_t symoff, nsyms, stroff, strsize; };
@@ -1257,12 +1286,8 @@ bool parse_macho_bytes(std::string_view data, ObjectInfo &out, std::string &err)
                     const uint64_t s_size = seg64 ? rd64(p + soff + 40, le) : rd32(p + soff + 36, le);
                     const uint32_t s_foff = rd32(p + soff + (seg64 ? 48u : 40u), le);
                     if (segname == "__DWARF" && s_foff <= data.size() && s_size <= data.size() - s_foff) {
-                        const std::string_view sv = data.substr(s_foff, static_cast<size_t>(s_size));
-                        if (sectname == "__debug_info") dw.debug_info.assign(sv.data(), sv.size());
-                        else if (sectname == "__debug_abbrev") dw.debug_abbrev.assign(sv.data(), sv.size());
-                        else if (sectname == "__debug_str") dw.debug_str.assign(sv.data(), sv.size());
-                        else if (sectname == "__debug_line_str") dw.debug_line_str.assign(sv.data(), sv.size());
-                        else if (sectname == "__debug_str_offs") dw.debug_str_offsets.assign(sv.data(), sv.size());
+                        if (std::string *dst = dw.slot_for(sectname, false, true))
+                            dst->assign(data.data() + s_foff, static_cast<size_t>(s_size));
                     }
                     soff += sec_sz;
                 }
@@ -1277,10 +1302,11 @@ bool parse_macho_bytes(std::string_view data, ObjectInfo &out, std::string &err)
     }
 
     const size_t entsz = is64 ? 16u : 12u;
+    uint64_t total_macho_syms = 0;
     for (const SymCmd &sc : sym_cmds) {
         if (sc.stroff > data.size() || sc.strsize > data.size() - sc.stroff) continue;
         const std::string_view strtab = data.substr(sc.stroff, sc.strsize);
-        for (uint32_t i = 0; i < sc.nsyms; ++i) {
+        for (uint32_t i = 0; i < sc.nsyms && total_macho_syms < 4000000u; ++i, ++total_macho_syms) {
             const uint64_t pos = uint64_t(sc.symoff) + uint64_t(i) * entsz;
             if (pos + entsz > data.size()) break;
             const uint32_t n_strx = rd32(p + pos, le);
@@ -1384,12 +1410,8 @@ bool parse_pe_coff_bytes(std::string_view data, ObjectInfo &out, std::string &er
         sects.push_back(PeSec{vaddr, std::max(vsize, rawsize), rawptr, rawsize});
         const uint32_t eff_sz = (vsize > 0 && vsize < rawsize) ? vsize : rawsize;
         if (rawptr <= data.size() && eff_sz <= data.size() - rawptr) {
-            const std::string_view sv = data.substr(rawptr, eff_sz);
-            if (sname == ".debug_info") dw.debug_info.assign(sv.data(), sv.size());
-            else if (sname == ".debug_abbrev") dw.debug_abbrev.assign(sv.data(), sv.size());
-            else if (sname == ".debug_str") dw.debug_str.assign(sv.data(), sv.size());
-            else if (sname == ".debug_line_str") dw.debug_line_str.assign(sv.data(), sv.size());
-            else if (sname == ".debug_str_offsets") dw.debug_str_offsets.assign(sv.data(), sv.size());
+            if (std::string *dst = dw.slot_for(sname, false, false))
+                dst->assign(data.data() + rawptr, eff_sz);
         }
     }
 
@@ -1494,34 +1516,9 @@ bool parse_single_object(std::string_view data, ObjectInfo &out, std::string &er
 
 }  // namespace
 
-bool inspect_object_file(const std::string &path, ObjectInfo &out, std::string &err) {
+bool inspect_object_bytes(std::string_view data, std::string_view label, ObjectInfo &out, std::string &err) {
     out = ObjectInfo{};
-    std::error_code fs_ec;
-    const auto st = std::filesystem::status(path, fs_ec);
-    if (fs_ec || !std::filesystem::is_regular_file(st)) {
-        err = "cannot open " + path;
-        return false;
-    }
-    constexpr uintmax_t kMaxObjBytes = 512ULL * 1024ULL * 1024ULL;
-    const uintmax_t fsz = std::filesystem::file_size(path, fs_ec);
-    if (fs_ec) {
-        err = "cannot stat " + path;
-        return false;
-    }
-    if (fsz > kMaxObjBytes) {
-        err = "object file " + path + " exceeds 512 MiB inspection limit";
-        return false;
-    }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        err = "cannot open " + path;
-        return false;
-    }
-    std::string data(static_cast<size_t>(fsz), '\0');
-    if (fsz > 0 && !in.read(data.data(), static_cast<std::streamsize>(fsz))) {
-        err = "cannot read " + path;
-        return false;
-    }
+    const std::string path(label);
     if (data.size() >= 8 && std::memcmp(data.data(), "!<arch>\n", 8) == 0) {
         size_t pos = 8;
         bool any_member = false;
@@ -1613,6 +1610,37 @@ bool inspect_object_file(const std::string &path, ObjectInfo &out, std::string &
         return true;
     }
     return parse_single_object(data, out, err);
+}
+
+bool inspect_object_file(const std::string &path, ObjectInfo &out, std::string &err) {
+    out = ObjectInfo{};
+    std::error_code fs_ec;
+    const auto st = std::filesystem::status(path, fs_ec);
+    if (fs_ec || !std::filesystem::is_regular_file(st)) {
+        err = "cannot open " + path;
+        return false;
+    }
+    constexpr uintmax_t kMaxObjBytes = 512ULL * 1024ULL * 1024ULL;
+    const uintmax_t fsz = std::filesystem::file_size(path, fs_ec);
+    if (fs_ec) {
+        err = "cannot stat " + path;
+        return false;
+    }
+    if (fsz > kMaxObjBytes) {
+        err = "object file " + path + " exceeds 512 MiB inspection limit";
+        return false;
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        err = "cannot open " + path;
+        return false;
+    }
+    std::string data(static_cast<size_t>(fsz), '\0');
+    if (fsz > 0 && !in.read(data.data(), static_cast<std::streamsize>(fsz))) {
+        err = "cannot read " + path;
+        return false;
+    }
+    return inspect_object_bytes(data, path, out, err);
 }
 
 }  // namespace native_ffi
