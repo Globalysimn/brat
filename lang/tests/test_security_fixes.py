@@ -40,8 +40,9 @@ CASES = {
                      b"cleanup\ncaught\n", 0),
     'regex_alt65': ('fn main() -> i64 {\n  print(re_match("a", "%s"))\n  0\n}\n' % _ALT65,
                     b"true\n", 0),
-    'regex_dot_utf8': ('fn main() -> i64 {\n  print(re_match("\u00e9", ".."))\n  0\n}\n',
-                       b"true\n", 0),
+    'regex_dot_utf8': ('fn main() -> i64 {\n  print(re_match("\u00e9", ".."))\n'
+                       '  print(re_match("\u00e9", "^.$"))\n  0\n}\n',
+                       b"false\ntrue\n", 0),
 }
 
 NEST = '''fn worker(n: i64) -> i64 {

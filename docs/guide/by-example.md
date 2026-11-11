@@ -285,8 +285,9 @@ touched a: page:a -> page:c -> page:b
 
 Built-in `re_match`, `re_find`, `re_captures`, and `re_replace` run on a
 non-backtracking Thompson/Pike VM in `crt/ops_str.h`, so pathological inputs do
-not go exponential. Note `\{4\}`: unescaped `{4}` inside `"..."` would
-interpolate the integer `4`:
+not go exponential. A pattern matches characters, so `.` takes a whole `é`
+and `[а-я]` is a range of letters; `\d`, `\w` and `\s` cover ASCII only. Note
+`\{4\}`: unescaped `{4}` inside `"..."` would interpolate the integer `4`:
 
 ```brat run
 fn main() -> i64 {

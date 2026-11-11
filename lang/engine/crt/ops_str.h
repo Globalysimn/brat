@@ -2729,7 +2729,7 @@ BFN Val venv_get_bytes(Val v) { return _venv_lookup(v, 1); }
 #if (BRAT_CRT_MASK & BRAT_CRT_RE)
 typedef struct { char kind; char q; char ch; const char *body; } RTok;
 
-static int r_cls_shorthand(char esc, unsigned char uch) {
+static int r_cls_shorthand(char esc, unsigned uch) {
     int is_d = (uch >= '0' && uch <= '9');
     int is_w = is_d || (uch >= 'a' && uch <= 'z') || (uch >= 'A' && uch <= 'Z') || uch == '_';
     int is_s = (uch == ' ' || uch == '\t' || uch == '\n' || uch == '\r');
@@ -2742,7 +2742,11 @@ static int r_cls_shorthand(char esc, unsigned char uch) {
     return -1;
 }
 
-static int r_cls_next(const char **bp, unsigned char *out, char *shorthand) {
+BFN bint vcp_next(const char *p, unsigned *out);
+
+/* A class member is a code point, so `[é]` holds one character and `[а-я]`
+   is a range of characters. */
+static int r_cls_next(const char **bp, unsigned *out, char *shorthand) {
     const char *b = *bp;
     *shorthand = 0;
     if (!*b) return 0;
@@ -2757,16 +2761,14 @@ static int r_cls_next(const char **bp, unsigned char *out, char *shorthand) {
         if (e == 'n') *out = '\n';
         else if (e == 't') *out = '\t';
         else if (e == 'r') *out = '\r';
-        else *out = (unsigned char)e;
+        else *bp = b + 1 + vcp_next(b + 1, out);
         return 2;
     }
-    *out = (unsigned char)*b;
-    *bp = b + 1;
+    *bp = b + vcp_next(b, out);
     return 1;
 }
 
-static int rtok_match(RTok *t, char ch) {
-    unsigned char uch = (unsigned char)ch;
+static int rtok_match(RTok *t, unsigned uch) {
     if (t->kind == 'l') return uch == (unsigned char)t->ch;
     if (t->kind == 'd') return 1;
     if (t->kind == 's') {
@@ -2774,7 +2776,7 @@ static int rtok_match(RTok *t, char ch) {
         int neg = 0, found = 0;
         if (*body == '^') { neg = 1; body++; }
         while (*body) {
-            unsigned char lo = 0;
+            unsigned lo = 0;
             char sh = 0;
             r_cls_next(&body, &lo, &sh);
             if (sh) {
@@ -2783,7 +2785,7 @@ static int rtok_match(RTok *t, char ch) {
             }
             if (*body == '-' && body[1]) {
                 const char *peek = body + 1;
-                unsigned char hi = 0;
+                unsigned hi = 0;
                 char sh2 = 0;
                 r_cls_next(&peek, &hi, &sh2);
                 if (!sh2) {
@@ -2969,6 +2971,13 @@ static bint r_atom(RProg *g) {
         body = r_emit(g, 'c', 0, 0);
         g->p[body].q = 'l';
         g->p[body].ch = c;
+    }
+    /* A literal is a whole code point: `é+` repeats the character, not its last byte. */
+    while (!g->err && g->p[body].q == 'l' && g->i < g->plen &&
+           ((unsigned char)g->pat[g->i] & 0xC0) == 0x80) {
+        bint at = r_emit(g, 'c', 0, 0);
+        g->p[at].q = 'l';
+        g->p[at].ch = g->pat[g->i++];
     }
     if (g->err) return -1;
     bint body_end = g->n;
@@ -3203,7 +3212,8 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
     bint nlist = 0;
     memset(seen, 0, sizeof(bint) * (size_t)(nprog + 1));
     for (bint si = min_from; si <= slen; si++) {
-        if (!matched) {
+        /* A match starts on a code point, never inside one. */
+        if (!matched && (si >= slen || ((unsigned char)s[si] & 0xC0) != 0x80)) {
             for (bint z = 0; z < nslots; z++) work_slots[z] = -1;
             re_pike_add(g->p, start, slen, si, list_pcs, list_slots, &nlist,
                         seen, work_slots, nslots, stk, stk_cap);
@@ -3220,15 +3230,22 @@ static int re_pike_search(RProg *g, bint start, const char *s, bint slen,
                 break;
             }
             if (si >= slen || in->op != 'c') continue;
+            bint to = pc + 1;
             if (in->q == 'l') { if (s[si] != in->ch) continue; }
-            else if (in->q == 'd') { }
             else {
-                RTok t; t.kind = 's'; t.q = 0; t.ch = 0; t.body = in->body;
-                if (!rtok_match(&t, s[si])) continue;
+                /* `.` and a class take one code point: it is tested at its first
+                   byte and the thread waits here while the rest goes by. */
+                if (in->q != 'd' && ((unsigned char)s[si] & 0xC0) != 0x80) {
+                    unsigned cp = 0;
+                    vcp_next(s + si, &cp);
+                    RTok t; t.kind = 's'; t.q = 0; t.ch = 0; t.body = in->body;
+                    if (!rtok_match(&t, cp)) continue;
+                }
+                if (si + 1 < slen && ((unsigned char)s[si + 1] & 0xC0) == 0x80) to = pc;
             }
             if (nslots > 0)
                 memcpy(work_slots, list_slots + k * nslots, sizeof(bint) * (size_t)nslots);
-            re_pike_add(g->p, pc + 1, slen, si + 1, next_pcs, next_slots, &nn,
+            re_pike_add(g->p, to, slen, si + 1, next_pcs, next_slots, &nn,
                         next_seen, work_slots, nslots, stk, stk_cap);
         }
         if (si >= slen) break;

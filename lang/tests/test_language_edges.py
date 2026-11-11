@@ -99,8 +99,17 @@ CASES = {
   return 0
 }
 ''', 'inner caught\nouter caught outer\n'),
-    # Regex: both backends match raw UTF-8 bytes, so \w covers the whole string.
-    'regex_unicode_word': ('print(re_match("h\u00e9llo", "\\\\w+"))\n', 'true\n'),
+    # `\w` is ASCII only; the search is unanchored, so the `h` is enough.
+    'regex_unicode_word': ('print(re_match("h\u00e9llo", "\\\\w+"))\n'
+                           'print(re_match("h\u00e9llo", "^\\\\w+$"))\n', 'true\nfalse\n'),
+    # A pattern works on characters: `.` used to hand back the first byte of
+    # `\u00e9`, which is not a string, and `\u00e9+` repeated the second byte.
+    'regex_code_points': ('print(unwrap(re_find("\u00e9t\u00e9", ".")) == "\u00e9")\n'
+                          'print(re_match("\u00e9\u00e9\u00e9", "^\u00e9+$"), re_match("\u00e9", "^..$"))\n'
+                          'print(unwrap(re_find("\u043f\u0440\u0438\u0432\u0435\u0442 x", "[\u0430-\u044f]+")))\n'
+                          'print(re_match("\u00e9", "^[^a]$"), re_match("\u20ac", "^\\\\W$"))\n'
+                          'print(re_replace("a\u00e9b", ".", "<$0>"))\n',
+                          'true\ntrue false\n\u043f\u0440\u0438\u0432\u0435\u0442\ntrue true\n<a><\u00e9><b>\n'),
     # An empty alternation branch matches "", so "ac" fails but "abd" passes.
     'regex_empty_alt': ('print(re_match("ac", "a(b|c|)d"))\n'
                         'print(re_match("abd", "a(b|c|)d"))\n', 'false\ntrue\n'),
@@ -109,7 +118,7 @@ CASES = {
                           'print(re_match("b", "(a*)*"))\n', 'true\ntrue\n'),
     'regex_neg_class': ('print(re_match("abc", "[^xyz]+"))\n'
                         'print(re_match("xyz", "[^xyz]+"))\n', 'true\nfalse\n'),
-    # `.` matches any byte, newline included -- both backends agree on this.
+    # `.` matches any character, newline included -- both backends agree on this.
     'regex_dot_bytes': ('print(re_match("a\\nb", "a.b"))\n', 'true\n'),
     # `^` anchors the whole input, not each line.
     'regex_anchor_input': ('print(re_match("foo\\nbar", "^bar"))\n', 'false\n'),
