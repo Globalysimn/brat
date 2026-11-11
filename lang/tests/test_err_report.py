@@ -332,6 +332,19 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # a second top-level `let` of a name takes over from the first
+    "relet_global": '''let v = [1, 2, 3]
+let t = [v, v]
+let v = [len(v), 9]
+let v = v + [len(t)]
+
+fn show() {
+  print(t, v)
+  return 0
+}
+
+show()
+''',
 }
 
 for name, src in ASSIGNED.items():

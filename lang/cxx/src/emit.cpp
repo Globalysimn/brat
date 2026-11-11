@@ -6239,7 +6239,16 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         if (global_lets.count(name) && fin == "__fin_top") {
             V v = ex(e);
             for (auto &p : v.pre) ln(ind, p);
-            ln(ind, cat(cname(name), " = (", keep(e, v.val), ");"));
+            if (relet.count(name)) {
+                // A second `let` of the name takes the binding over, after the
+                // right side had its chance to read the old value.
+                std::string tmp = new_tmp("v");
+                ln(ind, cat("Val ", tmp, " = (", keep(e, v.val), ");"));
+                ln(ind, cat("vrelease(", cname(name), ");"));
+                ln(ind, cat(cname(name), " = ", tmp, ";"));
+            } else {
+                ln(ind, cat(cname(name), " = (", keep(e, v.val), ");"));
+            }
             emit_err_check(ind);
             assigned.insert(name);
             return;
