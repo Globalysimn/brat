@@ -271,6 +271,26 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # `sort` hands back its receiver, except when it fails on a mixed vector
+    "sort_mixed": '''fn mixed(i: i64) {
+  return [[i], ["a"]]
+}
+
+fn main() -> i64 {
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    try {
+      print(mixed(i).sort())
+    } catch e {
+      n = n + 1
+    }
+    i = i + 1
+  }
+  print(n, [[2], [1]].sort())
+  return 0
+}
+''',
 }
 
 for name, src in ASSIGNED.items():

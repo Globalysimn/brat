@@ -4658,9 +4658,9 @@ V Emitter::ex_mcall(const Expr &e) {
     V o = ex(*obj);
     // `"a,b".split(",")` or `a[0].push(3)` builds or fetches a receiver nothing
     // else names: release it once the call returns unless the method returns the
-    // receiver itself (`SELF_RESULT`).
+    // receiver itself (`SELF_RESULT`), which a failed `sort` does not.
     std::string recv;
-    if (!SELF_RESULT.count(meth) && dec_able(*obj, heap_returns())) {
+    if (dec_able(*obj, heap_returns())) {
         recv = new_tmp("r");
         o.pre.push_back("Val " + recv + " = (" + o.val + ");");
         o.val = recv;
@@ -4669,8 +4669,11 @@ V Emitter::ex_mcall(const Expr &e) {
         if (recv.empty()) return res;
         std::string t = new_tmp("c");
         res.pre.push_back("Val " + t + " = (" + res.val + ");");
-        res.pre.push_back((PART_RESULT.count(meth) ? "vdrop_recv_part(" : "vdrop_recv(") + recv +
-                          ", " + t + ");");
+        if (SELF_RESULT.count(meth))
+            res.pre.push_back(cat("if (vhead_of(", t, ") != vhead_of(", recv, ")) vdrop_temp(", recv, ");"));
+        else
+            res.pre.push_back((PART_RESULT.count(meth) ? "vdrop_recv_part(" : "vdrop_recv(") + recv +
+                              ", " + t + ");");
         res.val = t;
         return res;
     };
