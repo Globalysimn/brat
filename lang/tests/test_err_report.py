@@ -291,6 +291,24 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # the check after a failed comparison ran ahead of the two literal drops
+    "compare_literals": '''fn id(x) {
+  return x
+}
+
+fn main() -> i64 {
+  let s = id("a string long enough to live on the heap")
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    try { print([1, "x"] < [1, 2]) } catch e { n = n + 1 }
+    try { if [s, 1] >= [s, "y"] { print("ge") } } catch e { n = n + 1 }
+    i = i + 1
+  }
+  print(n, [1] < [1, 2], [s] != [s])
+  return 0
+}
+''',
 }
 
 for name, src in ASSIGNED.items():

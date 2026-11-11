@@ -3492,8 +3492,8 @@ V Emitter::ex_bin(const Expr &e) {
         // string per `assert("a" + "b" == "ab")`: the error path was covered and
         // the path a correct program takes was not.
         for (auto &d : drops) pre.push_back(cat("vdrop_temp(", d, ");"));
-        pre.push_back(err_check_line());
         for (auto &d : cdrops) pre.push_back(d);
+        pre.push_back(err_check_line());
         return {pre, t};
     }
     throw EmitError("operator " + op);
