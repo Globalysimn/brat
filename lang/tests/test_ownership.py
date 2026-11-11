@@ -390,6 +390,18 @@ fn main() -> i64 {
 }
 """}, "use of undeclared var `m`"))
 
+# A method call does not make the name in front of it a value either:
+# `helper.push(1)` passed `check` and then failed in the C compiler.
+REJECT.append(("a38_fn_name_as_receiver", {"m.brat": """fn helper(x) {
+  return x
+}
+
+fn main() -> i64 {
+  helper.push(1)
+  return 0
+}
+"""}, "as a value"))
+
 
 ACCEPT = []
 

@@ -988,7 +988,10 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
         } else {
             bp = write_path(e->kids[0].get());
         }
-        if (!bp || !callee_known(*bp + "." + e->b, decl, funcs)) {
+        // `helper.push(1)` reads a fn name as a value just like `helper[0]`.
+        const bool fn_recv = bp && e->kids[0]->k == EK::Var && !decl.has(*bp) &&
+                             funcs.sigs.count(*bp) && !funcs.heads.count(*bp);
+        if (!bp || fn_recv || !callee_known(*bp + "." + e->b, decl, funcs)) {
             check_expr(e->kids[0].get(), decl, errs, funcs);
         }
         auto cb = HOF_CB_ARG.find(e->b);
