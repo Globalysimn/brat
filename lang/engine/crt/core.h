@@ -110,7 +110,6 @@
 #define BRAT_CRT_CASE 0x040u
 #define BRAT_CRT_CONC 0x080u
 #define BRAT_CRT_MT   0x100u
-#define BRAT_CRT_DYN  0x200u
 #define BRAT_CRT_JSON 0x400u
 #ifdef BRAT_HAS_VTAB_DISP
 static const char *_brat_vtag_disp(const char *t);
@@ -369,7 +368,6 @@ BFN void vtrace_print_cur_line(void) {
 BFN bint vsprint_len_q(Val v, bint q);
 BFN_HOT int verr_pending(void);
 BFN Val verr_take(void);
-BFN void verr_clear(void);
 BFN bint utf8_cplen(const char *s);
 BFN void vjprint(Val v);
 
@@ -2077,13 +2075,6 @@ BFN Vec *vtag_args_heap(Vec *a) {
     barena_depth = saved;
     return d;
 }
-static char *_vtag_intern(const char *tag);
-BFN Val vtagv_lit(const char *tag, Vec *args) {
-    Vec *tv = vtag_args_heap(args);
-    tv->tag = _vtag_intern(tag);
-    Val r; r.tag = V_TAG; r.sso = 0; r.imm = 0; r.as.tv = tv;
-    return r;
-}
 /* Intern table for tag names (Ok, Err, user enum variants): immortal.
  * Two threads can build the same tag at the same time (`spawn` runs bodies
  * concurrently), so the table has one mutex and a length published with
@@ -2533,13 +2524,6 @@ BFN bint map_del_v(Map *m, Val k) {
     return 1;
 }
 
-BFN char *vkey(Val k) {
-    if (k.tag == V_STR) return strdup(vstr_c(&k));
-    if (k.tag == V_INT) { char b[32]; snprintf(b, sizeof b, BINT_FMT, (bint)k.as.ival); return strdup(b); }
-    if (k.tag == V_FLOAT) { char b[64]; snprintf(b, sizeof b, "%.17g", k.as.fval); return strdup(b); }
-    if (k.tag == V_BOOL) return strdup(k.as.b ? "true" : "false");
-    vraise("bad map key"); return NULL;
-}
 /* Defined below the read methods that answer with them; the reserved key is
    refused by `get`, `has`, `del` and `get_or` as a value, never a raise. */
 BFN bint vmapkey_reserved(Val k);

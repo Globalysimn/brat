@@ -1640,29 +1640,6 @@ BFN const char *utf8_at(const char *s, bint idx) {
     }
     return p;
 }
-/* Strict UTF-8 validation: reject overlong encodings, surrogates, and > U+10FFFF. */
-BFN int vutf8_ok(const char *s) {
-    const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        unsigned c = *p;
-        if (c < 0x80) { p++; continue; }
-        bint n;
-        unsigned lo = 0x80, hi = 0xBF;
-        if (c >= 0xC2 && c <= 0xDF) n = 1;
-        else if (c == 0xE0) { n = 2; lo = 0xA0; }
-        else if (c >= 0xE1 && c <= 0xEC) n = 2;
-        else if (c == 0xED) { n = 2; hi = 0x9F; }
-        else if (c >= 0xEE && c <= 0xEF) n = 2;
-        else if (c == 0xF0) { n = 3; lo = 0x90; }
-        else if (c >= 0xF1 && c <= 0xF3) n = 3;
-        else if (c == 0xF4) { n = 3; hi = 0x8F; }
-        else return 0;
-        if (p[1] < lo || p[1] > hi) return 0;
-        for (bint i = 2; i <= n; i++) if (p[i] < 0x80 || p[i] > 0xBF) return 0;
-        p += n + 1;
-    }
-    return 1;
-}
 BFN Val vat(Val a, Val i) {
     if (a.tag == V_STRUCT) {
         Val *o = map_get_v(a.as.map, i);
@@ -1740,14 +1717,6 @@ BFN Val verr_leave(void) {
     }
     return vunwind;
 }
-BFN void verr_clear(void) {
-    Val prev = _verr_pending ? vunwind : vnil();
-    vunwind = vnil();
-    _verr_pending = 0;
-    _verr_exc = 0;
-    _verr_line = 0;
-    vrelease(prev);
-}
 /* A catch binds the first argument of the error it took and releases the
    envelope immediately while returning an owned reference to the payload. */
 BFN Val verr_catch_part(void) {
@@ -1763,10 +1732,6 @@ BFN void verr_catch_discard(void) {
     _verr_line = 0;
     vrelease(e);
 }
-BFN void verr_catch_end(void) {
-    if (verr_pending()) return;
-}
-BFN void vunwind_disarm(void) { /* no-op: pending channel has no jmp_buf */ }
 BFN void vunwind_do(void) { _verr_pending = 1; _verr_exc = 1; }
 
 /* The error owns its message and argument vector. A caught or stored error must not

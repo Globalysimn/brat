@@ -291,10 +291,6 @@ BFN Vec *vvec_of_m(Val v, const char *meth) {
     }
     return v.as.vec;
 }
-BFN Vec *vvec_of(Val v) {
-    if (v.tag != V_VEC) { vraise("not a vec"); vpoison_vec_s.len = 0; return &vpoison_vec_s; }
-    return v.as.vec;
-}
 BFN int vis_ok(Val v) {
     return v.tag == V_TAG && !strcmp(v.as.tv->tag, "ok");
 }
@@ -916,33 +912,6 @@ BFN void vspan(Val v) {
     fflush(stdout);
 }
 
-BFN void vjson_str(const char *s) {
-    putchar('"');
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p == '"') fputs("\\\"", stdout);
-        else if (*p == '\\') fputs("\\\\", stdout);
-        else if (*p == '\n') fputs("\\n", stdout);
-        else if (*p == '\r') fputs("\\r", stdout);
-        else if (*p == '\t') fputs("\\t", stdout);
-        else if (*p == '\b') fputs("\\b", stdout);
-        else if (*p == '\f') fputs("\\f", stdout);
-        else if (*p < 0x20) printf("\\u%04x", *p);
-        else putchar(*p);
-    }
-    putchar('"');
-}
-
-BFN void vfieldset(Val s, const char *k, Val v) {
-    if (s.tag != V_STRUCT) { vrelease1(v); vraise("bad field set"); return; }
-    Map *m = s.as.map;
-    BRAT_CTR_LOCK_OBJ(m);
-    Val *o = map_get(m, k);
-    if (!o) { BRAT_CTR_UNLOCK_OBJ(m); vrelease1(v); vraise("bad field set"); return; }
-    Val old = *o;
-    *o = v;
-    BRAT_CTR_UNLOCK_OBJ(m);
-    vrelease1(old);
-}
 BFN_HOT void vfieldset_ic(Val s, const char *k, Val v, BFieldIC *ic);
 BFN_HOT void vstruct_slot_set(Val s, const BShape *shp, bint slot, const char *k, Val v) {
     if (BRAT_LIKELY(s.tag == V_STRUCT && s.as.map->shape == shp)) {
