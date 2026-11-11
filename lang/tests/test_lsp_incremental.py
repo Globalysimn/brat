@@ -755,6 +755,64 @@ def test_ide_intelligence(bin_path):
         })["result"]
         check(f_idem == [], "formatting is idempotent on already-formatted document")
 
+        # 9. Multi-arm match (.els chain), Result[T, E] signatureHelp, and .bri comment braces
+        m3_uri = "file://" + os.path.join(td, "match3.brat")
+        m3_src = (
+            "struct Pt3 { x: i64, y: i64 }\n"
+            "fn m3(x: i64) -> i64 {\n"
+            "  let r: Result[i64, str] = Ok(1)\n"
+            "  let u = unwrap_or(r, 0)\n"
+            "  match x {\n"
+            "    1 => { return u },\n"
+            "    2 => { return 2 },\n"
+            "    _ => {\n"
+            "      let p = Pt3 { x: 3, y: 4 }\n"
+            "      return p.x\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        cli.notify("textDocument/didOpen", {
+            "textDocument": {"uri": m3_uri, "languageId": "brat", "version": 1, "text": m3_src}
+        })
+        check(cli.wait_diag(m3_uri) == [], "match3 clean")
+        sh = cli.request("textDocument/signatureHelp", {
+            "textDocument": {"uri": m3_uri}, "position": {"line": 3, "character": 23}
+        })["result"]
+        check(len(sh["signatures"][0]["parameters"]) == 2 and sh["activeParameter"] == 1,
+              "unwrap_or(Result[T, E], T) signatureHelp keeps 2 params: %r" % (sh,))
+        hv_p = cli.request("textDocument/hover", {
+            "textDocument": {"uri": m3_uri}, "position": {"line": 9, "character": 13}
+        })["result"]
+        check(hv_p is not None and "Pt3" in hv_p["contents"]["value"],
+              "hover resolves let binding in 3rd match arm: %r" % (hv_p,))
+        ih_p = cli.request("textDocument/inlayHint", {
+            "textDocument": {"uri": m3_uri},
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 12, "character": 0}},
+        })["result"]
+        check(any("Pt3" in h["label"] for h in ih_p),
+              "inlayHint emits inferred type in 3rd match arm: %r" % (ih_p,))
+        cli.notify("textDocument/didChange", {
+            "textDocument": {"uri": m3_uri, "version": 2},
+            "contentChanges": [{"text": m3_src.replace("return p.x", "p.\n      return 0")}],
+        })
+        cli.wait_diag(m3_uri)
+        comp_p = cli.request("textDocument/completion", {
+            "textDocument": {"uri": m3_uri}, "position": {"line": 9, "character": 8}
+        })["result"]
+        comp_lbls = {c["label"] for c in comp_p}
+        check({"x", "y", "copy"}.issubset(comp_lbls),
+              "struct completion works in 3rd match arm: %r" % (comp_lbls,))
+
+        bri_uri = "file://" + os.path.join(td, "brace_comment.bri")
+        cli.notify("textDocument/didOpen", {
+            "textDocument": {
+                "uri": bri_uri, "languageId": "brat", "version": 1,
+                "text": "pub struct BriBox {\n  a: i64 // } brace in comment\n  b: i64\n}\n",
+            }
+        })
+        check(cli.wait_diag(bri_uri) == [], ".bri struct ignores } inside // comment")
+
         rc, stderr = cli.shutdown()
         check(rc == 0, "clean shutdown")
 

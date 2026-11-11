@@ -375,60 +375,9 @@ bool ast_mentions_interproc_effects(std::string_view text) {
            text.find("lib_open") != std::string_view::npos;
 }
 
-static bool is_raw_str_open(std::string_view text, size_t quote_idx) {
-    if (quote_idx == 0 || text[quote_idx - 1] != 'r') return false;
-    if (quote_idx >= 2) {
-        const unsigned char prev = static_cast<unsigned char>(text[quote_idx - 2]);
-        if (std::isalnum(prev) || prev == '_') return false;
-    }
-    return true;
-}
-
-size_t function_end(std::string_view text, size_t start) {
-    bool in_string = false, raw_string = false, escaped = false;
-    bool in_line_comment = false, in_block_comment = false;
-    int depth = 0;
-    bool opened = false;
-    for (size_t i = start; i < text.size(); ++i) {
-        const char c = text[i];
-        if (in_line_comment) {
-            if (c == '\n') in_line_comment = false;
-            continue;
-        }
-        if (in_block_comment) {
-            if (c == '*' && i + 1 < text.size() && text[i + 1] == '/') {
-                in_block_comment = false;
-                ++i;
-            }
-            continue;
-        }
-        if (in_string) {
-            if (!raw_string && escaped) escaped = false;
-            else if (!raw_string && c == '\\') escaped = true;
-            else if (c == '"') { in_string = false; raw_string = false; }
-            continue;
-        }
-        if (c == '/' && i + 1 < text.size() && text[i + 1] == '/') {
-            in_line_comment = true;
-            ++i;
-        } else if (c == '/' && i + 1 < text.size() && text[i + 1] == '*') {
-            in_block_comment = true;
-            ++i;
-        } else if (c == '"') {
-            in_string = true;
-            raw_string = is_raw_str_open(text, i);
-        } else if (c == '{') {
-            opened = true;
-            ++depth;
-        } else if (c == '}' && opened && --depth == 0) {
-            return i + 1;
-        }
-    }
-    return std::string_view::npos;
-}
-
-size_t header_end(std::string_view text, size_t start, size_t end) {
-    bool in_string = false, raw_string = false, escaped = false;
+template <typename Fn>
+void scan_code_chars(std::string_view text, size_t start, size_t end, Fn &&on_code_char) {
+    bool in_string = false, escaped = false;
     bool in_line_comment = false, in_block_comment = false;
     for (size_t i = start; i < end; ++i) {
         const char c = text[i];
@@ -440,9 +389,9 @@ size_t header_end(std::string_view text, size_t start, size_t end) {
                 ++i;
             }
         } else if (in_string) {
-            if (!raw_string && escaped) escaped = false;
-            else if (!raw_string && c == '\\') escaped = true;
-            else if (c == '"') { in_string = false; raw_string = false; }
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') in_string = false;
         } else if (c == '/' && i + 1 < end && text[i + 1] == '/') {
             in_line_comment = true;
             ++i;
@@ -451,12 +400,39 @@ size_t header_end(std::string_view text, size_t start, size_t end) {
             ++i;
         } else if (c == '"') {
             in_string = true;
-            raw_string = is_raw_str_open(text, i);
-        } else if (c == '{') {
-            return i;
+        } else if (!on_code_char(i, c)) {
+            return;
         }
     }
-    return end;
+}
+
+size_t function_end(std::string_view text, size_t start) {
+    int depth = 0;
+    bool opened = false;
+    size_t found = std::string_view::npos;
+    scan_code_chars(text, start, text.size(), [&](size_t i, char c) {
+        if (c == '{') {
+            opened = true;
+            ++depth;
+        } else if (c == '}' && opened && --depth == 0) {
+            found = i + 1;
+            return false;
+        }
+        return true;
+    });
+    return found;
+}
+
+size_t header_end(std::string_view text, size_t start, size_t end) {
+    size_t found = end;
+    scan_code_chars(text, start, end, [&](size_t i, char c) {
+        if (c == '{') {
+            found = i;
+            return false;
+        }
+        return true;
+    });
+    return found;
 }
 
 struct TopFnSpan {
@@ -878,10 +854,11 @@ bool parse_bri_document(const std::string &src, const LineIndex &lines,
                 std::string_view ln_view = lines.line_view(src, static_cast<int>(end_idx));
                 chunk.append(ln_view.data(), ln_view.size());
                 chunk.push_back('\n');
-                for (char ch : ln_view) {
+                scan_code_chars(ln_view, 0, ln_view.size(), [&](size_t, char ch) {
                     if (ch == '{') { opened = true; ++depth; }
                     else if (ch == '}' && opened) --depth;
-                }
+                    return true;
+                });
                 if (opened && depth <= 0) break;
             }
             idx = std::min(end_idx, nlines > 0 ? nlines - 1 : 0);
@@ -1682,7 +1659,8 @@ std::optional<std::string> find_let_hover(const std::vector<StmtP> &body, const 
             }
             walk(s.body);
             walk(s.body2);
-            if (s.els) walk(s.els->body);
+            for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get())
+                walk(el->body);
         }
     };
     walk(body);
@@ -1825,12 +1803,17 @@ private:
         lsp_wire::send_frame(writer_.view());
     }
 
-    void send_null_result(std::string_view raw_id) {
+    void begin_result(std::string_view raw_id) {
         writer_.reset();
         writer_.begin_obj();
         writer_.key_lit("jsonrpc"); writer_.str("2.0");
         writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result"); writer_.null_val();
+        writer_.key_lit("result");
+    }
+
+    void send_null_result(std::string_view raw_id) {
+        begin_result(raw_id);
+        writer_.null_val();
         writer_.end_obj();
         lsp_wire::send_frame(writer_.view());
     }
@@ -1947,11 +1930,7 @@ private:
         const bool client_prepare_rename =
             tape_.bool_val(tape_.get(tape_.get(td_caps, "rename"), "prepareSupport"), false);
 
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_obj();
         writer_.key_lit("capabilities");
         writer_.begin_obj();
@@ -2026,11 +2005,7 @@ private:
 
     void write_document_symbols(std::string_view raw_id, const std::string &uri) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
         if (st && st->ast_valid) {
             for (const DocSymbol &sym : st->symbols) {
@@ -2098,11 +2073,7 @@ private:
                     const size_t tail = rm.ns.rfind("__");
                     if (rm.ns == want_ns ||
                         (tail != std::string::npos && rm.ns.substr(tail + 2) == word.name)) {
-                        writer_.reset();
-                        writer_.begin_obj();
-                        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-                        writer_.key_lit("id"); writer_.raw_value(raw_id);
-                        writer_.key_lit("result");
+                        begin_result(raw_id);
                         writer_.begin_obj();
                         writer_.key_lit("uri"); writer_.str("file://" + rm.path);
                         writer_.key_lit("range"); writer_.lsp_range(0, 0, 0, 0);
@@ -2171,11 +2142,7 @@ private:
             ? 0 : target_lines->byte_to_utf16_col(target_text, tline, bcol);
         const int ecol = col + LineIndex::utf16_len(best->name, false);
 
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_obj();
         writer_.key_lit("uri"); writer_.str("file://" + target_path);
         writer_.key_lit("range"); writer_.lsp_range(tline, col, tline, ecol);
@@ -2191,11 +2158,7 @@ private:
         if (word.name.empty()) { send_null_result(raw_id); return; }
 
         auto send_md = [&](std::string_view md) {
-            writer_.reset();
-            writer_.begin_obj();
-            writer_.key_lit("jsonrpc"); writer_.str("2.0");
-            writer_.key_lit("id"); writer_.raw_value(raw_id);
-            writer_.key_lit("result");
+            begin_result(raw_id);
             writer_.begin_obj();
             writer_.key_lit("contents");
             writer_.begin_obj();
@@ -2345,11 +2308,7 @@ private:
 
     void write_completions(std::string_view raw_id, const std::string &uri, int line, int character) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
 
         if (!st || line < 0 || static_cast<size_t>(line) >= st->lines.line_count()) {
@@ -2506,7 +2465,8 @@ private:
                             }
                             walk(s.body);
                             walk(s.body2);
-                            if (s.els) walk(s.els->body);
+                            for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get())
+                                walk(el->body);
                         }
                     };
                     walk(b);
@@ -2697,11 +2657,7 @@ private:
                             std::string_view doc) {
             const int clamped = plabels.empty()
                 ? 0 : std::min<int>(active_param, static_cast<int>(plabels.size()) - 1);
-            writer_.reset();
-            writer_.begin_obj();
-            writer_.key_lit("jsonrpc"); writer_.str("2.0");
-            writer_.key_lit("id"); writer_.raw_value(raw_id);
-            writer_.key_lit("result");
+            begin_result(raw_id);
             writer_.begin_obj();
             writer_.key_lit("signatures");
             writer_.begin_arr();
@@ -2801,7 +2757,14 @@ private:
                     const std::string inside = full.substr(lp + 1, rp - lp - 1);
                     size_t pos = 0;
                     while (pos < inside.size()) {
-                        const size_t comma = inside.find(',', pos);
+                        int bdepth = 0;
+                        size_t comma = std::string::npos;
+                        for (size_t k = pos; k < inside.size(); ++k) {
+                            const char ch = inside[k];
+                            if (ch == '[' || ch == '(') ++bdepth;
+                            else if ((ch == ']' || ch == ')') && bdepth > 0) --bdepth;
+                            else if (ch == ',' && bdepth == 0) { comma = k; break; }
+                        }
                         std::string part = inside.substr(
                             pos, comma == std::string::npos ? std::string::npos : comma - pos);
                         while (!part.empty() && part.front() == ' ') part.erase(part.begin());
@@ -2820,11 +2783,7 @@ private:
     void write_references(std::string_view raw_id, const std::string &uri,
                           int line, int character, bool include_decl) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
 
         if (st) {
@@ -2887,11 +2846,7 @@ private:
             send_null_result(raw_id);
             return;
         }
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_obj();
         writer_.key_lit("range"); writer_.lsp_range(line, word.start, line, word.end);
         writer_.key_lit("placeholder"); writer_.str(word.name);
@@ -2925,11 +2880,7 @@ private:
             if (ds.name == word.name && ds.is_pub) { is_pub_sym = true; break; }
         }
 
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_obj();
         writer_.key_lit("changes");
         writer_.begin_obj();
@@ -3036,11 +2987,7 @@ private:
         });
         if (hits.size() > 256) hits.resize(256);
 
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
         for (const Hit &h : hits) {
             writer_.begin_obj();
@@ -3063,11 +3010,7 @@ private:
     void write_code_actions(std::string_view raw_id, const std::string &uri,
                             int start_line, int end_line, uint32_t ctx_diags) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
 
         if (st) {
@@ -3230,11 +3173,7 @@ private:
     // Delta-encoded semantic tokens (`textDocument/semanticTokens/full`)
     void write_semantic_tokens(std::string_view raw_id, const std::string &uri) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_obj();
         writer_.key_lit("data");
         writer_.begin_arr();
@@ -3368,11 +3307,7 @@ private:
     void write_inlay_hints(std::string_view raw_id, const std::string &uri,
                            int start_line, int end_line) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
 
         if (st && st->ast_valid) {
@@ -3440,7 +3375,8 @@ private:
                     for (const FnDecl &fn : s.fns) walk(fn.body);
                     walk(s.body);
                     walk(s.body2);
-                    if (s.els) walk(s.els->body);
+                    for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get())
+                        walk(el->body);
                 }
             };
             walk(st->ast_body);
@@ -3516,11 +3452,7 @@ private:
     void write_document_highlight(std::string_view raw_id, const std::string &uri,
                                   int line, int character) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
         if (st) {
             const Word word = word_at(st->text, st->lines, line, character);
@@ -3543,11 +3475,7 @@ private:
     // Folding ranges (`textDocument/foldingRange`)
     void write_folding_ranges(std::string_view raw_id, const std::string &uri) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
         if (st) {
             std::vector<int> brace_stack;
@@ -3605,11 +3533,7 @@ private:
     // Document formatting (`textDocument/formatting`)
     void write_formatting(std::string_view raw_id, const std::string &uri) {
         const DocState *st = find_doc(uri);
-        writer_.reset();
-        writer_.begin_obj();
-        writer_.key_lit("jsonrpc"); writer_.str("2.0");
-        writer_.key_lit("id"); writer_.raw_value(raw_id);
-        writer_.key_lit("result");
+        begin_result(raw_id);
         writer_.begin_arr();
         if (st && !st->text.empty()) {
             const std::string formatted = format_brat_source(st->text, st->lines);

@@ -612,6 +612,45 @@ fn main() -> i64 {
     r_tls = run_cmd([cc, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-I", ENG, "-c", tls_only_c, "-o", tls_only_o])
     assert r_tls.returncode == 0, f"standalone BRAT_CRT_TLS failed:\n{r_tls.stderr.decode()}"
 
+    # 12. Multi-arm match (.els chain) must not bypass arena sink-escape check or `brat dist` FFI gate
+    arena_m3 = os.path.join(td, "arena_match_arm3.brat")
+    with open(arena_m3, "w", encoding="utf-8") as af:
+        af.write(
+            "let mut g_sink: vec[vec[i64]] = []\n"
+            "fn stash(v: vec[i64], k: i64) -> None {\n"
+            "  match k {\n"
+            "    1 => { return },\n"
+            "    2 => { return },\n"
+            "    _ => { push(g_sink, v) }\n"
+            "  }\n"
+            "}\n"
+            "fn main() -> i64 {\n"
+            "  arena { let tmp = [1, 2, 3]\n stash(tmp, 3) }\n"
+            "  return 0\n"
+            "}\n"
+        )
+    r_am3 = run_cmd([CXX, "check", arena_m3])
+    assert r_am3.returncode != 0 and b"arena: a value made inside the block" in (r_am3.stdout + r_am3.stderr), (
+        r_am3.stdout + r_am3.stderr
+    )
+
+    dist_m3 = os.path.join(td, "dist_plugin_arm3.brat")
+    with open(dist_m3, "w", encoding="utf-8") as df2:
+        df2.write(
+            "fn f(k: i64) -> i64 {\n"
+            "  match k {\n"
+            "    1 => { return 1 },\n"
+            "    2 => { return 2 },\n"
+            "    _ => { let h = lib_open(\"libc.so.6\")\n lib_close(h)\n return 0 }\n"
+            "  }\n"
+            "}\n"
+            "fn main() -> i64 { return 0 }\n"
+        )
+    r_dm3 = run_cmd([CXX, "dist", dist_m3, "-o", os.path.join(td, "dist_out")])
+    assert r_dm3.returncode != 0 and b"--unsafe-ffi" in (r_dm3.stdout + r_dm3.stderr), (
+        r_dm3.stdout + r_dm3.stderr
+    )
+
 
 if __name__ == "__main__":
     test_o2_ssa_origin_and_congruence_soundness()

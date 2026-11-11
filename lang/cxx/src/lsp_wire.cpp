@@ -807,9 +807,15 @@ private:
 }  // namespace
 
 bool LspJsonTape::parse(std::string_view src) {
-    src_ = src;
+    src_ = {};
     root_ = 0;
     err_ = {};
+    if (src.size() > 0x7fffffffu) {
+        nodes_.assign(1, TapeNode{});
+        err_ = "JSON input exceeds 2 GiB limit";
+        return false;
+    }
+    src_ = src;
     TapeParser tp(src, nodes_, arena_);
     return tp.run(root_, err_);
 }
@@ -1020,11 +1026,17 @@ FrameStatus LspFrameReader::next_frame(std::string_view &out_body, std::string &
         }
 
         const size_t colon = line.find(':');
-        if (colon == std::string_view::npos) {
+        if (colon == 0 || colon == std::string_view::npos) {
             out_err = "malformed message header";
             return FrameStatus::HeaderError;
         }
         const std::string_view raw_name = line.substr(0, colon);
+        for (unsigned char ch : raw_name) {
+            if (!std::isalnum(ch) && ch != '-' && ch != '_') {
+                out_err = "malformed message header";
+                return FrameStatus::HeaderError;
+            }
+        }
         bool is_cl = (raw_name.size() == 14);
         if (is_cl) {
             static constexpr char want[] = "content-length";

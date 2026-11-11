@@ -18,6 +18,14 @@ HARNESS = r'''
 #include <vector>
 
 int main() {
+    lsp_wire::LspJsonTape empty_tape;
+    int failures = 0;
+    if (!empty_tape.is_null(0) || empty_tape.is_object(0) || empty_tape.is_object(999) ||
+        empty_tape.at(0).kind != lsp_wire::JKind::Null ||
+        empty_tape.at(999).kind != lsp_wire::JKind::Null) {
+        std::cerr << "unparsed LspJsonTape sentinel failed\n";
+        ++failures;
+    }
     lsp_wire::LspJsonTape tape;
     const std::vector<std::string> invalid = {
         "\xff", "\x80", "\xc0\xaf", "\xc1\xbf", "\xc2", "\xe2\x82",
@@ -25,7 +33,6 @@ int main() {
         "\xf0\x80\x80\xaf", "\xf4\x90\x80\x80", "\xf5\x80\x80\x80",
         "\xf0\x9f\x98", "\xfe"
     };
-    int failures = 0;
     for (const auto &bytes : invalid) {
         // Raw string, raw run after an escape, and object key.
         for (const auto &json : {"\"" + bytes + "\"",
@@ -59,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix="brat-wire-utf8-") as tmp:
     harness = Path(tmp) / "wire.cpp"
     harness.write_text(HARNESS, encoding="utf-8")
     binary = Path(tmp) / ("wire.exe" if os.name == "nt" else "wire")
-    flags = ["-std=c++20", "-O1"]
+    flags = ["-std=c++20", "-O1", "-D_GLIBCXX_ASSERTIONS"]
     if os.environ.get("BRAT_WIRE_SANITIZE") == "1":
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
     subprocess.run([CC, *flags, "-I", str(SRC), str(harness),

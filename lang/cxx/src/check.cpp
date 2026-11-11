@@ -669,13 +669,9 @@ static void scan_sink_stmts(const std::vector<StmtP> &stmts, const std::set<std:
         }
         if (!s.body.empty()) scan_sink_stmts(s.body, sinks, locals, deps, sink_params, edges);
         if (!s.body2.empty()) scan_sink_stmts(s.body2, sinks, locals, deps, sink_params, edges);
-        if (s.els) {
-            if (s.els->k == SK::Block) {
-                scan_sink_stmts(s.els->body, sinks, locals, deps, sink_params, edges);
-            } else {
-                scan_sink_expr(s.els->e1.get(), sinks, locals, deps, sink_params, edges);
-                scan_sink_stmts(s.els->body, sinks, locals, deps, sink_params, edges);
-            }
+        for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get()) {
+            scan_sink_expr(el->e1.get(), sinks, locals, deps, sink_params, edges);
+            if (!el->body.empty()) scan_sink_stmts(el->body, sinks, locals, deps, sink_params, edges);
         }
         for (const auto &fd : s.fns) {
             std::set<std::string> sub = locals;

@@ -89,34 +89,40 @@ static std::string_view trim_left(std::string_view text) {
     return text;
 }
 
-static ReadResult read_mcp_message(std::istream &in, bool &jsonl_mode) {
+enum class WireMode : uint8_t { Auto, Framed, Jsonl };
+
+static ReadResult read_mcp_message(std::istream &in, WireMode &mode) {
     std::map<std::string, std::string> headers;
     bool first = true;
     while (true) {
-        const size_t line_limit = jsonl_mode ? kMaxBody : kMaxHeaderLine;
-        InputLine line = read_line_bounded(in, line_limit, first && !jsonl_mode);
+        const size_t line_limit = (mode == WireMode::Jsonl) ? kMaxBody : kMaxHeaderLine;
+        InputLine line = read_line_bounded(in, line_limit, first && mode == WireMode::Auto);
         if (!line.terminated && line.text.empty() && !line.too_long) {
             return {ReadKind::Eof, {}};
         }
-        if (line.too_long) return {ReadKind::Invalid, {}};
-        if (!line.terminated) return {ReadKind::Invalid, {}};
+        if (line.too_long || !line.terminated) return {ReadKind::Invalid, {}};
         if (!line.text.empty() && line.text.back() == '\r') line.text.pop_back();
         std::string_view stripped = trim_left(line.text);
         if (first && stripped.empty()) continue;
 
-        if (jsonl_mode || (first && (stripped.front() == '{' || stripped.front() == '['))) {
-            jsonl_mode = true;
+        if (mode == WireMode::Jsonl ||
+            (first && mode == WireMode::Auto && (stripped.front() == '{' || stripped.front() == '['))) {
+            mode = WireMode::Jsonl;
             if (stripped.empty()) continue;
             if (stripped.size() > kMaxBody) return {ReadKind::Invalid, {}};
             return {ReadKind::Message, std::string(stripped)};
         }
+        mode = WireMode::Framed;
         first = false;
         if (line.text.empty()) break;
         if (line.text.size() > kMaxHeaderLine) return {ReadKind::Invalid, {}};
         for (unsigned char c : line.text) if (c > 0x7f) return {ReadKind::Invalid, {}};
         const size_t colon = line.text.find(':');
-        if (colon == std::string::npos) return {ReadKind::Invalid, {}};
+        if (colon == 0 || colon == std::string::npos) return {ReadKind::Invalid, {}};
         std::string key = line.text.substr(0, colon);
+        for (unsigned char c : key) {
+            if (!std::isalnum(c) && c != '-' && c != '_') return {ReadKind::Invalid, {}};
+        }
         std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
             return static_cast<char>(std::tolower(c));
         });
@@ -126,6 +132,7 @@ static ReadResult read_mcp_message(std::istream &in, bool &jsonl_mode) {
         size_t end = line.text.size();
         while (end > begin && std::isspace(static_cast<unsigned char>(line.text[end - 1])))
             --end;
+        if (key == "content-length" && headers.count(key)) return {ReadKind::Invalid, {}};
         headers[key] = line.text.substr(begin, end - begin);
         if (headers.size() > kMaxHeaders) return {ReadKind::Invalid, {}};
     }
@@ -350,10 +357,15 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
                     const std::string &cwd = {}) {
         return run_native(exe, command, timeout, cwd);
     };
-    auto cli_text = [](const CommandResult &r, bool fallback_json = false) {
+    auto launch_err = [](const CommandResult &r) -> std::string {
         if (!r.launch_error.empty()) return r.launch_error;
-        if (r.timed_out) return std::string("timed out");
-        if (r.too_large) return std::string("native command output exceeds limit");
+        if (r.timed_out) return "timed out";
+        if (r.too_large) return "native command output exceeds limit";
+        return {};
+    };
+    auto cli_text = [&](const CommandResult &r, bool fallback_json = false) {
+        std::string fail = launch_err(r);
+        if (!fail.empty()) return fail;
         if (!r.out.empty()) return r.out;
         if (!r.err.empty()) return r.err;
         return fallback_json ? std::string("{}") : std::string();
@@ -361,6 +373,12 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
     auto finish_cli = [&](const CommandResult &r, bool fallback_json = false) {
         result.text = cli_text(r, fallback_json);
         result.failed = r.code != 0 || !r.launch_error.empty() || r.timed_out || r.too_large;
+    };
+    auto finish_cli_json = [&](const CommandResult &r, std::string_view bin = {},
+                               bool include_bin = false) -> ToolResult {
+        std::string fail = launch_err(r);
+        if (!fail.empty()) return {std::move(fail), true};
+        return {json_cli_result(r.code, r.out, r.err, bin, include_bin), r.code != 0};
     };
 
     if (name == "brat_check" || name == "brat_run" || name == "brat_build" ||
@@ -375,14 +393,7 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
         return result;
     }
     if (name == "brat_run") {
-        CommandResult r = call({"run", path});
-        if (!r.launch_error.empty() || r.timed_out || r.too_large) {
-            return {r.launch_error.empty() ? (r.timed_out ? "timed out" : "native command output exceeds limit")
-                                           : r.launch_error, true};
-        }
-        result.text = json_cli_result(r.code, r.out, r.err);
-        result.failed = r.code != 0;
-        return result;
+        return finish_cli_json(call({"run", path}));
     }
     if (name == "brat_build") {
         uint32_t out_node = tape.get(args, "out");
@@ -429,14 +440,7 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
                 }
             }
         }
-        CommandResult r = call({"build", path, "-o", out_path}, 600000);
-        if (!r.launch_error.empty() || r.timed_out || r.too_large) {
-            return {r.launch_error.empty() ? (r.timed_out ? "timed out" : "native command output exceeds limit")
-                                           : r.launch_error, true};
-        }
-        result.text = json_cli_result(r.code, r.out, r.err, out_path, true);
-        result.failed = r.code != 0;
-        return result;
+        return finish_cli_json(call({"build", path, "-o", out_path}, 600000), out_path, true);
     }
     if (name == "brat_api") {
         CommandResult r = call({"api", path, "--json"});
@@ -472,9 +476,7 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
             return {"`level` must be 'O1' or 'O2'", true};
         const std::string flag = level.front() == '-' ? level : "-" + level;
         CommandResult r = call({"cc", flag, "--why-opt", "--no-check", path}, 60000);
-        if (!r.launch_error.empty() || r.timed_out || r.too_large)
-            return {r.launch_error.empty() ? (r.timed_out ? "timed out" : "native command output exceeds limit")
-                                           : r.launch_error, true};
+        if (std::string fail = launch_err(r); !fail.empty()) return {std::move(fail), true};
         std::vector<std::string> groups;
         std::string current;
         std::istringstream lines(r.code == 0 ? r.err : std::string());
@@ -538,13 +540,7 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
             command.push_back("--target");
             command.emplace_back(tape.str_view(target_node));
         }
-        CommandResult r = call(std::move(command), kDefaultTimeoutMs, dir);
-        if (!r.launch_error.empty() || r.timed_out || r.too_large)
-            return {r.launch_error.empty() ? (r.timed_out ? "timed out" : "native command output exceeds limit")
-                                           : r.launch_error, true};
-        result.text = json_cli_result(r.code, r.out, r.err);
-        result.failed = r.code != 0;
-        return result;
+        return finish_cli_json(call(std::move(command), kDefaultTimeoutMs, dir));
     }
     return {"unknown tool", true};
 }
@@ -587,9 +583,10 @@ int cmd_mcp(int argc, char **argv) {
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
     bool initialized = false;
-    bool jsonl_mode = false;
+    WireMode wire_mode = WireMode::Auto;
     while (true) {
-        ReadResult input = read_mcp_message(std::cin, jsonl_mode);
+        ReadResult input = read_mcp_message(std::cin, wire_mode);
+        const bool jsonl_mode = (wire_mode == WireMode::Jsonl);
         if (input.kind == ReadKind::Eof) return 0;
         if (input.kind == ReadKind::Invalid) {
             if (!send_body(make_error("null", -32700, "parse error"), jsonl_mode)) return 1;

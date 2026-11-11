@@ -84,6 +84,7 @@ class LspJsonTape {
 public:
     LspJsonTape() {
         nodes_.reserve(256);
+        nodes_.push_back(TapeNode{});  // node 0 is the Null/invalid sentinel
         arena_.reserve(16384);
     }
 
@@ -92,17 +93,27 @@ public:
 
     std::string_view error() const { return err_; }
     uint32_t root() const { return root_; }
-    const TapeNode &at(uint32_t idx) const { return nodes_[idx]; }
+    const TapeNode &at(uint32_t idx) const { return nodes_[idx < nodes_.size() ? idx : 0]; }
 
-    bool is_null(uint32_t idx) const { return idx == 0 || nodes_[idx].kind == JKind::Null; }
-    bool is_bool(uint32_t idx) const { return idx != 0 && nodes_[idx].kind == JKind::Bool; }
-    bool is_array(uint32_t idx) const { return idx != 0 && nodes_[idx].kind == JKind::Array; }
-    bool is_object(uint32_t idx) const { return idx != 0 && nodes_[idx].kind == JKind::Object; }
+    bool is_null(uint32_t idx) const {
+        return idx == 0 || idx >= nodes_.size() || nodes_[idx].kind == JKind::Null;
+    }
+    bool is_bool(uint32_t idx) const {
+        return idx != 0 && idx < nodes_.size() && nodes_[idx].kind == JKind::Bool;
+    }
+    bool is_array(uint32_t idx) const {
+        return idx != 0 && idx < nodes_.size() && nodes_[idx].kind == JKind::Array;
+    }
+    bool is_object(uint32_t idx) const {
+        return idx != 0 && idx < nodes_.size() && nodes_[idx].kind == JKind::Object;
+    }
     bool is_string(uint32_t idx) const {
-        return idx != 0 && (nodes_[idx].kind == JKind::StrRaw || nodes_[idx].kind == JKind::StrArena);
+        return idx != 0 && idx < nodes_.size() &&
+               (nodes_[idx].kind == JKind::StrRaw || nodes_[idx].kind == JKind::StrArena);
     }
     bool is_number(uint32_t idx) const {
-        return idx != 0 && (nodes_[idx].kind == JKind::Int || nodes_[idx].kind == JKind::Float);
+        return idx != 0 && idx < nodes_.size() &&
+               (nodes_[idx].kind == JKind::Int || nodes_[idx].kind == JKind::Float);
     }
 
     bool bool_val(uint32_t idx, bool fallback = false) const {

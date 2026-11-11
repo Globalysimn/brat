@@ -173,7 +173,18 @@ def main():
         malformed.proc.stdin.flush()
         assert malformed.read().get("error", {}).get("code") == -32700
         assert malformed.request("ping")["result"] == {}
+
+        # Framed sessions reject unframed JSONL lines and duplicate Content-Length headers.
+        malformed.proc.stdin.write(b'{"jsonrpc":"2.0","id":77,"method":"ping"}\n')
+        malformed.proc.stdin.flush()
+        assert malformed.read().get("error", {}).get("code") == -32700
         malformed.close()
+
+        dup = Client(binary, env)
+        dup.proc.stdin.write(b"Content-Length: 10\r\nContent-Length: 2\r\n\r\n")
+        dup.proc.stdin.flush()
+        assert dup.read().get("error", {}).get("code") == -32700
+        dup.close()
 
     print("NATIVE MCP ALL GREEN")
 

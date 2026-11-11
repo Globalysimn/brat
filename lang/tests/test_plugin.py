@@ -319,4 +319,24 @@ type_error("nosig", head + '  let f = lib_sym(h, "add")\n  let s = "i64(i64)"\n'
 type_error("bad", head + '  let f = lib_sym(h, "add")\n  print(call(f, "i64", 1))\n  return 0\n}\n',
            "call: bad signature `i64`")
 
+cb_tail = ('fn main() -> i64 {\n'
+           '  let h = lib_open("%s")\n'
+           '  let f = lib_sym(h, "add")\n'
+           '  call(f, "none(fn(i64)->i64 thread(any))", "cb")\n'
+           '  lib_close(h)\n'
+           '  return 0\n}\n' % LIB)
+type_error("cb_set_global",
+           "let mut g = 0\nfn cb(x: i64) -> i64 { g = x\n return 0 }\n" + cb_tail,
+           "touches `g`")
+type_error("cb_self_shadow",
+           "let mut g = 0\nfn cb(x: i64) -> i64 { let g = g + x\n return g }\n" + cb_tail,
+           "touches `g`")
+type_error("cb_inner_scope",
+           "let mut g = 0\nfn cb(x: i64) -> i64 { if x > 0 { let g = x } return g }\n" + cb_tail,
+           "touches `g`")
+type_error("cb_match_arm3",
+           "let mut g = 0\nfn cb(x: i64) -> i64 {\n"
+           "  match x { 1 => { return 1 }, 2 => { return 2 }, _ => { return g } }\n}\n" + cb_tail,
+           "touches `g`")
+
 print("PLUGIN ALL GREEN (%d asserts)" % n)

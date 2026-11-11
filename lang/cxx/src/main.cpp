@@ -563,8 +563,8 @@ static bool stmts_have_plugin_call(const std::vector<StmtP> &body) {
             expr_has_plugin_call(s.e3.get()))
             return true;
         if (stmts_have_plugin_call(s.body) || stmts_have_plugin_call(s.body2)) return true;
-        if (s.els) {
-            if (expr_has_plugin_call(s.els->e1.get()) || stmts_have_plugin_call(s.els->body))
+        for (const Stmt *el = s.els.get(); el != nullptr; el = el->els.get()) {
+            if (expr_has_plugin_call(el->e1.get()) || stmts_have_plugin_call(el->body))
                 return true;
         }
         for (const auto &f : s.fns)
