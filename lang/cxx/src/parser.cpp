@@ -620,6 +620,7 @@ private:
             if (kw == "pub") return one(pub_stmt());
             if (kw == "use") fail("use wants pub");
             if (kw == "break" || kw == "continue") {
+                if (!loops_) fail("`" + kw + "` outside a loop");
                 step();
                 eat(";");
                 auto s = std::make_unique<Stmt>();
@@ -642,6 +643,7 @@ private:
             }
             if (kw == "try") return one(try_stmt());
             if (kw == "spawn") {
+                LoopScope fresh(*this, false);
                 step();
                 want("{");
                 auto s = std::make_unique<Stmt>();
@@ -898,6 +900,7 @@ private:
     }
 
     std::vector<StmtP> while_stmt() {
+        LoopScope loop(*this, true);
         want("while");
         if (peek().kind == TK::Kw && at("let")) {
             step();
@@ -947,6 +950,7 @@ private:
     }
 
     std::vector<StmtP> for_stmt() {
+        LoopScope loop(*this, true);
         want("for");
         Tok v = step();
         if (v.kind != TK::Id) fail("want loop var have '" + to_str(v.text) + "'", v.line);
@@ -1608,6 +1612,7 @@ private:
     }
 
     FnDecl fn_decl() {
+        LoopScope fresh(*this, false);
         want("fn");
         FnDecl f;
         f.name = to_str(step().text);
@@ -2243,6 +2248,16 @@ private:
     int nest_expr_ = 0;
     int nest_block_ = 0;
 
+    // `break` and `continue` leave the innermost loop of the function being
+    // parsed: a loop counts one up, a function body starts again at zero.
+    int loops_ = 0;
+    struct LoopScope {
+        int &n;
+        const int outer;
+        LoopScope(Parser &p, bool loop) : n(p.loops_), outer(p.loops_) { n = loop ? outer + 1 : 0; }
+        ~LoopScope() { n = outer; }
+    };
+
     struct Depth {
         Parser &p;
         bool block;
@@ -2416,6 +2431,7 @@ private:
                     }
                     want(")");
                     if (e->k == EK::Var && e->a == "trace" && at("{")) {
+                        LoopScope fresh(*this, false);
                         step();
                         auto closure = std::make_unique<Expr>();
                         closure->k = EK::Closure;
@@ -2439,6 +2455,7 @@ private:
     // the line, because a diagnostic about the fold needs one and an expression
     // has no line field of its own.
     ExprP par_for(int line_no) {
+        LoopScope fresh(*this, false);
         want("for");
         Tok v = step();
         if (v.kind != TK::Id) fail("want loop var have '" + to_str(v.text) + "'", v.line);
@@ -2484,6 +2501,7 @@ private:
         }
         if (t.kind == TK::Kw && (t.text == "true" || t.text == "false")) return mk_bool(t.text == "true");
         if (t.kind == TK::Kw && t.text == "fn") {
+            LoopScope fresh(*this, false);
             auto closure = std::make_unique<Expr>();
             closure->k = EK::Closure;
             closure->fn = std::make_unique<FnDecl>();

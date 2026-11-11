@@ -40,6 +40,14 @@ CASES = {
     # The snippet limit is 200 characters, not bytes: clipping this line
     # by bytes cut it earlier in C++ and could split a UTF-8 character.
     "long_unicode_line": 'print("' + ("Ж" * 250) + '" ++ 1)\n',
+    # A jump with no loop of its own around it passed `check` and stopped in the
+    # C compiler: "break statement not within loop or switch". A function body,
+    # a closure and a task start outside any loop, wherever they are written.
+    "jump_in_fn": "fn f() -> i64 {\n  break\n  return 1\n}\nprint(f())\n",
+    "jump_at_top": "continue\nprint(1)\n",
+    "jump_in_closure": "for i in 0..3 {\n  let f = fn(x) {\n    continue\n    return x\n  }\n"
+                       "  print(f(i))\n}\n",
+    "jump_in_spawn": "for i in 0..3 {\n  spawn {\n    break\n  }\n}\njoin_all()\n",
 }
 
 
@@ -73,6 +81,9 @@ def main():
             continue
         if a.returncode and ": error: " not in py:
             print("FAIL %s: rejected without a `file:line: error: ` line:\n%s" % (name, py))
+            bad += 1
+        if name.startswith("jump_") and "outside a loop" not in cx:
+            print("FAIL %s: a jump with no loop around it was accepted:\n%s" % (name, cx))
             bad += 1
     # Invalid UTF-8 follows a different load path in Python, so the text
     # need not match there. The C++ diagnostic itself must still be valid
