@@ -671,6 +671,20 @@ LOOPS = {
         "  return s\n"
         "}\n", 1),
 
+    # a guard inside the body says nothing once the loop is over: the loop may
+    # run zero times, so `100 / a` after it keeps its check.
+    "loop_guard_after.brat": (
+        "fn f(a: i64, n: i64) -> i64 {\n"
+        "  let mut i = 0\n"
+        "  while i < n {\n"
+        "    if a < 1 {\n"
+        "      return 0\n"
+        "    }\n"
+        "    i = i + 1\n"
+        "  }\n"
+        "  return 100 / a\n"
+        "}\n", 0),
+
     # the same counter loop written as `for i in lo..hi`. The counter is
     # fresh, the step is +1 and the head runs to `hi - 1`, so the range the body
     # gets is [lo, hi - 1] and `i / 2` or `i % 3` needs no check.
@@ -737,6 +751,17 @@ LOOPS = {
         "  }\n"
         "  return s / 2 + i / 2\n"
         "}\n", 1),
+
+    # the same through `for`, which runs zero times when `n <= 0`.
+    "for_guard_after.brat": (
+        "fn f(a: i64, n: i64) -> i64 {\n"
+        "  for i in 0..n {\n"
+        "    if a < 1 {\n"
+        "      return 0\n"
+        "    }\n"
+        "  }\n"
+        "  return 100 / a\n"
+        "}\n", 0),
 
     # a non-counter local mutated later in the loop body does not keep its
     # pre-loop interval on the second iteration.

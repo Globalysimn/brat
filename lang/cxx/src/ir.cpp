@@ -17,6 +17,7 @@ namespace {
 struct IV {
     bool top = true;
     int64_t lo = 0, hi = 0;
+    bool operator==(const IV &) const = default;
 };
 
 IV unknown_iv() { return IV{}; }
@@ -725,6 +726,7 @@ bool Walker::block(const std::vector<const Stmt *> &body) {
             if (head_hi < entry_iv.lo) break;                // guard false on entry
             const std::string guard = src_text(cond);
 
+            std::map<std::string, int> saved = b.env;
             b.env[counter] = b.narrow(entry, rng(entry_iv.lo, head_hi), guard, line);
             for (const auto &name : assigned)
                 if (name != counter)
@@ -734,9 +736,11 @@ bool Walker::block(const std::vector<const Stmt *> &body) {
             block(body);
             loops--;
             if (b.bad) return false;
-            // The body ran zero or more times: everything it wrote is unknown
-            // afterwards. The counter keeps the lower bound the entry and the step
-            // give it, and no upper bound, since the loop may stop anywhere.
+            // The body ran zero or more times: what its guards proved is dropped
+            // and everything it wrote is unknown afterwards. The counter keeps the
+            // lower bound the entry and the step give it, and no upper bound, since
+            // the loop may stop anywhere.
+            b.env = saved;
             for (const auto &name : assigned)
                 b.env[name] = b.call("assigned inside the loop at line " + std::to_string(line), line);
             b.env[counter] = b.narrow(entry, rng(entry_iv.lo, INT64_MAX), guard, line);
@@ -782,6 +786,7 @@ bool Walker::block(const std::vector<const Stmt *> &body) {
                 else b.env.erase(counter);
                 break;
             }
+            std::map<std::string, int> saved = b.env;
             b.env[counter] = b.narrow(entry, rng(lo_iv.lo, head_hi), guard, line);
             for (const auto &name : assigned)
                 if (name != counter)
@@ -791,6 +796,7 @@ bool Walker::block(const std::vector<const Stmt *> &body) {
             block(body);
             loops--;
             if (b.bad) return false;
+            b.env = saved;
             // In C emission, `for` reuses an outer binding of the same name when
             // one exists, so an outer `counter` is clobbered whenever the loop
             // may run at least one iteration.
@@ -1297,16 +1303,22 @@ struct Builder2 {
         return id;
     }
 
+    // A narrowed value is rebound, never rewritten in place: the same id is
+    // still bound in the environment saved for the other branch of the `if`.
     void sync_from_dbm() {
         dbm.close();
         if (dbm.inconsistent) return;
         for (auto &[vname, vid] : env) {
             int dn = vals[vid].dbm_node;
             if (dn > 0) {
-                IV div = dbm.extract_iv(dn);
-                vals[vid].iv = meet_iv(vals[vid].iv, div);
-                reduce_iv_cong(vals[vid].iv, vals[vid].cg);
-                dbm.set_iv(dn, vals[vid].iv);
+                IV iv = meet_iv(vals[vid].iv, dbm.extract_iv(dn));
+                if (iv == vals[vid].iv) {
+                    dbm.set_iv(dn, iv);
+                } else {
+                    Val2 nv = vals[vid];
+                    nv.iv = iv;
+                    vid = push(std::move(nv));
+                }
             }
         }
     }
@@ -1870,10 +1882,8 @@ struct Walker2 {
                 b.vecs.count(e.kids[0]->a)) {
                 return b.len_of(e.kids[0]->a, line);
             }
-            for (const auto &arg : e.kids) {
-                if (arg->k == EK::Var && b.vecs.count(arg->a)) continue;
+            for (const auto &arg : e.kids)
                 if (val(*arg) < 0) return -1;
-            }
             return b.call_val(e.a, line);
         }
         default:
@@ -2059,6 +2069,7 @@ struct Walker2 {
 
                 b.dbm.close();
                 auto pre_dbm = b.dbm;
+                auto pre_env = b.env;
                 const int old_cdn = entry.dbm_node;
                 for (const auto &nm : assigned) {
                     if (nm == counter) continue;
@@ -2118,6 +2129,7 @@ struct Walker2 {
                 if (b.bad) return false;
 
                 b.dbm = pre_dbm;
+                b.env = pre_env;
                 for (const auto &nm : assigned) {
                     b.dbm.forget(nm);
                     if (nm != counter)
@@ -2183,6 +2195,7 @@ struct Walker2 {
                 }
 
                 auto pre_dbm = b.dbm;
+                auto pre_env = b.env;
                 for (const auto &nm : assigned) {
                     if (nm == counter) continue;
                     b.dbm.forget(nm);
@@ -2218,6 +2231,7 @@ struct Walker2 {
                 if (b.bad) return false;
 
                 b.dbm = pre_dbm;
+                b.env = pre_env;
                 b.dbm.forget(counter);
                 if (saved_counter >= 0) {
                     Val2 uv;
@@ -2240,66 +2254,27 @@ struct Walker2 {
                 break;
             }
             case SK::ForIter: {
-                if (!s->e1) return bail();
-                bool empty_lit = false;
-                IV elem_iv = unknown_iv();
-                Cong elem_cg = top_cong();
-                if (s->e1->k == EK::Var && b.vecs.count(s->e1->a)) {
-                    // Vector parameter iterable.
-                } else if (s->e1->k == EK::VecLit) {
-                    if (s->e1->kids.empty()) {
-                        empty_lit = true;
-                    } else {
-                        bool first_el = true;
-                        for (const auto &el : s->e1->kids) {
-                            int eid = val(*el);
-                            if (eid < 0) return bail();
-                            if (first_el) {
-                                elem_iv = b.vals[eid].iv;
-                                elem_cg = b.vals[eid].cg;
-                                first_el = false;
-                            } else {
-                                elem_iv = hull_iv(elem_iv, b.vals[eid].iv);
-                                elem_cg = join_cong(elem_cg, b.vals[eid].cg);
-                            }
-                        }
-                    }
-                } else {
-                    if (val(*s->e1) < 0) return bail();
-                }
+                // Fast functions iterate vector parameters only.
+                if (!s->e1 || s->e1->k != EK::Var || !b.vecs.count(s->e1->a)) return bail();
                 const std::string &elem = s->a;
                 auto saved_elem = b.env.count(elem) ? b.env[elem] : -1;
-                if (empty_lit) break;
                 std::vector<const Stmt *> lbody = view(s->body);
-                int elem_writes = 0;
-                for (const Stmt *t : lbody) count_counter_writes_o2(*t, elem, elem_writes);
                 std::set<std::string> assigned;
                 for (const Stmt *t : lbody) collect_assigned(*t, assigned);
                 auto pre_dbm = b.dbm;
+                auto pre_env = b.env;
                 for (const auto &nm : assigned) {
                     b.dbm.forget(nm);
                     b.env[nm] = b.call_val("<loop-assigned>", line);
                 }
                 b.dbm.forget(elem);
-                if (elem_writes == 0 && (!elem_iv.top || elem_cg.m != 1)) {
-                    Val2 ev;
-                    ev.k = VK::Narrow;
-                    ev.iv = elem_iv;
-                    ev.cg = elem_cg;
-                    ev.dbm_node = b.dbm.node(elem);
-                    ev.line = line;
-                    ev.name = "%" + elem + "." + std::to_string(b.seq++);
-                    ev.why = "`for " + elem + " in [...]` hull at line " + std::to_string(line);
-                    b.env[elem] = b.push(std::move(ev));
-                    b.sync_from_dbm();
-                } else {
-                    b.env[elem] = b.call_val("<iter-elem>", line);
-                }
+                b.env[elem] = b.call_val("<iter-elem>", line);
                 loops++;
                 if (!b.dbm.inconsistent) block(lbody);
                 loops--;
                 if (b.bad) return false;
                 b.dbm = pre_dbm;
+                b.env = pre_env;
                 b.dbm.forget(elem);
                 if (saved_elem >= 0) {
                     b.env[elem] = b.call_val("<iter-elem>", line);
