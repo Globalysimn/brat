@@ -2625,6 +2625,7 @@ BFN bint vmap_has_reserved(Map *m) {
 }
 
 BFN Val vmap_setv(Val m, Val k, Val v) {
+    if (verr_pending()) { vrc_dec(k); vrc_dec(v); return vunwind; }
     if (m.tag != V_STRUCT) { vrc_dec(k); vrc_dec(v); vraise("no method set"); return vunwind; }
     Val ke;
     if (!_vmap_key_guard(k, &ke)) { vrc_dec(k); vrc_dec(v); return ke; }

@@ -1070,7 +1070,7 @@ struct Emitter {
 };
 
 
-static bool may_raise(const Expr &e);
+static bool may_raise(const Expr &e, bool typed = false);
 
 bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand,
                        const std::string &kind, const std::set<std::string> &intvars,
@@ -1107,7 +1107,7 @@ bool Emitter::int_expr(const Expr &e, const std::map<std::string, FnEntry> &cand
             intish(*e.kids[0], kind, intvars) && intish(*e.kids[1], kind, intvars))
             return false;
         if (e.a == "&&" || e.a == "||") {
-            if (may_raise(*e.kids[0]) || may_raise(*e.kids[1])) return false;
+            if (may_raise(*e.kids[0], true) || may_raise(*e.kids[1], true)) return false;
             if (!all_bool(*e.kids[0]) &&
                 e.kids[0]->k != EK::Var && e.kids[0]->k != EK::Num && e.kids[0]->k != EK::Bool)
                 return false;
@@ -2881,14 +2881,18 @@ const std::set<std::string> FRESH_RESULT = {
     "filter", "pop", "del", "slice", "unwrap", "unwrap_or", "is_ok", "is_err",
     "is_some", "is_none", "min", "max", "first", "last", "get", "find", "set", "sort_by"};
 // True when evaluating `e` can raise: it calls something, indexes/projects,
-// unwraps `?`, or divides.
-static bool may_raise(const Expr &e) {
+// unwraps `?`, divides, or hands an operator a value it has no meaning for
+// (`"a" - 1`). `typed` leaves the last one out: the operands are numbers.
+static bool may_raise(const Expr &e, bool typed) {
     if (e.k == EK::Call || e.k == EK::MCall ||
         e.k == EK::Idx || e.k == EK::Field || e.k == EK::Quest)
         return true;
     if (e.k == EK::Bin && (e.a == "/" || e.a == "%")) return true;
+    if (!typed && e.k == EK::Bin && e.a != "&&" && e.a != "||" && e.a != "==" && e.a != "!=")
+        return true;
+    if (!typed && e.k == EK::Un && e.a != "!") return true;
     for (const auto &kid : e.kids)
-        if (kid && may_raise(*kid)) return true;
+        if (kid && may_raise(*kid, typed)) return true;
     return false;
 }
 

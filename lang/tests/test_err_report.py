@@ -199,6 +199,53 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # an operator that refuses its operand, written straight into a store: the
+    # container took the error, the catch freed it, and `print` read freed memory
+    "store_operator": '''struct Box { v: dyn }
+
+fn id(x) {
+  return x
+}
+
+fn main() -> i64 {
+  let s = id("a string long enough to live on the heap")
+  let mut m = {"k": [0]}
+  let mut out = [[1]]
+  let mut b = Box { v: [2] }
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    try { m["k"] = s - 1 } catch e { n = n + 1 }
+    try { out[0] = [s - 1] } catch e { n = n + 1 }
+    try { b.v = -s } catch e { n = n + 1 }
+    try { m.set("z", s < 1) } catch e { n = n + 1 }
+    i = i + 1
+  }
+  print(n, m, out, b.v)
+  return 0
+}
+''',
+    # a literal built around the failed operand has no owner on the way to the catch
+    "literal_operand": '''fn id(x) {
+  return x
+}
+
+fn main() -> i64 {
+  let s = id("a string long enough to live on the heap")
+  let mut out = [[1]]
+  let mut w = id([7])
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    try { w = [s - 1] } catch e { n = n + 1 }
+    try { out = out + [s - 1] } catch e { n = n + 1 }
+    try { w = {"a": ~s} } catch e { n = n + 1 }
+    i = i + 1
+  }
+  print(n, out, w)
+  return 0
+}
+''',
     # a failed method call bound by `let`: the binding counted a reference to the
     # error that no release gave back
     "bind_method": '''fn id(x) {
