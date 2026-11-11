@@ -309,6 +309,29 @@ fn main() -> i64 {
   return 0
 }
 ''',
+    # `print` owns what it was handed by `move`, also when a later part fails
+    "print_moved": '''fn id(x) {
+  return x
+}
+
+fn main() -> i64 {
+  let mut n = 0
+  let mut i = 0
+  while i < 2 {
+    let m = {"k": [i]}
+    print(move m)
+    try {
+      let w = id([i])
+      print(move w, [i], [1, 2][5])
+    } catch e {
+      n = n + 1
+    }
+    i = i + 1
+  }
+  print(n)
+  return 0
+}
+''',
 }
 
 for name, src in ASSIGNED.items():

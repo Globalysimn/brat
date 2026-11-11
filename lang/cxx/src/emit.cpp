@@ -10051,7 +10051,13 @@ V Emitter::ex_call(const Expr &e) {
     if (name == "print") {
         if (args.empty())
             return {{}, "(BRAT_PRINT_LOCK(), vprint_nl(), BRAT_PRINT_UNLOCK(), vint(0))"};
-        std::vector<std::string> pre_all, parts;
+        // vprint reads its argument; a value this statement built is nobody's
+        // afterwards, and leaving it was a leak of one container per print.
+        // `print(move m)` took `m` out of its binding, which is the same.
+        // A later argument that raises skips the print, so the parts built
+        // before it ride in `call_cleanup` until the line is out.
+        std::vector<std::string> pre_all, parts, mine;
+        CleanupGuard guard{call_cleanup, call_cleanup.size()};
         for (const Expr *a : args) {
             V v = ex(*a);
             for (auto &p : v.pre) pre_all.push_back(p);
@@ -10059,6 +10065,10 @@ V Emitter::ex_call(const Expr &e) {
             pre_all.push_back(cat("Val ", t, " = (", v.val, ");"));
             pre_all.push_back(err_check_line());
             parts.push_back(t);
+            if (dec_able(*a, heap_returns()) || moves_owned_local(*a)) {
+                mine.push_back(t);
+                call_cleanup.push_back(t);
+            }
         }
         pre_all.push_back("BRAT_PRINT_LOCK();");
         for (size_t i = 0; i < parts.size(); i++) {
@@ -10067,10 +10077,7 @@ V Emitter::ex_call(const Expr &e) {
         }
         pre_all.push_back("vprint_nl();");
         pre_all.push_back("BRAT_PRINT_UNLOCK();");
-        // vprint reads its argument; a value this statement built is nobody's
-        // afterwards, and leaving it was a leak of one container per print.
-        for (size_t i = 0; i < parts.size(); i++)
-            if (dec_able(*args[i], heap_returns())) pre_all.push_back(cat("vdrop_temp(", parts[i], ");"));
+        for (auto &t : mine) pre_all.push_back(cat("vdrop_temp(", t, ");"));
         return {pre_all, "vint(0)"};
     }
     if (name == "log.info" || name == "log.warn" || name == "log.error") {
