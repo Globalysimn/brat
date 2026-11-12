@@ -63,6 +63,10 @@ OWNERSHIP = {
     'move_borrowed.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let a = v\n  move v\n  return len(a)\n}\n',
     'moved_path.brat': 'fn f() -> i64 {\n  let p = Point { x: 1 }\n  let a = move p.x\n  return p.x + a\n}\n',
     'moved_use.brat': 'fn f(v: vec[i64]) -> i64 {\n  move v\n  return len(v)\n}\n',
+    'nested_capture.brat': ('fn main() -> i64 {\n  let a = 3\n  fn inner(k) { return k + a }\n'
+                            '  fn same(a: i64) -> i64 { return a }\n  let f = fn(k) {\n'
+                            '    fn deep(n: i64) -> i64 { return n + a }\n    return deep(k)\n'
+                            '  }\n  print(inner(1) + same(1) + f(1))\n  return 0\n}\n'),
     'nested_scope.brat': ('fn a() -> i64 {\n  fn inner() -> i64 { return 1 }\n'
                           '  let g = fn() { return inner() }\n  return inner() + g()\n}\n'
                           'fn b() -> i64 {\n  return inner()\n}\n'),
@@ -267,6 +271,13 @@ EXPECT = {
         'mut_while_borrowed.brat: 1 error(s), 0 warning(s)',
         'mut_while_borrowed.brat:3: error: cannot mutate immutable `v` while borrowed by `a`',
         'mut_while_borrowed.brat:2: note: borrowed by `a` here',
+    ],
+    'nested_capture.brat': [
+        'nested_capture.brat: 2 error(s), 0 warning(s)',
+        'nested_capture.brat:3: error: use of undeclared var `a`',
+        'nested_capture.brat: note: help: `a` belongs to the enclosing fn, and a nested fn does not capture: take it as a parameter, or bind a closure with `let name = fn(...) { ... }`',
+        'nested_capture.brat:6: error: use of undeclared var `a`',
+        'nested_capture.brat: note: help: `a` belongs to the enclosing fn, and a nested fn does not capture: take it as a parameter, or bind a closure with `let name = fn(...) { ... }`',
     ],
     'nested_scope.brat': [
         'nested_scope.brat: 1 error(s), 0 warning(s)',

@@ -116,6 +116,8 @@ struct Decl {
 // are emitted in declaration order.
 struct Decls {
     std::vector<std::pair<std::string, std::shared_ptr<Decl>>> v;
+    // In a fn body: the scope the fn is declared in. Null outside any fn.
+    const Decls *outer = nullptr;
 
     Decl *find(const std::string &n) {
         for (auto &kv : v) {
@@ -255,6 +257,7 @@ std::vector<ParamMode> fn_modes(const std::vector<Param> &params) {
 // not see the other branch's moves.
 Decls copy_decl(const Decls &d) {
     Decls out;
+    out.outer = d.outer;
     out.v.reserve(d.v.size());
     for (const auto &kv : d.v) out.v.emplace_back(kv.first, std::make_shared<Decl>(*kv.second));
     return out;
@@ -904,6 +907,13 @@ std::optional<BorrowNote> undeclared_rel(const std::string &name,
     if (name == "enum" || name == "trait" || name == "impl" || name == "struct") {
         return BorrowNote{0, "help: `" + name + "` starts a declaration, so it cannot be used "
                              "inside an expression"};
+    }
+    for (const Decls *d = decl ? decl->outer : nullptr; d; d = d->outer) {
+        if (d->has(name)) {
+            return BorrowNote{0, "help: `" + name + "` belongs to the enclosing fn, and a nested "
+                                 "fn does not capture: take it as a parameter, or bind a closure "
+                                 "with `let name = fn(...) { ... }`"};
+        }
     }
     if (auto suggestion = name_suggestion(name, decl, funcs)) {
         return BorrowNote{0, "help: did you mean `" + *suggestion + "`?"};
@@ -2281,7 +2291,12 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
     case SK::ExportFn: {
         const FnDecl &f = s.fns[0];
         NestedScope nested(f, funcs);
-        Decls sub = copy_decl(decl);
+        // A nested fn is a plain C function with no frame to read from: its
+        // body starts from the top-level names, as any fn does.
+        const Decls *top = &decl;
+        while (top->outer) top = top->outer;
+        Decls sub = copy_decl(*top);
+        sub.outer = &decl;
         for (auto &kv : sub.v) kv.second->clo_outer = true;
         auto saved_floor = errs.fn_floor;
         auto saved_defers = errs.active_defers;
@@ -2290,7 +2305,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         const int saved_spawn = errs.in_spawn;
         errs.in_spawn = 0;
         errs.fn_floor.clear();
-        for (const auto &kv : decl.v) errs.fn_floor.insert(kv.first);
+        for (const auto &kv : top->v) errs.fn_floor.insert(kv.first);
         for (const Param &p : f.params) sub.set(p.name, param_decl(p));
         errs.active_defers.clear();
         errs.try_sinks.clear();
@@ -2477,6 +2492,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
             seen.insert(name);
             NestedScope nested(f, funcs);
             Decls sub = copy_decl(decl);
+            sub.outer = &decl;
             auto saved_floor = errs.fn_floor;
             auto saved_defers = errs.active_defers;
             auto saved_sinks = std::move(errs.try_sinks);
