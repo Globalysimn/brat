@@ -2,6 +2,7 @@
 
 #include "builtins.h"
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <set>
@@ -106,25 +107,36 @@ struct BodyInfo {
     std::set<std::string> params;
 };
 
-using Bodies = std::map<std::string, BodyInfo>;
+// Keyed by the name a call uses. A fn declared inside another one shares its
+// bare name with any other fn of that name, and a call is charged with all of
+// them: the passes below resolve a callee by name alone.
+using Bodies = std::multimap<std::string, BodyInfo>;
 
 Bodies collect_bodies(const std::vector<StmtP> &body) {
     Bodies out;
-    auto pnames = [](const std::vector<Param> &ps) {
-        std::set<std::string> s;
-        for (const auto &p : ps) s.insert(p.name);
-        return s;
+    auto add = [&](const std::string &name, const FnDecl &f) {
+        std::set<std::string> params;
+        for (const auto &p : f.params) params.insert(p.name);
+        out.emplace(name, BodyInfo{view(f.body), params});
+    };
+    auto add_nested = [&](const Stmt &s) {
+        if ((s.k == SK::Fn || s.k == SK::ExportFn) && !s.fns.empty())
+            add(s.fns[0].name.value_or(""), s.fns[0]);
     };
     for (const auto &sp : body) {
         const Stmt *node = sp.get();
         while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
-        if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
-            out[node->fns[0].name.value_or("")] = {view(node->fns[0].body), pnames(node->fns[0].params)};
-        } else if (node->k == SK::Impl) {
-            for (const auto &f : node->fns)
-                out[node->a + "." + f.name.value_or("")] = {view(f.body), pnames(f.params)};
-        } else if (node->k == SK::Extern) {
-            out[node->ext.name] = {{}, {}};
+        if (node->k == SK::Extern) out.emplace(node->ext.name, BodyInfo{});
+        const bool is_fn = node->k == SK::Fn || node->k == SK::ExportFn;
+        if (!is_fn && node->k != SK::Impl) continue;
+        for (const auto &f : node->fns) {
+            const std::string name = f.name.value_or("");
+            add(is_fn ? name : node->a + "." + name, f);
+            each_stmt(view(f.body), add_nested);
+            each_expr_in(view(f.body), [&](const Expr &e) {
+                if ((e.k == EK::Closure || e.k == EK::ParFor) && e.fn)
+                    each_stmt(view(e.fn->body), add_nested);
+            });
         }
     }
     return out;
@@ -144,7 +156,7 @@ rows_of(const Bodies &bodies, const std::set<std::string> &externs,
             rows[name].insert("ffi");
             continue;
         }
-        rows[name] = local_row(info.body);
+        rows[name].merge(local_row(info.body));
         each_expr_in(info.body, [&](const Expr &e) {
             if (e.k == EK::Call) fcalls[name].insert(e.a);
             else if (e.k == EK::MCall) mcalls[name].insert(e.b);
@@ -275,7 +287,9 @@ std::vector<BorrowDiag> parfor_rules(const std::vector<StmtP> &body, const FnTab
     std::map<std::string, std::pair<std::set<std::string>, std::set<std::string>>> fn_edges;
     for (const auto &[name, info] : bodies) {
         if (externs.count(name)) continue;
-        fn_gwrites[name] = outer_writes(info.body, info.params, &funcs);
+        auto &writes = fn_gwrites[name];
+        for (auto &w : outer_writes(info.body, info.params, &funcs))
+            if (std::find(writes.begin(), writes.end(), w) == writes.end()) writes.push_back(w);
         each_expr_in(info.body, [&](const Expr &e) {
             if (e.k == EK::Call) fn_edges[name].first.insert(e.a);
             else if (e.k == EK::MCall) fn_edges[name].second.insert(e.b);

@@ -115,6 +115,30 @@ fn main() -> i64 {
   return t
 }
 ''', "the `par for` body writes `seen`, which lives outside the loop"),
+    ("nested_impure_call", '''fn add(a: i64, b: i64) -> i64 { return a + b }
+fn main() -> i64 {
+  fn noisy(x: i64) -> i64 { print(x) return x }
+  let v = [1, 2]
+  return par for x in v reduce(add, 0) { return noisy(x) }
+}
+''', "the `par for` body cannot io"),
+    ("nested_outer_write", '''let mut seen = 0
+fn add(a: i64, b: i64) -> i64 { return a + b }
+fn main() -> i64 {
+  fn bump(x: i64) -> i64 {
+    seen = seen + 1
+    return x
+  }
+  let v = [1, 2]
+  return par for x in v reduce(add, 0) { return bump(x) }
+}
+''', "the `par for` body writes `seen`, which lives outside the loop"),
+    ("nested_impure_op", '''fn main() -> i64 {
+  fn shout(a: i64, b: i64) -> i64 { print(a) return b }
+  let v = [1, 2]
+  return par for x in v reduce(shout, 0) { return x }
+}
+''', "`shout` cannot fold in parallel: it can io"),
 ]
 
 
