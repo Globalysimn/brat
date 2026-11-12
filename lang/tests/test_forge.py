@@ -23,7 +23,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
 
 ENV = dict(os.environ)
-ENV["PYTHONIOENCODING"] = "utf-8"
 
 n = 0
 FAILED = []

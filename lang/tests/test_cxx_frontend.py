@@ -1,8 +1,6 @@
 """Native parser contracts and AST-preserving formatting of the source corpus."""
-import argparse
 import os
 import subprocess
-import sys
 import time
 
 import _cxx

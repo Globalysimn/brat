@@ -17,7 +17,6 @@ import _scratch
 import json
 import os
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))

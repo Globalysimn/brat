@@ -7,7 +7,6 @@ import os
 import shutil
 import stat
 import subprocess
-import sys
 
 import _cxx
 import _scratch

@@ -28,7 +28,6 @@ ENGINE = os.path.abspath(os.path.join(HERE, '..', 'engine'))
 TMP = _scratch.mkdtemp(prefix='brat-hard-')
 
 ENV = dict(os.environ)
-ENV['PYTHONIOENCODING'] = 'utf-8'
 ENV.pop('BRAT_FILES', None)
 
 n = 0

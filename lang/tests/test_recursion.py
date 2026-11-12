@@ -9,7 +9,6 @@ import importlib.util
 import os
 import re
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENG = os.path.join(HERE, '..', 'engine')

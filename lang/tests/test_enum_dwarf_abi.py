@@ -645,8 +645,8 @@ void run_var_cb(int x, void (*vcb)(int, ...));
                 "enum FwdI64 : int64_t;\n"
                 "void use_fixed(enum FixedTag a, FixedAlias b, enum FwdI64 *c);\n"
             )
-        r_fixed = subprocess.run([CXX, "bindgen", fixed_h, "-o", fixed_out],
-                                 capture_output=True, text=True, check=True)
+        subprocess.run([CXX, "bindgen", fixed_h, "-o", fixed_out],
+                       capture_output=True, text=True, check=True)
         fixed_txt = open(fixed_out, encoding="utf-8").read()
         check("a: u8, b: u16, c: ptr[i64]" in fixed_txt,
               f"native bindgen fixed-underlying enum widths wrong:\n{fixed_txt}")

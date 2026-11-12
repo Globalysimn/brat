@@ -11,7 +11,6 @@ import _cxx
 import json
 import os
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = _scratch.mkdtemp(prefix="brat-lsp-")
@@ -394,7 +393,7 @@ check(d["result"]["range"]["start"]["line"] == 0, "module target line: %r" % (d[
 
 # Module resolution follows unsaved import edits from the editor buffer, not
 # the root file's older on-disk contents.
-mathx_path = write("lib/mathx.brat", '''pub fn square(r: i64) -> i64 {
+write("lib/mathx.brat", '''pub fn square(r: i64) -> i64 {
   return r * r
 }
 ''')

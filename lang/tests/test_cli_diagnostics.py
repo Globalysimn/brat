@@ -6,11 +6,9 @@ import _toolchain as tc_mod
 
 import hashlib
 import http.server
-import io
 import json
 import os
 import subprocess
-import sys
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))

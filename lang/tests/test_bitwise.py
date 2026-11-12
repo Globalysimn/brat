@@ -5,7 +5,6 @@ import _scratch
 
 import os
 import subprocess
-import sys
 
 BIN = _cxx.build()
 TMP = _scratch.mkdtemp(prefix="brat-bitwise-")

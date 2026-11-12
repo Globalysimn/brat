@@ -16,7 +16,6 @@ import os
 import shutil
 import struct
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE_DIR = os.path.abspath(os.path.join(HERE, "..", "engine"))

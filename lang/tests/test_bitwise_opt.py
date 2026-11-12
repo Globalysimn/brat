@@ -1,7 +1,6 @@
 """Bitwise abstract interpretation (-O1 IV, -O2 IV x Granger congruence x DBM) and proof certificates."""
 import os
 import subprocess
-import sys
 
 import _cxx
 import _scratch

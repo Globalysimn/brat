@@ -1,7 +1,6 @@
 """Regression tests for string pinning and extern effect parsing."""
 import os
 import subprocess
-import sys
 import tempfile
 
 import _cxx

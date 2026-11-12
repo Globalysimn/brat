@@ -154,11 +154,6 @@ def emit_source(src, base=".", flags=(), env=None, no_check=True):
             pass
 
 
-def emit_c_file(path, flags=(), env=None):
-    """C through the product `emit-c` command, including its gates."""
-    return _native_text(["emit-c"] + list(flags) + [os.path.abspath(path)], env=env)
-
-
 def sx(node):
     """Canonical s-expression printer matching `brat-cxx ast` output."""
     if isinstance(node, tuple):

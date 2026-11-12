@@ -4,8 +4,6 @@
 
 import _scratch
 
-import argparse
-import importlib.util
 import os
 import subprocess
 import sys

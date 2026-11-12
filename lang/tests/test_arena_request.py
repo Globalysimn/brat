@@ -17,7 +17,6 @@ import _scratch
 import os
 import shutil
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')
@@ -112,13 +111,6 @@ def check(cond, msg):
     global n
     assert cond, msg
     n += 1
-
-
-def limited(bytes_):
-    def apply():
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (bytes_, bytes_))
-    return apply
 
 
 tmp = _scratch.mkdtemp(prefix='brat-arena-request-')

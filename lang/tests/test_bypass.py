@@ -18,12 +18,8 @@ import os
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-OWN = os.path.join(ENGINE, "borrow.py")
 
 ENV = dict(os.environ)
-ENV["PYTHONIOENCODING"] = "utf-8"
 ENV["BRAT_FILES"] = "1"
 
 n = 0

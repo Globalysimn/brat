@@ -3,7 +3,6 @@ import _scratch
 import importlib.util
 import os
 import subprocess
-import sys
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))

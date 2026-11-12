@@ -159,7 +159,7 @@ def main():
     with open(bad, "w", encoding="utf-8") as f:
         f.write(HEADER.replace("float x; float y;", "double x; double y;"))
     outbin = os.path.join(TMP, "should_not_exist")
-    rc, out5, err5 = run(["build", prog, "--header", bad, "-o", outbin])
+    rc, _, err5 = run(["build", prog, "--header", bad, "-o", outbin])
     check(rc == 1, "a wrong header did not stop the build (rc=%d)" % rc)
     check("refusing to build" in err5, "the refusal does not say so:\n%s" % err5)
     check(not os.path.exists(outbin), "a binary was produced despite a failed proof")

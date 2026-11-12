@@ -3,10 +3,8 @@
 import _cxx
 import _scratch
 
-import argparse
 import os
 import subprocess
-import sys
 import time
 
 BIN = _cxx.BIN

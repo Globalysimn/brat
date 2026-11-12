@@ -7,7 +7,6 @@ import json
 import os
 import struct
 import subprocess
-import sys
 import tarfile
 
 import _cxx

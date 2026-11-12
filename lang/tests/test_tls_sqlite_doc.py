@@ -8,7 +8,6 @@ import os
 import socket
 import ssl
 import subprocess
-import sys
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,7 +67,7 @@ def _https_server():
             break
         try:
             with srv_ctx.wrap_socket(conn, server_side=True) as tls_conn:
-                _req = tls_conn.recv(4096)
+                tls_conn.recv(4096)
                 body = '{"tls":"verified","wave":3}'
                 resp = (
                     "HTTP/1.1 200 OK\r\n"
@@ -169,7 +168,7 @@ def _corrupt_tls_server():
             break
         try:
             tls_conn = srv_ctx.wrap_socket(conn, server_side=True)
-            _req = tls_conn.recv(4096)
+            tls_conn.recv(4096)
             tls_conn.sendall(b"HTTP/1.0 200 OK\r\n\r\npartial")
             raw_conn = socket.socket(fileno=tls_conn.detach())
             raw_conn.sendall(b"\x17\x03\x03\x00\x10" + b"X" * 16)
@@ -263,7 +262,7 @@ print("ok: std.sqlite + confinement + ASan")
 
 
 # Standalone `brat-cxx build` `brat_ffi_contract[]` + `brat doc`
-hdr73 = write("cxx_ffi/mylib.h", '''#pragma once
+write("cxx_ffi/mylib.h", '''#pragma once
 #include <stdint.h>
 typedef struct Vec2i {
     int32_t x;

@@ -9,7 +9,6 @@ import _scratch
 import os
 import shutil
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ENGINE = os.path.join(HERE, '..', 'engine')

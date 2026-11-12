@@ -25,7 +25,6 @@ import _cxx
 BIN = _cxx.build()
 
 ENV = dict(os.environ)
-ENV["PYTHONIOENCODING"] = "utf-8"
 
 n = 0
 FAILED = []

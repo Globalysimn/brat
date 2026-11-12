@@ -4,12 +4,10 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 ENV = dict(os.environ)
-ENV["PYTHONIOENCODING"] = "utf-8"
 
 n = 0
 TMP = _scratch.mkdtemp(prefix="brat-own-")

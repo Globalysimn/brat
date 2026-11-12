@@ -6,7 +6,6 @@ import os
 import socket
 import socketserver
 import subprocess
-import sys
 import tarfile
 import threading
 import time

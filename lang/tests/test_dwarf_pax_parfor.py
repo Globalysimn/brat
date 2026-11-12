@@ -12,12 +12,10 @@ Covers:
    arrays (`T[M][N]`), and C11 `_Atomic` / GNU qualifier stripping.
 """
 import gzip
-import io
 import json
 import os
 import pathlib
 import socket
-import struct
 import subprocess
 import sys
 import tempfile

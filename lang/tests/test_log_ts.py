@@ -11,7 +11,6 @@ import _scratch
 import json
 import os
 import subprocess
-import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))

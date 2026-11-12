@@ -16,7 +16,6 @@ import os
 import re
 import socket
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))

@@ -5,7 +5,6 @@ import _scratch
 import importlib.util
 import os
 import subprocess
-import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))

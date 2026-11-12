@@ -9,7 +9,6 @@ import _cxx
 import _scratch
 import os
 import subprocess
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = _scratch.mkdtemp(prefix="brat-fuzzreg-")

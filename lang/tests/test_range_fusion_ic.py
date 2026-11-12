@@ -170,8 +170,8 @@ check(proofs.count("triangular_div") >= 3 and "div-by-zero check dropped" in pro
 check("use_summary" in proofs and "[3, 12]" in proofs,
       f"expected interprocedural FnSummary [3, 12] in use_summary:\n{proofs}")
 
-c_o0, ex_o0 = compile_and_run(o2_src, None)
-c_o1, ex_o1 = compile_and_run(o2_src, "-O1")
+_, ex_o0 = compile_and_run(o2_src, None)
+_, ex_o1 = compile_and_run(o2_src, "-O1")
 c_o2, ex_o2 = compile_and_run(o2_src, "-O2", sanitize=True)
 check(ex_o0.returncode == 0 and ex_o1.returncode == 0 and ex_o2.returncode == 0,
       "execution failed on o2_math.brat")

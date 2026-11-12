@@ -1,5 +1,4 @@
 """Regressions for CRT and emitter lifetime, concurrency, SQLite, locale, and DWARF rules."""
-import locale
 import os
 import platform
 import subprocess

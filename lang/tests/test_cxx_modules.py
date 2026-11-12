@@ -3,11 +3,8 @@
 import _cxx
 import _scratch
 
-import argparse
-import importlib.util
 import os
 import subprocess
-import sys
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
