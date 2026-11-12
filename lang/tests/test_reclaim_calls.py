@@ -2,7 +2,8 @@
 AddressSanitizer, because a leak is invisible on stdout.
 
 Each case is a shape that used to leak: a fresh value per loop pass, a
-container returned out of an arena, a defer that captures nothing.
+container returned out of an arena, a defer that captures nothing, a vector
+built for one `par for`.
 """
 import _cxx
 import _scratch
@@ -178,6 +179,29 @@ fn main() -> i64 {
   return 0
 }
 ''', "100\nt 99\n")
+
+CASES["parfor_source"] = ('''
+fn add(a: i64, b: i64) -> i64 { return a + b }
+
+fn make(n: i64) -> vec[i64] {
+  let mut v = []
+  for i in 0..n {
+    v.push(i + 1)
+  }
+  return v
+}
+
+fn main() -> i64 {
+  let mut i = 0
+  while i < 50 {
+    let lit = par for n in [1, 2, 3] reduce(add, 0) { return n * 2 }
+    let built = par for n in make(4) reduce(add, 0) { return n }
+    i = i + lit + built
+  }
+  print(i)
+  return 0
+}
+''', "66\n")
 
 CASES["mixed_slot_relet_and_iter"] = ('''
 fn iter_then_untaken_set(flag: bool, k: i64) -> str {

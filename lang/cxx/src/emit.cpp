@@ -5369,9 +5369,25 @@ V Emitter::ex_parfor(const Expr &e) {
     }
     const int opcode = fn_code("fn:" + fn_key(e.b));
     pre.push_back(cat("Val ", opc, " = vclosure0(", opcode, ");"));
+    // `vparfor` consumes the closures and the unit, not the vector it reads: a
+    // vector built for this loop alone is released here.
+    const Expr &src = *e.kids[0];
+    const bool built = (src.k == EK::Call || src.k == EK::MCall || src.k == EK::Idx ||
+                        src.k == EK::Field || src.k == EK::Quest) &&
+                       dec_able(src, heap_returns());
+    std::string vec = it.val;
+    if (built) {
+        vec = new_tmp("h");
+        pre.push_back(cat("Val ", vec, " = (", it.val, ");"));
+    }
     std::string t = new_tmp("pf");
-    pre.push_back(cat("Val ", t, " = vparfor(", it.val, ", ", m, ", ", unit.val,
+    pre.push_back(cat("Val ", t, " = vparfor(", vec, ", ", m, ", ", unit.val,
                       ", ", opc, ");"));
+    if (built) {
+        pre.push_back(cat("vdrop_temp(", vec, ");"));
+    } else if (src.k == EK::VecLit) {
+        if (auto lit = container_tmp(it.val)) pre.push_back(cat("vrc_dec(vvecv(", *lit, "));"));
+    }
     return {pre, t};
 }
 
