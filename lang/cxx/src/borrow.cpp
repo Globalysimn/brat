@@ -2757,11 +2757,19 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
 // top-level declarations, so a nested `fn` used to read as undeclared.
 static void register_nested(const std::vector<StmtP> &body, FnTable &funcs);
 
+// A closure has a body of its own, and a `fn` can be declared in it.
+static void register_nested_expr(const Expr *e, FnTable &funcs) {
+    if (!e) return;
+    for (const auto &k : e->kids) register_nested_expr(k.get(), funcs);
+    if (e->fn) register_nested(e->fn->body, funcs);
+}
+
 static void register_nested_stmt(const Stmt &s, FnTable &funcs) {
     if (s.k == SK::Fn || s.k == SK::ExportFn) {
         const FnDecl &f = s.fns[0];
         funcs.sigs[f.name.value_or("")] = fn_modes(f.params);
     }
+    for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()}) register_nested_expr(e, funcs);
     register_nested(s.body, funcs);
     register_nested(s.body2, funcs);
     if (s.els) register_nested_stmt(*s.els, funcs);

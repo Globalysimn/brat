@@ -178,12 +178,17 @@ fn main() -> i64 {
       ch.send(tag(1))
     }
   }
+  let boxed = fn(k) {
+    fn box(n) { return [n, n + 1] }
+    return box(k)
+  }
   print(ch.recv())
+  print(boxed(1))
   return 0
 }
 '''
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
-                   "2 true ['end']\n" * 4 + "job 1\n")
+                   "2 true ['end']\n" * 4 + "job 1\n[1, 2]\n")
 NESTED_CAPTURE = '''fn main() -> i64 {
   let a = 3
   fn inner(k) { return k + a }

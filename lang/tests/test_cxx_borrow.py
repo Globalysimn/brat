@@ -27,6 +27,8 @@ OWNERSHIP = {
     'escape_return.brat': 'fn f() -> vec[i64] {\n  let v = [1]\n  let r = v\n  return r\n}\n',
     'closure_escape.brat': 'fn main() -> i64 {\n  let s = \"x\"\n  let r = s\n  let f = fn() { return r }\n  print(f())\n  return 0\n}\n',
     'closure_capture_used.brat': 'fn main() -> i64 {\n  let n = 10\n  let f = fn(x) { return x + n }\n  print(f(5))\n  return 0\n}\n',
+    'closure_fn.brat': ('fn main() -> i64 {\n  let g = fn(x) {\n    fn inc(y) { return y + 1 }\n'
+                        '    return inc(x)\n  }\n  print(g(0))\n  return 0\n}\n'),
     'closure_shadow.brat': 'fn main() -> i64 {\n  let n = 10\n  let f = fn(n) { return n }\n  print(f(5))\n  return 0\n}\n',
     'if_move.brat': 'fn f(c: bool) -> i64 {\n  let v = [1]\n  if c {\n    move v\n  }\n  return len(v)\n}\n',
     'immutable_set.brat': 'fn f() -> i64 {\n  let s = Point { x: 1 }\n  s.x = 2\n  return 0\n}\n',
@@ -150,6 +152,9 @@ EXPECT = {
     # stays unused and the warning stands. Both are the same walk.
     'closure_capture_used.brat': [
         'closure_capture_used.brat: 0 error(s), 0 warning(s)',
+    ],
+    'closure_fn.brat': [
+        'closure_fn.brat: 0 error(s), 0 warning(s)',
     ],
     'closure_shadow.brat': [
         'closure_shadow.brat: 0 error(s), 1 warning(s)',
