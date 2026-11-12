@@ -7072,9 +7072,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             if (!have) order.push_back({false, name, ""});
             late.push_back({name, &f, lookup_fn_file(name, &f)});
         } else {
-            // A nested fn is a plain C function with no frame to read from.
+            // A nested fn is a plain C function with no frame to read from. In a
+            // closure or a spawn the enclosing locals are the captured names.
             for (const auto &v : closure_free_vars(f))
-                if (sym.count(v) && !global_lets.count(v))
+                if ((sym.count(v) || (cap && cap->second.count(v))) && !global_lets.count(v))
                     throw EmitError(cat(lookup_stmt_file(&s), ":", s.line, ": fn `", name, "` uses `", v,
                                         "` of the enclosing fn: take it as a parameter, or bind a ",
                                         "closure with `let ", name, " = fn(...)`"));

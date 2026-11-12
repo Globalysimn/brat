@@ -171,7 +171,8 @@ fn main() -> i64 {
 A `fn` declared inside another function is a name of that function only, and
 it does not capture: its body sees its own parameters and the top-level names.
 Reading a local of the enclosing function is a compile error. Bind a closure
-with `let name = fn(...) { ... }` when the body needs one.
+with `let name = fn(...) { ... }` when the body needs one. This holds for a
+`fn` declared in a closure body or in a `spawn` block too.
 
 ## Indexing, variants and map keys
 

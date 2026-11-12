@@ -189,7 +189,8 @@ fn main() -> i64 {
 '''
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
                    "2 true ['end']\n" * 4 + "job 1\n[1, 2]\n")
-# What the emitter refuses, with the line of the declaration.
+# What the emitter refuses, with the line of the declaration. In a closure or
+# a spawn the local is a captured name, not a slot of the C frame.
 NESTED_REFUSED = {
     "capture": ('''fn main() -> i64 {
   let a = 3
@@ -198,6 +199,27 @@ NESTED_REFUSED = {
   return 0
 }
 ''', "capture.brat:3: fn `inner` uses `a` of the enclosing fn"),
+    "capture_spawn": ('''fn main() -> i64 {
+  let a = [3]
+  scope {
+    spawn {
+      fn inner(k) { print(k + a[0]) }
+      inner(1)
+    }
+  }
+  return 0
+}
+''', "capture_spawn.brat:5: fn `inner` uses `a` of the enclosing fn"),
+    "capture_closure": ('''fn main() -> i64 {
+  let a = 3
+  let f = fn(k) {
+    fn inner(n: i64) -> i64 { return n + a }
+    return inner(k)
+  }
+  print(f(1))
+  return 0
+}
+''', "capture_closure.brat:4: fn `inner` uses `a` of the enclosing fn"),
 }
 
 EXPECTED = """0
