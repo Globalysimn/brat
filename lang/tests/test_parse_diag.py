@@ -1,4 +1,4 @@
-"""Parse diagnostic formatting, line numbers, `: error: ` prefix, and source snippets."""
+"""Parse diagnostics: the first error of each case, with its line number."""
 import _cxx
 import _scratch
 import os
@@ -18,7 +18,7 @@ CASES = {
     # `v[0](10)` used to parse as two arguments of the enclosing call, so
     # `print(v[0](10))` printed the closure and then 10, and a closure that
     # captured the vector holding it recursed until the frame budget ran out.
-    # A call needs a name; the two front ends must refuse it the same way.
+    # A call needs a name.
     "call_of_a_value": "let mut v = []\nv.push(fn(x) { return x + 1 })\n"
                        "print(v[0](10))\n",
     "bad_let": "let = 5\nprint(1)\n",
@@ -51,9 +51,34 @@ CASES = {
 }
 
 
-def norm(text, path):
-    return "\n".join(l.replace(path, "F") for l in text.replace("\r\n", "\n").splitlines()
-                     if l.strip())
+# name -> the first `error:` line with the path cut off, or None when the
+# case is accepted.
+WANT = {
+    "eof_in_block": "4: error: unexpected end of file at line 4",
+    "eof_in_call": "4: error: unexpected end of file at line 4",
+    "unclosed_map": "3: error: want ':' have 'print' at line 3",
+    "stray_percent": "3: error: stuck at '%' at line 3",
+    "stray_brace_after_let": "1: error: stuck at '}' at line 1",
+    "stray_paren": "2: error: stuck at ')' at line 2",
+    "call_of_a_value": "3: error: a call needs a name, a function value is not first class at line 3",
+    "bad_let": "1: error: want '=' have '5' at line 1",
+    "bad_fn": "1: error: want '(' have 'a' at line 1",
+    "want_colon": "1: error: want ':' have '1' at line 1",
+    "unterminated_string": "1: error: unterminated string literal at line 1",
+    "dangling_else": "3: error: want ':' have '}' at line 3",
+    "double_op": "1: error: stuck at '+' at line 1",
+    "too_deep_expr": "4: error: expression nested too deeply at line 4",
+    "too_deep_block": "202: error: block nested too deeply at line 202",
+    "extern_result_before_expr": "2: error: arg 1 of `flip`: want bool, got i64",
+    "extern_result_same_line_expr": None,
+    "extern_result_generic_before_expr": "1: error: unsupported FFI type `vec[i64]` as the result of extern fn `f`",
+    "extern_result_errno_before_expr": None,
+    "long_unicode_line": "1: error: stuck at '+' at line 1",
+    "jump_in_fn": "2: error: `break` outside a loop at line 2",
+    "jump_at_top": "1: error: `continue` outside a loop at line 1",
+    "jump_in_closure": "3: error: `continue` outside a loop at line 3",
+    "jump_in_spawn": "3: error: `break` outside a loop at line 3",
+}
 
 
 def run(cmd):
@@ -67,23 +92,15 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(CASES[name])
-        a = run(_cxx.cli_args("check", path))
-        b = run([cxx, "check", path])
-        py = norm(a.stdout + a.stderr, path)
-        cx = norm(b.stdout + b.stderr, path)
-        if a.returncode != b.returncode:
-            print("FAIL %s: exit codes %d and %d" % (name, a.returncode, b.returncode))
-            bad += 1
-            continue
-        if py != cx:
-            print("FAIL %s: diagnostics differ\n  py :\n%s\n  cxx:\n%s" % (name, py, cx))
-            bad += 1
-            continue
-        if a.returncode and ": error: " not in py:
-            print("FAIL %s: rejected without a `file:line: error: ` line:\n%s" % (name, py))
-            bad += 1
-        if name.startswith("jump_") and "outside a loop" not in cx:
-            print("FAIL %s: a jump with no loop around it was accepted:\n%s" % (name, cx))
+        r = run([cxx, "check", path])
+        errors = [l for l in (r.stdout + r.stderr).splitlines() if ": error: " in l]
+        want = WANT[name]
+        if want is None:
+            ok = r.returncode == 0 and not errors
+        else:
+            ok = r.returncode == 1 and errors and errors[0].startswith(path + ":" + want)
+        if not ok:
+            print("FAIL %s: rc=%d, want %r:\n%s" % (name, r.returncode, want, r.stdout + r.stderr))
             bad += 1
     # The diagnostic for a file that is not UTF-8 must itself be valid UTF-8:
     # echoing byte 0xff into a terminal, pipe or JSON consumer just moves the
@@ -105,7 +122,7 @@ def main():
     if bad:
         print("PARSE DIAG: %d case(s) failed" % bad)
         return 1
-    print("PARSE DIAG OK (%d cases, both front ends print the same bytes)" % len(CASES))
+    print("PARSE DIAG OK (%d cases)" % len(CASES))
     return 0
 
 

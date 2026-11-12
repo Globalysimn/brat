@@ -116,7 +116,7 @@ def main():
     if bad:
         print("RESOURCE BOUNDS: %d case(s) failed" % bad)
         return 1
-    print("RESOURCE BOUNDS OK (%d cases, both backends say the same thing)" % len(CASES))
+    print("RESOURCE BOUNDS OK (%d cases, -O0 and -O2 say the same thing)" % len(CASES))
     return 0
 
 

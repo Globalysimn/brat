@@ -348,7 +348,7 @@ REJECT.append(("a33_borrow_live_across_while_then_move", {"m.brat": """fn main()
 }
 """}, "while borrowed"))
 
-# A fn name is a callback argument, never a value: the backends have no function
+# A fn name is a callback argument, never a value: there are no function
 # values, so this is a checker error, not a run-time NameError. The module case
 # is the same defect with a module short name in the way, which is how it was
 # found: `import lib.m` plus `fn m` used to pass `check` and die in `cc`.
@@ -1205,13 +1205,10 @@ def summaries(out):
     return [int(m) for m in SUMMARY.findall(out)]
 
 
-def closure_capture_both():
-    """A name read inside a closure is a use: neither checker warns about it.
-
-    `vars_in` used to stop at a closure node, so a captured binding looked
-    unused and `let n = 10` + `fn(x) { return x + n }` warned. A parameter of the
-    same spelling is bound by the body, so the outer binding stays unused: the
-    two halves of the rule are the same walk.
+def closure_capture():
+    """A name read inside a closure is a use, so `let n = 10` with
+    `fn(x) { return x + n }` does not warn. A closure parameter of the same
+    spelling is bound by the body, and the outer binding stays unused.
     """
     capture = """fn main() -> i64 {
   let n = 10
@@ -1231,25 +1228,17 @@ def closure_capture_both():
         path = os.path.join(TMP, "cap_%s.brat" % label)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(src)
-        outs = {}
-        for tag, cmd in (("py", _cxx.cli_args("check", path)),
-                         ("cxx", _cxx.cli_args("check", path))):
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=ENV)
-            outs[tag] = ((r.stdout or "") + (r.stderr or "")).replace(path, "m.brat")
-        for tag, out in outs.items():
-            check(("unused var `n`" in out) == want_warn,
-                  "closure %s %s: want unused-warning=%s, got:\n%s"
-                  % (label, tag, want_warn, out[-400:]))
-        check(outs["py"] == outs["cxx"],
-              "closure %s: both checkers disagree\n--- py ---\n%s\n--- cxx ---\n%s"
-              % (label, outs["py"][-400:], outs["cxx"][-400:]))
-        print("closure %s: both checkers agree (%s)"
-              % (label, "warns" if want_warn else "silent"))
+        r = subprocess.run(_cxx.cli_args("check", path), capture_output=True, text=True,
+                           timeout=120, env=ENV)
+        out = (r.stdout or "") + (r.stderr or "")
+        check(("unused var `n`" in out) == want_warn,
+              "closure %s: want unused-warning=%s, got:\n%s" % (label, want_warn, out[-400:]))
+        print("closure %s: %s" % (label, "warns" if want_warn else "silent"))
 
 
 def main():
     try:
-        closure_capture_both()
+        closure_capture()
         check(len(REJECT) >= 56, "want >=56 reject cases, have %d" % len(REJECT))
         check(len(ACCEPT) >= 24, "want >=24 accept cases, have %d" % len(ACCEPT))
         names = [c[0] for c in REJECT] + [c[0] for c in ACCEPT]

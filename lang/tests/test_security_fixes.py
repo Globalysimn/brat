@@ -1,9 +1,9 @@
 """Regression pins for the security fixes.
 
 FS sandbox type rejection, `defer` vs `catch` order, regex parity (>=65
-alternatives and UTF-8 `.`), and nested `join_all` termination. Unoptimized (-O0) and
-C binary must agree on stdout and exit code; nested-spawn output is compared as
-a sorted line set because the two backends schedule workers differently.
+alternatives and UTF-8 `.`), and nested `join_all` termination. `run -O0` and
+the built binary must agree on stdout and exit code; nested-spawn output is
+compared as a sorted line set because the workers finish in no fixed order.
 """
 import _cxx
 import _scratch
@@ -81,7 +81,7 @@ def build(name, src):
     return rb, exe
 
 
-def run_interp(path, timeout):
+def run_o0(path, timeout):
     return subprocess.run(_cxx.run_args(path),
                           input=b"stdin-should-not-be-read\n",
                           capture_output=True, timeout=timeout)
@@ -101,7 +101,7 @@ for name, (src, want, want_rc) in CASES.items():
         print('%-16s EMIT FAIL %s' % (name, e))
         bad += 1
         continue
-    a = run_interp(path, 60)
+    a = run_o0(path, 60)
     b = subprocess.run([exe], capture_output=True, timeout=60)
     if a.stdout == b.stdout and a.returncode == b.returncode and a.stdout == want \
             and a.returncode == want_rc:
@@ -111,7 +111,7 @@ for name, (src, want, want_rc) in CASES.items():
         print('%-16s FAIL i=(%d,%r) n=(%d,%r) want=(%d,%r)'
               % (name, a.returncode, a.stdout, b.returncode, b.stdout, want_rc, want))
 
-# Nested join_all must terminate in both backends (sorted output, same rc).
+# Nested join_all must terminate at -O0 and -O2 (sorted output, same rc).
 path = os.path.join(TMP, 'nested_join_all.brat')
 with open(path, 'w', encoding='utf-8') as f:
     f.write(NEST)
@@ -121,7 +121,7 @@ try:
         print('nested_join_all  BUILD FAIL')
         bad += 1
     else:
-        a = run_interp(path, 45)
+        a = run_o0(path, 45)
         b = subprocess.run([exe], capture_output=True, timeout=45)
         ok = (sorted(a.stdout.splitlines()) == NEST_LINES
               and sorted(b.stdout.splitlines()) == NEST_LINES

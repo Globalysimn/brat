@@ -106,7 +106,7 @@ def main():
         path = write(name, source(body, "libnosuch.so"))
         ipath = write(name + "_interp", source(body, lib)) if lib else None
 
-        # Both front ends, through the two doors that write C.
+        # The two doors that write C: `cc` and `emit-c`.
         cxx = subprocess.run([CXX, "cc", path], capture_output=True, timeout=120,
                      env=CXX_ENV)
         ref = subprocess.run(_cxx.cli_args("emit-c", "--unsafe-ffi", path),

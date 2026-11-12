@@ -28,7 +28,7 @@ import _scratch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-CXX = os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
+CXX = _cxx.build()
 ENGINE = os.path.join(ROOT, "lang", "engine")
 TMP = _scratch.mkdtemp(prefix="brat-defer-try-")
 
@@ -240,19 +240,11 @@ for name, src, want_rc, want_frag in CHECK_CASES:
     path = os.path.join(TMP, f"{name}.brat")
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
-    r_cxx = run_check([CXX, "check", path])
-    r_py = run_check(_cxx.cli_args("check", path))
-    out_cxx = r_cxx.stdout + r_cxx.stderr
-    out_py = r_py.stdout + r_py.stderr
-    assert r_cxx.returncode == want_rc, (
-        f"{name} (cxx): want rc={want_rc}, got {r_cxx.returncode}:\n{out_cxx}"
-    )
-    assert r_py.returncode == want_rc, (
-        f"{name} (py): want rc={want_rc}, got {r_py.returncode}:\n{out_py}"
-    )
+    r = run_check([CXX, "check", path])
+    out = r.stdout + r.stderr
+    assert r.returncode == want_rc, f"{name}: want rc={want_rc}, got {r.returncode}:\n{out}"
     if want_frag is not None:
-        assert want_frag in out_cxx, f"{name} (cxx): missing {want_frag!r} in:\n{out_cxx}"
-        assert want_frag in out_py, f"{name} (py): missing {want_frag!r} in:\n{out_py}"
+        assert want_frag in out, f"{name}: missing {want_frag!r} in:\n{out}"
 
 
 # Runtime 1: uncaught `raise(...)` from a scalar function must not leak `Err` tags.

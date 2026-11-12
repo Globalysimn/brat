@@ -47,7 +47,7 @@ def write(rel, text):
 
 
 def test_borrows_effect():
-    # 1. Contradictory declaration refusals match across both parsers.
+    # 1. A contradictory declaration is refused.
     bad_decls = [
         ("owned", "extern fn v(p: ptr) -> move ptr borrows(p);\nfn main() {}\n",
          "`borrows(p)` contradicts `-> move` on v"),
@@ -58,13 +58,11 @@ def test_borrows_effect():
     ]
     for tag, src, needle in bad_decls:
         fp = write("s91/decl_%s.brat" % tag, src)
-        rp = subprocess.run(_cxx.cli_args("check", fp), capture_output=True, text=True)
-        rc = subprocess.run([BIN, "check", fp], capture_output=True, text=True)
-        op, oc = rp.stdout + rp.stderr, rc.stdout + rc.stderr
-        check(rp.returncode != 0 and needle in op, "py %s: %r" % (tag, op))
-        check(rc.returncode != 0 and needle in oc, "cx %s: %r" % (tag, oc))
+        r = subprocess.run([BIN, "check", fp], capture_output=True, text=True)
+        out = r.stdout + r.stderr
+        check(r.returncode != 0 and needle in out, "decl %s: %r" % (tag, out))
 
-    # 2. Borrow provenance refusals + NLL acceptance match across both checkers.
+    # 2. Borrow provenance refusals, and acceptance once the view is dead.
     cases = [
         ("ok_nll", True, """
 extern "c" fn malloc(n: usize) -> move ptr;
@@ -127,13 +125,11 @@ fn main() {}
     ]
     for tag, ok, src, needle in cases:
         fp = write("s91/case_%s.brat" % tag, src)
-        rp = subprocess.run(_cxx.cli_args("check", fp), capture_output=True, text=True)
-        rc = subprocess.run([BIN, "check", fp], capture_output=True, text=True)
-        op, oc = rp.stdout + rp.stderr, rc.stdout + rc.stderr
-        check((rp.returncode == 0) == ok, "py %s: %r" % (tag, op))
-        check((rc.returncode == 0) == ok, "cx %s: %r" % (tag, oc))
+        r = subprocess.run([BIN, "check", fp], capture_output=True, text=True)
+        out = r.stdout + r.stderr
+        check((r.returncode == 0) == ok, "case %s: %r" % (tag, out))
         if needle:
-            check(needle in op and needle in oc, "%s needle:\npy=%r\ncx=%r" % (tag, op, oc))
+            check(needle in out, "case %s: no %r in %r" % (tag, needle, out))
 
     # 3. Cross-module `extern` `borrows(p)` propagation across multi-file check.
     api_path = write("s91/mod2/api.brat", """
@@ -150,14 +146,10 @@ fn main() {
     free(move owner);
 }
 """)
-    rp2 = subprocess.run(_cxx.cli_args("check", api_path, m2),
-                         capture_output=True, text=True)
     rc2 = subprocess.run([BIN, "check", api_path, m2],
                          capture_output=True, text=True)
-    check(rp2.returncode != 0 and "cannot move borrowed pointer `v`" in (rp2.stdout + rp2.stderr),
-          "py multi-file extern borrows: %r" % (rp2.stdout + rp2.stderr))
     check(rc2.returncode != 0 and "cannot move borrowed pointer `v`" in (rc2.stdout + rc2.stderr),
-          "cx multi-file extern borrows: %r" % (rc2.stdout + rc2.stderr))
+          "multi-file extern borrows: %r" % (rc2.stdout + rc2.stderr))
 
 
 def test_plugin_abi():
@@ -167,14 +159,7 @@ export fn scale_f64(x: f64, k: i64) -> f64 { return x * k }
 export fn passthru(p: ptr) -> ptr { return p }
 fn main() -> i32 { return 0 }
 """)
-    # Byte-for-byte output through both CLI doors + warning cleanliness.
-    ec_py = subprocess.run(
-        _cxx.cli_args("emit-c", plug_brat),
-        capture_output=True, text=True, check=True,
-        env=dict(os.environ, BRAT_CXX=BIN),
-    ).stdout
     ec_cx = subprocess.run([BIN, "emit-c", plug_brat], capture_output=True, text=True, check=True).stdout
-    check(ec_py == ec_cx, "plugin emit-c CLI doors mismatch")
     check("brat_plugin_abi_v1" in ec_cx, "missing brat_plugin_abi_v1 table")
     cfile = write("s92/plug_check.c", ec_cx)
     werr = subprocess.run(
@@ -317,19 +302,12 @@ fn main() {
 }
 """)
 
-    # AST dump, and identical C through both CLI doors.
+    # AST dump.
     sx_cx = subprocess.run([BIN, "ast", app], capture_output=True, text=True, check=True).stdout.strip()
     check('("externstruct" "Event"' in sx_cx and "Event__anon0" in sx_cx and "Event__anon1" in sx_cx,
           "AST missing extern union shape: %s" % sx_cx[:300])
 
-    ec_py = subprocess.run(
-        _cxx.cli_args("emit-c", app, "--unsafe-ffi"),
-        capture_output=True, text=True, check=True,
-        env=dict(os.environ, BRAT_CXX=BIN),
-    ).stdout
-    ec_cx = subprocess.run([BIN, "emit-c", "--unsafe-ffi", app],
-                           capture_output=True, text=True, check=True).stdout
-    check(ec_py == ec_cx, "Emit-C CLI doors mismatch on extern union")
+    subprocess.run([BIN, "emit-c", "--unsafe-ffi", app], capture_output=True, text=True, check=True)
 
     # Header proof, DWARF object proof, and L5 differential ABI matrix proof.
     for extra in (["--header", hdr], ["--object", so], ["--header", hdr, "--abi-matrix"]):
@@ -343,12 +321,9 @@ fn main() {
     let _u = ScalarU { i: 1, f: 2.0 }
 }
 """)
-    rma_py = subprocess.run(_cxx.cli_args("check", multi_arm), capture_output=True, text=True)
-    rma_cx = subprocess.run([BIN, "check", multi_arm], capture_output=True, text=True)
-    check(rma_py.returncode != 0 and "initializes 2 arms" in (rma_py.stdout + rma_py.stderr),
-          "py multi-arm union refusal: %r" % (rma_py.stdout + rma_py.stderr))
-    check(rma_cx.returncode != 0 and "initializes 2 arms" in (rma_cx.stdout + rma_cx.stderr),
-          "cx multi-arm union refusal: %r" % (rma_cx.stdout + rma_cx.stderr))
+    rma = subprocess.run([BIN, "check", multi_arm], capture_output=True, text=True)
+    check(rma.returncode != 0 and "initializes 2 arms" in (rma.stdout + rma.stderr),
+          "multi-arm union refusal: %r" % (rma.stdout + rma.stderr))
 
     doc_out = subprocess.run(_cxx.cli_args("doc", "--json", app),
                              capture_output=True, text=True, check=True).stdout

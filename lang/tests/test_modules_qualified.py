@@ -57,13 +57,13 @@ def main():
                       "import a.b\nfn main() -> i64 {\n"
                       "  print(b.f(20))\n  print(f(5))\n  return 0\n}\n")
     expect_both(qualified, "qualified", b"42\n12\n")
-    print("modules qualified ok: qualified call and unique pub on both backends")
+    print("modules qualified ok: qualified call and unique pub at -O0 and -O2")
 
     private = write("qualified/private.brat",
                     "import a.b\nfn main() -> i64 {\n"
                     "  print(b.helper(1))\n  return 0\n}\n")
     expect_error(private, "function `helper` is private")
-    print("modules qualified ok: private function rejected on both backends")
+    print("modules qualified ok: private function rejected by run and build")
 
     write("ambiguous/a.brat", 'pub fn name() -> str { return "A" }\n')
     write("ambiguous/b.brat", 'pub fn name() -> str { return "B" }\n')
@@ -71,13 +71,13 @@ def main():
                       "import a\nimport b\nfn main() -> i64 {\n"
                       "  print(name())\n  return 0\n}\n")
     expect_error(ambiguous, "ambiguous unqualified name `name`")
-    print("modules qualified ok: ambiguous unqualified name rejected on both backends")
+    print("modules qualified ok: ambiguous unqualified name rejected by run and build")
 
     distinct = write("ambiguous/distinct.brat",
                      "import a\nimport b\nfn main() -> i64 {\n"
                      "  print(a.name())\n  print(b.name())\n  return 0\n}\n")
     expect_both(distinct, "distinct", b"A\nB\n")
-    print("modules qualified ok: qualification disambiguates on both backends")
+    print("modules qualified ok: qualification disambiguates at -O0 and -O2")
 
     print("MODULES QUALIFIED ALL GREEN (8 asserts)")
 

@@ -41,7 +41,7 @@ def run(*argv, timeout=180):
     return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
 
 
-def backends(path, name):
+def run_both(path, name):
     """(-O0 output, -O2 built output) for one program, both asserted equal."""
     run_o0 = run(BIN, "run", "-O0", path, timeout=60)
     assert run_o0.returncode == 0, "%s: -O0 rc=%d %r" % (
@@ -81,7 +81,7 @@ def main():
     # half-happened.
     quiet = {"store_vec", "store_struct", "store_tag_vec"}
     for name, body in sorted(cases.items()):
-        out = backends(write(name + ".brat", body), name)
+        out = run_both(write(name + ".brat", body), name)
         if name in quiet:
             assert out == "{'a': 1}\n", "%s: map changed: %r" % (name, out)
         else:
@@ -94,7 +94,7 @@ def main():
                    '  try { raise(m.get([1, 2])) } catch e { print("caught " + e) }\n'
                    '  print(m)\n'
                    '  print(len(m))')
-    out = backends(caught, "caught")
+    out = run_both(caught, "caught")
     # `raise` re-raises the value, so the message a `catch` binds is the tag
     # itself; the point here is that it travels as a value and that the map is
     # still whole afterwards.
@@ -110,7 +110,7 @@ def main():
                  '  print(len(n))\n  print(n[2] + n[2.0] + n[false])\n'
                  '  print(m.keys())')
     want = "a\nb\nc\nd\ne\n5\n3\nxyz\n[1, true, 1.5, 's', Ok(1)]\n"
-    out = backends(good, "good")
+    out = run_both(good, "good")
     assert out == want, "keys: %r wanted %r" % (out, want)
 
     # 4. A NaN key is one key. IEEE says NaN != NaN, so hashing the bit pattern
@@ -126,7 +126,7 @@ def main():
                 '  print(len(m))\n'
                 '  print(a == b)\n'
                 '  print(m)')
-    out = backends(nan, "nan")
+    out = run_both(nan, "nan")
     assert out == "true\n1\nfalse\n{nan: 2}\n", "nan: %r" % (out,)
 
     tag_hash = write("tag_hash.brat",
@@ -141,7 +141,7 @@ def main():
                      '  let mut big = {}\n'
                      '  for i in 0..2000 { big[Some(i)] = i * 2 }\n'
                      '  print(len(big), big[Some(0)], big[Some(1999)])')
-    out = backends(tag_hash, "tag_hash")
+    out = run_both(tag_hash, "tag_hash")
     assert out == "3 int flt nan2\n2000 0 3998\n", "tag_hash: %r" % (out,)
 
     print("map keys: one sentence at -O0 and -O2, no hang; scalar literal keys readable")

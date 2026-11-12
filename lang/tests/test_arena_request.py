@@ -4,7 +4,7 @@ The handler builds its working state inside an arena, returns Err with a
 message copied out with own(), and the loop runs many requests, most of them
 successful. Checked here:
 
-- both backends print the same output;
+- `run -O0` and the built binary print the same output;
 - under a 16 MiB address-space limit both the arena and the plain build
   finish, and the peak RSS does not grow when the request loop is run four
   times longer, so a request gives its working state back on both the Ok and

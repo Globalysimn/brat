@@ -7,9 +7,9 @@ which reached the caller as a number invented by the compiler ("94700151231784"
 from a program that raised `bad 2`), and the process exited 0.
 
 Now the wrapper reports the error exactly as an uncaught one at the top level and
-exits 1. Both backends must agree on exit code, stdout, and the runtime error. The CLI's
-FFI proof notice is checked separately; a clean call proves the callback check
-does not fire on success.
+exits 1. `run -O0` and the built binary must agree on exit code, stdout, and the
+runtime error. The CLI's FFI proof notice is checked separately; a clean call
+proves the callback check does not fire on success.
 """
 import _cxx
 
@@ -85,7 +85,7 @@ def native(src, name):
     return path, run
 
 
-# a raise in the callback: both backends say the same thing and exit 1
+# a raise in the callback: -O0 and -O2 say the same thing and exit 1
 path, built_run = native(RAISES, "raises")
 run_o0 = subprocess.run(
     _cxx.cli_args("run", "-O0", "--header", HEADER, path), capture_output=True,
@@ -111,5 +111,5 @@ assert run_o0.returncode == 0 and run_o0.stdout == "20\n", \
 assert built_run.returncode == 0 and built_run.stdout == "20\n", \
     "native rc=%d out=%r err=%r" % (built_run.returncode, built_run.stdout, built_run.stderr)
 
-print("CALLBACK RAISE ALL GREEN (runtime error is preserved across both backends, "
+print("CALLBACK RAISE ALL GREEN (runtime error is preserved at -O0 and -O2, "
       "a clean callback still returns)")

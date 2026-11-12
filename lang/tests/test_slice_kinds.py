@@ -130,7 +130,7 @@ def main():
         check(r2.stdout == WANT, "brat-cxx cc:\nwant %r\ngot  %r" % (WANT, r2.stdout))
         n += 1
 
-    # 4. A kind that does not exist is a checker error in both checkers, not a
+    # 4. A kind that does not exist is a checker error, not a
     #    silently different stride at run time.
     bad = os.path.join(TMP, "bad.brat")
     with open(bad, "w", encoding="utf-8") as f:
@@ -140,15 +140,10 @@ def main():
                 '  let w = slice_of_ptr(p, 2, "f16")\n'
                 '  return 0\n'
                 '}\n')
-    for label, argv in (("python", _cxx.cli_args("check", bad)),
-                        ("cxx", [CXX, "check", bad])):
-        if label == "cxx" and not os.path.exists(CXX):
-            continue
-        r3 = subprocess.run(argv, capture_output=True, text=True, timeout=120)
-        out = r3.stdout + r3.stderr
-        check(r3.returncode != 0, "%s accepted kind \"f16\"" % label)
-        check("i32" in out and "f32" in out, "%s error does not list the kinds it accepts:\n%s"
-              % (label, out))
+    r3 = subprocess.run(_cxx.cli_args("check", bad), capture_output=True, text=True, timeout=120)
+    out = r3.stdout + r3.stderr
+    check(r3.returncode != 0, "check accepted kind \"f16\"")
+    check("i32" in out and "f32" in out, "the error does not list the kinds it accepts:\n%s" % out)
 
     print("SLICE KINDS ALL GREEN (%d asserts: i64/i32/f64/f32/u8, three implementations)" % n)
     return 0

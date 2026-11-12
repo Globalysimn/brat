@@ -38,7 +38,7 @@ def norm(s):
     return TS.sub('"ts": T', s.replace('\r\n', '\n'))
 
 
-def run_interp(path):
+def run_o0(path):
     p = subprocess.run(_cxx.run_args(path), capture_output=True, text=True, timeout=120)
     return p.returncode, norm(p.stdout)
 
@@ -62,7 +62,7 @@ def run_native(exe):
 
 n = 0
 for prog in PROGS:
-    rc1, out1 = run_interp(prog)
+    rc1, out1 = run_o0(prog)
     exe = build(prog)
     rc2, out2 = run_native(exe)
     assert rc1 == rc2, '%s exit: run_o0=%d native=%d' % (prog, rc1, rc2)

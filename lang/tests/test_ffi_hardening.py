@@ -1,12 +1,11 @@
-"""FFI hardening: inputs that used to reach C and crash, or diverge between backends.
+"""FFI hardening: inputs that must not reach C.
 
-- An unknown argument type (`u128`) is refused by both back ends, as the
-  -O0 already refuses it at call time.
-- A negative pointer argument raises `ffi: arg N of f wants ptr` in both backends
-  instead of segfaulting inside C.
-- A str argument containing a NUL byte raises in the -O0 build. Native strings
-  are NUL-terminated C strings, so the known length divergence is documented in
-  CHANGELOG, not hidden here.
+- An unknown type (`u128`) in a parameter, a struct field or a variadic tail
+  is refused by `check` at the declaration.
+- A negative pointer argument raises `ffi: arg N of f wants ptr` at -O0 and
+  -O2 instead of segfaulting inside C.
+- A string literal containing a NUL byte is refused by the parser, before any
+  FFI call can truncate it.
 """
 import _cxx
 import _scratch
@@ -152,7 +151,7 @@ def run(cmd, timeout=300):
 def main():
     n = 0
 
-    # Negative pointer: same message on both backends, no segfault.
+    # Negative pointer: same message at -O0 and -O2, no segfault.
     want = b"ffi: arg 1 of free wants ptr[i32]\n"
     path = write("neg_ptr", NEG_PTR)
     ri = run(["run", "-O0", path], 120)
@@ -192,7 +191,7 @@ def main():
     n += 1
     print("ffihard ok: unknown_arg")
 
-    # `%s`: a str fills a variadic `..ptr` slot as `const char *`, both backends.
+    # `%s`: a str fills a variadic `..ptr` slot as `const char *`, at -O0 and -O2.
     path = write("vararg_str", VARARG_STR)
     ri = run(["run", "-O0", path], 120)
     exe = os.path.join(TMP, "vararg_str.exe")
@@ -223,7 +222,7 @@ def main():
         print("ffihard ok: %s refused" % name)
 
     # A negative address is never one: read and write raise instead of faulting,
-    # the same words in both backends, and 0 keeps its own message.
+    # the same words at -O0 and -O2, and 0 keeps its own message.
     want = b"pointer is negative\npointer is negative\nnull pointer dereference\n"
     path = write("neg_read", NEG_READ)
     ri = run(["run", "-O0", path], 120)
@@ -271,26 +270,19 @@ def main():
     print("ffihard ok: runtime_name prefixed")
 
 
-    # The signature is checked, not only emitted
-    # A type the emitter cannot spell used to pass `check` and die in `build`,
-    # so `check` was not the verdict it claims to be. Both checkers now refuse
-    # it at the declaration, with the same bytes and a stable code.
+    # The signature is checked, not only emitted: a type the emitter cannot
+    # spell is refused by `check` at the declaration.
     UNUSED_BAD = 'extern fn abs(x: u128) -> i32;\nprint(1)\n'
     path = write("unused_bad_decl", UNUSED_BAD)
-    py = run(["check", path], 120)
-    cx = run(["check", path], 120)
-    assert py.returncode == 1 and cx.returncode == 1, \
-        "unused_bad_decl: check must refuse, rc py=%d cxx=%d" % (py.returncode, cx.returncode)
-    assert py.stdout == cx.stdout, \
-        "unused_bad_decl: checkers disagree\n--- py ---\n%s\n--- cxx ---\n%s" % (
-            py.stdout.decode("utf-8", "replace"), cx.stdout.decode("utf-8", "replace"))
-    out = py.stdout
+    r = run(["check", path], 120)
+    assert r.returncode == 1, "unused_bad_decl: check must refuse, rc=%d" % r.returncode
+    out = r.stdout
     assert b"unsupported FFI type `u128`" in out, "unused_bad_decl: %r" % out
     # D3: a declaration that is never called is still checked -- the surface of
     # the language does not depend on whether a call exists.
     assert b"export fn" not in out, "unused_bad_decl: %r" % out
     n += 1
-    print("ffihard ok: unsupported signature refused by check, both checkers")
+    print("ffihard ok: unsupported signature refused by check")
 
     # D2: the same program now fails `check` and `build`, so the verdicts agree.
     BAD_CALL = ('extern fn abs(x: u128) -> i32;\n'
@@ -324,10 +316,7 @@ def main():
         'print(1)\n')
     path = write("c_spellings", SPELLINGS)
     rp = run(["check", path], 120)
-    rc2 = run(["check", path], 120)
-    assert rp.returncode == 0 and rc2.returncode == 0, \
-        "c_spellings: both checkers must accept, py=%r cxx=%r" % (
-            rp.stdout + rp.stderr, rc2.stdout + rc2.stderr)
+    assert rp.returncode == 0, "c_spellings: check must accept: %r" % (rp.stdout + rp.stderr)
     cs = run(["emit-c", path], 120).stdout
     # Each C spelling reaches the emitted C as itself, not as a machine word:
     # a `size_t` that became `int64_t` is an ABI bug on a 32-bit target.
@@ -351,7 +340,7 @@ def main():
     assert rn.stdout == ri.stdout == b"4\n", \
         "size_t_run: native %r run_o0 %r" % (rn.stdout, ri.stdout)
     n += 1
-    print("ffihard ok: size_t works end to end on both backends")
+    print("ffihard ok: size_t works end to end at -O0 and -O2")
 
     # Every slot is checked, not just parameters: a field and a variadic tail
     # are the two places where a wrong width corrupts memory quietly.
@@ -359,18 +348,14 @@ def main():
                  'print(1)\n')
     path = write("bad_field", FIELD_BAD)
     r1 = run(["check", path], 120)
-    r2 = run(["check", path], 120)
-    assert r1.returncode == 1 and r2.returncode == 1, "bad_field: must be refused"
-    assert r1.stdout == r2.stdout, "bad_field: checkers disagree"
+    assert r1.returncode == 1, "bad_field: must be refused"
     assert b"for field `a` of extern struct `B`" in r1.stdout, "bad_field: %r" % r1.stdout
 
     VAR_BAD = ('extern "libkern.so" fn t(n: i64, ..u128) -> i64;\n'
                'print(1)\n')
     path = write("bad_varargs", VAR_BAD)
     r3 = run(["check", path], 120)
-    r4 = run(["check", path], 120)
-    assert r3.returncode == 1 and r4.returncode == 1, "bad_varargs: must be refused"
-    assert r3.stdout == r4.stdout, "bad_varargs: checkers disagree"
+    assert r3.returncode == 1, "bad_varargs: must be refused"
     assert b"in the variadic tail of extern fn `t`" in r3.stdout, "bad_varargs: %r" % r3.stdout
     n += 1
     print("ffihard ok: struct fields and variadic tails are checked too")
@@ -470,10 +455,8 @@ def main():
     n += 1
     print("ffihard ok: i64 does not match 32-bit size_t")
 
-    def both_checkers(src, name):
-        path = write(name, src)
-        nat = subprocess.run([CXX, "check", path], capture_output=True, timeout=300)
-        return nat, nat
+    def checked(src, name):
+        return subprocess.run([CXX, "check", write(name, src)], capture_output=True, timeout=300)
 
     ALIAS = ('extern fn swap2(a: ptr[i64], b: ptr[i64])\n'
              'fn main() -> i64 {\n'
@@ -481,14 +464,11 @@ def main():
              '  swap2(&x, &x)\n'
              '  return 0\n'
              '}\n')
-    ref, nat = both_checkers(ALIAS, "alias_twice")
+    ref = checked(ALIAS, "alias_twice")
     msg = b"two `&x` in one call to `swap2`: C may write the same place through both"
-    assert ref.returncode != 0 and msg in ref.stdout, "ref alias: %r" % ref.stdout
-    assert nat.returncode != 0 and msg in nat.stdout, "native alias: %r" % nat.stdout
-    assert ref.stdout.splitlines()[1] == nat.stdout.splitlines()[1], \
-        "the two checkers must word it the same:\n%r\n%r" % (ref.stdout, nat.stdout)
+    assert ref.returncode != 0 and msg in ref.stdout, "alias: %r" % ref.stdout
     n += 1
-    print("ffihard ok: p5 two &x in one call refused by both checkers")
+    print("ffihard ok: p5 two &x in one call refused by check")
 
     IMMUT = ('extern fn wr(p: ptr[i64])\n'
              'fn main() -> i64 {\n'
@@ -496,12 +476,11 @@ def main():
              '  wr(&x)\n'
              '  return 0\n'
              '}\n')
-    ref, nat = both_checkers(IMMUT, "amp_immutable")
+    ref = checked(IMMUT, "amp_immutable")
     msg = b"pass immutable `x` by address: C may write through `&x`, so declare it `let mut x`"
-    assert ref.returncode != 0 and msg in ref.stdout, "ref immut: %r" % ref.stdout
-    assert nat.returncode != 0 and msg in nat.stdout, "native immut: %r" % nat.stdout
+    assert ref.returncode != 0 and msg in ref.stdout, "immut: %r" % ref.stdout
     n += 1
-    print("ffihard ok: p5 &x of an immutable binding refused by both checkers")
+    print("ffihard ok: p5 &x of an immutable binding refused by check")
 
     # The text side: a writable `char *` may not be bound as `str`, and a BRAT
     # `str` may not be handed to one. The reverse (a `const char *`) still binds.
@@ -534,13 +513,11 @@ def main():
     # storage. A scalar is copied; the declaration is the thing that is wrong.
     SCALAR_MOVE = ('extern fn f() -> move i64\n'
                    'fn main() -> i64 { let n = f()\n  print(n)\n  return 0 }\n')
-    ref, nat = both_checkers(SCALAR_MOVE, "move_scalar")
+    ref = checked(SCALAR_MOVE, "move_scalar")
     msg = b"`-> move` on `i64` as the result of extern fn `f`: a scalar is copied, " \
           b"there is nothing to own (drop the mode)"
-    assert ref.returncode != 0 and msg in ref.stdout, "ref move_scalar: %r" % ref.stdout
-    assert nat.returncode != 0 and msg in nat.stdout, "native move_scalar: %r" % nat.stdout
-    assert b"leaked owned pointer" not in ref.stdout + nat.stdout, \
-        "a copy type cannot leak: %r" % (ref.stdout + nat.stdout)
+    assert ref.returncode != 0 and msg in ref.stdout, "move_scalar: %r" % ref.stdout
+    assert b"leaked owned pointer" not in ref.stdout, "a copy type cannot leak: %r" % ref.stdout
     n += 1
     print("ffihard ok: p4 move on a scalar refused, no phantom leak")
 
@@ -556,17 +533,14 @@ def main():
                 '  return 0\n'
                 '}\n')
     path = write("none_out", NONE_OUT)
-    ref, nat = both_checkers(NONE_OUT, "none_out")
-    assert ref.returncode == 0 and nat.returncode == 0, \
-        "`-> none` with `&x` must check in both: %r / %r" % (ref.stdout, nat.stdout)
+    ref = checked(NONE_OUT, "none_out")
+    assert ref.returncode == 0, "`-> none` with `&x` must check: %r" % ref.stdout
     n += 1
     print("ffihard ok: p5 `-> none` is the same declaration as no arrow")
 
-    # A C function that returns a number returns a *value*. Unannotated, `let n =
-    # c_fn(x)` used to stay "dynamic, therefore a conservative borrow", so the very
-    # next line of the out-parameter idiom -- `let mut out_len = n` -- was refused
-    # with "cannot borrow immutable `n` as mut", in both checkers. The declared
-    # result type is right there in the extern; the checker now reads it.
+    # A C function that returns a number returns a value. The checker reads the
+    # declared result type, so `let n = c_fn(x)` is a copy and the next line of
+    # the out-parameter idiom, `let mut out_len = n`, is accepted.
     COPY_RET = ('extern fn bound(n: i64) -> u64\n'
                 'extern fn wr(p: ptr[u64])\n'
                 'fn main() -> i64 {\n'
@@ -576,9 +550,8 @@ def main():
                 '  print(out_len)\n'
                 '  return 0\n'
                 '}\n')
-    ref, nat = both_checkers(COPY_RET, "copy_ret")
-    assert ref.returncode == 0, "ref copy_ret: %r" % ref.stdout
-    assert nat.returncode == 0, "native copy_ret: %r" % nat.stdout
+    ref = checked(COPY_RET, "copy_ret")
+    assert ref.returncode == 0, "copy_ret: %r" % ref.stdout
     n += 1
     print("ffihard ok: an extern scalar result is a copy, not a borrow")
 
@@ -594,10 +567,9 @@ def main():
                '  print(t)\n'
                '  return 0\n'
                '}\n')
-    ref, nat = both_checkers(STR_RET, "str_ret")
+    ref = checked(STR_RET, "str_ret")
     msg = b"cannot move `s` while borrowed by `t`"
-    assert ref.returncode != 0 and msg in ref.stdout, "ref str_ret: %r" % ref.stdout
-    assert nat.returncode != 0 and msg in nat.stdout, "native str_ret: %r" % nat.stdout
+    assert ref.returncode != 0 and msg in ref.stdout, "str_ret: %r" % ref.stdout
     n += 1
     print("ffihard ok: a `str` result is still tracked as a borrow")
 
@@ -614,11 +586,11 @@ def main():
                 'fn main() -> i64 {\n'
                 '  return 0\n'
                 '}\n')
-    lay_py = os.path.join(TMP, "layout_target.py.c")
+    lay_c = os.path.join(TMP, "layout_target.c")
     emitted = subprocess.run(_cxx.cli_args("emit-c", "--unsafe-ffi", lay_src, "--target", "i686-linux-gnu"),
                              capture_output=True, text=True, timeout=180)
     assert emitted.returncode == 0, "emit-c --target: %r" % emitted.stderr[-400:]
-    with open(lay_py, "w", encoding="utf-8") as f:
+    with open(lay_c, "w", encoding="utf-8") as f:
         f.write(emitted.stdout)
     assert 'sizeof(bf_Node) == 8' in emitted.stdout and 'bf_tag) == 4' in emitted.stdout, \
         "a 32-bit target lays `ptr` out at 4 bytes:\n%s" % emitted.stdout[-600:]

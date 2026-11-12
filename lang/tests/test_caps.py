@@ -1,16 +1,16 @@
 """The capability lattice: what a place still allows, joined across the flow.
 
-The list model in `borrow.py` keeps live views per root and asks "is any of them
-live here". The lattice keeps one capability per place and joins the two sides of
-a branch, which answers two questions the list cannot:
+A list of live views per root can only answer "is any of them live here". The
+lattice keeps one capability per place and joins the two sides of a branch,
+which answers two more questions:
 
   * a view whose last use is behind us no longer holds the place, so the write
     that follows it is accepted;
   * a place moved on one path only is "maybe gone" at the join, so a use after
     it is refused.
 
-Every case runs through both checkers (`brat check` and `brat-cxx check`) and
-the diagnostics must match byte for byte.
+Every case goes through `check` and must report each listed fragment, or pass
+when it lists none.
 """
 import _cxx
 import _scratch
@@ -18,12 +18,7 @@ import os
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-caps-")
-
-HAVE_CXX = os.path.exists(CXX)
 
 # name, source, substrings that must appear (empty = the program is accepted)
 CASES = [
@@ -216,31 +211,17 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
-def diags(text):
-    """The lines of a check that carry a verdict, without the counters."""
-    out = []
-    for line in text.splitlines():
-        if ": error:" in line or ": warning:" in line:
-            out.append(line)
-    return out
-
-
 def main():
     for name, src, expect in CASES:
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        py = run(_cxx.cli_args("check", path))
+        r = run(_cxx.cli_args("check", path))
         for want in expect:
-            check(want in py.stdout,
-                  "%s: `%s` not reported\n%s" % (name, want, py.stdout))
+            check(want in r.stdout,
+                  "%s: `%s` not reported\n%s" % (name, want, r.stdout))
         if not expect:
-            check(py.returncode == 0, "%s: refused\n%s" % (name, py.stdout))
-        if HAVE_CXX:
-            cx = run([CXX, "check", path])
-            check(diags(cx.stdout) == diags(py.stdout),
-                  "%s: backends disagree\npython: %r\nc++   : %r"
-                  % (name, diags(py.stdout), diags(cx.stdout)))
+            check(r.returncode == 0, "%s: refused\n%s" % (name, r.stdout))
         print("%-28s %s" % (name, "green" if not expect else "refused as expected"))
 
     if FAILED:
@@ -248,7 +229,7 @@ def main():
         for f in FAILED:
             print("  " + f)
         sys.exit(1)
-    print("\nCAPS ALL GREEN (%d cases, both checkers)" % len(CASES))
+    print("\nCAPS ALL GREEN (%d cases)" % len(CASES))
 
 
 if __name__ == "__main__":

@@ -29,7 +29,6 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-ENGINE = os.path.join(ROOT, "lang", "engine")
 sys.path.insert(0, HERE)
 
 import _cxx  # noqa: E402
@@ -61,11 +60,7 @@ def test_fail_loud_and_gnu11():
         with open(src, "w", encoding="utf-8") as f:
             f.write('fn main() -> i64 {\n  print("ok-11-1")\n  return 0\n}\n')
 
-        # 1. Verify legacy engine files are completely absent from `lang/engine/`.
-        py_files = [fn for fn in os.listdir(ENGINE) if fn.endswith(".py")]
-        check(not py_files, f"unexpected .py files in lang/engine: {py_files}")
-
-        # 2. Spy on `BRAT_CC` across `brat build` to prove `-std=gnu11`
+        # 1. Spy on `BRAT_CC` across `brat build` to prove `-std=gnu11`
         #    and verify zero duplicate `_UNVERIFIED_BANNER` in `emit-c --no-check`.
         real_cc = shutil.which("gcc") or shutil.which("cc")
         spy_log = os.path.join(td, "cc_args.log")
@@ -74,18 +69,12 @@ def test_fail_loud_and_gnu11():
             f.write(f'#!/bin/sh\necho "$@" >> "{spy_log}"\nexec "{real_cc}" "$@"\n')
         os.chmod(spy_cc, stat.S_IRWXU)
 
-        exe1 = os.path.join(td, "hello_py")
+        exe1 = os.path.join(td, "hello")
         r_b1 = run_cli(["build", src, "-o", exe1], env={"BRAT_CC": spy_cc})
         check(r_b1.returncode == 0, f"brat build failed: {r_b1.stderr}")
-        exe2 = os.path.join(td, "hello_cxx")
-        env_spy = os.environ.copy()
-        env_spy["BRAT_CC"] = spy_cc
-        r_b2 = subprocess.run([CXX, "build", src, "-o", exe2],
-                              capture_output=True, text=True, env=env_spy)
-        check(r_b2.returncode == 0, f"brat-cxx build failed: {r_b2.stderr}")
 
         logged = open(spy_log, encoding="utf-8").read().splitlines()
-        check(len(logged) >= 2, f"expected >=2 cc invocations, got {logged}")
+        check(logged, "the build did not call BRAT_CC")
         for ln in logged:
             check("-std=gnu11" in ln.split(), f"missing -std=gnu11 in cc invocation: {ln}")
 
@@ -94,7 +83,7 @@ def test_fail_loud_and_gnu11():
         check(r_nc.stdout.count("BRAT: UNVERIFIED") == 1,
               f"expected exactly 1 UNVERIFIED banner, got {r_nc.stdout.count('BRAT: UNVERIFIED')}")
 
-        # 3. `brat build --header` must fail closed (never swallow FFI contract errors).
+        # 2. `brat build --header` must fail closed (never swallow FFI contract errors).
         ext_src = os.path.join(td, "bad_ffi.brat")
         with open(ext_src, "w", encoding="utf-8") as f:
             f.write('extern "m" fn cos(x: i32) -> i32\nfn main() -> i64 { return 0 }\n')
@@ -553,7 +542,7 @@ fn main() -> i64 {
             f.write("\n\n".join(lines))
 
         ref = run_cli(["run", "-O0", fuzz_path])
-        check(ref.returncode == 0, f"interp failed on fuzz_o2_desc: {ref.stderr}")
+        check(ref.returncode == 0, f"run -O0 failed on fuzz_o2_desc: {ref.stderr}")
         for opt in ("-O0", "-O1", "-O2"):
             exe = os.path.join(td, f"fuzz_{opt[1:]}")
             subprocess.run([CXX, "build", opt, fuzz_path, "-o", exe], check=True)

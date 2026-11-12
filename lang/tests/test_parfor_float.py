@@ -87,7 +87,7 @@ def run_native(path, threads):
                           timeout=600, env=env)
 
 
-def run_interp(path, threads):
+def run_o0(path, threads):
     env = dict(os.environ, BRAT_THREADS=str(threads))
     return subprocess.run(_cxx.run_args(path),
                           capture_output=True, text=True, timeout=600, env=env)
@@ -104,10 +104,10 @@ def fold_is_deterministic():
         check(lines and lines[0] == 'identical',
               'native threads=%d: par != seq (%r)' % (threads, lines[:2]))
         seen.add(native.stdout)
-        run_o0 = run_interp(path, threads)
-        check(run_o0.returncode == 0 and run_o0.stdout == native.stdout,
-              'run_o0 threads=%d disagrees: %r vs %r'
-              % (threads, run_o0.stdout, native.stdout))
+        unopt = run_o0(path, threads)
+        check(unopt.returncode == 0 and unopt.stdout == native.stdout,
+              'run -O0 threads=%d disagrees: %r vs %r'
+              % (threads, unopt.stdout, native.stdout))
     check(len(seen) == 1, 'float fold changed with the worker count: %r' % (seen,))
 
 
@@ -150,7 +150,7 @@ def main():
         for f in FAILED:
             print('  - %s' % f)
         sys.exit(1)
-    print('PARFOR FLOAT ALL GREEN (%d asserts, 1/2/4/8 workers, both backends)' % n)
+    print('PARFOR FLOAT ALL GREEN (%d asserts, 1/2/4/8 workers, -O0 and -O2)' % n)
 
 
 if __name__ == '__main__':

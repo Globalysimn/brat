@@ -1,20 +1,14 @@
 """Inferred channel protocols: the shape of a pipe, and whether it can finish.
 
-Every case runs through both checkers (`brat check` and `brat-cxx check`) and
-the diagnostics must match byte for byte. A refused program is also built and
-run on both backends to prove the refusal is not hiding a working program.
+Every case goes through `check`. A case with fragments must be refused with
+each of them in the diagnostics, and a case without must pass.
 """
 import _cxx
 import _scratch
 import os
 import subprocess
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.abspath(os.path.join(HERE, "..", "engine"))
-CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-session-")
-
-HAVE_CXX = os.path.exists(CXX)
 
 CASES = [
     # name, source, list of substrings that must appear in the diagnostics
@@ -172,17 +166,10 @@ def main():
             print("FAIL %s: refused a program that finishes" % name)
             print(text)
             failures += 1
-        if HAVE_CXX:
-            c = run([CXX, "check", path])
-            py = "\n".join(l for l in text.splitlines() if "type error" not in l)
-            cx = "\n".join(l for l in (c.stdout + c.stderr).splitlines() if "type error" not in l)
-            if py.strip() != cx.strip():
-                print("FAIL %s: checkers disagree\n--- python\n%s\n--- cxx\n%s" % (name, py, cx))
-                failures += 1
 
     if failures:
         raise SystemExit("SESSION FAILED (%d)" % failures)
-    print("SESSION ALL GREEN (%d cases%s)" % (len(CASES), ", both checkers" if HAVE_CXX else ""))
+    print("SESSION ALL GREEN (%d cases)" % len(CASES))
 
 
 if __name__ == "__main__":

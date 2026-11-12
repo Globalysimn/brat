@@ -10,7 +10,7 @@ helper was never written out. The native emitter had the bug, so a program with
 
 This file pins the class, not one operator: for each fast kind it emits the C,
 collects the `bf_*` calls, and requires a definition for every one of them. It
-then builds the program on both backends and compares stdout with the
+then builds the program at -O0 and -O2 and compares stdout with the
 -O0, because a helper that exists but computes something else is the
 same bug in a different place.
 """
@@ -155,7 +155,7 @@ def main():
     if bad:
         print("FAST HELPERS: %d case(s) failed" % bad)
         return 1
-    print("FAST HELPERS OK (%d cases, helpers defined and both backends agree)" % len(CASES))
+    print("FAST HELPERS OK (%d cases, helpers defined, -O0 and -O2 agree)" % len(CASES))
     return 0
 
 

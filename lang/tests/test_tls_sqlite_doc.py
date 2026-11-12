@@ -38,7 +38,7 @@ def run_cli(*args, cwd=None):
                           capture_output=True, text=True, cwd=cwd, timeout=120)
 
 
-# `https://` TLS + `std.time` + `std.crypto` (both backends + ASan)
+# `https://` TLS + `std.time` + `std.crypto` (-O0, -O2, ASan)
 cert_pem = os.path.join(TMP, "tls_app", "ca_cert.pem")
 key_pem = os.path.join(TMP, "tls_app", "ca_key.pem")
 os.makedirs(os.path.dirname(cert_pem), exist_ok=True)
@@ -126,7 +126,7 @@ fn main() -> i64 {{
 ''')
 
 r71_i = run_cli("run", "-O0", step71_src)
-check(r71_i.returncode == 0, f"interp failed: {r71_i.stdout}\n{r71_i.stderr}")
+check(r71_i.returncode == 0, f"run -O0 failed: {r71_i.stdout}\n{r71_i.stderr}")
 
 c71 = run_cli("emit-c", step71_src)
 check(c71.returncode == 0, f"emit-c failed: {c71.stderr}")
@@ -189,8 +189,8 @@ corrupt_src = write("tls_app/corrupt.brat", f'''fn main() -> i64 {{
 }}
 ''')
 r_corrupt_i = run_cli("run", "-O0", corrupt_src)
-check(r_corrupt_i.returncode == 0, f"interp corrupt TLS failed: {r_corrupt_i.stdout}\n{r_corrupt_i.stderr}")
-check(r_corrupt_i.stdout.strip() == "TLS_CORRUPT_REJECTED", f"interp corrupt TLS: {r_corrupt_i.stdout}")
+check(r_corrupt_i.returncode == 0, f"run -O0 corrupt TLS failed: {r_corrupt_i.stdout}\n{r_corrupt_i.stderr}")
+check(r_corrupt_i.stdout.strip() == "TLS_CORRUPT_REJECTED", f"run -O0 corrupt TLS: {r_corrupt_i.stdout}")
 c_corrupt = run_cli("emit-c", corrupt_src)
 check(c_corrupt.returncode == 0, f"corrupt TLS emit-c failed: {c_corrupt.stderr}")
 c_corrupt_path = os.path.join(TMP, "tls_app", "corrupt.c")
@@ -237,7 +237,7 @@ fn main() -> i64 {
 ''')
 
 r72_i = run_cli("run", "-O0", step72_src)
-check(r72_i.returncode == 0, f"interp failed: {r72_i.stdout}\n{r72_i.stderr}")
+check(r72_i.returncode == 0, f"run -O0 failed: {r72_i.stdout}\n{r72_i.stderr}")
 
 # Remove db file so native starts clean too
 db_file = os.path.join(TMP, "sql_app", "local_items.db")

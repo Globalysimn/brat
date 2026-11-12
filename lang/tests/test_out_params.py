@@ -15,8 +15,7 @@ What this file pins:
 * The width comes from the pointee, not from the word: an `i16 *` writes two
   bytes, and a program that wrote eight would corrupt the neighbour.
 * `&x` is only meaningful as that argument: written anywhere else it is refused
-  by both checkers and, at run time, by the -O0 build. It takes a name, not an
-  expression.
+  by the checker. It takes a name, not an expression.
 * `let p = &x` needs `mut`: the callee writes through it, so the binding changes.
 * Memory the program allocates itself is ordinary FFI now: `malloc` returns
   `ptr[u8]`, a `u8` window fills it, and C reads what the program wrote.
@@ -267,7 +266,7 @@ fn main() -> i64 {
     assert p.returncode != 0 and "takes a binding" in (p.stdout + p.stderr), p.stdout + p.stderr
 
     print("OUT PARAMS ALL GREEN (integer, float, bool and size_t outputs; "
-          "both backends and target-aware native emission)")
+          "-O0, -O2 and emission for a 32-bit target)")
 
 
 main()

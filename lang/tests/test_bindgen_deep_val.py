@@ -9,12 +9,12 @@ Verifies:
   - `brat bindgen` extracts `#define`/enum constants (`pub const`),
     fn-ptr typedefs, fn-ptr struct fields, nested inline structs, and
     `--inline-arrays` fixed-size C struct array fields (`Elem[N]`), proven via
-    `_Static_assert` + `brat ffi verify` and marshaled end-to-end across both
-    native and `-O0` backends.
+    `_Static_assert` + `brat ffi verify` and marshaled end-to-end at -O0
+    and -O2.
   - Iterative heap-stack runtime walkers (`vrelease`, `vprint_f`,
     `vsprint_len_q`, `vsprint_q`, `veq`, `vcmp_`, `_brepr`, `_eq_deep`, `_ncmp`)
     handle 150,000-deep drops under a 256 KB native stack limit with zero leaks
-    and 1,500-deep values across both backends, plus a full ThreadSanitizer
+    and 1,500-deep values at -O0 and -O2, plus a full ThreadSanitizer
     (`-fsanitize=thread`) concurrency regression suite across `spawn`/`scope`/
     `chan`, `par for`, SSO/heap string sharing, `BShape`/`BFieldIC`, and plugins.
 """
@@ -214,8 +214,6 @@ def test_bindgen_and_inline_arrays():
 
     ck = run_cli(["check", gen_brat])
     check(ck.returncode == 0, "generated pkt_gen.brat must check clean: %r" % (ck.stdout + ck.stderr))
-    ck_cxx = subprocess.run([CXX, "check", gen_brat], capture_output=True, text=True)
-    check(ck_cxx.returncode == 0, "brat-cxx check on pkt_gen.brat failed: %r" % (ck_cxx.stdout + ck_cxx.stderr))
 
     # `brat ffi` proves layout via target compiler probe (`--header`), via DWARF debug info (`shlib`),
     # and re-proves the built BRAT binary (`--header --bin exe`)!
@@ -261,7 +259,7 @@ def test_bindgen_and_inline_arrays():
 def test_iterative_walkers_and_tsan():
     # 1. Iterative `vrelease`: build and drop a 150,000-deep nested container inside a function
     #    under a strict 256 KB RLIMIT_STACK + ASan/LSan (recursive vrelease would SIGSEGV immediately),
-    #    plus test >14-char struct field names (`vmap_shaped` lock safety) and 1,500-deep values across both backends!
+    #    plus test >14-char struct field names (`vmap_shaped` lock safety) and 1,500-deep values at -O0 and -O2!
     deep_src = write("deep_iter.brat",
                      "fn drop_150k() -> i64 {\n"
                      "  let mut v = []\n"

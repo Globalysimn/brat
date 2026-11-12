@@ -139,9 +139,8 @@ try:
 finally:
     os.remove(bad)
 
-# Both backends of `run`: the native product path agrees with the -O0 build on
-# a clean program, prints only the program's output, and refuses what the
-# checker refuses.
+# `run` agrees with `run -O0` on a clean program, prints only the program's
+# output, and refuses what the checker refuses.
 clean = os.path.join(tempfile.mkdtemp(prefix="brat-run-"), "clean.brat")
 with open(clean, "w", encoding="utf-8") as f:
     f.write('fn main() -> i64 {\n  print("both")\n  return 0\n}\n')
@@ -151,7 +150,7 @@ check(native.returncode == 0 and native.stdout == "both\n",
       "run native out=%r err=%r" % (native.stdout, native.stderr[-300:]))
 check(run_o0.returncode == 0 and run_o0.stdout == "both\n",
       "run run_o0 out=%r" % (run_o0.stdout,))
-check(native.stdout == run_o0.stdout, "run backends disagree")
+check(native.stdout == run_o0.stdout, "run and run -O0 disagree")
 check("error(s)" not in native.stdout, "native run printed a report: %r" % native.stdout)
 
 p = run_cli("bogus-cmd")

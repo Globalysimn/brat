@@ -26,13 +26,7 @@ def check(cond, msg):
     n += 1
 
 
-def run_py(*args, cwd=None, env=None):
-    return subprocess.run(_cxx.cli_args(*(list(args))),
-                          capture_output=True, text=True, timeout=180,
-                          cwd=cwd, env=env)
-
-
-def run_cxx(*args, cwd=None, env=None):
+def brat(*args, cwd=None, env=None):
     return subprocess.run([CXX] + list(args),
                           capture_output=True, text=True, timeout=180,
                           cwd=cwd, env=env)
@@ -76,11 +70,10 @@ fn main() -> i64 {
   return 0
 }
 ''')
-c_cli = run_py("emit-c", leak_brat,
-               env=dict(os.environ, BRAT_CXX=CXX))
-c_cx = run_cxx("cc", leak_brat)
+c_cli = brat("emit-c", leak_brat)
+c_cx = brat("cc", leak_brat)
 check(c_cli.returncode == 0 and c_cx.returncode == 0 and c_cli.stdout == c_cx.stdout,
-      "CLI/native cc output mismatch")
+      "`emit-c` and `cc` wrote different C")
 leak_c = os.path.join(TMP, "step36.c")
 leak_exe = os.path.join(TMP, "step36_asan")
 with open(leak_c, "w", encoding="utf-8") as f:
@@ -142,11 +135,11 @@ fn main() -> i64 {
 }
 ''' % good_o)
 
-r_ok = run_py("ffi", l1_brat, "--header", good_h, "--object", good_o)
+r_ok = brat("ffi", l1_brat, "--header", good_h, "--object", good_o)
 check(r_ok.returncode == 0, "L1 good .o rejected: %s" % (r_ok.stdout + r_ok.stderr))
-r_ar = run_py("ffi", l1_brat, "--header", good_h, "--object", good_a)
+r_ar = brat("ffi", l1_brat, "--header", good_h, "--object", good_a)
 check(r_ar.returncode == 0, "L1 good .a archive rejected: %s" % (r_ar.stdout + r_ar.stderr))
-r_drift = run_py("ffi", l1_brat, "--header", good_h, "--object", drift_o)
+r_drift = brat("ffi", l1_brat, "--header", good_h, "--object", drift_o)
 check(r_drift.returncode != 0 and ("24" in r_drift.stdout + r_drift.stderr or "Sensor" in r_drift.stdout + r_drift.stderr),
       "L1 failed to catch header-vs-.o struct size drift: %s" % (r_drift.stdout + r_drift.stderr))
 
@@ -164,9 +157,9 @@ with open(macho_ok_brat, "w", encoding="utf-8") as f:
 macho_miss_brat = os.path.join(l1_dir, "macho_miss.brat")
 with open(macho_miss_brat, "w", encoding="utf-8") as f:
     f.write("extern fn missing_sym(x: i64) -> i64\n")
-check(run_cxx("ffi", macho_ok_brat, "--object", macho_path).returncode == 0,
+check(brat("ffi", macho_ok_brat, "--object", macho_path).returncode == 0,
       "native Mach-O 64 symbol reader rejected present symbol")
-check(run_cxx("ffi", macho_miss_brat, "--object", macho_path).returncode != 0,
+check(brat("ffi", macho_miss_brat, "--object", macho_path).returncode != 0,
       "native Mach-O 64 symbol reader accepted missing symbol")
 
 coff_hdr = struct.pack("<HHIIIHH", 0x8664, 1, 0, 20 + 40, 1, 0, 0)
@@ -179,9 +172,9 @@ with open(coff_path, "wb") as f:
 coff_ok_brat = os.path.join(l1_dir, "coff_ok.brat")
 with open(coff_ok_brat, "w", encoding="utf-8") as f:
     f.write("extern fn win_fn(x: i64) -> i64\n")
-check(run_cxx("ffi", coff_ok_brat, "--object", coff_path).returncode == 0,
+check(brat("ffi", coff_ok_brat, "--object", coff_path).returncode == 0,
       "native PE/COFF x64 symbol reader rejected present symbol")
-check(run_cxx("ffi", macho_miss_brat, "--object", coff_path).returncode != 0,
+check(brat("ffi", macho_miss_brat, "--object", coff_path).returncode != 0,
       "native PE/COFF x64 symbol reader accepted missing symbol")
 
 
@@ -210,7 +203,7 @@ pub fn mix(x: i64, y: i64) -> i64 {
 with open(pkg_bri, "w", encoding="utf-8") as f:
     f.write("pub fn mix(x: i64, y: i64) -> i64\n")
 
-eb = run_py("ffi", pkg_brat, "--header", c_math_h, "--object", c_math_o, "--emit-bind", pkg_bind)
+eb = brat("ffi", pkg_brat, "--header", c_math_h, "--object", c_math_o, "--emit-bind", pkg_bind)
 check(eb.returncode == 0 and os.path.isfile(pkg_bind),
       "--emit-bind failed: %s" % (eb.stdout + eb.stderr))
 bind_json = json.loads(open(pkg_bind, encoding="utf-8").read())
@@ -224,9 +217,9 @@ with tarfile.open(tgz_path, "w:gz") as tf:
 
 app_dir = os.path.join(TMP, "consumer_app")
 os.makedirs(app_dir, exist_ok=True)
-add_r = run_py("pkg", "add", "file://" + tgz_path, cwd=app_dir)
+add_r = brat("pkg", "add", "file://" + tgz_path, cwd=app_dir)
 check(add_r.returncode == 0, "brat pkg add .bratbind archive failed: %s" % (add_r.stdout + add_r.stderr))
-verify_r = run_py("pkg", "verify", cwd=app_dir)
+verify_r = brat("pkg", "verify", cwd=app_dir)
 check(verify_r.returncode == 0, "brat pkg verify failed: %s" % (verify_r.stdout + verify_r.stderr))
 
 app_brat = os.path.join(app_dir, "app.brat")
@@ -240,17 +233,12 @@ fn main() -> i64 {
 }
 ''')
 vendored_o = os.path.join(app_dir, "vendor", "fastcrc", "fastcrc.o")
-app_exe_py = os.path.join(app_dir, "app_py")
-app_exe_cx = os.path.join(app_dir, "app_cx")
-# Build WITHOUT --header and WITHOUT --unsafe-ffi through both drivers!
-b_py = run_py("build", app_brat, "--link", vendored_o, "-o", app_exe_py, cwd=app_dir)
-check(b_py.returncode == 0, "CLI build with .bratbind failed: %s" % (b_py.stdout + b_py.stderr))
-b_cx = run_cxx("build", app_brat, "--link", vendored_o, "-o", app_exe_cx, cwd=app_dir)
-check(b_cx.returncode == 0, "C++ build with .bratbind failed: %s" % (b_cx.stdout + b_cx.stderr))
-out_py = subprocess.check_output([app_exe_py], text=True)
-out_cx = subprocess.check_output([app_exe_cx], text=True)
-check(out_py.strip() == "305" and out_cx.strip() == "305",
-      ".bratbind binary output mismatch: %r vs %r" % (out_py, out_cx))
+app_exe = os.path.join(app_dir, "app")
+# Built without --header and without --unsafe-ffi.
+b_app = brat("build", app_brat, "--link", vendored_o, "-o", app_exe, cwd=app_dir)
+check(b_app.returncode == 0, "build with .bratbind failed: %s" % (b_app.stdout + b_app.stderr))
+out_app = subprocess.check_output([app_exe], text=True)
+check(out_app.strip() == "305", ".bratbind binary printed %r" % out_app)
 
 
 # 16B SSO (`<= 14B`) zero-malloc loop + FFI `vstr_pin` safety
@@ -313,7 +301,7 @@ fn main() -> i64 {
 ''')
 sso_c = os.path.join(sso_dir, "sso_pin.c")
 with open(sso_c, "w", encoding="utf-8") as f:
-    f.write(run_cxx("cc", "--no-check", sso_brat).stdout)
+    f.write(brat("cc", "--no-check", sso_brat).stdout)
 wrap_c = os.path.join(sso_dir, "wrap_alloc.c")
 with open(wrap_c, "w", encoding="utf-8") as f:
     f.write(r'''
@@ -377,10 +365,8 @@ fn main() -> i64 {
   return 0
 }
 ''' % plug_so)
-r_lp = run_py("check", leak_own)
-r_lc = run_cxx("check", leak_own)
-check(r_lp.returncode != 0 and r_lc.returncode != 0 and r_lp.stdout == r_lc.stdout,
-      "own ptr leak parity mismatch:\nPY:\n%s\nCXX:\n%s" % (r_lp.stdout, r_lc.stdout))
+r_lp = brat("check", leak_own)
+check(r_lp.returncode != 0, "own ptr leak accepted:\n%s" % r_lp.stdout)
 
 # Valid plugin own ptr + &ptr + out ptr + callback retention + --header proof:
 ok_p38 = os.path.join(p38_dir, "ok_p38.brat")
@@ -409,14 +395,14 @@ fn main() -> i64 {
 }
 ''' % plug_so)
 # Gate refuses build without --header / --unsafe-ffi even without `extern fn`:
-gate_ref = run_py("build", ok_p38, "-o", os.path.join(p38_dir, "refused"))
+gate_ref = brat("build", ok_p38, "-o", os.path.join(p38_dir, "refused"))
 check(gate_ref.returncode != 0 and "--header" in gate_ref.stderr,
       "FFI gate did not catch plugin call without --header: %s" % gate_ref.stderr)
 # Gate accepts with --header (proving `call(sym, sig)` against `p38.h`!):
 p38_exe = os.path.join(p38_dir, "ok_p38_exe")
-b_p38 = run_py("build", ok_p38, "--header", plug_h, "-o", p38_exe)
+b_p38 = brat("build", ok_p38, "--header", plug_h, "-o", p38_exe)
 check(b_p38.returncode == 0, "proven plugin build failed: %s" % (b_p38.stdout + b_p38.stderr))
-i_p38 = run_py("run", "-O0", "--header", plug_h, ok_p38)
+i_p38 = brat("run", "-O0", "--header", plug_h, ok_p38)
 n_p38 = subprocess.run([p38_exe], capture_output=True, text=True, check=True)
 check(i_p38.returncode == 0 and i_p38.stdout.strip() == "133" and n_p38.stdout.strip() == "133",
       "run_o0 vs native mismatch: %r vs %r" % (i_p38.stdout, n_p38.stdout))
@@ -440,10 +426,8 @@ fn main() -> i64 {
   return 0
 }
 ''')
-e_py = run_py("check", p39_escape)
-e_cx = run_cxx("check", p39_escape)
-check(e_py.returncode != 0 and e_cx.returncode != 0 and e_py.stdout == e_cx.stdout,
-      "cross-fn arena escape parity failed:\nPY:\n%s\nCXX:\n%s" % (e_py.stdout, e_cx.stdout))
+e_chk = brat("check", p39_escape)
+check(e_chk.returncode != 0, "cross-fn arena escape accepted:\n%s" % e_chk.stdout)
 
 p39_spawn = os.path.join(TMP, "p39_spawn.brat")
 with open(p39_spawn, "w", encoding="utf-8") as f:
@@ -460,10 +444,8 @@ fn main() -> i64 {
   return 0
 }
 ''')
-s_py = run_py("check", p39_spawn)
-s_cx = run_cxx("check", p39_spawn)
-check(s_py.returncode != 0 and s_cx.returncode != 0 and s_py.stdout == s_cx.stdout,
-      "spawn pointer race/isolation parity failed:\nPY:\n%s\nCXX:\n%s" % (s_py.stdout, s_cx.stdout))
+s_chk = brat("check", p39_spawn)
+check(s_chk.returncode != 0, "spawn pointer race accepted:\n%s" % s_chk.stdout)
 
 
 # Non-Linux platform parity (`_WIN32`, `__APPLE__`) & L5 ABI algebra
@@ -693,7 +675,7 @@ void WINAPI GetCurrentThreadStackLimits(ULONG_PTR *, ULONG_PTR *);
 
 plat_c = os.path.join(TMP, "plat_hello.c")
 with open(plat_c, "w", encoding="utf-8") as f:
-    f.write(run_cxx("cc", os.path.join(ROOT, "lang", "examples", "hello.brat")).stdout)
+    f.write(brat("cc", os.path.join(ROOT, "lang", "examples", "hello.brat")).stdout)
 
 r_win = subprocess.run(
     ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror", "-U__linux__", "-D_WIN32",
@@ -708,15 +690,15 @@ r_mac = subprocess.run(
     capture_output=True, text=True, timeout=30)
 check(r_mac.returncode == 0, "__APPLE__ C99 runtime check failed:\n%s" % r_mac.stderr)
 
-# Plugin confinement outside program base directory is refused in both backends:
+# Plugin confinement outside program base directory is refused at -O0 and -O2:
 conf_dir = os.path.join(TMP, "confined_sub")
 os.makedirs(conf_dir, exist_ok=True)
 esc_plug = os.path.join(conf_dir, "escape_plug.brat")
 with open(esc_plug, "w", encoding="utf-8") as f:
     f.write('fn main() -> i64 {\n  let h = lib_open("../p38/libp38.so")\n  return h\n}\n')
-ep_i = run_py("run", "-O0", "--unsafe-ffi", esc_plug)
+ep_i = brat("run", "-O0", "--unsafe-ffi", esc_plug)
 ep_exe = os.path.join(conf_dir, "esc_exe")
-run_py("build", "--unsafe-ffi", esc_plug, "-o", ep_exe)
+brat("build", "--unsafe-ffi", esc_plug, "-o", ep_exe)
 ep_n = subprocess.run([ep_exe], capture_output=True, text=True)
 check(ep_i.returncode != 0 and "outside the program directory" in (ep_i.stdout + ep_i.stderr),
       "run_o0 lib_open allowed path escape: %s" % (ep_i.stdout + ep_i.stderr))
@@ -743,7 +725,7 @@ extern struct Packet { tag: u8, ts: i64, len: usize }
 extern fn packet_len(p: Packet) -> usize
 fn main() -> i64 { return 0 }
 ''')
-m_ok = run_cxx("ffi", l5_brat_portable, "--header", l5_h_portable, "--abi-matrix", "--json")
+m_ok = brat("ffi", l5_brat_portable, "--header", l5_h_portable, "--abi-matrix", "--json")
 check(m_ok.returncode == 0, "portable L5 ABI matrix failed: %s" % (m_ok.stdout + m_ok.stderr))
 m_data = json.loads(m_ok.stdout)
 check(m_data["ok"] is True and len(m_data["targets"]) == 5, "unexpected L5 matrix: %r" % m_data)
@@ -764,7 +746,7 @@ with open(l5_h_bad, "w", encoding="utf-8") as f:
 l5_brat_bad = os.path.join(TMP, "l5_bad.brat")
 with open(l5_brat_bad, "w", encoding="utf-8") as f:
     f.write("extern struct BadLong { tag: u8, count: i64 }\nfn main() -> i64 { return 0 }\n")
-m_bad = run_py("ffi", l5_brat_bad, "--header", l5_h_bad, "--abi-matrix", "--json")
+m_bad = brat("ffi", l5_brat_bad, "--header", l5_h_bad, "--abi-matrix", "--json")
 check(m_bad.returncode == 1, "non-portable `long` passed --abi-matrix!")
 m_bad_data = json.loads(m_bad.stdout)
 by_model = {t["target"]: t["errors"] for t in m_bad_data["targets"]}

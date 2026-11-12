@@ -3,7 +3,7 @@
 u32 / u64 / usize are FFI-only types: BRAT values stay i64, and the boundary checks
 the range. Arguments outside the range raise `ffi: arg N of f wants T`. A u64 or
 usize result above i64::MAX raises `ffi: result of f does not fit i64`.
-Both backends must produce the same output.
+`run -O0` and the built binary must produce the same output.
 """
 import _cxx
 import _scratch
@@ -80,7 +80,7 @@ CASES = {
 }
 
 
-def run_interp(path):
+def run_o0(path):
     p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                        capture_output=True, timeout=120)
     return p.returncode, p.stdout
@@ -105,7 +105,7 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        ri, oi = run_interp(path)
+        ri, oi = run_o0(path)
         assert ri == 0 and oi == want, "%s run_o0: rc=%d out=%r want %r" % (name, ri, oi, want)
         rn, on = run_native(src, name)
         assert rn == 0 and on == want, "%s native: rc=%d out=%r want %r" % (name, rn, on, want)

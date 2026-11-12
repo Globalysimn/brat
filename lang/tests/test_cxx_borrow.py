@@ -162,8 +162,8 @@ EXPECT = {
     ],
     'closure_escape.brat': [
         # `r` is read inside the closure on line 4, so "unused var `r`" was a
-        # false positive: both checkers now walk a closure body (minus its own
-        # parameters) when they build the used set. The escape error stays.
+        # false positive: the used set now includes a closure body (minus its
+        # own parameters). The escape error stays.
         'closure_escape.brat: 1 error(s), 0 warning(s)',
         'closure_escape.brat:4: error: ref `r` escapes via return',
     ],

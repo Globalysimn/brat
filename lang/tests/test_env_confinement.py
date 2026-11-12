@@ -53,7 +53,7 @@ def run_cmd(argv, cwd=None, env=None, input_bytes=None, timeout=60):
     )
 
 
-def run_both_backends(td, name, src, env=None, asan=False):
+def run_o0_and_built(td, name, src, env=None, asan=False):
     p = os.path.join(td, name + ".brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write(src)
@@ -78,31 +78,27 @@ def run_both_backends(td, name, src, env=None, asan=False):
     out_i = r_int.stdout.decode("utf-8", "replace")
     out_n = r_nat.stdout.decode("utf-8", "replace")
     assert r_int.returncode == r_nat.returncode, (
-        f"{name} rc mismatch: interp={r_int.returncode} ({r_int.stderr.decode()}) "
+        f"{name} rc mismatch: run_o0={r_int.returncode} ({r_int.stderr.decode()}) "
         f"vs native={r_nat.returncode} ({r_nat.stderr.decode()})"
     )
-    assert out_i == out_n, f"{name} stdout mismatch:\ninterp={out_i!r}\nnative={out_n!r}"
+    assert out_i == out_n, f"{name} stdout mismatch:\nrun_o0={out_i!r}\nnative={out_n!r}"
     return r_int.returncode, out_i
 
 
-def check_both_reject(td, name, src, needle):
+def check_rejects(td, name, src, needle):
     p = os.path.join(td, name + ".brat")
     with open(p, "w", encoding="utf-8") as f:
         f.write(src)
-    r_py = run_cmd(_cxx.cli_args("check", p), cwd=td)
-    r_cx = run_cmd([CXX, "check", p], cwd=td)
-    assert r_py.returncode != 0, f"{name}: CLI check unexpectedly succeeded"
-    assert r_cx.returncode != 0, f"{name}: C++ check unexpectedly succeeded"
-    out_py = (r_py.stdout + r_py.stderr).decode("utf-8", "replace")
-    out_cx = (r_cx.stdout + r_cx.stderr).decode("utf-8", "replace")
-    assert needle in out_py, f"{name}: {needle!r} missing from CLI diag: {out_py!r}"
-    assert needle in out_cx, f"{name}: {needle!r} missing from C++ diag: {out_cx!r}"
+    r = run_cmd([CXX, "check", p], cwd=td)
+    assert r.returncode != 0, f"{name}: check unexpectedly succeeded"
+    out = (r.stdout + r.stderr).decode("utf-8", "replace")
+    assert needle in out, f"{name}: {needle!r} missing from the diagnostic: {out!r}"
 
 
 def test_mem02_arena_intrinsics_locked():
     td = _scratch.mkdtemp(prefix="brat-mem02")
     # Direct user calls to __arena_enter / __arena_leave must be rejected as unknown functions
-    check_both_reject(
+    check_rejects(
         td,
         "raw_arena_enter",
         "fn bad() -> vec[i64] {\n  __arena_enter()\n  let v = [1, 2, 3]\n  __arena_leave()\n  return v\n}\nprint(len(bad()))\n",
@@ -112,10 +108,9 @@ def test_mem02_arena_intrinsics_locked():
     p_dollar = os.path.join(td, "dollar_arena.brat")
     with open(p_dollar, "w", encoding="utf-8") as f:
         f.write("$arena_enter()\n")
-    assert run_cmd(_cxx.cli_args("check", p_dollar), cwd=td).returncode != 0
     assert run_cmd([CXX, "check", p_dollar], cwd=td).returncode != 0
     # Valid arena block still works and frees cleanly under ASan
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "valid_arena",
         "fn run_arena() -> i64 {\n"
@@ -136,15 +131,15 @@ def test_mem02_arena_intrinsics_locked():
 
 def test_mem03_mem04_ptr_of_str_borrow_and_pin_ring():
     td = _scratch.mkdtemp(prefix="brat-mem03-04")
-    # 1. Temporary argument to ptr_of_str rejected identically by both checkers
-    check_both_reject(
+    # 1. Temporary argument to ptr_of_str is rejected
+    check_rejects(
         td,
         "ptr_tmp",
         'let p = ptr_of_str("hel" + "lo")\nprint(str_from_ptr(p, 5))\n',
         "`ptr_of_str` wants a string binding or string literal, not a temporary",
     )
     # 2. Reassigning owner string while pointer borrow is still used is rejected
-    check_both_reject(
+    check_rejects(
         td,
         "ptr_mut_while_borrowed",
         'let mut s = "hello world - heap string longer than sso limit!"\n'
@@ -154,7 +149,7 @@ def test_mem03_mem04_ptr_of_str_borrow_and_pin_ring():
         "borrowed",
     )
     # 3. Valid borrow & >4096 SSO pin iterations run leak-free under ASan and preserve pinned values
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "ptr_ring_stress",
         'let mut ok_cnt = 0\n'
@@ -180,7 +175,7 @@ def test_mem01_f07_size_caps_and_ilp32_mul():
     with open(big17, "wb") as f:
         f.truncate(17 * 1024 * 1024)
 
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "file_and_utf8_caps",
         'match read_file("sparse65.txt") {\n'
@@ -263,7 +258,7 @@ def test_f06_sqlite_and_fs_symlink_confinement():
         f.write(b"")
     os.symlink(outside_wal, os.path.join(td, "sidecar.db-wal"))
 
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "sql_symlink_escape",
         'import std.sqlite\n'
@@ -286,7 +281,7 @@ def test_f06_sqlite_and_fs_symlink_confinement():
 def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
     td = _scratch.mkdtemp(prefix="brat-r3-sql")
     # (handle generation: stale handle rejected after slot reuse) + (100,000 row cap)
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "sql_gen_and_cap",
         'import std.sqlite\n'
@@ -337,7 +332,7 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
         '  return 0\n'
         '}\n'
     )
-    rc_r, out_r = run_both_backends(td, "sql_close_race", race_src, asan=False)
+    rc_r, out_r = run_o0_and_built(td, "sql_close_race", race_src, asan=False)
     assert rc_r == 0 and out_r.strip() == "race-clean"
 
     cc = shutil.which("gcc") or shutil.which("clang")
@@ -413,7 +408,7 @@ def test_r301_r302_r309_sqlite_generations_concurrency_and_caps():
 def test_r305_proc_run_timeout_and_pgid_kill():
     td = _scratch.mkdtemp(prefix="brat-r305")
     t0 = time.monotonic()
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "proc_timeout",
         'import std.proc\n'
@@ -443,7 +438,7 @@ def test_r308_r310_r311_chan_budget_sbuf_and_env():
     # aggregate channel budget enforced (>4,194,304 refused) and reclaimed on chan_close
     # >63 concurrent & sequential sbuf instances + Unicode codepoint len parity
     # expanded env_get denylist + BRAT_ENV_DENY_ALL=1
-    rc, out = run_both_backends(
+    rc, out = run_o0_and_built(
         td,
         "chan_sbuf_env",
         'fn main() -> i64 {\n'
@@ -495,7 +490,7 @@ def test_r308_r310_r311_chan_budget_sbuf_and_env():
     ], f"got: {out!r}"
 
     # Verify BRAT_ENV_DENY_ALL=1 blocks even non-sensitive vars
-    rc2, out2 = run_both_backends(
+    rc2, out2 = run_o0_and_built(
         td,
         "env_deny_all",
         'let d = is_err(env_get("MY_PUBLIC_VAR"))\nprint("pub_denied={d}")\n',

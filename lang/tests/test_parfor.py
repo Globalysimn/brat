@@ -1,8 +1,8 @@
 """`par for ... reduce(op, unit)`: a fold the checker has proved is a monoid.
 
 Three things are pinned here: the fold is the left-to-right fold of the same
-values (so the result is the sequential one), both backends agree on the value,
-and both checkers refuse the same non-monoids byte for byte.
+values (so the result is the sequential one), -O0 and -O2 agree on the value,
+and the checker refuses each non-monoid with the message listed for it.
 """
 import _cxx
 import _scratch
@@ -11,10 +11,7 @@ import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-ENGINE = os.path.join(HERE, "..", "engine")
-CXX = os.path.abspath(os.path.join(HERE, "..", "cxx", "bin", "brat-cxx"))
 TMP = _scratch.mkdtemp(prefix="brat-parfor-")
-HAVE_CXX = os.path.exists(CXX)
 
 INT_SRC = '''fn add(a: i64, b: i64) -> i64 { return a + b }
 fn sq(x: i64) -> i64 { return x * x }
@@ -153,35 +150,26 @@ def write(name, src):
 
 
 def both(path):
-    """(-O0 output, native output) - building the native one on demand."""
+    """(-O0 output, the built binary's result)."""
     run_o0 = run(_cxx.cli_args("run", "-O0", path))
     if run_o0.returncode not in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) and run_o0.stderr:
         raise SystemExit("run failed:\n" + run_o0.stdout + run_o0.stderr)
-    native = None
-    if HAVE_CXX:
-        exe = path[:-5] + ".bin"
-        b = run(_cxx.cli_args("build", path, "-o", exe))
-        if b.returncode != 0:
-            raise SystemExit("build failed:\n" + b.stdout + b.stderr)
-        native = run([exe])
-        if native.stdout != run_o0.stdout:
-            raise SystemExit("backends disagree on %s:\n--- run_o0\n%s\n--- native\n%s"
-                             % (path, run_o0.stdout, native.stdout))
+    exe = path[:-5] + ".bin"
+    b = run(_cxx.cli_args("build", path, "-o", exe))
+    if b.returncode != 0:
+        raise SystemExit("build failed:\n" + b.stdout + b.stderr)
+    native = run([exe])
+    if native.stdout != run_o0.stdout:
+        raise SystemExit("-O0 and -O2 disagree on %s:\n--- -O0\n%s\n--- -O2\n%s"
+                         % (path, run_o0.stdout, native.stdout))
     return run_o0.stdout, native
 
 
-def check_both(path):
-    py = run(_cxx.cli_args("check", path))
-    text = "\n".join(l for l in (py.stdout + py.stderr).splitlines()
+def checked(path):
+    r = run(_cxx.cli_args("check", path))
+    text = "\n".join(l for l in (r.stdout + r.stderr).splitlines()
                      if "type error" not in l)
-    if HAVE_CXX:
-        c = run([CXX, "check", path])
-        cx = "\n".join(l for l in (c.stdout + c.stderr).splitlines()
-                       if "type error" not in l)
-        if text.strip() != cx.strip():
-            raise SystemExit("checkers disagree on %s\n--- python\n%s\n--- cxx\n%s"
-                             % (path, text, cx))
-    return py.returncode, text
+    return r.returncode, text
 
 
 def main():
@@ -204,7 +192,7 @@ def main():
 
     for name, src, want in REFUSALS:
         path = write(name, src)
-        rc, text = check_both(path)
+        rc, text = checked(path)
         if want not in text:
             print("FAIL %s: missing %r\n%s" % (name, want, text))
             failures += 1
@@ -214,7 +202,7 @@ def main():
 
     example = os.path.join(ROOT, "lang", "examples", "parfor.brat")
     if os.path.exists(example):
-        rc, text = check_both(example)
+        rc, text = checked(example)
         if rc != 0:
             print("FAIL examples/parfor.brat is refused:\n" + text)
             failures += 1
@@ -225,8 +213,7 @@ def main():
 
     if failures:
         raise SystemExit("PARFOR FAILED (%d)" % failures)
-    print("PARFOR ALL GREEN (3 folds, %d refusals, both checkers%s)"
-          % (len(REFUSALS), ", both backends" if HAVE_CXX else ""))
+    print("PARFOR ALL GREEN (3 folds, %d refusals, at -O0 and -O2)" % len(REFUSALS))
 
 
 if __name__ == "__main__":

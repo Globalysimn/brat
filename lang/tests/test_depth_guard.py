@@ -6,18 +6,15 @@ that builds a deep value cheaply --
     let mut v = []
     for i in 0..200000 { v = [v] }
 
--- used to make the C backend walk the machine stack once per level and die with
-SIGSEGV (observed at ~100 000 levels, exit 139, no output). The -O0 build
-refused the same program with "recursion too deep" because it has a frame budget
-of 2000, so the two backends disagreed twice over: one gave a clean error, the
-other a signal.
+-- used to walk the machine stack once per level and die with SIGSEGV (observed
+at ~100 000 levels, exit 139, no output).
 
-`crt.h` now carries the same budget (`BRAT_MAX_VALUE_DEPTH`) in `vsprint_q`,
+`crt.h` carries a budget (`BRAT_MAX_VALUE_DEPTH`) in `vsprint_q`,
 `vsprint_len_q`, `vprint_f` and `vcmp`: past it the error channel gets
 "recursion too deep" and the walker stops. This test pins three things:
 
   * a deep value prints correctly while it is inside the budget;
-  * past the budget both backends exit 1 with no signal, and stdout matches;
+  * past the budget -O0 and -O2 exit 1 with no signal, and stdout matches;
   * the same holds for `str()`, comparison and the log path.
 """
 import _cxx
@@ -42,7 +39,7 @@ def depth_program(n, tail):
 
 
 CASES = {
-    # inside the budget: both backends print the same bytes
+    # inside the budget: -O0 and -O2 print the same bytes
     "print_within": (depth_program(900, "print(v)"), 0,
                      # `v = [v]` 900 times around the initial `[]` is 901 levels
                      "built\n" + "[" * 901 + "]" * 901 + "\ndone\n"),
@@ -100,7 +97,7 @@ def main():
     if bad:
         print("DEPTH GUARD: %d case(s) failed" % bad)
         return 1
-    print("DEPTH GUARD OK (%d cases, no signal, both backends agree)" % len(CASES))
+    print("DEPTH GUARD OK (%d cases, no signal, -O0 and -O2 agree)" % len(CASES))
     return 0
 
 

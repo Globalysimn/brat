@@ -2,18 +2,13 @@
 
 Each rule has a program that must be rejected with a message naming it. Programs
 that keep arena values inside their block, or pass only scalars out, must check
-clean and print the same in both backends.
+clean and print the same at -O0 and -O2.
 """
 import _cxx
 import _scratch
 import os
 import shutil
 import subprocess
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.join(HERE, '..', 'engine')
-CXX = os.path.abspath(os.path.join(HERE, '..', 'cxx', 'bin', 'brat-cxx'))
-HAVE_CXX = os.path.isfile(CXX)
 
 n = 0
 
@@ -235,18 +230,6 @@ try:
               'reject %s: want %r in output, rc=%d out=%s' % (name, want, r.returncode, out[-400:]))
         check('own(' in out or name == 'closure_capture',
               'reject %s: the refusal should point at `own(...)` as the way out' % name)
-        if HAVE_CXX:
-            # `brat run` decides with the same checker, so a refusal that one
-            # door misses is a program that builds and runs with a dangling
-            # arena pointer. Require identical bytes from both.
-            py = subprocess.run(_cxx.cli_args('check', p),
-                                capture_output=True, text=True, timeout=300)
-            cx = subprocess.run([CXX, 'check', p],
-                                capture_output=True, text=True, timeout=300)
-            check((py.returncode, py.stdout, py.stderr) == (cx.returncode, cx.stdout, cx.stderr),
-                  'reject %s: checkers disagree\n  py  rc=%d %r\n  cxx rc=%d %r'
-                  % (name, py.returncode, (py.stdout + py.stderr)[-300:],
-                     cx.returncode, (cx.stdout + cx.stderr)[-300:]))
         print('  rejected %-18s %s' % (name, want))
 
     for name, text in ACCEPT.items():
@@ -260,7 +243,7 @@ try:
         check(b.returncode == 0, 'accept %s: build failed: %s' % (name, (b.stdout + b.stderr)[-400:]))
         cr = subprocess.run([exe], capture_output=True, text=True, timeout=300)
         check(ip.returncode == 0 and cr.returncode == 0 and ip.stdout == cr.stdout,
-              'accept %s: backends differ: %r vs %r' % (name, ip.stdout, cr.stdout))
+              'accept %s: -O0 and -O2 differ: %r vs %r' % (name, ip.stdout, cr.stdout))
         print('  accepted %-28s %s' % (name, ip.stdout.strip()))
 
     arena_src = os.path.join(tmp, 'noncheck.brat')

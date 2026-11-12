@@ -1,6 +1,6 @@
 """Channels and `scope`: a value has one holder at a time, and a block joins.
 
-Every case runs on both backends and the two stdouts must match byte for byte.
+Every case runs at -O0 and -O2 and the two stdouts must match byte for byte.
 The memory cases go through AddressSanitizer with leak detection on, because a
 channel that keeps a value nobody reads looks exactly like a working program.
 """

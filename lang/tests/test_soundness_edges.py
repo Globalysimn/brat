@@ -1,6 +1,5 @@
 """Optimizer soundness, runtime boundary checks, HTTP/package limits, and compiler warning cleanliness."""
 
-import ast
 import glob
 import json
 import os
@@ -300,9 +299,7 @@ def test_bratbind_system_header_and_vendor_confinement():
     with open(app, "w", encoding="utf-8") as f:
         f.write("import evilpkg.mod\nprint(mod.val())\n")
 
-    r_py = run_cmd(_cxx.cli_args("build", app, "-o", os.path.join(td, "a1.exe")), cwd=td)
-    r_cx = run_cmd([CXX, "build", app, "-o", os.path.join(td, "a2.exe")], cwd=td)
-    assert r_py.returncode != 0 and "stdio.h" in r_py.stderr.decode(), r_py.stderr.decode()
+    r_cx = run_cmd([CXX, "build", app, "-o", os.path.join(td, "a1.exe")], cwd=td)
     assert r_cx.returncode != 0 and "stdio.h" in r_cx.stderr.decode(), r_cx.stderr.decode()
 
 
@@ -330,40 +327,6 @@ def test_lsp_oversized_header_rejection_and_zero_warnings():
         r_cpp = run_cmd(["g++", "-std=c++20", "-O2", "-Wall", "-Wextra", "-Wunused", "-Werror",
                          "-fsyntax-only", cpp])
         assert r_cpp.returncode == 0, f"C++ warning regression in {cpp}:\n{r_cpp.stderr.decode()}"
-
-    # 4. Every Python file in `lang/engine/` has 0 unused local variables
-    unused = []
-    for path in sorted(glob.glob(os.path.join(ENG, "**", "*.py"), recursive=True)):
-        with open(path, encoding="utf-8") as f:
-            src = f.read()
-        tree = ast.parse(src, path)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                assigned = {}
-                loaded = set()
-                nonlocals = set()
-                for sub in ast.walk(node):
-                    if sub is not node and isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                        for sub2 in ast.walk(sub):
-                            if isinstance(sub2, ast.Name) and isinstance(sub2.ctx, ast.Load):
-                                loaded.add(sub2.id)
-                        continue
-                    if isinstance(sub, (ast.Global, ast.Nonlocal)):
-                        nonlocals.update(sub.names)
-                    elif isinstance(sub, ast.Name):
-                        if isinstance(sub.ctx, ast.Store) and not sub.id.startswith("_"):
-                            assigned.setdefault(sub.id, sub.lineno)
-                        elif isinstance(sub.ctx, (ast.Load, ast.Del)):
-                            loaded.add(sub.id)
-                arg_names = {a.arg for a in node.args.posonlyargs + node.args.args + node.args.kwonlyargs}
-                if node.args.vararg:
-                    arg_names.add(node.args.vararg.arg)
-                if node.args.kwarg:
-                    arg_names.add(node.args.kwarg.arg)
-                for v, ln in assigned.items():
-                    if v not in loaded and v not in arg_names and v not in nonlocals:
-                        unused.append(f"{os.path.relpath(path, ROOT)}:{ln}:{v}")
-    assert not unused, f"Unused Python locals found: {unused}"
 
 
 def test_emitter_crt_ownership_and_locale_regressions():

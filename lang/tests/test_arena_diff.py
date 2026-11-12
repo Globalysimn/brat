@@ -1,4 +1,4 @@
-"""`arena { }` in the -O0 build and in the C backend.
+"""`arena { }` under `run -O0` and in the built binary.
 
 Each program must print the same output in both. An error raised inside a
 block must still leave the arena. A loop that fills arenas far beyond the
@@ -123,7 +123,7 @@ fn main() -> i64 {
 }
 
 
-def run_interp(src):
+def run_o0(src):
     return subprocess.run(_cxx.run_args(src), capture_output=True, text=True,
                           timeout=300, env=ENV)
 
@@ -149,7 +149,7 @@ try:
         src = os.path.join(tmp, name + '.brat')
         with open(src, 'w', encoding='utf-8') as f:
             f.write(src_text)
-        ip = run_interp(src)
+        ip = run_o0(src)
         check(ip.returncode == 0, '%s: run_o0 exit=%d err=%s' % (name, ip.returncode, ip.stderr[-400:]))
         exe = os.path.join(tmp, name + '_bin')
         # 16 MiB of address space: a leaking arena cannot finish the reclaim loop.
@@ -157,7 +157,7 @@ try:
         b, cr = build_and_run(src, exe, limit)
         check(b.returncode == 0, '%s: build failed: %s' % (name, (b.stdout + b.stderr)[-400:]))
         check(cr.returncode == 0, '%s: C exit=%d err=%s' % (name, cr.returncode, cr.stderr[-400:]))
-        check(ip.stdout == cr.stdout, '%s: outputs differ\ninterp: %r\nC: %r' % (name, ip.stdout, cr.stdout))
+        check(ip.stdout == cr.stdout, '%s: outputs differ\nrun_o0: %r\nbuilt: %r' % (name, ip.stdout, cr.stdout))
         print('  %s: %s' % (name, ip.stdout.strip().replace('\n', ' | ')))
 
     n += 1

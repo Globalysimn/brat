@@ -1,4 +1,4 @@
-"""Typed pointers and slices: `ptr[T]`, `slice[T]`, bounds checked on both backends."""
+"""Typed pointers and slices: `ptr[T]`, `slice[T]`, bounds checked at -O0 and -O2."""
 import _cxx
 import _scratch
 

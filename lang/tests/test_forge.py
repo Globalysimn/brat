@@ -5,7 +5,7 @@
 also leaked: `len()` reported one key fewer, `"$type" in m` was False for a map
 that had the key, and diagnostics printed `struct Guard` for a map.
 
-Both backends answer the same way: the expression yields an err value instead
+-O0 and -O2 answer the same way: the expression yields an err value instead
 of raising. The first attempt raised through `vraise` in C, and longjmp from
 there under -O2 misbehaved -- the binary hung instead of reporting. An err
 value is the honest shape anyway: a caught error is a value in this language.

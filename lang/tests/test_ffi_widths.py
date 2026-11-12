@@ -16,7 +16,7 @@ that compiles, links and corrupts the next stack slot:
 * the build passed `-O2` and no `-fwrapv`, so the native answer on an
   overflowing i64 was the optimizer's opinion rather than unoptimized (-O0).
 
-Checked here: both front ends and both backends, plus the refusals.
+Checked here: `run -O0`, the built binary, and the refusals.
 """
 import _cxx
 import _scratch
@@ -231,7 +231,7 @@ def main():
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == out, "the CLI doors disagree on the extern declarations"
 
-    # and both backends agree on the values
+    # and -O0 and -O2 agree on the values
     assert run_o0(widths) == WIDTHS_WANT, run_o0(widths)
     assert native(widths, "widths.bin") == WIDTHS_WANT
 
@@ -285,7 +285,7 @@ fn main() -> i64 { return 0 }
     # Fixed-width C spellings copied from a header mean the BRAT width of the
     # same size, including inside a record and a callback. Target-dependent
     # spellings and names nested inside `ptr[...]`/`fn(...)` are still refused
-    # by both checkers instead of passing `check` and failing in the emitter.
+    # by the checker instead of passing `check` and failing in the emitter.
     CSP_C = write("cspell.c", """#include <stdint.h>
 struct CRec { unsigned long long a; int16_t b; };
 unsigned long long add_u64(unsigned long long a, signed short int b) {
@@ -332,13 +332,9 @@ fn main() -> i64 {
 '''.replace('"LIB"', '"%s"' % csp_lib)
     csp = write("cspell.brat", CSP)
     csp_want = "42\n-4\n3.75\nfalse\ntext\n15\n8\n-1\n"
-    py_check = subprocess.run(_cxx.cli_args("check", csp), capture_output=True,
-                              text=True, timeout=120,
-                              env=dict(os.environ))
-    assert py_check.returncode == 0, py_check.stdout + py_check.stderr
-    native_check = subprocess.run([CXX, "check", csp], capture_output=True, text=True,
-                                  timeout=120, env=CXX_ENV)
-    assert native_check.returncode == 0, native_check.stdout + native_check.stderr
+    checked = subprocess.run([CXX, "check", csp], capture_output=True, text=True,
+                             timeout=120, env=CXX_ENV)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
     assert run_o0(csp) == csp_want, run_o0(csp)
     assert native(csp, "cspell.bin") == csp_want
 
@@ -351,13 +347,10 @@ fn main() -> i64 {
     }
     for label, decl in unsupported_slots.items():
         path = write(label + ".brat", decl + "fn main() -> i64 { return 0 }\n")
-        for cmd, env in (
-                (_cxx.cli_args("check", path),
-                 dict(os.environ)),
-                ([CXX, "check", path], CXX_ENV)):
-            got = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-            assert got.returncode != 0 and "unsupported FFI type" in (got.stdout + got.stderr), \
-                "%s must be refused at check: %r" % (label, got.stdout + got.stderr)
+        got = subprocess.run([CXX, "check", path], capture_output=True, text=True,
+                             timeout=120, env=CXX_ENV)
+        assert got.returncode != 0 and "unsupported FFI type" in (got.stdout + got.stderr), \
+            "%s must be refused at check: %r" % (label, got.stdout + got.stderr)
     print("ffiw ok: fixed-width C spellings canonicalize, nested bad slots fail check")
 
     # a projection move is counted, not leaked
@@ -450,7 +443,7 @@ fn main() -> i64 {
     narrow = write("narrow_use.brat", NARROW_USE)
     assert run_o0(narrow) == want, "run_o0: %r" % run_o0(narrow)
     assert native(narrow, "narrow.exe") == want, "native disagrees with the -O0 build"
-    print("ffiw ok: fixed-width C types bind at their true width, both backends")
+    print("ffiw ok: fixed-width C types bind at their true width, at -O0 and -O2")
 
     # `_Bool` is a distinct one-byte ABI type, represented by BRAT `bool`.
     BOOL_HDR = write("bool.h", "_Bool flag(_Bool f);\nstruct Flags { _Bool on; int n; };\n")

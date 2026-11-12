@@ -145,29 +145,18 @@ def main():
         path = os.path.join(TMP, name + ".brat")
         with open(path, "w", encoding="utf-8") as f:
             f.write(src)
-        for tag, cmd in (("check-py", _cxx.cli_args("check", path)),
-                         ("check-cxx", [CXX, "check", path])):
-            p = sh(cmd)
-            if p.returncode != 0:
-                fail(name, "%s refused a legal program: %s"
-                     % (tag, (p.stdout + p.stderr)[-400:]))
-        got = {}
-        # The -O0 build is the oracle for what the program means.
-        got["run_o0"] = sh(_cxx.run_args(path)).stdout
-        for tag, cmd in (("py", _cxx.cli_args("build", path, "-o", os.path.join(TMP, name + ".py.exe"))),
-                         ("cxx", [CXX, "build", path, "-o",
-                                  os.path.join(TMP, name + ".cxx.exe")])):
-            exe = os.path.join(TMP, name + ("." + tag + ".exe"))
-            b = sh(cmd)
-            if b.returncode != 0:
-                fail(name, "%s build: %s" % (tag, (b.stdout + b.stderr)[-500:]))
-            got[tag] = sh([exe]).stdout
-            if got[tag] == "":
-                fail(name, "%s produced no output (the build wrote no binary?)" % tag)
+        p = sh([CXX, "check", path])
+        if p.returncode != 0:
+            fail(name, "check refused a legal program: %s" % (p.stdout + p.stderr)[-400:])
+        exe = os.path.join(TMP, name + ".exe")
+        b = sh([CXX, "build", path, "-o", exe])
+        if b.returncode != 0:
+            fail(name, "build: %s" % (b.stdout + b.stderr)[-500:])
+        got = {"run_o0": sh(_cxx.run_args(path)).stdout, "built": sh([exe]).stdout}
         for tag, out in sorted(got.items()):
             if out != want:
                 fail(name, "%s stdout %r, want %r" % (tag, out, want))
-    print("GLOBALS ALL GREEN (%d cases, -O0 + both CLI build paths)" % len(CASES))
+    print("GLOBALS ALL GREEN (%d cases, -O0 and -O2)" % len(CASES))
 
 
 if __name__ == "__main__":

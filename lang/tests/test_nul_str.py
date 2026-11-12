@@ -1,4 +1,4 @@
-"""A string literal with NUL is refused, so `len` cannot differ between backends."""
+"""A string literal with NUL is refused, so `len` cannot differ between -O0 and -O2."""
 import _cxx
 import _scratch
 

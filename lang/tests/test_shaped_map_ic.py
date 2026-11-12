@@ -161,9 +161,6 @@ def test_pch_cache_and_bundle_cli() -> None:
                             capture_output=True, text=True, timeout=30)
         check(rc.returncode == 0, f"bundled bin/brat check failed: {rc.stdout} {rc.stderr}")
 
-    # Verify retired Python modules stay removed and release workflow exists
-    check(not os.path.exists(os.path.join(ROOT, "lang", "engine", "scaffold.py")), "scaffold.py should be retired")
-    check(not os.path.exists(os.path.join(ROOT, "lang", "engine", "mcp.py")), "mcp.py should be retired")
     check(os.path.isfile(os.path.join(ROOT, ".github", "workflows", "release.yml")), "missing release.yml")
 
 

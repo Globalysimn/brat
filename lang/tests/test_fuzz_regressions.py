@@ -2,7 +2,7 @@
 
 1. A program with only warnings (here: an unused variable) must build. Before,
    `brat build` refused it because the gate treated any diagnostic as blocking.
-2. A missing map key must say which key, on both backends. Native printed only
+2. A missing map key must say which key, at -O0 and -O2. Native printed only
    `no key`, so the same program printed different output on each backend.
 """
 import _cxx
@@ -42,12 +42,12 @@ def main():
     assert b.returncode == 0 and os.path.isfile(exe), \
         "build refused a warnings-only program:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
 
-    # (2) same output on both backends
+    # (2) same output at -O0 and -O2
     ri = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, timeout=120)
     assert ri.returncode == 0 and ri.stdout == WANT, "run_o0 rc=%d out=%r" % (ri.returncode, ri.stdout)
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
-    print("FUZZ REGRESSIONS ALL GREEN (2 cases, 2 backends)")
+    print("FUZZ REGRESSIONS ALL GREEN (2 cases, -O0 and -O2)")
 
 
 if __name__ == "__main__":

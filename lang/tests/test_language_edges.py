@@ -1,6 +1,6 @@
 """Crafted-program edges: defer/catch ordering, regex parity, the FS sandbox.
 
-Parity alone cannot prove a case whose output is the point -- two backends can
+Parity alone cannot prove a case whose output is the point -- -O0 and -O2 can
 be wrong the same way -- so every case here also asserts the exact stdout.
 That exact stdout is what gives each FS-sandbox rejection a positive control:
 the same program must still read a file inside the program directory, so a
@@ -118,7 +118,7 @@ CASES = {
                           'print(re_match("b", "(a*)*"))\n', 'true\ntrue\n'),
     'regex_neg_class': ('print(re_match("abc", "[^xyz]+"))\n'
                         'print(re_match("xyz", "[^xyz]+"))\n', 'true\nfalse\n'),
-    # `.` matches any character, newline included -- both backends agree on this.
+    # `.` matches any character, newline included -- -O0 and -O2 agree on this.
     'regex_dot_bytes': ('print(re_match("a\\nb", "a.b"))\n', 'true\n'),
     # `^` anchors the whole input, not each line.
     'regex_anchor_input': ('print(re_match("foo\\nbar", "^bar"))\n', 'false\n'),

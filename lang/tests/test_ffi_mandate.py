@@ -136,10 +136,10 @@ check(r.returncode == 0, "build --header: %r" % (r.stdout + r.stderr))
 check("--unsafe-ffi" not in r.stderr, "a proven build mentions the opt-out: %r" % r.stderr)
 ran = subprocess.run([good_exe], capture_output=True, text=True, timeout=120, env=env)
 check(ran.stdout == "42\n", "the proven build is wrong: %r" % ran.stdout)
-interp_proved = cli("run", "-O0", prog, "--header", GOOD)
-check(interp_proved.returncode == 0 and interp_proved.stdout == "42\n",
+o0_proved = cli("run", "-O0", prog, "--header", GOOD)
+check(o0_proved.returncode == 0 and o0_proved.stdout == "42\n",
       "the -O0 build must run a C call after the same header proof: %r"
-      % (interp_proved.stdout + interp_proved.stderr))
+      % (o0_proved.stdout + o0_proved.stderr))
 
 # A header that disagrees is a refusal, not a warning with a binary next to it.
 r = cli("build", prog, "--header", BAD, "-o", os.path.join(TMP, "bad.exe"))

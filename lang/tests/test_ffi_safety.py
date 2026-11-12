@@ -2,7 +2,7 @@
 
 Expected values are literals taken from the C standard (strcmp sign, getenv
 returning NULL for an unset variable) and from the rule that FFI misuse is an
-error value, not a crash. Both backends must agree.
+error value, not a crash. `run -O0` and the built binary must agree.
 """
 import _cxx
 import _scratch
@@ -36,7 +36,7 @@ CASES = {
         '}\n',
         b"caught\n", 0),
     # A non-str argument to a str parameter must be a catchable error in run.
-    "arg_type_caught_interp": (
+    "arg_type_caught_o0": (
         'extern fn puts(s: str) -> i32;\n'
         'fn main() -> i64 {\n'
         '    try {\n'
@@ -67,7 +67,7 @@ def write(name, src):
     return p
 
 
-def run_interp(path, no_check=False):
+def run_o0(path, no_check=False):
     cmd = _cxx.cli_args("run", "-O0", "--unsafe-ffi")
     if no_check:
         cmd.append("--no-check")
@@ -90,11 +90,11 @@ def run_native(src, tag):
 def main():
     n = 0
     for name, (src, want, want_rc) in CASES.items():
-        ri, oi = run_interp(write(name, src), no_check=(name == "arg_type_caught_interp"))
+        ri, oi = run_o0(write(name, src), no_check=(name == "arg_type_caught_o0"))
         assert oi == want and ri == want_rc, (
             "%s run_o0: rc=%d out=%r want rc=%d out=%r"
             % (name, ri, oi, want_rc, want))
-        if name != "arg_type_caught_interp":
+        if name != "arg_type_caught_o0":
             rn, on = run_native(src, name)
             assert on == want and rn == want_rc, (
                 "%s native: rc=%d out=%r want rc=%d out=%r"

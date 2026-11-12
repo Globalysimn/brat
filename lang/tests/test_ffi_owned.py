@@ -160,8 +160,7 @@ def main():
     n += 1
     print("ffiown ok: allocate, use, release -- -O0 and native agree")
 
-    # The leak and the double free are refused *before* the binary exists, and the
-    # sentence is the same in both checkers.
+    # The leak and the double free are refused before the binary exists.
     for name, body, want in (
         ("owned_leak", '  let p = dup_str("x")\n  print(str_from_ptr(p, 1))\n',
          "leaked owned pointer `p`"),

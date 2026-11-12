@@ -70,9 +70,8 @@ def diagnostics(cmd):
     return p.returncode, "\n".join(l for l in text.splitlines() if ": error: " in l)
 
 
-def both_checkers(path):
-    return {"py": diagnostics(_cxx.cli_args("check", path)),
-            "cxx": diagnostics([CXX, "check", path])}
+def checked(path):
+    return diagnostics([CXX, "check", path])
 
 
 def build_lib():
@@ -89,8 +88,7 @@ def build_lib():
     return out if r.returncode == 0 else None
 
 
-# Declarations that cannot mean what they say; the parser refuses each, so the
-# message is identical in both front ends without a second implementation.
+# Declarations that cannot mean what they say; the parser refuses each.
 REFUSALS = {
     "unknown_contract": 'extern fn f(cb: fn(i64) -> i64 frobnicate(x)) -> i64\n',
     "unknown_value": 'extern fn f(cb: fn(i64) -> i64 thread(sometimes)) -> i64\n',
@@ -100,15 +98,10 @@ REFUSALS = {
 }
 
 # name -> (source, diagnostic fragment or None, expected stdout when accepted)
-# Checked but not built: with the default (`thread(same)`) a callback that
-# touches a script-level binding is legal, and that is the whole point of the
-# contract -- refusing it would make the default useless. The build is not
-# asserted here because *this program does not build for a second reason*, one
-# that has nothing to do with callbacks: a function reading a top-level `let` is
-# accepted by both checkers, runs in the -O0 build, and produces no working
-# binary from either emitter (LEDGER, "Open", 2026-10-30).
-CHECK_ONLY = {
-    "same_thread_may_touch_state": '''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64, v: i64) -> i64
+CASES = {
+    # With the default (`thread(same)`) a callback that touches a script-level
+    # binding is legal: refusing it would make the default useless.
+    "same_thread_may_touch_state": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64, v: i64) -> i64
 let mut total = 100
 fn bump(x: i64) -> i64 {
   total = total + x
@@ -118,10 +111,7 @@ fn main() -> i64 {
   print(call_cb("bump", 1))
   return 0
 }
-''',
-}
-
-CASES = {
+''', None, "101\n"),
     # Same program, `thread(any)`: the callback may run beside the caller's
     # thread, so reaching its global is a race the runtime cannot survive.
     "any_thread_may_not_touch_state": ('''extern "%(lib)s" fn call_cb(cb: fn(i64) -> i64 thread(any), v: i64) -> i64
@@ -224,24 +214,10 @@ fn main() -> i64 {
 def check_refusals():
     for name, src in sorted(REFUSALS.items()):
         path = write(name, src)
-        seen = both_checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        rc, text = seen["py"]
+        rc, text = checked(path)
         if rc == 0 or not text:
             fail(name, "must be refused with a message, got rc=%d" % rc)
-    print("CONTRACTS refusals ok (%d cases, identical messages)" % len(REFUSALS))
-
-
-def check_only(lib):
-    for name, src in sorted(CHECK_ONLY.items()):
-        path = write(name, src % {"lib": lib or "libcb.so"})
-        seen = both_checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        if seen["py"][0] != 0:
-            fail(name, "the default contract must accept this, got:\n%s" % seen["py"][1])
-    print("CONTRACTS defaults ok (%d case, check only)" % len(CHECK_ONLY))
+    print("CONTRACTS refusals ok (%d cases)" % len(REFUSALS))
 
 
 def check_cases(lib):
@@ -250,49 +226,43 @@ def check_cases(lib):
         return
     for name, (src, want, stdout) in sorted(CASES.items()):
         path = write(name, src % {"lib": lib})
-        seen = both_checkers(path)
-        if len(set(seen.values())) != 1:
-            fail(name, "checkers disagree: %r" % (seen,))
-        rc, text = seen["py"]
+        rc, text = checked(path)
         if want is None:
             if rc != 0:
                 fail(name, "must be accepted, got:\n%s" % text)
             exe = os.path.join(TMP, name + ".exe")
             header = os.path.join(TMP, "libcb.h")
-            for tag, cmd in (("py", _cxx.cli_args("build", path, "-o", exe, "--header", header)),
-                             ("cxx", [CXX, "build", path, "-o", exe, "--header", header])):
-                b = sh(cmd)
-                if b.returncode != 0:
-                    fail(name, "%s build: %s" % (tag, (b.stdout + b.stderr)[-400:]))
-                run = sh([exe])
-                if run.stdout != stdout:
-                    fail(name, "%s stdout %r, want %r" % (tag, run.stdout, stdout))
+            b = sh([CXX, "build", path, "-o", exe, "--header", header])
+            if b.returncode != 0:
+                fail(name, "build: %s" % (b.stdout + b.stderr)[-400:])
+            run = sh([exe])
+            if run.stdout != stdout:
+                fail(name, "stdout %r, want %r" % (run.stdout, stdout))
         elif want not in text:
             fail(name, "want %r in the diagnostic, got:\n%s" % (want, text))
-    print("CONTRACTS cases ok (%d cases, both CLI build paths, binaries run)" % len(CASES))
+    print("CONTRACTS cases ok (%d cases, binaries run)" % len(CASES))
 
 
-def check_dump_agrees():
+def check_dump():
     """The contracts are part of the tree."""
     src = ('extern fn f(a: fn(i64) -> i64 thread(any), b: fn() -> none reenter(no)) -> none\n'
            'extern fn g(cb: fn() -> none) -> none\n')
     path = write("dumps", src)
-    theirs = sh([CXX, "ast", path]).stdout.strip()
+    tree = sh([CXX, "ast", path]).stdout.strip()
     for want in ('("thread:any" "reenter:no")', '()'):
-        if want not in theirs:
-            fail("dumps", "want %r in the tree, got %s" % (want, theirs))
-    if "thread(any)" in theirs or "reenter(no)" in theirs:
-        fail("dumps", "a contract leaked into a type: %s" % theirs)
+        if want not in tree:
+            fail("dumps", "want %r in the tree, got %s" % (want, tree))
+    if "thread(any)" in tree or "reenter(no)" in tree:
+        fail("dumps", "a contract leaked into a type: %s" % tree)
     print("CONTRACTS dumps ok")
 
 
 def main():
     global CXX
     CXX = _cxx.build()
-    check_dump_agrees()
+    check_dump()
     check_refusals()
     lib = build_lib()
-    check_only(lib)
     check_cases(lib)
     print("FFI CALLBACK CONTRACTS ALL GREEN")
 

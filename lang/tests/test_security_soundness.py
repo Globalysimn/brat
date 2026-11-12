@@ -482,8 +482,7 @@ def test_security_and_soundness_hardening(cxx, env):
         p = os.path.join(d, f"esc_{tag}.brat")
         with open(p, "w", encoding="utf-8") as f:
             f.write(code)
-        for cmd in ([cxx, "check", p], _cxx.cli_args("check", p),
-                    [cxx, "emit-c", p], [cxx, "cc", p], _cxx.cli_args("emit-c", p)):
+        for cmd in ([cxx, "check", p], [cxx, "emit-c", p], [cxx, "cc", p]):
             r = subprocess.run(cmd, capture_output=True, text=True)
             assert r.returncode != 0, (tag, cmd, r.stdout, r.stderr)
 
@@ -642,8 +641,7 @@ def test_security_and_soundness_hardening(cxx, env):
         with open(p, "w", encoding="utf-8") as f:
             f.write(code)
         r1 = subprocess.run([cxx, "check", p], capture_output=True, text=True)
-        r2 = subprocess.run(_cxx.cli_args("check", p), capture_output=True, text=True)
-        assert r1.returncode != 0 and r2.returncode != 0, (tag, r1.returncode, r2.returncode, r1.stderr, r2.stderr)
+        assert r1.returncode != 0, (tag, r1.stdout, r1.stderr)
 
     # 5c. Formatter preserves raw strings `r"..."` and multi-line string bodies.
     fmt_p = os.path.join(d, "fmt_raw.brat")
@@ -943,8 +941,8 @@ def test_ten_subsystem_improvements(cxx, env):
 def main():
     cxx = _cxx.build()
     env = zero_python_env()
-    interp_src = os.path.join(TMP, "interp_check.brat")
-    with open(interp_src, "w", encoding="utf-8") as f:
+    o0_src = os.path.join(TMP, "o0_check.brat")
+    with open(o0_src, "w", encoding="utf-8") as f:
         f.write(
             'import std.json\nimport std.csv\n'
             'fn check_deep_and_clo() {\n'
@@ -970,7 +968,7 @@ def main():
             '  return 0\n'
             '}\n'
         )
-    subprocess.run(_cxx.cli_args("run", "-O0", interp_src), check=True)
+    subprocess.run(_cxx.cli_args("run", "-O0", o0_src), check=True)
     test_13_6b_native_ffi_and_bindgen(cxx, env)
     test_13_1c_native_pkg_http_targz_and_c_sources(cxx, env)
     test_13_2b2_and_compiler_leaks_under_asan(cxx)

@@ -460,7 +460,7 @@ sn = subprocess.run([sys_exe], capture_output=True, text=True, cwd=sys_dir,
                     env=dict(base_env, ASAN_OPTIONS="detect_leaks=1"), timeout=30)
 assert sn.returncode == 0 and sn.stdout == "SYS_STD_OK\n", (sn.returncode, sn.stdout, sn.stderr)
 
-# Capability gate default-deny blocks subprocesses in both backends:
+# Capability gate default-deny blocks subprocesses at -O0 and -O2:
 deny_env = dict(os.environ, BRAT_TEST_FLAG="yes", BRAT_EXEC="0", BRAT_EXEC_ALLOW="", ASAN_OPTIONS="detect_leaks=1")
 di = subprocess.run(_cxx.cli_args("run", "-O0", sys_prog),
                     capture_output=True, text=True, cwd=sys_dir, env=deny_env, timeout=30)

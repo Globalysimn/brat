@@ -12,8 +12,6 @@ Each case is a defect that was found by driving the CLI, not by reading it:
   * the NUL-in-literal diagnostic pointed at the line after the literal;
   * no command answered `--help`;
   * `brat dist` blamed the type checker for a file it could not read.
-
-Both front ends are exercised where the file has one.
 """
 import _cxx
 import _scratch

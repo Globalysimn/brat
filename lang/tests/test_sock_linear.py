@@ -108,7 +108,7 @@ r = run(["check", path])
 check(r.returncode == 1 and "use of closed `s`" in r.stdout,
       "recv after close: rc=%d %r" % (r.returncode, r.stdout))
 
-# Closing once is clean, and both backends agree on the result.
+# Closing once is clean, and -O0 and -O2 agree on the result.
 ONCE = '''fn main() -> i64 {
   let l = tcp_listen("127.0.0.1:47373")
   match l {

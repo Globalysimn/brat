@@ -35,7 +35,7 @@ CASES = {
 }
 
 
-def run_interp(src):
+def run_o0(src):
     path = os.path.join(TMP, "t.brat")
     with open(path, "w", encoding="utf-8") as f:
         f.write(src)
@@ -87,10 +87,10 @@ def check_export(libpath, tag):
 def main():
     n = 0
     for name, src in CASES.items():
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, name)
         assert ri == rn, "%s exit: run_o0=%d native=%d" % (name, ri, rn)
-        assert oi == on, "%s stdout differs:\ninterp=%r\nnative=%r" % (name, oi, on)
+        assert oi == on, "%s stdout differs:\nrun_o0=%r\nnative=%r" % (name, oi, on)
         n += 1
         print("ffi ok: %s" % name)
 
@@ -103,7 +103,7 @@ def main():
             '    return add42(1);\n'
             '}\n' % lib
         )
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, "custom_add42")
         assert ri == rn == 43, "custom exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on, "custom stdout differs"
@@ -117,7 +117,7 @@ def main():
             '    return 1;\n'
             '}\n' % lib
         )
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, "custom_greet")
         assert ri == rn == 0, "greet exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
@@ -130,7 +130,7 @@ def main():
             '    return varsum(3, 10, 20, 30);\n'
             '}\n'
         )
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, "custom_varargs")
         assert ri == rn == 60, "varargs exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
@@ -152,7 +152,7 @@ def main():
             '    return 0;\n'
             '}\n'
         )
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, "custom_struct")
         assert ri == rn == 0, "struct exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on
@@ -170,7 +170,7 @@ def main():
             '    return 0;\n'
             '}\n'
         )
-        ri, oi = run_interp(src)
+        ri, oi = run_o0(src)
         rn, on = run_native(src, "custom_callback")
         assert ri == rn == 0, "callback exit: run_o0=%d native=%d" % (ri, rn)
         assert oi == on

@@ -166,7 +166,7 @@ fn main() -> i64 {{
     rn = subprocess.run([exe_path], capture_output=True, text=True, cwd=TMP, timeout=60,
                         env={**os.environ, "ASAN_OPTIONS": "detect_leaks=1:abort_on_error=1"})
     check(ri.returncode == 0 and ri.stdout == "W2_STD_REGEX_OK\n",
-          f"interp failed: {ri.returncode} {ri.stdout} {ri.stderr}")
+          f"run -O0 failed: {ri.returncode} {ri.stdout} {ri.stderr}")
     check(rn.returncode == 0 and rn.stdout == "W2_STD_REGEX_OK\n" and rn.stderr == "",
           f"native ASan failed: {rn.returncode} {rn.stdout} {rn.stderr}")
 finally:
@@ -218,34 +218,25 @@ app_p = os.path.join(proj, "app.brat")
 with open(app_p, "w", encoding="utf-8") as f:
     f.write("import hashx.hashx\nfn main() -> i64 {\n  print(hashx.hashx.fold(10, 5))\n  return 0\n}\n")
 
-exe_py = os.path.join(proj, "app_py")
 exe_cx = os.path.join(proj, "app_cx")
-# Zero --link, zero --header, zero --unsafe-ffi!
-bpy = subprocess.run(_cxx.cli_args("build", app_p, "-o", exe_py),
-                     capture_output=True, text=True, cwd=proj, timeout=60)
+# No --link, no --header, no --unsafe-ffi.
 bcx = subprocess.run([BIN, "build", app_p, "-o", exe_cx],
                      capture_output=True, text=True, cwd=proj, timeout=60)
 rcx = subprocess.run([BIN, "run", app_p],
                      capture_output=True, text=True, cwd=proj, timeout=60)
-check(bpy.returncode == 0, "brat build zero-flag c_sources failed: " + bpy.stderr)
 check(bcx.returncode == 0, "brat-cxx build zero-flag c_sources failed: " + bcx.stderr)
 check(rcx.returncode == 0 and rcx.stdout == "404\n", f"brat-cxx run c_sources failed: {rcx.stdout} {rcx.stderr}")
-check(subprocess.check_output([exe_py], text=True) == "404\n", "exe_py output mismatch")
 check(subprocess.check_output([exe_cx], text=True) == "404\n", "exe_cx output mismatch")
 
-# Tampering with vendored C file must fail both `pkg verify` and `build`!
+# Tampering with a vendored C file must fail both `pkg verify` and `build`.
 vendored_c = os.path.join(proj, "vendor", "hashx", "hashx.c")
 orig_c = open(vendored_c, "rb").read()
 with open(vendored_c, "ab") as f:
     f.write(b"\n/* tampered */\n")
-tamper_py = subprocess.run(_cxx.cli_args("build", app_p, "-o", exe_py),
-                           capture_output=True, text=True, cwd=proj, timeout=30)
 tamper_cx = subprocess.run([BIN, "build", app_p, "-o", exe_cx],
                            capture_output=True, text=True, cwd=proj, timeout=30)
-check(tamper_py.returncode != 0 and "HASH MISMATCH" in tamper_py.stderr,
-      f"CLI build missed tampered C source: {tamper_py.stderr}")
 check(tamper_cx.returncode != 0 and "HASH MISMATCH" in tamper_cx.stderr,
-      f"C++ build missed tampered C source: {tamper_cx.stderr}")
+      f"build missed tampered C source: {tamper_cx.stderr}")
 open(vendored_c, "wb").write(orig_c)
 
 

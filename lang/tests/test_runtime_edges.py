@@ -58,7 +58,7 @@ def main():
     assert b.returncode == 0, "build failed:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
-    print("EDGES ALL GREEN (13 lines, 2 backends)")
+    print("EDGES ALL GREEN (13 lines, -O0 and -O2)")
 
 
 if __name__ == "__main__":

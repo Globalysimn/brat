@@ -1,4 +1,4 @@
-"""Telemetry timestamps are wall clock in both backends.
+"""Telemetry timestamps are wall clock at -O0 and -O2.
 
 `log.info` writes a JSON line with a `ts` field, and `time_ms()` returns epoch
 milliseconds. A clock that starts at zero - CPU time since process start - is
@@ -87,6 +87,6 @@ check(abs(ms[0] - int(time.time() * 1000)) < 5000,
       "native: time_ms %d is not epoch ms" % ms[0])
 
 check(run_o0.stdout.count("\n") == native.stdout.count("\n"),
-      "backends print a different number of lines")
+      "-O0 and -O2 print a different number of lines")
 
 print("LOG TS ALL GREEN (%d asserts)" % n)

@@ -27,9 +27,6 @@ import os
 import subprocess
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-CXX = os.path.join(ROOT, "lang", "cxx", "bin", "brat-cxx")
 TMP = _scratch.mkdtemp(prefix="brat-loops")
 
 HEAD = "fn main() -> i64 {\n"
@@ -124,43 +121,23 @@ def write(name, text):
     return path
 
 
-def py_check(path):
+def check(path):
     return subprocess.run(_cxx.cli_args("check", path), capture_output=True,
-                          text=True, timeout=300, env=dict(os.environ))
-
-
-def cxx_check(path):
-    if not os.path.isfile(CXX):
-        return None
-    return subprocess.run([CXX, "check", path], capture_output=True, text=True, timeout=300)
+                          text=True, timeout=300)
 
 
 def main():
-    # Both front ends are compared: one refusing what the other accepts is the
-    # divergence `test_cxx_borrow.py` exists for, and it starts here.
     for name, src in ACCEPTED.items():
-        path = write(name, src)
-        p = py_check(path)
-        assert p.returncode == 0, "python refused %s:\n%s%s" % (name, p.stdout, p.stderr)
-        c = cxx_check(path)
-        if c is not None:
-            assert c.returncode == 0, "brat-cxx refused %s:\n%s%s" % (name, c.stdout, c.stderr)
+        p = check(write(name, src))
+        assert p.returncode == 0, "check refused %s:\n%s%s" % (name, p.stdout, p.stderr)
 
     for name, src in REFUSED.items():
-        path = write(name, src)
-        p = py_check(path)
-        assert p.returncode != 0, "python accepted %s, which it must not" % name
+        p = check(write(name, src))
+        assert p.returncode != 0, "check accepted %s, which it must not" % name
         assert "error" in p.stdout, (name, p.stdout)
-        c = cxx_check(path)
-        if c is not None:
-            assert c.returncode != 0, "brat-cxx accepted %s, which it must not" % name
-            assert "error" in c.stdout, (name, c.stdout)
-            # Same first error, same line: the two checkers are one contract.
-            first = lambda out: [ln for ln in out.splitlines() if ": error: " in ln][:1]
-            assert first(p.stdout) == first(c.stdout), (name, p.stdout, c.stdout)
 
     # A program that runs must also run: the accepted shapes are not just
-    # checkable, they execute in both backends.
+    # checkable, they execute at -O0 and -O2.
     for name in ("while_local", "for_local", "nested_loops"):
         path = os.path.join(TMP, name + ".brat")
         r = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True,
@@ -174,7 +151,7 @@ def main():
         assert n.returncode == 0, (name, n.stdout + n.stderr)
         assert n.stdout == r.stdout, (name, r.stdout, n.stdout)
 
-    print("MOVE LOOPS ALL GREEN (%d accepted, %d refused, both checkers)"
+    print("MOVE LOOPS ALL GREEN (%d accepted, %d refused)"
           % (len(ACCEPTED), len(REFUSED)))
     return 0
 

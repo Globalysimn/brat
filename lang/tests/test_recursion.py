@@ -1,4 +1,4 @@
-"""Recursion fast-fail: the depth budget is a language number, both backends agree.
+"""Recursion fast-fail: the depth budget is a language number, -O0 and -O2 agree.
 
 The budget is driven small through the environment so the guard under test cannot
 itself be the slow path it exists to prevent.
@@ -126,7 +126,7 @@ for name, src in PROGS.items():
     print('recursion ok: %s (rc=%d)' % (name, irc))
 
 # defer must be visible, not merely equal: the unwinding frame runs its defer
-# before the refusal is reported, in both backends (SPEC 9 / DESIGN 2.8.5).
+# before the refusal is reported, at -O0 and -O2 (SPEC 9 / DESIGN 2.8.5).
 assert 'bye' in OUT['defer'] and 'recursion too deep' in OUT['defer'], \
     'defer unwind not visible: %r' % OUT['defer']
 assert OUT['defer'].count('bye') >= BUDGET - 2, \
@@ -134,7 +134,7 @@ assert OUT['defer'].count('bye') >= BUDGET - 2, \
 n += 2
 
 # Fail-closed shape: the uncaught runaway refuses with exit 1, empty stdout,
-# and a diagnostic naming the refusal on both backends.
+# and a diagnostic naming the refusal at -O0 and -O2.
 irc, iout, ierr = run(_cxx.run_args(os.path.join(TMP, 'runaway.brat')))
 nrc, nout, nerr = run([os.path.join(TMP, 'runaway.exe')])
 assert irc == 1 and iout == '', 'runaway must exit 1 with empty stdout, got rc=%d %r' % (irc, iout)

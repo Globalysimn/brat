@@ -47,7 +47,7 @@ def case(name, impl, bri, main_src):
 def main():
     n = 0
 
-    # Non-pub function listed in the interface is exported; both backends agree.
+    # Non-pub function listed in the interface is exported; -O0 and -O2 agree.
     main_ok = case("ok", CIRCLE_OK, "fn area(r: i64) -> i64\n", MAIN_AREA)
     ri = run(main_ok)
     assert ri.returncode == 0 and ri.stdout == b"16\n", \
@@ -58,7 +58,7 @@ def main():
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == b"16\n", "native ok rc=%d out=%r" % (rn.returncode, rn.stdout)
     n += 3
-    print("interfaces ok: matching interface, both backends")
+    print("interfaces ok: matching interface, at -O0 and -O2")
 
     # Declared but not implemented.
     main_missing = case("missing", CIRCLE_OK,

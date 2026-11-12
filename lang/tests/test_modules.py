@@ -1,4 +1,4 @@
-"""Modules: name clashes are errors; non-clashing imports work on both backends.
+"""Modules: name clashes are errors; non-clashing imports work at -O0 and -O2.
 
 Before this change, two imported files defining `name()` silently kept the first
 definition, in the -O0 build and in native code alike, so the program ran and
@@ -44,7 +44,7 @@ def main():
     n += 1
     print("modules ok: build refuses clash")
 
-    # Non-clashing imports keep working on both backends.
+    # Non-clashing imports keep working at -O0 and -O2.
     write("ok/geo/circle.brat", 'pub fn circle_name() -> str {\n  return "circle"\n}\n')
     write("ok/geo/square.brat", 'pub fn square_name() -> str {\n  return "square"\n}\n')
     ok_main = write("ok/main.brat",
@@ -60,7 +60,7 @@ def main():
     rn = subprocess.run([exe2], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == want, "native ok-case rc=%d out=%r" % (rn.returncode, rn.stdout)
     n += 2
-    print("modules ok: non-clashing imports on both backends")
+    print("modules ok: non-clashing imports at -O0 and -O2")
 
     print("MODULES ALL GREEN (%d asserts)" % n)
 

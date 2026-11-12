@@ -6,7 +6,7 @@ memory the arena never saw: the block's reset could not free it and `own()` had
 nothing to copy out of. Now every string is a `balloc` value, so an arena block
 captures string work too and a block can be reset in one move.
 
-What this file pins: both backends print the same thing, the native binary is clean
+What this file pins: `run -O0` and the built binary print the same thing, the binary is clean
 under AddressSanitizer and LeakSanitizer, `own(...)` hands out a value that survives
 the reset, and the escape rule still refuses assigning an arena string to an outer
 binding. The three timings at the end are a measurement, not a threshold: they are
@@ -110,7 +110,7 @@ def build(name, src, sanitize=False):
 
 want = "checksum 5200\n78\n"
 
-# 1. the program with one arena block: both backends, sanitized, leak free
+# 1. the program with one arena block: `run -O0` and a sanitized build, leak free
 path, exe = build("arena", WORKLOAD, sanitize=True)
 run_o0 = subprocess.run(_cxx.cli_args("run", "-O0", path), capture_output=True, text=True,
                         timeout=300)
@@ -126,7 +126,7 @@ assert run.returncode == 0 and run.stdout == want, "native rc=%d out=%r" % (run.
 assert run_o0.stdout.splitlines()[0] == "checksum 5200", \
     "own() did not survive the arena reset: %r" % run_o0.stdout
 
-# 3. the escape rule still refuses the shortcut, on both front ends
+# 3. the escape rule still refuses the shortcut, in `check` and in `build`
 bad = write("escape", ESCAPE)
 for tag, argv in (("check", _cxx.cli_args("check", bad)),
                   ("build", _cxx.cli_args("build", bad, "-o", os.path.join(TMP, "no.exe")))):
@@ -155,7 +155,7 @@ def timed(src, name):
 # 4. the measurement, at 50k rounds, three shapes of the same work
 ROUNDS = 50000
 sizes = {pos: timed(bench_src(ROUNDS, pos), "bench_" + pos) for pos in ("none", "round", "all")}
-print("ARENA STRINGS ALL GREEN (2 backends, ASan+LSan clean, own() copies, escape refused)")
+print("ARENA STRINGS ALL GREEN (-O0 and -O2, ASan+LSan clean, own() copies, escape refused)")
 print("  measured, %d rounds, best of 3 (wall / peak RSS):" % ROUNDS)
 for pos, label in (("none", "no arena      "), ("round", "arena per round"),
                    ("all", "one arena block")):
