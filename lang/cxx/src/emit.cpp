@@ -576,16 +576,21 @@ struct Closure {
     const std::vector<Param> *params = nullptr;
     StmtList body;
     std::set<std::string> caps;
-    bool ret_result = false;
+    char ret_early = 0;
     std::string src_file;
 };
 
-static bool is_result_ret_ann(const std::optional<std::string> &ret) {
-    if (!ret) return false;
+// What a `?` leaves the function with: 'R' under `-> Result[...]`, 'O' under
+// `-> Option[...]`, 0 when the function declares neither.
+static char early_ret_ann(const std::optional<std::string> &ret) {
+    if (!ret) return 0;
     size_t i = 0;
     while (i < ret->size() && (*ret)[i] == ' ') i++;
-    return ret->compare(i, 6, "Result") == 0 &&
-           (i + 6 == ret->size() || (*ret)[i + 6] == '[' || (*ret)[i + 6] == ' ');
+    for (const char *t : {"Result", "Option"})
+        if (ret->compare(i, 6, t) == 0 &&
+            (i + 6 == ret->size() || (*ret)[i + 6] == '[' || (*ret)[i + 6] == ' '))
+            return t[0];
+    return 0;
 }
 
 struct Late {
@@ -686,7 +691,7 @@ struct Emitter {
     int try_n = 0;
     std::set<std::string> alias_ret;
     std::set<std::string> cur_params;  // parameters of the function being emitted
-    bool cur_ret_result = false;       // true when current fn declares `-> Result[...]`
+    char cur_ret_early = 0;  // early_ret_ann() of the function being emitted
     std::vector<std::string> scopes;
     std::vector<std::string> iter_cleanups;
     // Lexical boundaries for each loop body: early exits must drain every
@@ -1039,7 +1044,7 @@ struct Emitter {
     void define_fn(const std::string &cname_, const std::vector<Param> &params, const StmtList &body,
                    const std::set<std::string> *caps, const std::string *fastraw,
                    const std::string *fastkind, const std::string *fastname,
-                   bool positional = false, bool ret_result = false,
+                   bool positional = false, char ret_early = 0,
                    const std::string *self_struct = nullptr);
     int struct_field_slot(const std::string &sname, const std::string &fname) const;
     std::optional<std::string> struct_field_ann(const std::string &sname, const std::string &fname) const;
@@ -3023,8 +3028,9 @@ V Emitter::ex(const Expr &e) {
     }
     case EK::Quest: {
         V a = ex(*e.kids[0]);
-        return part_of_temp(a, *e.kids[0],
-                            cur_ret_result ? "vquest_ok(vquest_ret(" : "vquest_ok(vquest(", "))");
+        const char *inner = cur_ret_early == 'R' ? "vquest_ret("
+                            : cur_ret_early == 'O' ? "vquest_opt(" : "vquest(";
+        return part_of_temp(a, *e.kids[0], cat("vquest_ok(", inner), "))");
     }
     case EK::VecLit:
         return ex_vec(ptrs(e.kids));
@@ -5323,7 +5329,7 @@ V Emitter::ex_parfor(const Expr &e) {
     std::set<std::string> capnames;
     for (const auto &n : avail)
         if (free.count(n)) capnames.insert(n);
-    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret),
+    clos.push_back({&decl.params, view(decl.body), capnames, early_ret_ann(decl.ret),
                     lookup_fn_file("", &decl)});
     std::string m = new_tmp("m");
     const int body_cb = tmp;
@@ -5369,7 +5375,7 @@ V Emitter::ex_closure(const Expr &e) {
         if (free.count(n) && (!named || n != *decl.name)) others.insert(n);
     std::set<std::string> capnames = others;
     if (self_used) capnames.insert(*decl.name);
-    clos.push_back({&decl.params, view(decl.body), capnames, is_result_ret_ann(decl.ret),
+    clos.push_back({&decl.params, view(decl.body), capnames, early_ret_ann(decl.ret),
                     lookup_fn_file("", &decl)});
     std::string t = new_tmp("m");
     if (capnames.empty()) {
@@ -7159,7 +7165,7 @@ std::pair<std::set<std::string>, std::set<std::string>> reclaim_names(
 void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params, const StmtList &body,
                         const std::set<std::string> *caps, const std::string *fastraw,
                         const std::string *fastkind, const std::string *fastname, bool positional,
-                        bool ret_result, const std::string *self_struct) {
+                        char ret_early, const std::string *self_struct) {
     std::vector<std::string> names;
     for (const auto &p : params) names.push_back(p.name);
     const std::string impl = positional ? cn + "_p" : cn;
@@ -7168,8 +7174,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         arg_exprs.push_back(positional ? cat("bf_arg_", i) : cat("args->items[", i, "]"));
     auto saved_params = cur_params;
     cur_params = std::set<std::string>(names.begin(), names.end());
-    bool saved_ret_result = cur_ret_result;
-    cur_ret_result = ret_result;
+    char saved_ret_early = cur_ret_early;
+    cur_ret_early = ret_early;
     auto saved_var_structs = var_structs;
     var_structs = compute_var_structs(params, body, self_struct);
     auto saved_scalar_vars = scalar_vars;
@@ -7516,7 +7522,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     catch_cns = saved_catch_cns;
     frame_arr_n = saved_frame_arr_n;
     frame_idx = saved_frame_idx;
-    cur_ret_result = saved_ret_result;
+    cur_ret_early = saved_ret_early;
     var_structs = std::move(saved_var_structs);
 }
 
@@ -8591,7 +8597,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         }
         ln("", cat("/* fn ", safe_comment(name), " */"));
         define_fn(cfn(key), f.params, view(f.body), nullptr, raw, kind, fname, true,
-                  is_result_ret_ann(f.ret));
+                  early_ret_ann(f.ret));
     } else if (key.rfind("meth:", 0) == 0) {
         std::string rest = key.substr(5);
         auto dot = rest.rfind('.');
@@ -8601,7 +8607,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         const std::string *self_st = native_structs.count(tname) ? &tname : nullptr;
         ln("", cat("/* meth ", safe_comment(tname + "." + mname), " */"));
         define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true,
-                  is_result_ret_ann(f.ret), self_st);
+                  early_ret_ann(f.ret), self_st);
     } else {
         throw EmitError("bad fn key " + key);
     }
@@ -9191,7 +9197,7 @@ void Emitter::emit_closures_queue() {
         std::string saved_src_file = cur_src_file;
         cur_src_file = !c.src_file.empty() ? c.src_file : root_src_file;
         define_fn(cfn(cat("clo:", clos_done)), *c.params, c.body, &c.caps, nullptr, nullptr, nullptr,
-                  false, c.ret_result);
+                  false, c.ret_early);
         cur_src_file = saved_src_file;
         clos_done++;
         emit_closure_protos();

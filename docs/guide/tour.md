@@ -91,7 +91,8 @@ checker limits, or run `./bin/brat explain E0382` in the terminal.
 `Ok(v)`, `Err(e)`, `Some(v)` and `None` are built-in tagged values, typed as
 `Result[T, E]` and `Option[T]` when annotated (or left dynamic in unannotated
 functions). `?` unwraps `Ok(v)` / `Some(v)`, returning `Err(e)` early from
-`-> Result[T, E]` functions and unwinding to `try` / `catch` otherwise;
+`-> Result[T, E]` functions, `None` early from `-> Option[T]` functions, and
+unwinding to `try` / `catch` otherwise;
 `unwrap_or(x, fallback)` (or `x.unwrap_or(fb)`) evaluates `fallback` lazily only
 on `Err`/`None`; `or` provides a fallback for `None` without swallowing `Err`.
 

@@ -129,6 +129,37 @@ CASES = {
                         'print(id([1, 0.1, 2, 0.2]).sum())\n'
                         'print(id([9223372036854775807, 1]).sum())\n',
                         '1.8446744073709552e+19\n3.3\n-9223372036854775808\n'),
+    # `?` on None leaves a function that returns Option, running its defers.
+    # It used to fall through with None in hand and fail on the next line.
+    # A Result function keeps the None, and a `try` around it catches.
+    'quest_none': ('''fn find(k: i64) -> Option[i64] {
+  if k > 0 { return Some(k * 10) }
+  return None
+}
+fn twice(k: i64) -> Option[i64] {
+  defer print("left", k)
+  let v = find(k)?
+  return Some(v + 1)
+}
+fn res(k: i64) -> Result {
+  let v = find(k)?
+  return Ok(v)
+}
+fn guarded(k: i64) -> Option[i64] {
+  try {
+    let v = find(k)?
+    return Some(v)
+  } catch e {
+    return Some(-1)
+  }
+}
+fn main() -> i64 {
+  print(twice(1), twice(0))
+  print(res(1), res(0))
+  print(guarded(2), guarded(0))
+  return 0
+}
+''', 'left 1\nleft 0\nSome(11) None\nOk(10) Ok(None)\nSome(20) Some(-1)\n'),
     # read_file() resolves symlinks and refuses any target outside the program
     # directory; the inside_link and ../ reads are the positive controls.
     'fs_sandbox_links': ('''fn main() -> i64 {

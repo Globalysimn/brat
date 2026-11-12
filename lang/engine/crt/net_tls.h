@@ -83,6 +83,16 @@ BFN Val vquest_ret(Val v) {
     }
     return v;
 }
+/* `None?` in a function that returns Option leaves it with None, by the road
+   `Err(e)?` takes out of a function that returns Result. */
+BFN Val vquest_opt(Val v) {
+    if (!_verr_pending && (v.tag == V_NIL || (v.tag == V_TAG && !strcmp(v.as.tv->tag, "none")))) {
+        vunwind = vnil();
+        _verr_pending = 1;
+        _verr_exc = 0;
+    }
+    return vquest(v);
+}
 BFN Val vquest_ok(Val v) {
     if (v.tag == V_TAG && (!strcmp(v.as.tv->tag, "ok") || !strcmp(v.as.tv->tag, "some")))
         return vtag_payload(v);
