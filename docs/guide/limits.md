@@ -174,6 +174,10 @@ Reading a local of the enclosing function is a compile error. Bind a closure
 with `let name = fn(...) { ... }` when the body needs one. This holds for a
 `fn` declared in a closure body or in a `spawn` block too.
 
+Top-level statements are not a function body. A `fn` declared inside one (in
+the block of an `if` or a loop, or in a closure bound there) is refused by
+`build` and `run`; `check` does not report it. Declare it at the top level.
+
 ## Indexing, variants and map keys
 
 Vector and string indices accept `i64` or integral `f64` values (`2.0`), while

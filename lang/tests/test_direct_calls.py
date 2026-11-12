@@ -220,6 +220,17 @@ NESTED_REFUSED = {
   return 0
 }
 ''', "capture_closure.brat:4: fn `inner` uses `a` of the enclosing fn"),
+    "top_block": ('''if true {
+  fn inner() -> i64 { return 1 }
+  print(inner())
+}
+''', "top_block.brat:1: fn `inner` is declared inside a top-level statement"),
+    "top_closure": ('''let f = fn(k) {
+  fn inner(n) { return [n] }
+  return inner(k)
+}
+print(f(1))
+''', "top_closure.brat:1: fn `inner` is declared inside a top-level statement"),
 }
 
 EXPECTED = """0

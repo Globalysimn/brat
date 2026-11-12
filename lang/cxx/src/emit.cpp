@@ -7064,26 +7064,17 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
     case SK::ExportFn: {
         const FnDecl &f = s.fns[0];
         std::string name = f.name.value_or("");
-        if (!nesting) {
-            fns[name].decl = &f;
-            bool have = false;
-            for (const auto &o : order)
-                if (!o.meth && o.a == name) have = true;
-            if (!have) order.push_back({false, name, ""});
-            late.push_back({name, &f, lookup_fn_file(name, &f)});
-        } else {
-            // A nested fn is a plain C function with no frame to read from. In a
-            // closure or a spawn the enclosing locals are the captured names.
-            for (const auto &v : closure_free_vars(f))
-                if ((sym.count(v) || (cap && cap->second.count(v))) && !global_lets.count(v))
-                    throw EmitError(cat(lookup_stmt_file(&s), ":", s.line, ": fn `", name, "` uses `", v,
-                                        "` of the enclosing fn: take it as a parameter, or bind a ",
-                                        "closure with `let ", name, " = fn(...)`"));
-            // From here on the name means this declaration, whatever another
-            // block of the same function called its own.
-            for (const auto &l : late)
-                if (l.decl == &f) fn_alias[name] = l.name;
-        }
+        // A nested fn is a plain C function with no frame to read from. In a
+        // closure or a spawn the enclosing locals are the captured names.
+        for (const auto &v : closure_free_vars(f))
+            if ((sym.count(v) || (cap && cap->second.count(v))) && !global_lets.count(v))
+                throw EmitError(cat(lookup_stmt_file(&s), ":", s.line, ": fn `", name, "` uses `", v,
+                                    "` of the enclosing fn: take it as a parameter, or bind a ",
+                                    "closure with `let ", name, " = fn(...)`"));
+        // From here on the name means this declaration, whatever another
+        // block of the same function called its own.
+        for (const auto &l : late)
+            if (l.decl == &f) fn_alias[name] = l.name;
         return;
     }
     case SK::Extern:
@@ -9247,6 +9238,17 @@ std::string Emitter::emit_program() {
     last_dbg_file.clear();
     last_dbg_line = -1;
     last_dbg_next_idx = 0;
+    // The table of nested fns is kept per function, and top-level statements
+    // are not one: a fn declared inside them would have no entry a call
+    // could resolve to.
+    for (const Stmt *s : top_exe) {
+        const size_t known = late.size();
+        collect_nested(*s);
+        if (late.size() != known)
+            throw EmitError(cat(lookup_stmt_file(s), ":", s->line, ": fn `", *late[known].decl->name,
+                                "` is declared inside a top-level statement: declare it at the ",
+                                "top level or inside a fn"));
+    }
     run_pipeline();
     cb_wrappers.clear();
     auto ffi_decl_impl = [&](auto &&self, const std::string &ann,
