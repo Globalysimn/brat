@@ -113,6 +113,14 @@ CASES = {
     # An empty alternation branch matches "", so "ac" fails but "abd" passes.
     'regex_empty_alt': ('print(re_match("ac", "a(b|c|)d"))\n'
                         'print(re_match("abd", "a(b|c|)d"))\n', 'false\ntrue\n'),
+    # An empty group or an empty first branch matches "" and the pattern goes
+    # on: it used to jump to the end, so `b()$` accepted "ba".
+    'regex_empty_group': ('print(re_match("ba", "b()$"), re_match("b", "b()$"))\n'
+                          'print(re_match("ac", "^a(|b)d$"), re_match("ad", "^a(|b)d$"))\n'
+                          'print(re_match("x", "^(|a)$"), re_match("", "^(|a)$"))\n'
+                          'print(re_match("a1", "^a()\\{2\\}1$"), re_match("a", "^a()\\{2\\}1$"))\n'
+                          'print(unwrap(re_captures("ab", "a()(|x)b")))\n',
+                          'false true\nfalse true\nfalse true\ntrue false\n[\'ab\', \'\', \'\']\n'),
     # A nullable group under * never terminates the match loop early.
     'regex_nested_star': ('print(re_match("aaa", "(a*)*"))\n'
                           'print(re_match("b", "(a*)*"))\n', 'true\ntrue\n'),

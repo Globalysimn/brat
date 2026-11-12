@@ -2769,7 +2769,6 @@ typedef struct {
     bint i, plen;
     bint ngroups;
     int err;
-    int empty_seq;
 } RProg;
 
 #define BRAT_RE_MAX_INST 65536
@@ -3022,8 +3021,8 @@ static bint r_seq(RProg *g) {
         if (first_atom < 0) first_atom = a;
     }
     if (g->err) return -1;
-    g->p[entry].x = (first_atom < 0) ? entry : first_atom;
-    g->empty_seq = (first_atom < 0);
+    /* An empty sequence falls through to whatever is emitted after it. */
+    g->p[entry].x = (first_atom < 0) ? g->n : first_atom;
     return entry;
 }
 
@@ -3046,11 +3045,9 @@ static bint r_alt(RProg *g) {
         g->i++;
         bint sp = r_emit(g, 's', 0, 0);
         sps[ns++] = sp;
-        bint s0 = r_seq(g);
+        r_seq(g);
         if (g->err) { free(sps); free(jmps); return -1; }
-        bint j = r_emit(g, 'j', 0, 0);
-        jmps[nj++] = j;
-        if (g->empty_seq) g->p[s0].x = j;
+        jmps[nj++] = r_emit(g, 'j', 0, 0);
     }
     bint fail = r_emit(g, 'f', 0, 0);
     bint exit = g->n;
@@ -3084,16 +3081,13 @@ static int r_compile_prog_n(RProg *g, const char *pat, bint plen, bint *start_ou
     g->p = NULL; g->n = 0; g->cap = 0;
     g->bodies = NULL; g->nbodies = 0; g->bodies_cap = 0;
     g->pat = pat; g->i = 0; g->plen = plen;
-    g->ngroups = 0; g->err = 0; g->empty_seq = 0;
+    g->ngroups = 0; g->err = 0;
     bint sv0 = r_emit(g, 'v', 0, 0);
     bint body = r_alt(g);
     if (g->err || body < 0 || g->i != g->plen) { r_free(g); return 0; }
     r_emit(g, 'v', 1, 0);
     r_emit(g, 'm', 0, 0);
     if (g->err) { r_free(g); return 0; }
-    for (bint k = 0; k < g->n; k++) {
-        if (g->p[k].op == 'j' && g->p[k].x == k) g->p[k].x = g->n - 2;
-    }
     *start_out = sv0;
     return 1;
 }
