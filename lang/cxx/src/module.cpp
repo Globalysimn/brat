@@ -999,7 +999,7 @@ void flatten(ModuleSet &set, bool prune_imports) {
     std::set<std::string> expanded;
     std::vector<StmtP> flat;
     // A module's statements land where its `import` sits in the importer, not
-    // at the end: the reference splices depth first, each module once.
+    // at the end: spliced depth first, each module once.
     struct Walk {
         ModuleSet &set;
         std::set<std::string> &expanded;

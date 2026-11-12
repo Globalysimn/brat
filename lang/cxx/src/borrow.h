@@ -58,7 +58,7 @@ struct BorrowOut {
 };
 
 // The names another file exports: `pub fn` parameter modes and `pub enum`
-// variants, which the reference merges per file before checking the set.
+// variants, merged per file before the set is checked.
 FnTable pub_sigs(const std::vector<StmtP> &body,
                  const std::set<std::string> &exp_fns = {});
 

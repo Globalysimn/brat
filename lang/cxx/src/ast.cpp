@@ -714,7 +714,7 @@ void stmt(const Stmt &s, std::string &o) {
         opt(o, s.ext.varargs);
         boolean(o, s.ext.owned);
         boolean(o, s.ext.checked);
-        // A tuple in the reference printer: `("pure" "nothrow")`, and `()` when
+        // Printed as a tuple: `("pure" "nothrow")`, and `()` when
         // the declaration promises nothing. `quoted`, not `word` -- `word`
         // prepends the space that separates fields, and the open paren is
         // already the separator.

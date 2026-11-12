@@ -401,7 +401,7 @@ void expr_vars(const Expr &e, Names &acc) {
     }
 }
 
-// The names a statement binds anywhere below it, in the order the reference walks.
+// The names a statement binds anywhere below it.
 void stmt_vars(const Stmt &s, Names &acc) {
     switch (s.k) {
     case SK::Let: case SK::LetTmp:

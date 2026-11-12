@@ -1,5 +1,5 @@
-// Module loading: a file plus everything it imports, in the order the reference
-// visits them, and the flattened program the emitter works on.
+// Module loading: a file plus everything it imports, depth first, and the
+// flattened program the emitter works on.
 #pragma once
 
 #include <map>
@@ -20,7 +20,7 @@ using ModuleInterface =
     std::map<std::string, std::pair<std::vector<std::string>, std::string>>;
 
 struct SourceFile {
-    std::string path;                  // real path, as the reference reports it
+    std::string path;                  // real path, as diagnostics report it
     std::string src;
     std::vector<StmtP> body;
     // `{...}` chunks the parser kept as literal text: the checker warns once
@@ -58,7 +58,7 @@ ModuleSet load_modules(const std::string &path);
 ModuleSet load_modules(const std::string &path, const std::string &root_source);
 void mangle_modules(ModuleSet &set);
 // Mangles names and fills `flat`. Prints nothing; throws ModuleError when the
-// program breaks one of the reference's link-time rules. When `prune_imports`
-// is true, unreferenced non-exported functions from imported modules (`idx > 0`)
-// are omitted from `flat` while keeping 100% of the root module intact.
+// program breaks a link-time rule. When `prune_imports` is true, unreferenced
+// non-exported functions from imported modules (`idx > 0`) are left out of
+// `flat`; the root module is kept whole.
 void flatten(ModuleSet &set, bool prune_imports = false);

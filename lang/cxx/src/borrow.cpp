@@ -253,8 +253,8 @@ std::vector<ParamMode> fn_modes(const std::vector<Param> &params) {
     return out;
 }
 
-// Every entry cloned: the reference's `copy_decl`, used where a branch must
-// not see the other branch's moves.
+// Every entry cloned, for where a branch must not see the other branch's
+// moves.
 Decls copy_decl(const Decls &d) {
     Decls out;
     out.outer = d.outer;
