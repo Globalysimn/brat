@@ -157,22 +157,14 @@ check(p.returncode == 1, "unwrap dyn wants exit=1 have %d" % p.returncode)
 check("unwrap of i64 (want Ok/Err/Some)" in p.stderr, "unwrap wants the type have %r" % p.stderr[-300:])
 
 
-# Every test file the documentation names must exist. A doc that points at
-# `test_checker_parity.py` when the tree has `test_cxx_checker.py` sends the
-# reader to a dead end, and exactly that happened while writing the 2026-10-28
-# notes.
-# CHANGELOG.md is history: naming a test that has since been removed is the
-# point of it. Everywhere else a dead test name is a bug unless the line says it
-# is gone ("used to", "merged", "replaced").
+# Every test file the documentation names must exist, unless the line says the
+# test is gone ("used to", "merged", "replaced").
 PAST = ("used to", "merged", "replaced", "deleted", "renamed", "was ", "were ")
-DOCS = [os.path.join(ROOT, n) for n in
-        ("README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md")]
+DOCS = [os.path.join(ROOT, n) for n in ("README.md", "CONTRIBUTING.md", "SECURITY.md")]
 DOCS.append(os.path.join(ROOT, "lang", "spec", "SPEC.md"))
 DOCS.extend(sorted(glob.glob(os.path.join(ROOT, "docs", "*", "*.md"))))
 missing = []
 for doc in DOCS:
-    if not os.path.isfile(doc) or os.path.basename(doc) == "CHANGELOG.md":
-        continue
     for line in open(doc, encoding="utf-8"):
         if any(mark in line for mark in PAST):
             continue

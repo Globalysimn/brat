@@ -2545,10 +2545,9 @@ BFN Val vtime_ms(void) {
     return vint((bint)(t / 10000ULL));
 #else
     struct timespec ts;
-    /* `clock_gettime` rather than C11's `timespec_get`: the output is documented
-       as C99, and `timespec_get`/`TIME_UTC` do not exist there. POSIX is already
-       required by `fileno`, `realpath`, `strdup` and `pthread`, and the feature
-       level is asked for at the top of this file. */
+    /* `clock_gettime` rather than C11's `timespec_get`, which `-std=c99` hides.
+       POSIX is already required by `fileno`, `realpath`, `strdup` and `pthread`,
+       and the feature level is asked for in `core.h`. */
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0) { ts.tv_sec = 0; ts.tv_nsec = 0; }
     return vint((bint)((uint64_t)ts.tv_sec * 1000ULL
                        + (uint64_t)ts.tv_nsec / 1000000ULL));

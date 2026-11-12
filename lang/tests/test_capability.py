@@ -1,8 +1,7 @@
 """Sharing rules: reference cycles and writes that escape a `spawn`.
 
-Every case runs through both checkers, so the two cannot drift: the diagnostic
-must be identical, and a program that the rule accepts must build with a
-working binary on both backends.
+A refused case must carry its diagnostic. An accepted one must also build and
+print the expected output at -O0 and -O2.
 
 The rules exist because the runtime has no cycle collector and `spawn` copies a
 frame but not the objects the frame points at (see docs/guide/ownership.md).
@@ -31,9 +30,7 @@ LOOP = "launched in a loop"
 CASES = {
     # A parent that rebinds a name while the child reads it is two frames, not
     # two threads on one object: `spawn` copies the frame, so the child holds the
-    # value from the launch. That is only true since the snapshot exists -- the
-    # child used to read the script-level global directly, the checker said
-    # nothing, and the backends disagreed (see LEDGER, 2026-10-30).
+    # value from the launch.
     "read_in_child_write_in_parent": ('''fn main() -> i64 {
   let mut x = 0
   spawn {

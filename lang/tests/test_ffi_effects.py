@@ -1,14 +1,9 @@
 """FFI effects: what an `extern fn` promises about the C function behind it.
 
-An effect is the only thing standing between a foreign call and the three
-guarantees the language makes everywhere else -- that memory is not written by
-two threads at once, that the optimizer may reuse a result, and that a failure
-has one channel. Without effects the checkers treated every foreign call as
-"touches nothing", so a `free` or a `memcpy` racing across a `spawn` was
-invisible (docs/guide/ffi.md, LEDGER 2026-10-30). These cases pin down the
-vocabulary, the refusals, and the fact that the two front ends agree on both.
-
-Run: python3 test_ffi_effects.py
+The checker cannot see into a C function. Without a declared effect a foreign
+call would count as touching nothing, and a `free` or a `memcpy` racing across
+a `spawn` would pass (docs/guide/ffi.md). These cases pin the effect
+vocabulary and the refusals that follow from it.
 """
 import _cxx
 import _scratch
@@ -228,7 +223,7 @@ def check_lib_block_with_typed_return():
     `extern "libm.so" { extern fn sin(x: f64) -> f64 }` is what docs/guide/ffi.md
     tells people to write, and the return-type scan ran past the closing brace
     into the next declaration, so the block form was unusable for any function
-    that returns something. Both front ends had it; both stop at `}` now.
+    that returns something.
     """
     src = ('extern "libm.so" {\n  extern fn cos(x: f64) -> f64\n}\n'
            'fn main() -> i64 { return 0 }\n')

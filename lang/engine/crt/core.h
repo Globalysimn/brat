@@ -1,8 +1,7 @@
 
-/* `fileno`, `realpath` and `strdup` are POSIX, not ISO C: under `-std=c11` they
-   are hidden unless the feature level is asked for, and the runtime then fails
-   to compile for a user who tries strict ISO C. Ask before the first include;
-   The floor is C99 plus POSIX: nothing in this runtime needs C11. */
+/* `fileno`, `realpath` and `strdup` are POSIX, not ISO C: a strict `-std=c11`
+   or `-std=c99` hides them unless the feature level is asked for. Ask before
+   the first include. */
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE 1
 #endif

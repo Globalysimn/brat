@@ -1,21 +1,15 @@
-"""`emit-c` really compiles as C99, which is what the README promises.
+"""The emitted C compiles under `cc -std=c99`.
 
-Two ways this was not true, both invisible to the rest of the suite because no
-test ever compiled the emitted C with an explicit `-std`:
+`brat build` passes `-std=gnu11`, so no other test compiles the output with a
+strict ISO flag. Two things are pinned:
 
-  * `crt.h` called `timespec_get`/`TIME_UTC`, which are C11, so
-    `cc -std=c99` refused the file with two errors. The project's own builds
-    never saw it: `toolchain.py` passes no `-std` at all, so the compiler's
-    default (gnu17 here) was in force.
-  * `INT64_MIN` was printed as `-9223372036854775808`, which C parses as an
-    unsigned constant with a unary minus on top: gcc warns "integer constant is
-    so large that it is unsigned", and the value is implementation-defined. The
-    program printed the right answer because gcc happens to do the obvious
-    thing; `-Werror` turns it into a build failure.
+- the runtime reads the clock with `clock_gettime`, not `timespec_get`, which
+  `-std=c99` hides;
+- `INT64_MIN` is not written as `-9223372036854775808`. C reads that as an
+  unsigned constant under a unary minus, and gcc warns that the constant is so
+  large that it is unsigned.
 
-So the test compiles the emitted C for a few programs with `-std=c99` explicitly,
-requires a warning-free compile of the integer-literal class, runs the binary and
-compares stdout with the -O0 build.
+Each program is compiled, run, and compared with `run -O0`.
 """
 import _cxx
 import _scratch
