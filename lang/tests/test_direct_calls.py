@@ -113,6 +113,58 @@ fn main() -> i64 {
 '''
 CLOSURE_EXPECTED = ("capture-value-alphacapture-value-betacapture-value-gamma\n720\n" * 8)
 
+# A fn declared in a body belongs to that function. One table for the whole
+# program let the last `h` answer every call to `h`, and a nested name was not
+# accepted as a callback. `pick` is emitted from a copy of its body: the inner
+# `r` is renamed there and `p` is split into its fields.
+NESTED_SOURCE = '''struct P { x: i64 }
+impl P {
+  fn twice(self) -> i64 {
+    fn dbl(k: i64) -> i64 { return k * 2 }
+    return dbl(self.x)
+  }
+}
+fn h() { return "top" }
+fn a() {
+  fn h() { return "in a" }
+  return h()
+}
+fn b() {
+  fn h() { return "in b" }
+  return h()
+}
+fn pick(c) {
+  let p = P { x: 1 }
+  let r = p.x
+  if c {
+    fn side() { return "then" }
+    let r = side()
+    return r
+  } else {
+    fn side() { return "else" }
+    let r = side()
+    return r
+  }
+}
+fn main() -> i64 {
+  print(a(), b(), h())
+  print(pick(true), pick(false))
+  fn inc(k) { return k + 1 }
+  fn even(n) {
+    if n == 0 { return true }
+    return odd(n - 1)
+  }
+  fn odd(n) {
+    if n == 0 { return false }
+    return even(n - 1)
+  }
+  let via = fn(k) { return inc(k) }
+  print(even(10), [1, 2].map(inc), via(7), P { x: 3 }.twice())
+  return 0
+}
+'''
+NESTED_EXPECTED = "in a in b top\nthen else\ntrue [2, 3] 8 6\n"
+
 EXPECTED = """0
 1
 3
@@ -200,6 +252,23 @@ def main():
                           env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1"))
     assert (closure_native.returncode, closure_native.stdout, closure_native.stderr) == \
            (0, CLOSURE_EXPECTED, ""), closure_native.stderr
+
+    nested_source = put("nested.brat", NESTED_SOURCE)
+    nested_o0 = run(_cxx.cli_args("run", "-O0", nested_source))
+    assert (nested_o0.returncode, nested_o0.stdout) == (0, NESTED_EXPECTED), \
+           nested_o0.stdout + nested_o0.stderr
+    nested_cpp = run([cxx, "cc", nested_source])
+    assert nested_cpp.returncode == 0, nested_cpp.stderr
+    nested_cfile = put("nested.c", nested_cpp.stdout)
+    nested_exe = os.path.join(TMP, "nested")
+    nested_compiled = run(["cc", "-std=gnu11", "-O1", "-g", "-fsanitize=address,undefined",
+                           "-fno-omit-frame-pointer", "-fwrapv", "-I", ENGINE, nested_cfile,
+                           "-o", nested_exe, "-lm", "-pthread"])
+    assert nested_compiled.returncode == 0, nested_compiled.stderr
+    nested_native = run([nested_exe],
+                        env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1"))
+    assert (nested_native.returncode, nested_native.stdout, nested_native.stderr) == \
+           (0, NESTED_EXPECTED, ""), nested_native.stderr
 
     small_cpp = run([cxx, "cc", small])
     assert small_cpp.returncode == 0, small_cpp.stderr

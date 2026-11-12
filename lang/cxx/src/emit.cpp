@@ -578,6 +578,7 @@ struct Closure {
     std::set<std::string> caps;
     char ret_early = 0;
     std::string src_file;
+    std::map<std::string, std::string> alias = {};
 };
 
 // What a `?` leaves the function with: 'R' under `-> Result[...]`, 'O' under
@@ -746,7 +747,10 @@ struct Emitter {
     std::set<std::string> ub_floats;
     int nesting = 0;
     int nested_seq = 0;
+    // Source name of a nested fn to its key in `fns`, for the body being
+    // emitted. `fn_scope` keeps that table per function, by its key in `fns`.
     std::map<std::string, std::string> fn_alias;
+    std::map<std::string, std::map<std::string, std::string>> fn_scope;
     std::set<std::string> assigned;
     std::set<std::string> reclaim, relet;
     // BRAT_MOVE_RT=0 turns the drops off. It is a bisection knob: a program
@@ -959,7 +963,7 @@ struct Emitter {
 
     void collect_prog(const std::vector<StmtP> &prog);
     void collect_top(const Stmt &s);
-    void collect_nested_fn(const FnDecl &f);
+    void collect_nested_fn(const std::string &key, const FnDecl &f);
     void collect_nested_expr(const Expr &e);
     void collect_nested(const Stmt &s);
 
@@ -2582,7 +2586,7 @@ void Emitter::collect_top(const Stmt &s) {
             fns[name].decl = &f;
             fn_ret[name] = f.ret;
             order.push_back({false, name, ""});
-            collect_nested_fn(f);
+            collect_nested_fn(name, f);
         }
         exported.insert(name);
         return;
@@ -2612,7 +2616,7 @@ void Emitter::collect_top(const Stmt &s) {
             if (returns_param(f.body, pnames)) alias_ret.insert(name);
             order.push_back({false, name, ""});
         }
-        collect_nested_fn(f);
+        collect_nested_fn(name, f);
         return;
     }
     case SK::Impl: {
@@ -2633,6 +2637,7 @@ void Emitter::collect_top(const Stmt &s) {
                 fn_ret[key] = f.ret;
                 order.push_back({true, s.a, *f.name});
             }
+            collect_nested_fn(key, f);
         }
         return;
     }
@@ -2667,10 +2672,18 @@ void Emitter::collect_top(const Stmt &s) {
     }
 }
 
-void Emitter::collect_nested_fn(const FnDecl &f) {
+void Emitter::collect_nested_fn(const std::string &key, const FnDecl &f) {
+    const bool outermost = fn_alias.empty();
+    const size_t first = late.size();
     for (const auto &p : f.params)
         if (p.def) collect_nested_expr(*p.def);
     for (const Stmt *s : view(f.body)) collect_nested(*s);
+    if (!outermost || fn_alias.empty()) return;
+    // What was declared inside `f` is a name in `f` and in the fns nested in
+    // it, and in no other function.
+    fn_scope.emplace(key, fn_alias);
+    for (size_t i = first; i < late.size(); i++) fn_scope[late[i].name] = fn_alias;
+    fn_alias.clear();
 }
 
 void Emitter::collect_nested_expr(const Expr &e) {
@@ -2696,7 +2709,7 @@ void Emitter::collect_nested(const Stmt &s) {
         fns[mangled].decl = &f;
         fn_alias[name] = mangled;
         late.push_back({mangled, &f, lookup_fn_file(name, &f)});
-        collect_nested_fn(f);
+        collect_nested_fn(mangled, f);
         return;
     }
     case SK::Let: case SK::LetTmp: case SK::Set: case SK::Expr:
@@ -2721,6 +2734,7 @@ void Emitter::collect_nested(const Stmt &s) {
     case SK::Spawn:
     case SK::Scope:
     case SK::Unsafe:
+    case SK::Block:
         if (s.e1) collect_nested_expr(*s.e1);
         for (const Stmt *t : view(s.body)) collect_nested(*t);
         return;
@@ -2738,7 +2752,7 @@ void Emitter::collect_nested(const Stmt &s) {
         for (const Stmt *t : view(s.body2)) collect_nested(*t);
         return;
     case SK::Impl:
-        for (const auto &f : s.fns) collect_nested_fn(f);
+        for (const auto &f : s.fns) collect_nested_fn(s.a + "." + *f.name, f);
         return;
     case SK::Pub:
         if (!s.body.empty()) collect_nested(*s.body[0]);
@@ -4871,7 +4885,7 @@ V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, con
     V o = recv ? *recv : ex(obj);
     const FnDecl *entry = nullptr;
     if (arg->k == EK::Var) {
-        auto it = fns.find(arg->a);
+        auto it = fns.find(fn_key(arg->a));
         if (it != fns.end() && !it->second.ctor) entry = it->second.decl;
     }
     std::vector<std::string> pre = o.pre;
@@ -4893,7 +4907,7 @@ V Emitter::ex_hof(const Expr &obj, const std::string &meth, const Expr *arg, con
         }
         std::string fnv;
         if (entry) {
-            int code = fn_code("fn:" + arg->a);
+            int code = fn_code("fn:" + fn_key(arg->a));
             std::string t = new_tmp("c");
             pre.push_back(cat("Val ", t, " = vclosure0(", code, ");"));
             fnv = t;
@@ -4919,11 +4933,11 @@ V Emitter::ex_mapfilter(const Expr &obj, const std::string &meth, const Expr *ar
     V o = recv ? *recv : ex(obj);
     const FnDecl *entry = nullptr;
     if (arg->k == EK::Var) {
-        auto it = fns.find(arg->a);
+        auto it = fns.find(fn_key(arg->a));
         if (it != fns.end() && !it->second.ctor) entry = it->second.decl;
     }
     if (entry) {
-        int code = fn_code("fn:" + arg->a);
+        int code = fn_code("fn:" + fn_key(arg->a));
         std::string t = new_tmp("c");
         std::vector<std::string> pre = o.pre;
         pre.push_back(cat("Val ", t, " = vclosure0(", code, ");"));
@@ -7056,21 +7070,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             if (!have) order.push_back({false, name, ""});
             late.push_back({name, &f, lookup_fn_file(name, &f)});
         } else {
-            std::string mangled;
-            auto it = fn_alias.find(name);
-            if (it == fn_alias.end()) {
-                nested_seq++;
-                mangled = cat(name, "@", nested_seq);
-                fns[mangled].decl = &f;
-                fn_alias[name] = mangled;
-                late.push_back({mangled, &f, lookup_fn_file(name, &f)});
-            } else {
-                mangled = it->second;
-            }
-            bool have = false;
+            // From here on the name means this declaration, whatever another
+            // block of the same function called its own.
             for (const auto &l : late)
-                if (l.name == mangled) have = true;
-            if (!have) late.push_back({mangled, &f, lookup_fn_file(name, &f)});
+                if (l.decl == &f) fn_alias[name] = l.name;
         }
         return;
     }
@@ -7168,6 +7171,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
                         char ret_early, const std::string *self_struct) {
     std::vector<std::string> names;
     for (const auto &p : params) names.push_back(p.name);
+    const size_t first_clo = clos.size();
     const std::string impl = positional ? cn + "_p" : cn;
     std::vector<std::string> arg_exprs;
     for (size_t i = 0; i < names.size(); i++)
@@ -7524,6 +7528,8 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
     frame_idx = saved_frame_idx;
     cur_ret_early = saved_ret_early;
     var_structs = std::move(saved_var_structs);
+    // A closure is emitted later; it resolves nested fn names as this body did.
+    for (size_t i = first_clo; i < clos.size(); i++) clos[i].alias = fn_alias;
 }
 
 int Emitter::struct_field_slot(const std::string &sname, const std::string &fname) const {
@@ -8281,10 +8287,10 @@ static void map_cloned_nested_stmts(const std::vector<StmtP> &ob,
                 map_cloned_nested_stmts(co->body2, cn->body2, rep);
             }
         }
-        for (size_t j = 0; j < os.fns.size() && j < ns.fns.size(); j++) {
+        // The copy of a nested fn marks where it is declared. Its body is
+        // emitted from the entry the fn has in `fns`, not from this copy.
+        for (size_t j = 0; j < os.fns.size() && j < ns.fns.size(); j++)
             rep[&os.fns[j]] = &ns.fns[j];
-            map_cloned_nested_stmts(os.fns[j].body, ns.fns[j].body, rep);
-        }
     }
 }
 
@@ -8518,7 +8524,6 @@ void Emitter::run_shadow_disambig() {
             map_cloned_nested_stmts(old_ptr->body, copy.body, replaced);
             sra_fns.push_back(std::move(copy));
             entry.decl = &sra_fns.back();
-            replaced[old_ptr] = entry.decl;
         }
     }
     for (auto &l : late) {
@@ -8556,12 +8561,14 @@ void Emitter::run_sra() {
     for (auto &[name, entry] : fns) {
         if (entry.ctor || !entry.decl) continue;
         FnDecl copy = clone_fn(*entry.decl);
+        // Paired before the rewrite: it turns a struct `let` into a `let` per
+        // field, and the two bodies stop lining up statement by statement.
+        std::map<const FnDecl *, const FnDecl *> moved;
+        map_cloned_nested_stmts(entry.decl->body, copy.body, moved);
         if (sra_rewrite_decl(name, copy)) {
-            const FnDecl *old_ptr = entry.decl;
-            map_cloned_nested_stmts(old_ptr->body, copy.body, replaced);
             sra_fns.push_back(std::move(copy));
             entry.decl = &sra_fns.back();
-            replaced[old_ptr] = entry.decl;
+            replaced.insert(moved.begin(), moved.end());
         }
     }
     for (auto &l : late) {
@@ -8589,6 +8596,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         std::string name = key.substr(3);
         const FnDecl &f = *fns[name].decl;
         cur_src_file = lookup_fn_file(name, &f);
+        fn_alias = fn_scope[name];
         const std::string *raw = nullptr, *kind = nullptr, *fname = nullptr;
         if (fastc.count(name)) {
             raw = &fastc[name];
@@ -8604,6 +8612,7 @@ void Emitter::emit_fn_by_key(const std::string &key) {
         std::string tname = rest.substr(0, dot), mname = rest.substr(dot + 1);
         const FnDecl &f = *fns[tname + "." + mname].decl;
         cur_src_file = lookup_fn_file(tname + "." + mname, &f);
+        fn_alias = fn_scope[rest];
         const std::string *self_st = native_structs.count(tname) ? &tname : nullptr;
         ln("", cat("/* meth ", safe_comment(tname + "." + mname), " */"));
         define_fn(cfn(key), f.params, view(f.body), nullptr, nullptr, nullptr, nullptr, true,
@@ -8877,6 +8886,7 @@ void Emitter::emit_late() {
 
 void Emitter::emit_main_open() {
     cur_src_file = root_src_file;
+    fn_alias.clear();
     sym.clear();
     cap.reset();
     cap_slots.clear();
@@ -9194,6 +9204,7 @@ void Emitter::emit_closures_queue() {
     while (clos_done < static_cast<int>(clos.size())) {
         emit_closure_protos();
         const Closure &c = clos[clos_done];
+        fn_alias = c.alias;
         std::string saved_src_file = cur_src_file;
         cur_src_file = !c.src_file.empty() ? c.src_file : root_src_file;
         define_fn(cfn(cat("clo:", clos_done)), *c.params, c.body, &c.caps, nullptr, nullptr, nullptr,
@@ -9312,7 +9323,6 @@ std::string Emitter::emit_program() {
     last_dbg_next_idx = 0;
     ic_n = 0;
     mic_slot = -1;
-    nested_seq = 0;
     clos_done = clos_declared = late_done = late_declared = 0;
     tmp = 0;
     // Ownership is re-derived in pass two; a stale `dropped` would suppress it.
