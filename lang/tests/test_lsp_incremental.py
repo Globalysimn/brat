@@ -218,7 +218,7 @@ def test_wire_and_simd_lines(bin_path):
         emoji_line = len(boundary_lines) - 1
         # Line is: `fn uni() -> str { "Привет 🦀🚀 мир" }`
         # Prefix before 🚀: `fn uni() -> str { "Привет 🦀` -> 19 ASCII + 6 Cyrillic + 1 space + 2 UTF-16 (🦀) = 28 UTF-16 units
-        # 🚀 occupies UTF-16 cols [28, 30). Splitting at col 29 MUST fail cleanly!
+        # 🚀 occupies UTF-16 cols [28, 30). Splitting at col 29 must fail cleanly.
         cli.notify("textDocument/didChange", {
             "textDocument": {"uri": uri, "version": 2},
             "contentChanges": [{
@@ -235,7 +235,7 @@ def test_wire_and_simd_lines(bin_path):
         check(any("invalid UTF-16 range" in m for m in cli.logs),
               "surrogate midpoint split rejected cleanly: %r" % (cli.logs,))
 
-        # Valid UTF-16 replacement of `🚀` ([28, 30)) using JSON `\uD83D\uDD25` (🔥) escape!
+        # Valid UTF-16 replacement of `🚀` ([28, 30)) using JSON `\uD83D\uDD25` (🔥) escape.
         raw_change = (
             '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{'
             '"textDocument":{"uri":' + json.dumps(uri) + ',"version":3},'
@@ -247,7 +247,7 @@ def test_wire_and_simd_lines(bin_path):
         d3 = cli.wait_diag(uri)
         check(d3 == [], "valid UTF-16 astral surrogate edit succeeded: %r" % (d3,))
 
-        # 3. Coalesced multi-frame pipe burst (8 requests in a single write() syscall!) + -32700 recovery
+        # 3. Coalesced multi-frame pipe burst (8 requests in a single write() syscall) + -32700 recovery
         burst = bytearray()
         burst.extend(frame_bytes(b'{"jsonrpc":"2.0","id":77,"broken_json'))
         for k in range(100, 106):
@@ -286,7 +286,7 @@ def test_incremental_salsa_and_workspace(bin_path):
         with open(lib_path, "w", encoding="utf-8") as f:
             f.write(lib_v1)
 
-        # Rich module with imports, extern struct, extern union, enum, trait, impl, const, multiple fns!
+        # Rich module with imports, extern struct, extern union, enum, trait, impl, const, multiple fns.
         base_doc = (
             "import std.json\n"
             "import math_ext\n"
@@ -424,11 +424,11 @@ def test_incremental_salsa_and_workspace(bin_path):
         edit_and_assert_oracle("    v + 1", '    "bad_impl_ret"', "impl method body T0001")
         edit_and_assert_oracle('    "bad_impl_ret"', "    v + 2", "impl method body fixed")
 
-        # 5. Introduce syntax error (P0001) inside `middle_fn`, then recover clean AST!
+        # 5. Introduce syntax error (P0001) inside `middle_fn`, then recover clean AST.
         edit_and_assert_oracle("  let _ok_u = WordU { i: 7 }", "  let broken = (", "P0001 syntax error")
         edit_and_assert_oracle("  let broken = (", "  let _ok_u = WordU { i: 9 }", "recover from P0001")
 
-        # 6. Toggle local `const FACTOR` usage (triggers top-level W0001 unused const parity!)
+        # 6. Toggle local `const FACTOR` usage (triggers top-level W0001 unused const parity)
         d_unused_const = edit_and_assert_oracle(
             "scale_add(a, FACTOR)",
             "scale_add(a, 10)",
@@ -441,11 +441,11 @@ def test_incremental_salsa_and_workspace(bin_path):
             "restore FACTOR reference -> W0001 cleared",
         )
 
-        # 7. Fix `tail_fn` so `app.brat` has 0 diagnostics!
+        # 7. Fix `tail_fn` so `app.brat` has 0 diagnostics.
         d_clean = edit_and_assert_oracle('  let bad: i64 = "oops"\n  bad', "  first_fn(5)", "clean app")
         check(d_clean == [], "app is now 100% clean")
 
-        # 8. Cross-open-document signature hash invalidation (`propagate_signature_change`)!
+        # 8. Cross-open-document signature hash invalidation (`propagate_signature_change`).
         # Editing `lib_uri` BODY keeps signature hash identical -> `app_uri` stays clean
         lib_v2 = lib_v1.replace("x * 2 + bias", "x * 3 + bias")
         cli.notify("textDocument/didChange", {
@@ -455,7 +455,7 @@ def test_incremental_salsa_and_workspace(bin_path):
         check(cli.wait_diag(lib_uri) == [], "lib_v2 body edit clean")
 
         # Editing `lib_uri` SIGNATURE (`-> i64` -> `-> str`) changes `sig_hash`
-        # -> `brat-lsp` MUST automatically push a fresh `T0001` diagnostic on `app_uri`!
+        # -> `brat-lsp` must automatically push a fresh `T0001` diagnostic on `app_uri`.
         lib_v3 = (
             "/// Doubles and shifts an integer.\n"
             "pub fn scale_add(x: i64, bias: i64) -> str {\n"
@@ -472,20 +472,20 @@ def test_incremental_salsa_and_workspace(bin_path):
             m = cli.read_one()
             if m.get("method") == "textDocument/publishDiagnostics":
                 got_uris.add(m["params"]["uri"])
-        check(app_uri in got_uris, "changing lib signature automatically re-published app diagnostics!")
+        check(app_uri in got_uris, "changing lib signature automatically re-published app diagnostics")
         check(any(x["code"] == "T0001" for x in cli.diagnostics[app_uri]),
               "app_uri immediately flagged T0001 after lib signature change: %r" % (cli.diagnostics[app_uri],))
 
-        # Restore `lib_uri` signature -> `app_uri` automatically clears back to `[]`!
+        # Restore `lib_uri` signature -> `app_uri` automatically clears back to `[]`.
         cli.notify("textDocument/didChange", {
             "textDocument": {"uri": lib_uri, "version": 4},
             "contentChanges": [{"text": lib_v2}],
         })
         for _ in range(2):
             cli.read_one()
-        check(cli.diagnostics[app_uri] == [], "restoring lib signature cleared app diagnostics!")
+        check(cli.diagnostics[app_uri] == [], "restoring lib signature cleared app diagnostics")
 
-        # 9. All 12 `std.*` completions (`time`, `crypto`, `sqlite` included!) + fuzzy `workspace/symbol`
+        # 9. All 12 `std.*` completions (`time`, `crypto`, `sqlite` included) + fuzzy `workspace/symbol`
         comp_doc = "import std.crypto\nimport std.sqlite\n// std.\n// crypto.\n// sqlite.\n"
         comp_uri = "file://" + os.path.join(td, "comp.brat")
         cli.notify("textDocument/didOpen", {
@@ -525,7 +525,7 @@ def test_incremental_salsa_and_workspace(bin_path):
 # highlight, folding, formatting
 def test_ide_intelligence(bin_path):
     with tempfile.TemporaryDirectory(prefix="brat_ide_") as td:
-        # Cross-file workspace setup: `util.brat`, `service.brat` (open), `cli_tool.brat` (on-disk only!)
+        # Cross-file workspace setup: `util.brat`, `service.brat` (open), `cli_tool.brat` (on-disk only)
         util_path = os.path.join(td, "util.brat")
         svc_path = os.path.join(td, "service.brat")
         disk_path = os.path.join(td, "cli_tool.brat")
@@ -583,7 +583,7 @@ def test_ide_intelligence(bin_path):
         })
         check(cli.wait_diag(svc_uri) == [], "svc_src clean")
 
-        # 1. Rich Hover: `///` doc comments, `extern union` `@ offset 0`, and `borrows(p)` FFI effects!
+        # 1. Rich Hover: `///` doc comments, `extern union` `@ offset 0`, and `borrows(p)` FFI effects.
         h_union = cli.request("textDocument/hover", {
             "textDocument": {"uri": svc_uri}, "position": {"line": 3, "character": 15}
         })["result"]["contents"]["value"]
@@ -602,7 +602,7 @@ def test_ide_intelligence(bin_path):
         check("Computes deterministic checksum." in h_imp,
               "cross-module /// doc comment hover: %r" % h_imp)
 
-        # 2. Inlay Hints: `: i64` & `: str` inferred let types + `seed:` & `weight:` parameter labels!
+        # 2. Inlay Hints: `: i64` & `: str` inferred let types + `seed:` & `weight:` parameter labels.
         hints = cli.request("textDocument/inlayHint", {
             "textDocument": {"uri": svc_uri},
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 18, "character": 0}},
@@ -633,7 +633,7 @@ def test_ide_intelligence(bin_path):
         fold_spans = {(f["startLine"], f["endLine"]) for f in folds}
         check((3, 6) in fold_spans and (11, 17) in fold_spans, "foldingRange spans: %r" % (fold_spans,))
 
-        # 6. `prepareRename` + Cross-File Workspace `rename` & `references` (open + unopened disk files!)
+        # 6. `prepareRename` + Cross-File Workspace `rename` & `references` (open + unopened disk files)
         bad_prep = cli.request("textDocument/prepareRename", {
             "textDocument": {"uri": svc_uri}, "position": {"line": 11, "character": 1}  # `fn` keyword
         })["result"]
@@ -664,7 +664,7 @@ def test_ide_intelligence(bin_path):
         check('"compute_tag stays untouched in strings"' in new_svc, "string literal preserved")
         check("// compute_tag in comments also stays untouched" in new_svc, "comment preserved")
 
-        # 7. Quick-fix `textDocument/codeAction`: E0596, W0001, B0101 + context W0002 & W0003!
+        # 7. Quick-fix `textDocument/codeAction`: E0596, W0001, B0101 + context W0002 & W0003.
         qf_uri = "file://" + os.path.join(td, "quickfix.brat")
         qf_src = (
             "import std.csv\n"
@@ -707,7 +707,7 @@ def test_ide_intelligence(bin_path):
         check(any("Remove unused import" in t for t in by_title), "W0003 remove unused import quick-fix offered")
         check(any("Replace `pritn` with `print`" in t for t in by_title), "B0101 typo quick-fix offered")
 
-        # Apply all 5 quick-fixes sequentially (bottom-to-top safe) and verify 0 diagnostics!
+        # Apply all 5 quick-fixes sequentially (bottom-to-top safe) and verify 0 diagnostics.
         fixed = qf_src
         for needle in ["Replace `pritn` with `print`", "Prefix unused `lonely`",
                        "Remove unnecessary `mut`", "let mut", "Remove unused import"]:
@@ -922,7 +922,7 @@ def test_50k_loc_benchmark(bin_path):
             "enum Stage {\n  Init,\n  Ready,\n}\n\n"
             "impl Stage {\n  fn tag(self: Stage) -> i64 {\n    1\n  }\n}\n\n"
         ]
-        num_fns = 2600  # 2600 * 20 lines = 52,000+ LOC!
+        num_fns = 2600  # 2600 * 20 lines = 52,000+ LOC
         for i in range(num_fns):
             chunks.append(
                 "/// Worker stage %d.\n"
@@ -964,13 +964,13 @@ def test_50k_loc_benchmark(bin_path):
         d0 = cli.wait_diag(big_uri)
         check(d0 == [], "52k LOC didOpen clean")
 
-        # Locate `stage_2000`'s `let a = x + ...` line (~line 40,018 inside the 52,000-line buffer!)
+        # Locate `stage_2000`'s `let a = x + ...` line (~line 40,018 inside the 52,000-line buffer)
         lines = big_src.split("\n")
         target_ln = next(idx for idx, ln in enumerate(lines) if ln.startswith("pub fn stage_2000(")) + 1
         orig_line = lines[target_ln]
         check(orig_line.startswith("  let a = x + "), "located stage_2000 body line: %r" % orig_line)
 
-        # Warm up 5 edits, then measure 40 sequential real-pipe `didChange -> publishDiagnostics` round-trips!
+        # Warm up 5 edits, then measure 40 sequential real-pipe `didChange -> publishDiagnostics` round-trips.
         latencies_ms = []
         cur_col_end = len(orig_line)
         for step in range(1, 46):
@@ -999,7 +999,7 @@ def test_50k_loc_benchmark(bin_path):
             if step > 5:
                 latencies_ms.append(dt_ms)
 
-        # Also verify an error edit at line ~40,018 reports exact T0001 in sub-millisecond time!
+        # Also verify an error edit at line ~40,018 reports exact T0001 in sub-millisecond time.
         err_line = '  let a: i64 = "boom"'
         t0 = time.perf_counter()
         cli.notify("textDocument/didChange", {
@@ -1016,7 +1016,7 @@ def test_50k_loc_benchmark(bin_path):
               and err_diags[0]["range"]["start"]["line"] == target_ln,
               "52k LOC exact T0001 line %d in %.2f ms: %r" % (target_ln, err_ms, err_diags))
 
-        # Restore clean line and benchmark cached `hover` and `workspace/symbol` on 52,000+ LOC!
+        # Restore clean line and benchmark cached `hover` and `workspace/symbol` on 52,000+ LOC.
         cli.notify("textDocument/didChange", {
             "textDocument": {"uri": big_uri, "version": 101},
             "contentChanges": [{

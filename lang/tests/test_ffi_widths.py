@@ -13,8 +13,8 @@ that compiles, links and corrupts the next stack slot:
   expression inlined into each field: the C function ran once per field.
 * `vmove` marked its source through a plain store, which is a dead store the
   optimizer may delete; it now goes through a volatile lvalue.
-* the build passed `-O2` and no `-fwrapv`, so the native answer on an
-  overflowing i64 was the optimizer's opinion rather than unoptimized (-O0).
+* the build passed `-O2` and no `-fwrapv`, so an overflowing i64 gave one
+  answer in the built binary and another under `run -O0`.
 
 Checked here: `run -O0`, the built binary, and the refusals.
 """

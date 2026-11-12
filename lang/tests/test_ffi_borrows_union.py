@@ -329,7 +329,7 @@ fn main() {
                              capture_output=True, text=True, check=True).stdout
     check('"kind": "extern_union"' in doc_out, "brat doc missing extern_union: %r" % doc_out)
 
-    # Negative check: declaring ScalarU as `extern struct` must be refused against both header & DWARF!
+    # Negative check: declaring ScalarU as `extern struct` must be refused against both header & DWARF.
     wrong_kind = write("s93/wrong_kind.brat", """
 extern struct ScalarU { i: i64, f: f64 }
 fn main() {}
@@ -536,7 +536,7 @@ def main():
     print("ok: extern union + C11 anon inline union/struct")
     test_sanitizers_and_zero_leaks()
     print("ok: KNOWN_LEAKS=0 + ASan/LSan/UBSan + TSan + -Werror")
-    print("SAFETY ALL GREEN (%d asserts)" % asserts)
+    print("FFI BORROWS UNION ALL GREEN (%d asserts)" % asserts)
 
 
 if __name__ == "__main__":

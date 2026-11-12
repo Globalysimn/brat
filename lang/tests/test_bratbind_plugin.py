@@ -112,7 +112,7 @@ drift_c = os.path.join(l1_dir, "sensor_drift.c")
 with open(drift_c, "w", encoding="utf-8") as f:
     f.write('''
 #include <stdint.h>
-/* Binary compiled with an extra 8-byte field the stale header hides! */
+/* Binary compiled with an extra 8-byte field the stale header hides. */
 typedef struct { int64_t id; int64_t reading; int64_t secret_pad; } Sensor;
 int64_t sensor_sum(Sensor s) { return s.id + s.reading + s.secret_pad; }
 ''')
@@ -273,7 +273,7 @@ extern fn check_remembered(expect: str) -> i64
 
 fn make_and_pass() {
   // Computed short string lives inline inside 16B `Val` (SSO), passed by value;
-  // `vstr_pin` interns it so `g_saved` never dangles after `make_and_pass` returns!
+  // `vstr_pin` interns it so `g_saved` never dangles after `make_and_pass` returns.
   let s = "sso_" + "pin" + "_14"
   remember_cstr(s)
 }
@@ -398,7 +398,7 @@ fn main() -> i64 {
 gate_ref = brat("build", ok_p38, "-o", os.path.join(p38_dir, "refused"))
 check(gate_ref.returncode != 0 and "--header" in gate_ref.stderr,
       "FFI gate did not catch plugin call without --header: %s" % gate_ref.stderr)
-# Gate accepts with --header (proving `call(sym, sig)` against `p38.h`!):
+# Gate accepts with --header (proving `call(sym, sig)` against `p38.h`):
 p38_exe = os.path.join(p38_dir, "ok_p38_exe")
 b_p38 = brat("build", ok_p38, "--header", plug_h, "-o", p38_exe)
 check(b_p38.returncode == 0, "proven plugin build failed: %s" % (b_p38.stdout + b_p38.stderr))
@@ -730,7 +730,7 @@ check(m_ok.returncode == 0, "portable L5 ABI matrix failed: %s" % (m_ok.stdout +
 m_data = json.loads(m_ok.stdout)
 check(m_data["ok"] is True and len(m_data["targets"]) == 5, "unexpected L5 matrix: %r" % m_data)
 pkt_diff = m_data["differential"]["Packet"]
-# Verify differential sizes across LP64 (24B), i686 (16B: align8=4 -> offsets 0,4,12), wasm32 (24B: align8=8 -> offsets 0,8,16)!
+# Verify differential sizes across LP64 (24B), i686 (16B: align8=4 -> offsets 0,4,12), wasm32 (24B: align8=8 -> offsets 0,8,16).
 check(pkt_diff["x86_64-unknown-linux-gnu"]["brat"]["size"] == 24, "LP64 Packet size != 24")
 check(pkt_diff["i686-unknown-linux-gnu"]["brat"]["size"] == 16 and
       pkt_diff["i686-unknown-linux-gnu"]["brat"]["offsets"] == {"tag": 0, "ts": 4, "len": 12},
@@ -739,7 +739,7 @@ check(pkt_diff["wasm32-unknown-wasi"]["brat"]["size"] == 24 and
       pkt_diff["wasm32-unknown-wasi"]["brat"]["offsets"] == {"tag": 0, "ts": 8, "len": 16},
       "wasm32 ILP32 Packet layout wrong: %r" % pkt_diff["wasm32-unknown-wasi"])
 
-# Non-portable C `long` bound to `i64`: passes LP64, caught by `--abi-matrix` on LLP64 & ILP32!
+# Non-portable C `long` bound to `i64`: passes LP64, caught by `--abi-matrix` on LLP64 & ILP32.
 l5_h_bad = os.path.join(TMP, "l5_bad.h")
 with open(l5_h_bad, "w", encoding="utf-8") as f:
     f.write("typedef struct { char tag; long count; } BadLong;\n")
@@ -747,7 +747,7 @@ l5_brat_bad = os.path.join(TMP, "l5_bad.brat")
 with open(l5_brat_bad, "w", encoding="utf-8") as f:
     f.write("extern struct BadLong { tag: u8, count: i64 }\nfn main() -> i64 { return 0 }\n")
 m_bad = brat("ffi", l5_brat_bad, "--header", l5_h_bad, "--abi-matrix", "--json")
-check(m_bad.returncode == 1, "non-portable `long` passed --abi-matrix!")
+check(m_bad.returncode == 1, "non-portable `long` passed --abi-matrix")
 m_bad_data = json.loads(m_bad.stdout)
 by_model = {t["target"]: t["errors"] for t in m_bad_data["targets"]}
 check(by_model["x86_64-unknown-linux-gnu"] == 0 and
@@ -757,4 +757,4 @@ check(by_model["x86_64-unknown-linux-gnu"] == 0 and
       by_model["wasm32-unknown-wasi"] > 0,
       "L5 differential model detection wrong: %r" % by_model)
 
-print("ROADMAP CLOSURE ALL GREEN (%d asserts)" % n)
+print("BRATBIND PLUGIN ALL GREEN (%d asserts)" % n)

@@ -41,7 +41,7 @@ def test_user_header_excludes_system_includes_and_resolves_posix_typedefs():
         assert "pub const SVC_BUSY = 2" in out, out
         assert "extern struct ServiceItem { id: u32, quota: i64 }" in out, out
         assert "extern fn svc_open(path: str, mode: u32, owner: i32, offset: i64) -> i32;" in out, out
-        # System headers (<stdio.h>, <unistd.h>, <stdc-predef.h>) must NOT leak into user bindings:
+        # System headers (<stdio.h>, <unistd.h>, <stdc-predef.h>) must not leak into user bindings:
         for leaked in ("printf", "vfork", "unlink", "_STDC_PREDEF_H", "__GLIBC_"):
             assert leaked not in out, f"unexpected leak {leaked!r} in:\n{out}"
 

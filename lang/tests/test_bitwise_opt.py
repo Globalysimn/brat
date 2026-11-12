@@ -92,7 +92,7 @@ for flag in ("-O0", "-O1", "-O2"):
     outs[flag] = r.stdout
 assert outs["-O0"] == outs["-O1"] == outs["-O2"], outs
 
-# 4. Soundness check: a potentially-zero bitwise divisor MUST NOT elide the trap!
+# 4. Soundness check: a potentially-zero bitwise divisor must not elide the trap.
 UNSAFE_DIV_SRC = """fn maybe_zero(a: i64, x: i64) -> i64 {
   let d = (x << 3) & ~7
   return a / d

@@ -143,7 +143,7 @@ def main():
     assert "0 error(s)" in out, out
     assert "proven" in out, out
 
-    # A header that is NOT packed must be refused: the offsets differ.
+    # A header that is not packed must be refused: the offsets differ.
     loose = write("loose.h", HEADER.replace(
         "typedef struct __attribute__((packed)) { unsigned char kind; int len; } Hdr;",
         "typedef struct { unsigned char kind; int len; } Hdr;"))

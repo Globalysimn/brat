@@ -367,7 +367,7 @@ fn main() -> i64 {{
   assert(is_err(std.http.parse_request("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")))
   assert(is_err(std.http.parse_request(" GET / HTTP/1.1\r\nHost: a\r\n\r\n")))
 
-  // Connection: close + Connection: keep-alive must NOT stay keep-alive
+  // Connection: close + Connection: keep-alive must not stay keep-alive
   let req1 = unwrap(std.http.parse_request("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nConnection: keep-alive\r\n\r\n"))
   assert(req1["keep_alive"] == false)
   let req0 = unwrap(std.http.parse_request("GET / HTTP/1.0\r\nHost: a\r\nConnection: keep-alive\r\nConnection: close\r\n\r\n"))

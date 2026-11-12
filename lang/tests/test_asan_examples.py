@@ -38,7 +38,7 @@ TMP = _scratch.mkdtemp(prefix="brat-asan-")
 # not pinned -- they vary with the arguments an example is handed and with the
 # allocator, and a number that moves on its own turns this oracle into noise.
 # `vexit` now deterministically releases main's argument vector
-# and top-level script bindings before calling C `exit()`, reducing KNOWN_LEAKS to 0!
+# and top-level script bindings before calling C `exit()`, reducing KNOWN_LEAKS to 0.
 KNOWN_LEAKS = set()
 
 HARD = ("heap-use-after-free", "double-free", "heap-buffer-overflow",

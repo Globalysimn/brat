@@ -114,7 +114,7 @@ fn main() -> i64 {
   assert(ok_r.unwrap() == 42)
   assert(err_r.unwrap_or(7) == 7)
 
-  // Lazy unwrap_or: fallback must NOT run on Ok / Some.
+  // Lazy unwrap_or: fallback must not run on Ok / Some.
   let mut side: vec[i64] = []
   assert(unwrap_or(ok_r, bump(side, 99)) == 42)
   assert(ok_r.unwrap_or(bump(side, 88)) == 42)
@@ -451,7 +451,7 @@ r = run_brat("check", mod_priv)
 check(r.returncode != 0 and "is private in module" in (r.stdout + r.stderr),
       f"private enum variant not rejected: {r.stdout} {r.stderr}")
 
-# Non-exhaustive match on imported `pub enum` is rejected!
+# Non-exhaustive match on imported `pub enum` is rejected.
 mod_nonex = write_file("mod/nonex.brat", """import shapes
 fn bad(s: Shape) -> i64 {
   match s {
@@ -475,7 +475,7 @@ fn main() -> i64 {
 r = run_brat("check", mod_priv)
 check(r.returncode != 0, f"private enum leaked across module: {r.stdout} {r.stderr}")
 
-# Mismatched variant type in .bri is rejected!
+# Mismatched variant type in .bri is rejected.
 write_file("badbri/m.brat", """pub enum Token { Num(i64), Word(str) }
 """)
 write_file("badbri/m.bri", """pub enum Token { Num(str), Word(str) }

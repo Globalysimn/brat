@@ -975,7 +975,7 @@ def main():
     test_security_and_soundness_hardening(cxx, env)
     test_batch_1_2_3_regressions(cxx, env)
     test_ten_subsystem_improvements(cxx, env)
-    print("(v0.7) CLOSURE SUITE ALL GREEN")
+    print("SECURITY SOUNDNESS ALL GREEN")
 
 
 if __name__ == "__main__":

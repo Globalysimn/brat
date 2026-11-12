@@ -172,7 +172,7 @@ def test_http_server_and_vscode(cxx):
         rn = _run([node, "--check", ext_p])
         assert rn.returncode == 0, rn.stderr
 
-    # 2. Verify `std.http` server-side HTTP/1.1 parser, security guards & live TCP loopback!
+    # 2. Verify `std.http` server-side HTTP/1.1 parser, security guards & live TCP loopback.
     with tempfile.TemporaryDirectory(prefix="brat_http_") as td:
         srv_test = os.path.join(td, "http_srv_e2e.brat")
         with open(srv_test, "w", encoding="utf-8") as f:
@@ -365,17 +365,17 @@ print(ieee_edges(0.0, unwrap("nan".parse_float()), unwrap("inf".parse_float())))
         assert c_cx.returncode == 0, c_cx.stderr
 
         c_src = c_cx.stdout
-        # Verify unboxed local int & float coexist with a capturing closure in the same fn!
+        # Verify unboxed local int & float coexist with a capturing closure in the same fn.
         assert "int64_t BRAT_UNUSED ub_b_ub_counter = 0;" in c_src
         assert "double BRAT_UNUSED ubf_b_ubf_acc = 0.0;" in c_src
         assert "vub_fdiv(" in c_src
         assert "vub_fmod(" in c_src
         assert "vub_fcmp(" in c_src
-        # Verify `vclosure0` is emitted for pure closures, non-recursive named closures, HOF fn refs, and parfor!
+        # Verify `vclosure0` is emitted for pure closures, non-recursive named closures, HOF fn refs, and parfor.
         assert c_src.count("vclosure0(") >= 5, c_src
-        # Verify `unused_heavy` was NOT captured into any closure map!
+        # Verify `unused_heavy` was not captured into any closure map.
         assert '"unused_heavy"' not in c_src
-        # Verify `vmap_with` uses stack `BStackVec` + `vvec_cap`!
+        # Verify `vmap_with` uses stack `BStackVec` + `vvec_cap`.
         assert "Vec *o = meth[0] == 'm' ? vvec_cap(w->len) : vvec();" in c_src
         assert "BStackVec _osv; VSTACK_VEC_INIT(_osv, _ob, 1);" in c_src
 
@@ -391,12 +391,12 @@ print(ieee_edges(0.0, unwrap("nan".parse_float()), unwrap("inf".parse_float())))
             assert rr.returncode == 0 and rr.stdout == want_out, (opt, rr.stdout, want_out)
 
         # 3. ASan + LSan + UBSan stress test on Small-Map SBO, shaped structs -> unshape,
-        # filter heap-predicate release, and multi-threaded `vclosure0`!
+        # filter heap-predicate release, and multi-threaded `vclosure0`.
         san_brat = os.path.join(td, "san_sbo.brat")
         with open(san_brat, "w", encoding="utf-8") as f:
             f.write('''fn non_empty_tag(x) {
-  // Returns a fresh heap string (>22 bytes, non-SSO!) in `.filter(...)` to prove
-  // `vmap_with` releases `r` on every filter predicate evaluation without leaking!
+  // Returns a fresh heap string (>22 bytes, non-SSO) in `.filter(...)` to prove
+  // `vmap_with` releases `r` on every filter predicate evaluation without leaking.
   if x % 2 == 0 {
     return ""
   }
@@ -535,7 +535,7 @@ int64_t turbo_eval(TurboPair p) {
         assert rc_so.returncode == 0, rc_so.stderr
 
         # 1. `bindgen --preprocess -I... -D...` expands `#ifdef ENABLE_TURBO`, `#include <stdint.h>`,
-        # and `-I` user header without leaking glibc internals!
+        # and `-I` user header without leaking glibc internals.
         bind_p = os.path.join(td, "pp_bind.brat")
         r_bg = _run(_cxx.cli_args("bindgen", "--preprocess", f"-I{inc_dir}", "-DENABLE_TURBO=1", "-DBASE_SCALE=5", "--lib", so_pp, "-o", bind_p, hdr_pp))
         assert r_bg.returncode == 0, r_bg.stderr
@@ -544,14 +544,14 @@ int64_t turbo_eval(TurboPair p) {
         assert "extern struct TurboPair { base: i32, scaled: i64 }" in btxt, btxt
         assert "turbo_eval" in btxt and "legacy_only" not in btxt
         assert "pub const TURBO_SCALE = 10" in btxt, btxt
-        # Ensure `<stdint.h>` system internals did NOT flood bindgen output.
+        # Ensure `<stdint.h>` system internals did not flood bindgen output.
         assert "__uint128" not in btxt and "_IO_" not in btxt
 
-        # Verify `brat ffi --preprocess` proves the generated binding!
+        # Verify `brat ffi --preprocess` proves the generated binding.
         r_ffi_ok = _run(_cxx.cli_args("ffi", "--preprocess", f"-I{inc_dir}", "-DENABLE_TURBO=1", "-DBASE_SCALE=5", "--header", hdr_pp, bind_p))
         assert r_ffi_ok.returncode == 0, r_ffi_ok.stderr + r_ffi_ok.stdout
 
-        # Execute end-to-end call into `libpp_api.so`!
+        # Execute end-to-end call into `libpp_api.so`.
         use_pp = os.path.join(td, "use_pp.brat")
         with open(use_pp, "w", encoding="utf-8") as f:
             f.write(btxt + "\nlet tp = TurboPair { base: 7, scaled: 3 }\nassert(turbo_eval(tp) == 73)\nprint(TURBO_SCALE)\n")
@@ -561,7 +561,7 @@ int64_t turbo_eval(TurboPair p) {
         r_pp_run = _run([r_pp_bin])
         assert r_pp_run.returncode == 0 and r_pp_run.stdout.strip() == "10", r_pp_run.stderr
 
-        # 2. `#pragma pack(push, 1)` / `#pragma pack(push, 2)` / `#pragma pack(pop)` + C bitfields!
+        # 2. `#pragma pack(push, 1)` / `#pragma pack(push, 2)` / `#pragma pack(pop)` + C bitfields.
         hdr_pack = os.path.join(td, "pack_and_bf.h")
         with open(hdr_pack, "w", encoding="utf-8") as f:
             f.write("""#include <stdint.h>
@@ -604,13 +604,13 @@ int touch_bf(RegBitfields *r);
         r_bg2 = _run(_cxx.cli_args("bindgen", hdr_pack))
         assert r_bg2.returncode == 0, r_bg2.stderr
         g2 = r_bg2.stdout
-        # `WirePkt1` and `StillPack1` (under `#pragma pack(push, 1)` after nested `pop`) -> `extern packed struct`!
+        # `WirePkt1` and `StillPack1` (under `#pragma pack(push, 1)` after nested `pop`) -> `extern packed struct`.
         assert "extern packed struct WirePkt1 { tag: u8, payload: u32 }" in g2, g2
         assert "extern packed struct StillPack1 { end_tag: u8, stamp: u64 }" in g2, g2
-        # `RestoredNatural` (after outer `#pragma pack(pop)`) -> normal `extern struct`!
+        # `RestoredNatural` (after outer `#pragma pack(pop)`) -> normal `extern struct`.
         assert "extern struct RestoredNatural { flag: u8, count: u32 }" in g2, g2
-        # `HalfPacked2` (`#pragma pack(2)`, 6B align 2) & `RegBitfields` -> NOT emitted as broken struct layouts,
-        # and pointer functions take `ptr` cleanly and round-trip `brat ffi`!
+        # `HalfPacked2` (`#pragma pack(2)`, 6B align 2) & `RegBitfields` -> not emitted as broken struct layouts,
+        # and pointer functions take `ptr` cleanly and round-trip `brat ffi`.
         assert "extern struct HalfPacked2" not in g2 and "extern packed struct HalfPacked2" not in g2, g2
         assert "extern struct RegBitfields" not in g2, g2
         assert "// skipped: struct RegBitfields has C bitfield(s) (ready:1, mode:3, <pad>:0)" in g2, g2
@@ -624,7 +624,7 @@ int touch_bf(RegBitfields *r);
         r_g2_prove = _run(_cxx.cli_args("ffi", "--header", hdr_pack, g2_brat))
         assert r_g2_prove.returncode == 0, r_g2_prove.stdout + r_g2_prove.stderr
 
-        # Verify fail-closed errors if user manually writes byte-addressed `RegBitfields` or wrong `HalfPacked2`!
+        # Verify fail-closed errors if user manually writes byte-addressed `RegBitfields` or wrong `HalfPacked2`.
         bad_bf = os.path.join(td, "bad_bf.brat")
         with open(bad_bf, "w", encoding="utf-8") as f:
             f.write("extern struct RegBitfields { ready: u32, mode: u32, raw: u32 }\nextern struct HalfPacked2 { kind: u8, seq: u32 }\n")
@@ -645,7 +645,7 @@ def main():
     print("ok: vclosure0 + Map SBO + ub_floats + ASan/LSan, bench %.1f ms" % dt_ms)
     test_ffi_preprocess_pack_bitfields()
     print("ok: cc -E --preprocess + #pragma pack stack + C bitfields")
-    print("ALL (v0.6) TESTS GREEN!")
+    print("HTTP SERVER CLOSURES ALL GREEN")
 
 
 if __name__ == "__main__":

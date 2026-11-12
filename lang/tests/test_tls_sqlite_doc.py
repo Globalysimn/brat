@@ -306,7 +306,7 @@ check(b73.returncode == 0, f"Direct brat-cxx build failed: {b73.stdout}\n{b73.st
 run73 = subprocess.run([exe73], capture_output=True, text=True, timeout=30)
 check(run73.returncode == 0 and run73.stdout.strip() == "42", f"run73: {run73.stdout}")
 
-# Verify `brat ffi --bin` reads the contract embedded directly by `brat-cxx build`!
+# Verify `brat ffi --bin` reads the contract embedded directly by `brat-cxx build`.
 ver73 = run_cli("ffi", brat73, "--bin", exe73)
 check(ver73.returncode == 0 and "contract matches" in ver73.stdout,
       f"brat ffi --bin on brat-cxx binary failed: {ver73.stdout}\n{ver73.stderr}")

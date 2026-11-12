@@ -91,7 +91,7 @@ def test_fail_loud_and_gnu11():
         with open(hdr, "w", encoding="utf-8") as f:
             f.write("double cos(double x);\n")
         r_bad = run_cli(["build", ext_src, "--header", hdr, "-o", os.path.join(td, "bad_out")])
-        check(r_bad.returncode != 0, "brat build silently swallowed FFI header mismatch!")
+        check(r_bad.returncode != 0, "brat build silently swallowed FFI header mismatch")
     print("ok: fail-loud codegen/FFI + explicit -std=gnu11")
 
 
@@ -101,7 +101,7 @@ def test_steps_11_2_and_11_3_crt_speed_and_tsan():
     check(cc is not None, "C compiler required")
     with tempfile.TemporaryDirectory(prefix="brat_crt_") as td:
         # 1. ASan + LSan probe for Vec.inl[2] SBO, stack HOFs, cached BHead.hash,
-        #    BTLS tag interning, and in-place string append metadata invalidation!
+        #    BTLS tag interning, and in-place string append metadata invalidation.
         probe_c = os.path.join(td, "probe_sbo.c")
         with open(probe_c, "w", encoding="utf-8") as f:
             f.write(r"""
@@ -191,7 +191,7 @@ int main(void) {
     vdfr = NULL;
     assert(g_defer_runs == 2);
 
-    /* Cached BHead.hash + in-place `vadd_self_slow` invalidation! */
+    /* Cached BHead.hash + in-place `vadd_self_slow` invalidation. */
     Val hs = vstr("this_is_a_long_heap_string_key_for_hashing_012345");
     assert(!hs.sso);
     BHead *sh = (BHead *)hs.as.str - 1;
@@ -199,7 +199,7 @@ int main(void) {
     uint64_t h1 = vkey_hash(hs);
     assert(h1 != 0 && sh->hash == h1);
     assert(h1 == vcstr_hash(hs.as.str, (size_t)sh->len));
-    /* Prime cplen/ascii via vlen, then mutate in-place (rc == 1) via vadd_self_slow! */
+    /* Prime cplen/ascii via vlen, then mutate in-place (rc == 1) via vadd_self_slow. */
     Val ln1 = vlen(hs);
     assert(ln1.as.ival == 49);
     assert(sh->ascii == 1 && sh->cplen == 49);
@@ -231,7 +231,7 @@ int main(void) {
               f"ASan+LSan SBO probe failed (rc={r_run.returncode}):\n{r_run.stdout}\n{r_run.stderr}")
 
         # 2. ThreadSanitizer probe: concurrent plugin table ops (`_brat_plugin_lock`)
-        #    while `g_pool_n == 0` AND concurrent striped container mutations with `_BRAT_MT()`!
+        #    while `g_pool_n == 0` and concurrent striped container mutations with `_BRAT_MT()`.
         plug_c = os.path.join(td, "mini_plug.c")
         with open(plug_c, "w", encoding="utf-8") as f:
             f.write("long plug_twice(long x) { return x * 2; }\n")
@@ -253,7 +253,7 @@ static Vec *g_vecs[16];
 
 static void *plugin_worker(void *arg) {
     (void)arg;
-    /* Note: g_pool_n is STILL 0 here - proves `_brat_plugin_lock` is unconditional! */
+    /* Note: g_pool_n is still 0 here - proves `_brat_plugin_lock` is unconditional. */
     for (int i = 0; i < 40; i++) {
         Val p = vstr(g_so_path);
         Val nm = vstr("plug_twice");
@@ -437,9 +437,9 @@ fn main() -> i64 {
         check("iter_vec_guard" in proofs, f"missing ForIter body proof:\n{proofs}")
 
         # 2. Negative soundness gates:
-        #    (a) off-by-one `let mut i = len(v); while i >= 0 { v[i] }` MUST keep bounds check!
-        #    (b) `ForIter` body mutating outer `x` (`let mut x = 10; for y in v { x = y }; 100 / x`) MUST keep div check!
-        #    (c) `ForIter` loop variable shadowing outer `x` (`let mut x = 10; for x in v {}; 100 / x`) preserves outer `x == 10`!
+        #    (a) off-by-one `let mut i = len(v); while i >= 0 { v[i] }` must keep bounds check.
+        #    (b) `ForIter` body mutating outer `x` (`let mut x = 10; for y in v { x = y }; 100 / x`) must keep div check.
+        #    (c) `ForIter` loop variable shadowing outer `x` (`let mut x = 10; for x in v {}; 100 / x`) preserves outer `x == 10`.
         bad_src = os.path.join(td, "desc_soundness.brat")
         with open(bad_src, "w", encoding="utf-8") as f:
             f.write("""fn off_by_one(v: vec[i64]) -> i64 {
@@ -471,14 +471,14 @@ fn main() -> i64 {
               f"UNSOUND proof emitted on off-by-one or mutated ForIter:\n{why_bad.stderr}")
 
         # Verify `mut_iter([0])` raises clean `"div by zero"` identically across `-O0`, `-O1`, and `-O2`
-        # (never emitting raw `100 / x` SIGFPE under `-O2`!).
+        # (never emitting raw `100 / x` SIGFPE under `-O2`).
         outs = []
         for opt in ("-O0", "-O1", "-O2"):
             exe = os.path.join(td, f"bad_{opt[1:]}")
             subprocess.run([CXX, "build", opt, bad_src, "-o", exe], check=True)
             rr = subprocess.run([exe], capture_output=True, text=True)
             check(rr.returncode == 1 and "div by zero" in rr.stderr,
-                  f"{opt} miscompiled mutated ForIter variable (rc={rr.returncode}, err={rr.stderr!r})!")
+                  f"{opt} miscompiled mutated ForIter variable (rc={rr.returncode}, err={rr.stderr!r})")
             outs.append((rr.returncode, rr.stdout, rr.stderr))
         check(outs[0] == outs[1] == outs[2], f"-O0/-O1/-O2 mismatch on mut_iter: {outs}")
 
@@ -503,7 +503,7 @@ fn main() -> i64 {
                   f"{opt} clobbered outer variable in shadowed ForIter: rc={rr.returncode}, out={rr.stdout!r}, err={rr.stderr!r}")
 
         # 3. 3-way differential equivalence (`-O0 == -O1 == -O2`) on 30 randomized
-        #    descending / ascending / ForIter programs!
+        #    descending / ascending / ForIter programs.
         rng = random.Random(20261101)
         lines = []
         calls = []
@@ -685,7 +685,7 @@ void run_var_cb(int x, void (*vcb)(int, ...)) {
         r_ck = run_cli(["check", gen_brat])
         check(r_ck.returncode == 0, f"brat check failed on enum_cb_gen.brat:\n{r_ck.stdout}\n{r_ck.stderr}")
 
-        # Exact binding without C variadic callback passes BOTH `--header` AND DWARF `--object`!
+        # Exact binding without C variadic callback passes both `--header` and DWARF `--object`.
         clean_brat = os.path.join(td, "clean_bind.brat")
         with open(clean_brat, "w", encoding="utf-8") as f:
             f.write("\n".join(ln for ln in gen_txt.splitlines() if "run_var_cb" not in ln) + "\n")
@@ -695,7 +695,7 @@ void run_var_cb(int x, void (*vcb)(int, ...)) {
         r_obj = run_cli(["ffi", clean_brat, "--object", so_path])
         check(r_obj.returncode == 0, f"ffi --object failed on exact enum/callback binding:\n{r_obj.stdout}\n{r_obj.stderr}")
 
-        # Execute end-to-end across BOTH native C AND `-O0`!
+        # Execute end-to-end across both native C and `-O0`.
         app = os.path.join(td, "use_enum_cb.brat")
         with open(app, "w", encoding="utf-8") as f:
             f.write("""import clean_bind
@@ -723,7 +723,7 @@ fn main() -> i64 {
         r_nr = subprocess.run([app_exe], capture_output=True, text=True, env=env_lib, check=True)
         check(r_nr.stdout.strip() == "25.0", f"native enum+callback mismatch: {r_nr.stdout!r}")
 
-        # 2. Prove DWARF `--object` rejects EVERY drifted callback / enum / float-vs-int ABI mismatch!
+        # 2. Prove DWARF `--object` rejects every drifted callback / enum / float-vs-int ABI mismatch.
         drift_cases = [
             ("wrong_enum_w", f'extern "{so_path}" fn run_enum_cb(tag: i32, big: u64, sbig: i64, cb: fn(i32, f32) -> f64) -> f64\n'),
             ("wrong_cb_arity", f'extern "{so_path}" fn run_enum_cb(tag: u8, big: u64, sbig: i64, cb: fn(i32) -> f64) -> f64\n'),
@@ -836,4 +836,4 @@ if __name__ == "__main__":
     test_o2_descending_and_foriter()
     test_exact_enums_and_dwarf_callbacks()
     test_debug_line_directives_and_dwarf()
-    print("ALL (v0.5) TESTS GREEN!")
+    print("ENUM DWARF ABI ALL GREEN")

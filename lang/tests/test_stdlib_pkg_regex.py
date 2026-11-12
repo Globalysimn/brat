@@ -199,7 +199,7 @@ eb = subprocess.run(_cxx.cli_args("ffi", brat_p, "--header", hdr_p, "--emit-bind
                     capture_output=True, text=True, timeout=30)
 check(eb.returncode == 0 and os.path.isfile(bind_p), "emit-bind failed: " + eb.stderr)
 
-# Package contains ONLY portable source + .bratbind - NO precompiled .o!
+# Package contains only portable source + .bratbind - no precompiled .o.
 tgz_p = os.path.join(TMP, "hashx-0.2.0.tar.gz")
 with tarfile.open(tgz_p, "w:gz") as tf:
     for fn in ("brat.pkg.json", "hashx.h", "hashx.c", "hashx.brat", "hashx.bri", "hashx.bratbind"):
@@ -332,7 +332,7 @@ try:
     comp_labels = {it["label"] for it in comp["result"]}
     check({"parse", "stringify", "stringify_indent", "get_path"} <= comp_labels,
           f"std.json completions missing items: {comp_labels}")
-    # References on `helper` (1 decl + 2 calls = 3; comment & string ignored!)
+    # References on `helper` (1 decl + 2 calls = 3; comment & string ignored)
     refs = lsp_req(7, "textDocument/references",
                    {"textDocument": {"uri": uri}, "position": {"line": 5, "character": 4},
                     "context": {"includeDeclaration": True}})

@@ -125,7 +125,7 @@ fn main() {
         subprocess.run([BIN, "build", "-O0", src, "-o", exe_o0], check=True, timeout=60)
         subprocess.run([BIN, "build", "-O2", src, "-o", exe_o2], check=True, timeout=60)
 
-        # `fib(10)` reaches exact leaf depth across budgets 8..15: `-O0` and `-O2` must agree at every budget!
+        # `fib(10)` reaches exact leaf depth across budgets 8..15: `-O0` and `-O2` must agree at every budget.
         for budget in range(8, 16):
             env = dict(os.environ, BRAT_RECURSION_BUDGET=str(budget))
             r0 = subprocess.run([exe_o0], capture_output=True, text=True, env=env, timeout=15)
@@ -196,7 +196,7 @@ fn main() {
         check(c_out_res.returncode == 0, f"Valgrind error in `brat-cxx emit-c`:\n{c_out_res.stderr}")
 
         # 2. Compile emitted C dynamically (Valgrind requires non-static glibc binaries on Linux)
-        #    and run the resulting native BRAT binary under Valgrind Memcheck + leak-check=full!
+        #    and run the resulting native BRAT binary under Valgrind Memcheck + leak-check=full.
         c_file = os.path.join(td, "vg_target.c")
         with open(c_file, "w", encoding="utf-8") as f:
             f.write(c_out_res.stdout)

@@ -253,7 +253,7 @@ def test_vscode_lsp_workflows():
         assert caps["renameProvider"] == {"prepareProvider": True}, caps["renameProvider"]
         lsp.send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
 
-        # 2. Opening a real `.bri` interface file produces 0 bogus parse errors + full Outline symbols!
+        # 2. Opening a real `.bri` interface file produces 0 bogus parse errors + full Outline symbols.
         bri_path = os.path.join(ws_dir, "shapes.bri")
         bri_src = "pub struct Point { x: i64, y: i64 }\nfn distance(a: Point, b: Point) -> i64\n"
         with open(bri_path, "w", encoding="utf-8") as f:
@@ -286,7 +286,7 @@ def test_vscode_lsp_workflows():
         assert len(bad_diags) == 1 and bad_diags[0]["code"] == "P0001", bad_diags
         assert bad_diags[0]["range"]["start"]["line"] == 1, bad_diags
 
-        # 3. Untitled VS Code buffer (`untitled:Untitled-1`) resolves `import std.json` + struct completions!
+        # 3. Untitled VS Code buffer (`untitled:Untitled-1`) resolves `import std.json` + struct completions.
         untitled_uri = "untitled:Untitled-1"
         untitled_src = (
             "import std.json\n"

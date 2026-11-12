@@ -216,7 +216,7 @@ def test_bindgen_and_inline_arrays():
     check(ck.returncode == 0, "generated pkt_gen.brat must check clean: %r" % (ck.stdout + ck.stderr))
 
     # `brat ffi` proves layout via target compiler probe (`--header`), via DWARF debug info (`shlib`),
-    # and re-proves the built BRAT binary (`--header --bin exe`)!
+    # and re-proves the built BRAT binary (`--header --bin exe`).
     vf_probe = run_cli(["ffi", gen_brat, "--header", hdr])
     check(vf_probe.returncode == 0, "ffi --header failed: %r" % (vf_probe.stdout + vf_probe.stderr))
     vf_dwarf = run_cli(["ffi", gen_brat, "--object", shlib])
@@ -259,7 +259,7 @@ def test_bindgen_and_inline_arrays():
 def test_iterative_walkers_and_tsan():
     # 1. Iterative `vrelease`: build and drop a 150,000-deep nested container inside a function
     #    under a strict 256 KB RLIMIT_STACK + ASan/LSan (recursive vrelease would SIGSEGV immediately),
-    #    plus test >14-char struct field names (`vmap_shaped` lock safety) and 1,500-deep values at -O0 and -O2!
+    #    plus test >14-char struct field names (`vmap_shaped` lock safety) and 1,500-deep values at -O0 and -O2.
     deep_src = write("deep_iter.brat",
                      "fn drop_150k() -> i64 {\n"
                      "  let mut v = []\n"
@@ -316,7 +316,7 @@ def test_iterative_walkers_and_tsan():
 
     # 2. ThreadSanitizer (`-fsanitize=thread`) concurrency regression suite:
     #    Exercises concurrent `scope` + `spawn` + `chan`, SSO & heap strings, shaped structs & `BFieldIC`,
-    #    `tagof`, `par for ... reduce`, and concurrent native C plugin calls!
+    #    `tagof`, `par for ... reduce`, and concurrent native C plugin calls.
     plug_c = write("tsan_plug.c",
                    "#include <stdint.h>\n"
                    "int64_t plug_mix(int64_t a, int64_t b) { return a * 3 + b; }\n")
@@ -418,7 +418,7 @@ def main():
     test_interp_gate_and_trace_lines()
     test_bindgen_and_inline_arrays()
     test_iterative_walkers_and_tsan()
-    print("SAFETY ALL GREEN (%d asserts)" % n_asserts)
+    print("BINDGEN DEEP VAL ALL GREEN (%d asserts)" % n_asserts)
     return 0
 
 

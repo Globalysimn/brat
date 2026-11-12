@@ -65,7 +65,7 @@ fn main() -> i64 {{
 '''
 out = run_prog(td, "sql_sandbox", sql_code)
 assert out.strip().lower() == "true true true true true 9", out
-assert not os.path.exists(vac_db), "VACUUM INTO created outside file!"
+assert not os.path.exists(vac_db), "VACUUM INTO created outside file"
 
 # BRAT_FILES=1 allows ATTACH DATABASE when operator explicitly opts out of confinement
 out_free = run_prog(

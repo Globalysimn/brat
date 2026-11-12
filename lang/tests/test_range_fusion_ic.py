@@ -179,7 +179,7 @@ check(ex_o0.stdout == ex_o1.stdout == ex_o2.stdout,
       f"differential mismatch:\nO0={ex_o0.stdout}\nO1={ex_o1.stdout}\nO2={ex_o2.stdout}")
 check("bf_viat_nb(" in c_o2, "expected unchecked bf_viat_nb in -O2 emitted C")
 check("->items[" in c_o2, "expected unchecked SetIdx store in -O2 emitted C")
-# Verify floored negative division (-7 / 2 == -4, -7 % 2 == 1 -> -39) was NOT mis-lowered to C truncating div!
+# Verify floored negative division (-7 / 2 == -4, -7 % 2 == 1 -> -39) was not mis-lowered to C truncating div.
 check("-39" in ex_o2.stdout.splitlines(), f"floored negative division corrupted: {ex_o2.stdout}")
 
 # Checks that are not proven still raise under -O2: a plain division, an index
@@ -354,7 +354,7 @@ native_c = cxx_res.stdout
 check("= vmap_with(" not in native_c and "return vmap_with(" not in native_c,
       "fusible map/filter was NOT deforested (vmap_with call still present)")
 check("vfold(" not in native_c and "Map *_cm" not in native_c,
-      "fusible stream left vfold or closure environment allocation behind!")
+      "fusible stream left vfold or closure environment allocation behind")
 
 _, ex_fuse = compile_and_run(fuse_src, None, sanitize=True)
 check(ex_fuse.returncode == 0, f"ASan/LSan failure on stream_fuse.brat: {ex_fuse.stderr}")
@@ -439,7 +439,7 @@ check(ex_pic.returncode == 0, f"pic_swar failed: {ex_pic.stderr}")
 check("BFieldIC _fic[" in c_pic and "static BTLS BMethIC _mic[" in c_pic,
       "expected BFieldIC and BMethIC caches in emitted C")
 plines = ex_pic.stdout.strip().splitlines()
-# Verify exact polymorphic dispatch + field IC updates, O(1) ASCII slice/len, and exact UTF-8 codepoint indexing!
+# Verify exact polymorphic dispatch + field IC updates, O(1) ASCII slice/len, and exact UTF-8 codepoint indexing.
 check(plines[1] == str(5000 * (1 + 4 + 16384)), f"unexpected ASCII SWAR sum: {plines[1]}")
 check(plines[2] == "10", f"expected UTF-8 codepoint len 10, got {plines[2]}")
 check(plines[3] == "🚀", f"expected 🚀 at index 6, got {plines[3]}")

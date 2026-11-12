@@ -139,7 +139,7 @@ fn swap_and_atomic(boom_at: i64) -> str {
   try {
     p = Point { x: 888, y: explode(boom_at) }
   } catch _e {
-    // p.x must remain untouched when field 2 throws!
+    // p.x must remain untouched when field 2 throws.
     return "{before}|caught:{p.x}:{p.y}"
   }
   return "{before}|ok:{p.x}:{p.y}"
@@ -264,7 +264,7 @@ fn heap_and_arena_sra() -> str {
         arena_sum = arena_sum + inner.weight + len(inner.tag) + len(inner.items)
         k = k + 1
       }
-      // Whole struct escaping into own(whole) inside nested arena (must NOT be broken by SRA)
+      // Whole struct escaping into own(whole) inside nested arena (must not be broken by SRA)
       let whole = Packet { tag: "whole_" + str(99), items: [7, 8], weight: 99 }
       promoted_whole = own(whole)
     }
@@ -545,7 +545,7 @@ check(lines[-1] == "struct-sra-all-ok", f"missing final sentinel: {lines[-1]!r}"
 # 2. Verify emitted C properties:
 #    - `-O0` uses direct slot helpers (`vstruct_slot_ptr` / `vstruct_slot_set` / `vstruct_slot_val`)
 #    - `-O2` completely eliminates `vmap_shaped` / `vmap(` in `nested_ray_loop` and `pure_dot`,
-#      and unlocks `_fast` scalar C specialization for `pure_dot`!
+#      and unlocks `_fast` scalar C specialization for `pure_dot`.
 em_o0 = run_brat("emit-c", "-O0", prog_path)
 check(em_o0.returncode == 0, f"emit-c -O0 failed: {em_o0.stderr}")
 read_pt_o0 = fn_body(em_o0.stdout, "read_point_typed")
@@ -564,7 +564,7 @@ check("vmap_shaped" not in dot_c and "bf_f" in dot_c,
 
 
 # 3. Verify `--why-opt` contract:
-#    - `-O1 --why-opt` does NOT emit `sra:` lines (preserves existing -O1 proof counts)
+#    - `-O1 --why-opt` does not emit `sra:` lines (preserves existing -O1 proof counts)
 #    - `-O2 --why-opt` reports `sra: scalarized non-escaping struct` with clean user names
 why_src = write_src("why_sra.brat", """struct Pair {
   a: i64,
@@ -588,7 +588,7 @@ check(w_o2.returncode == 0 and "sra: scalarized non-escaping struct `Pair` local
 check("_sra_" not in w_o2.stderr, f"--why-opt leaked synthetic _sra_ identifier: {w_o2.stderr!r}")
 
 
-# 4. ASan + UBSan + LSan verification on emitted `-O0` and `-O2` C (and `-Wunused` cleanliness!)
+# 4. ASan + UBSan + LSan verification on emitted `-O0` and `-O2` C (and `-Wunused` cleanliness)
 if sys.platform.startswith("linux"):
     cc_bin = os.environ.get("CC", "cc")
     eng_inc = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "engine"))
