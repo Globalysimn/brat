@@ -1,8 +1,8 @@
 # Compiler and Runtime Architecture
 
 BRAT has a single implementation: the native C++20 compiler (`brat-cxx` in
-`lang/cxx/src/`, 26 `.cpp` and 25 `.h` files, ~57k lines) paired with the
-modular C11 runtime (`lang/engine/crt.h` and `lang/engine/crt/*.h`, ~14k lines).
+`lang/cxx/src/`, 26 `.cpp` and 27 `.h` files, ~56k lines) paired with the
+modular C11 runtime (`lang/engine/crt.h` and `lang/engine/crt/*.h`, ~13k lines).
 
 ## Pipeline (`lang/cxx/src/`)
 

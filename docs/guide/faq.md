@@ -186,7 +186,7 @@ store in a variable or container, write `fn(x) { return double(x) }`.
 
 ## Is the compiler self-hosted?
 
-No. `brat-cxx` is ~57k lines of C++20 (`lang/cxx/src/`, 26 `.cpp` and 25 `.h`
+No. `brat-cxx` is ~56k lines of C++20 (`lang/cxx/src/`, 26 `.cpp` and 27 `.h`
 files) with no external C++ libraries, emitting C11 against `lang/engine/crt.h`.
 Keeping the compiler in plain C++20 avoids bootstrap cycles while the language
 is still changing.

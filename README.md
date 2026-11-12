@@ -305,8 +305,8 @@ and [Contributing](CONTRIBUTING.md).
 
 ## Status and layout
 
-BRAT is experimental single-author software (~57k lines of C++20 in `brat-cxx`
-and ~14k lines of C11 runtime headers). CI builds and tests Linux x86-64 (GCC,
+BRAT is experimental single-author software (~56k lines of C++20 in `brat-cxx`
+and ~13k lines of C11 runtime headers). CI builds and tests Linux x86-64 (GCC,
 Clang, ASan/UBSan/LSan), macOS arm64, and Windows x86-64 (MinGW-w64 LLP64) on
 every push.
 
