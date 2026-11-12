@@ -7072,6 +7072,11 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
             if (!have) order.push_back({false, name, ""});
             late.push_back({name, &f, lookup_fn_file(name, &f)});
         } else {
+            // A nested fn is a plain C function with no frame to read from.
+            for (const auto &v : closure_free_vars(f))
+                if (sym.count(v) && !global_lets.count(v))
+                    throw EmitError(cat("fn `", name, "` uses `", v, "` of the enclosing fn: take it as ",
+                                        "a parameter, or bind a closure with `let ", name, " = fn(...)`"));
             // From here on the name means this declaration, whatever another
             // block of the same function called its own.
             for (const auto &l : late)

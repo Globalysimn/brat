@@ -176,6 +176,13 @@ fn main() -> i64 {
 '''
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
                    "2 true ['end']\n" * 4)
+NESTED_CAPTURE = '''fn main() -> i64 {
+  let a = 3
+  fn inner(k) { return k + a }
+  print(inner(1))
+  return 0
+}
+'''
 
 EXPECTED = """0
 1
@@ -281,6 +288,9 @@ def main():
                         env=dict(os.environ, ASAN_OPTIONS="detect_leaks=1:halt_on_error=1"))
     assert (nested_native.returncode, nested_native.stdout, nested_native.stderr) == \
            (0, NESTED_EXPECTED, ""), nested_native.stderr
+    capture = run([cxx, "cc", put("capture.brat", NESTED_CAPTURE)])
+    assert capture.returncode != 0 and "uses `a` of the enclosing fn" in capture.stderr, \
+           capture.stderr
 
     small_cpp = run([cxx, "cc", small])
     assert small_cpp.returncode == 0, small_cpp.stderr

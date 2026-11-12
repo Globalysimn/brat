@@ -168,6 +168,11 @@ fn main() -> i64 {
 12
 ```
 
+A `fn` declared inside another function is a name of that function only, and
+it does not capture: its body sees its own parameters and the top-level names.
+Reading a local of the enclosing function is a compile error. Bind a closure
+with `let name = fn(...) { ... }` when the body needs one.
+
 ## Indexing, variants and map keys
 
 Vector and string indices accept `i64` or integral `f64` values (`2.0`), while
