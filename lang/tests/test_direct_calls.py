@@ -171,11 +171,19 @@ fn main() -> i64 {
     print(len(pair(i)), pair(i) == pair(i), down(3))
     i += 1
   }
+  let ch = chan(1)
+  scope {
+    spawn {
+      fn tag(n) { return "job " + str(n) }
+      ch.send(tag(1))
+    }
+  }
+  print(ch.recv())
   return 0
 }
 '''
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
-                   "2 true ['end']\n" * 4)
+                   "2 true ['end']\n" * 4 + "job 1\n")
 NESTED_CAPTURE = '''fn main() -> i64 {
   let a = 3
   fn inner(k) { return k + a }

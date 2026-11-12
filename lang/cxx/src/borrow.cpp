@@ -2249,6 +2249,9 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         auto saved_floor = errs.fn_floor;
         auto saved_defers = errs.active_defers;
         auto saved_sinks = std::move(errs.try_sinks);
+        // A `return` in here leaves this fn, not the spawn it is declared in.
+        const int saved_spawn = errs.in_spawn;
+        errs.in_spawn = 0;
         errs.fn_floor.clear();
         for (const auto &kv : decl.v) errs.fn_floor.insert(kv.first);
         for (const Param &p : f.params) sub.set(p.name, param_decl(p));
@@ -2256,6 +2259,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         errs.try_sinks.clear();
         Borrows none;
         walk_block(wrap(f.body), sub, none, errs, funcs);
+        errs.in_spawn = saved_spawn;
         errs.fn_floor = std::move(saved_floor);
         errs.active_defers = std::move(saved_defers);
         errs.try_sinks = std::move(saved_sinks);

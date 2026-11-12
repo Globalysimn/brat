@@ -68,6 +68,8 @@ OWNERSHIP = {
     'send_param.brat': 'fn f(v: vec[i64], ch: Chan) -> i64 {\n  ch.send(v)\n  return 0\n}\n',
     'spawn_capture.brat': 'fn f() -> i64 {\n  let mut x = 1\n  spawn {\n    x = 2\n  }\n  return x\n}\n',
     'spawn_ref.brat': 'fn f(v: vec[i64]) -> i64 {\n  let a = v\n  spawn {\n    print(a)\n  }\n  return 0\n}\n',
+    'spawn_fn.brat': ('fn f() -> i64 {\n  spawn {\n    fn one() -> i64 { return 1 }\n'
+                      '    print(one())\n  }\n  return 0\n}\n'),
     'spawn_return.brat': 'fn f() -> i64 {\n  let v = [1]\n  spawn {\n    return 1\n  }\n  return v[0]\n}\n',
     'try_move.brat': 'fn f() -> i64 {\n  let v = [1]\n  try {\n    move v\n  } catch e {\n    print(e)\n  }\n  return len(v)\n}\n',
     'typo.brat': 'fn f() -> i64 {\n  return pritn(1)\n}\n',
@@ -281,6 +283,9 @@ EXPECT = {
     'spawn_ref.brat': [
         'spawn_ref.brat: 1 error(s), 0 warning(s)',
         'spawn_ref.brat:3: error: ref `a` escapes via spawn',
+    ],
+    'spawn_fn.brat': [
+        'spawn_fn.brat: 0 error(s), 0 warning(s)',
     ],
     'spawn_return.brat': [
         'spawn_return.brat: 1 error(s), 0 warning(s)',
