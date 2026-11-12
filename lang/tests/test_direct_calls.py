@@ -117,6 +117,7 @@ CLOSURE_EXPECTED = ("capture-value-alphacapture-value-betacapture-value-gamma\n7
 # program let the last `h` answer every call to `h`, and a nested name was not
 # accepted as a callback. `pick` is emitted from a copy of its body: the inner
 # `r` is renamed there and `p` is split into its fields.
+# The result of a nested call was never released: `pair` and `down`.
 NESTED_SOURCE = '''struct P { x: i64 }
 impl P {
   fn twice(self) -> i64 {
@@ -160,10 +161,21 @@ fn main() -> i64 {
   }
   let via = fn(k) { return inc(k) }
   print(even(10), [1, 2].map(inc), via(7), P { x: 3 }.twice())
+  fn pair(k) { return [k, k + 1] }
+  fn down(n) {
+    if n == 0 { return ["end"] }
+    return down(n - 1)
+  }
+  let mut i = 0
+  while i < 4 {
+    print(len(pair(i)), pair(i) == pair(i), down(3))
+    i += 1
+  }
   return 0
 }
 '''
-NESTED_EXPECTED = "in a in b top\nthen else\ntrue [2, 3] 8 6\n"
+NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
+                   "2 true ['end']\n" * 4)
 
 EXPECTED = """0
 1

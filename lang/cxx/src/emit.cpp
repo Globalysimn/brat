@@ -4170,6 +4170,8 @@ std::set<std::string> Emitter::heap_returns() {
             if (!entry.decl || entry.ctor) continue;
             size_t sep = name.find_last_of(":.");
             std::string short_name = sep == std::string::npos ? name : name.substr(sep + 1);
+            // A nested fn is registered as `name@seq` and called as `name`.
+            short_name.resize(std::min(short_name.size(), short_name.find('@')));
             // First check non-self base cases (`saw` requires at least one non-self owned return),
             // then verify all returns assuming self is owned by induction on recursion depth.
             std::set<std::string> with_self = grown;
