@@ -2107,6 +2107,30 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
     }
 }
 
+// Every `fn` statement in a body, at any depth, in source order.
+static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out);
+
+// A fn declared inside `f` is a name in `f` and in the fns nested in it, and
+// in no other function. A top-level fn of the same name is put back on exit.
+struct NestedScope {
+    FnTable &funcs;
+    decltype(FnTable::sigs) inner, outside;
+    NestedScope(const FnDecl &f, FnTable &t) : funcs(t) {
+        std::vector<const Stmt *> found;
+        nested_fns(f.body, found);
+        for (const Stmt *n : found)
+            inner[n->fns[0].name.value_or("")] = fn_modes(n->fns[0].params);
+        for (const auto &[name, sig] : inner) {
+            if (auto was = funcs.sigs.extract(name)) outside.insert(std::move(was));
+            funcs.sigs[name] = sig;
+        }
+    }
+    ~NestedScope() {
+        for (const auto &kv : inner) funcs.sigs.erase(kv.first);
+        funcs.sigs.merge(outside);
+    }
+};
+
 void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable &funcs) {
     if (s.line > 0) errs.line = s.line;
     switch (s.k) {
@@ -2256,6 +2280,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
     case SK::Fn:
     case SK::ExportFn: {
         const FnDecl &f = s.fns[0];
+        NestedScope nested(f, funcs);
         Decls sub = copy_decl(decl);
         for (auto &kv : sub.v) kv.second->clo_outer = true;
         auto saved_floor = errs.fn_floor;
@@ -2450,6 +2475,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
                 errs.note("duplicate method `" + s.a + "." + name + "`");
             }
             seen.insert(name);
+            NestedScope nested(f, funcs);
             Decls sub = copy_decl(decl);
             auto saved_floor = errs.fn_floor;
             auto saved_defers = errs.active_defers;
@@ -2763,12 +2789,6 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
     for (const auto &s : body) scan_type_names_stmt(*s, funcs);
 }
 
-}  // namespace
-
-// Every `fn` statement in a body, at any depth, in source order. The pass
-// above only sees top-level declarations.
-static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out);
-
 // A closure has a body of its own, and a `fn` can be declared in it.
 static void nested_fns_expr(const Expr *e, std::vector<const Stmt *> &out) {
     if (!e) return;
@@ -2790,6 +2810,8 @@ static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *>
         if (sp) nested_fns_stmt(*sp, out);
     }
 }
+
+}  // namespace
 
 
 static std::vector<size_t> extern_borrows_indices(const ExternDecl &ext) {
@@ -3181,16 +3203,21 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
         if (node.k != SK::Fn && node.k != SK::ExportFn && node.k != SK::Impl)
             nested_fns_stmt(node, nested);
     }
+    const auto add_sig = [&funcs](const Stmt *n) {
+        funcs.sigs[n->fns[0].name.value_or("")] = fn_modes(n->fns[0].params);
+    };
     for (const Stmt *n : nested) {
         errs.line = n->line;
         errs.note("fn `" + n->fns[0].name.value_or("") + "` is declared inside a top-level "
                   "statement: declare it at the top level or inside a fn");
+        // The declaration is the error; a call to it is not a second one.
+        add_sig(n);
     }
+    walk_block(wrap(body), decl, borrows, errs, funcs);
+    // The passes below look a callee up by bare name, whichever fn declares it.
     nested.clear();
     nested_fns(body, nested);
-    for (const Stmt *n : nested)
-        funcs.sigs[n->fns[0].name.value_or("")] = fn_modes(n->fns[0].params);
-    walk_block(wrap(body), decl, borrows, errs, funcs);
+    for (const Stmt *n : nested) add_sig(n);
     unused_in(wrap(body), warns);
     for (const auto &[ln, text] : stray) {
         warns.push_back(BorrowDiag{static_cast<int>(ln),

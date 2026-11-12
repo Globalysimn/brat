@@ -63,6 +63,9 @@ OWNERSHIP = {
     'move_borrowed.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let a = v\n  move v\n  return len(a)\n}\n',
     'moved_path.brat': 'fn f() -> i64 {\n  let p = Point { x: 1 }\n  let a = move p.x\n  return p.x + a\n}\n',
     'moved_use.brat': 'fn f(v: vec[i64]) -> i64 {\n  move v\n  return len(v)\n}\n',
+    'nested_scope.brat': ('fn a() -> i64 {\n  fn inner() -> i64 { return 1 }\n'
+                          '  let g = fn() { return inner() }\n  return inner() + g()\n}\n'
+                          'fn b() -> i64 {\n  return inner()\n}\n'),
     'owned_move.brat': 'fn f(v: move vec[i64]) -> i64 {\n  let owned = move v\n  return len(owned)\n}\n',
     'mut_self.brat': 'impl Point {\n  fn bump(mut self) -> i64 {\n    return 0\n  }\n}\nfn f() -> i64 {\n  let p = Point { x: 1 }\n  print(p.bump())\n  return 0\n}\n',
     'mut_while_borrowed.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let a = v\n  v.push(1)\n  return len(a)\n}\n',
@@ -264,6 +267,11 @@ EXPECT = {
         'mut_while_borrowed.brat: 1 error(s), 0 warning(s)',
         'mut_while_borrowed.brat:3: error: cannot mutate immutable `v` while borrowed by `a`',
         'mut_while_borrowed.brat:2: note: borrowed by `a` here',
+    ],
+    'nested_scope.brat': [
+        'nested_scope.brat: 1 error(s), 0 warning(s)',
+        'nested_scope.brat:7: error: use of undeclared var `inner`',
+        'nested_scope.brat: note: help: in scope here are `let` bindings, fn parameters, `for` bindings and `match` arm bindings; functions come from `fn`/`impl`; a name from another file needs `import that.file`',
     ],
     'own_return.brat': [
         'own_return.brat: 0 error(s), 0 warning(s)',
