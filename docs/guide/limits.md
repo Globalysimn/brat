@@ -174,6 +174,30 @@ Reading a local of the enclosing function is a compile error. Bind a closure
 with `let name = fn(...) { ... }` when the body needs one. This holds for a
 `fn` declared in a closure body or in a `spawn` block too.
 
+A block takes one `fn` per name. Sibling blocks can each declare their own:
+
+```brat check
+fn main() -> i64 {
+  fn step(n: i64) -> i64 {
+    return n + 1
+  }
+  fn step(n: i64) -> i64 {
+    return n + 2
+  }
+  print(step(1))
+  return 0
+}
+```
+
+```diagnostics
+example.brat: 1 error(s), 0 warning(s)
+example.brat:5: error: duplicate fn `step`
+  |   fn step(n: i64) -> i64 {
+example.brat:2: note: first declared here
+  |   fn step(n: i64) -> i64 {
+example.brat: 0 type error(s)
+```
+
 Top-level statements are not a function body. A `fn` declared inside one (in
 the block of an `if` or a loop, or in a closure bound there) is refused by
 `build` and `run`; `check` does not report it. Declare it at the top level.

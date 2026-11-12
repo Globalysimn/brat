@@ -22,6 +22,11 @@ OWNERSHIP = {
     'cut_call.brat': 'fn f(e: map[str, i64]) -> i64 {\n  print("{e["hits"]}")\n  return 0\n}\n',
     'cut_plus.brat': 'fn f() -> str {\n  let n = 1\n  return "{e[" + str(n) + "]}"\n}\n',
     'double_mut.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let mut a = v\n  let mut b = v\n  print(a)\n  print(b)\n  a.push(1)\n  return 0\n}\n',
+    'dup_fn.brat': ('fn h() -> i64 { return 1 }\nfn h() -> i64 { return 2 }\n'
+                    'fn f(c: bool) -> i64 {\n  fn g() -> i64 { return 1 }\n'
+                    '  fn g() -> i64 { return 2 }\n  let n = g() + h()\n  if c {\n'
+                    '    fn side() -> i64 { return 1 }\n    return n + side()\n  } else {\n'
+                    '    fn side() -> i64 { return 2 }\n    return n + side()\n  }\n}\n'),
     'dup_method.brat': 'impl Point {\n  fn a(self) -> i64 { return 0 }\n  fn a(self) -> i64 { return 1 }\n}\n',
     'elem_copy.brat': 'fn f(v: vec[i64]) -> i64 {\n  let x = v[0]\n  return x\n}\n',
     'escape_return.brat': 'fn f() -> vec[i64] {\n  let v = [1]\n  let r = v\n  return r\n}\n',
@@ -128,6 +133,13 @@ EXPECT = {
         'double_mut.brat:2: note: first borrow `a` here',
         'double_mut.brat:6: error: double mut borrow of `v`: `a.push` through alias `a` is a second mutable place',
         'double_mut.brat: note: help: `a` is a second mutable place over `v`; keep one writer -- write through the owner (`v[key][...] = ...`) instead of holding a mutating copy of one element',
+    ],
+    'dup_fn.brat': [
+        'dup_fn.brat: 2 error(s), 0 warning(s)',
+        'dup_fn.brat:2: error: duplicate fn `h`',
+        'dup_fn.brat:1: note: first declared here',
+        'dup_fn.brat:5: error: duplicate fn `g`',
+        'dup_fn.brat:4: note: first declared here',
     ],
     'dup_method.brat': [
         'dup_method.brat: 1 error(s), 0 warning(s)',

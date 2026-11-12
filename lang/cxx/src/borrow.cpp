@@ -1919,9 +1919,21 @@ std::map<std::string, int> walk_block(const Body &body, Decls &decl, Borrows &bo
     for (const auto &kv : decl.v) outer_names.insert(kv.first);
     size_t defer_base = errs.active_defers.size();
     std::vector<std::pair<const Expr *, int>> defers;
+    std::map<std::string, int> fn_lines;
     for (size_t i = 0; i < body.size(); i++) {
         const Stmt &s = *body[i];
         errs.idx = static_cast<int>(i);
+        // Calls bind to one declaration per block, so a second `fn` of the
+        // same name would leave one of the two bodies unreachable.
+        const Stmt &d = s.k == SK::Pub && !s.body.empty() ? *s.body[0] : s;
+        if ((d.k == SK::Fn || d.k == SK::ExportFn) && d.fns[0].name) {
+            auto [first, fresh] = fn_lines.emplace(*d.fns[0].name, d.line);
+            if (!fresh) {
+                errs.line = d.line;
+                errs.note("duplicate fn `" + first->first + "`",
+                          rel_at(first->second, "first declared here"));
+            }
+        }
         for (size_t b = 0; b < borrows.v.size();) {
             std::vector<Borrow> kept;
             for (const Borrow &bm : borrows.v[b].second) {
