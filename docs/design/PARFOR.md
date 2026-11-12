@@ -27,16 +27,19 @@ the calling thread using `op(acc, elem_result)` starting from `unit`.
 network, SQLite, channels, clocks, env), `alloc` (container/struct/closure
 literals and allocating container/string methods), `spawn` (`spawn` and
 `scope`), and `ffi` (`extern fn`, plugins, raw pointers, slices). Both the loop
-body and the reduction function must have an empty effect row, keeping parallel
-tasks restricted to pure scalar and read-only container computations without
-heap contention or nested worker-pool deadlocks.
+body and the reduction function must have an empty effect row.
+
+Functions are looked up by name. A `fn` declared inside another `fn` counts
+too, and two functions with the same name share one row: a pure nested `add`
+is refused when a top-level `add` prints.
 
 ## Execution and determinism
 
-`vparfor` (`crt/conc.h`) allocates an `N`-slot result array, submits one task
-per element writing to slot `i`, waits with `vjoin_all()` (propagating the first
-worker error if one occurs), and folds slots `0..N-1` sequentially on the
-calling thread with `op`.
+`vparfor` (`crt/conc.h`) allocates an `N`-slot result array and cuts the input
+into at most `4 * workers` contiguous chunks (capped at 128). Each chunk is one
+task that writes the body's result for element `i` to slot `i`. The calling
+thread waits for all chunks, propagates the first worker error if there is one,
+and folds slots `0..N-1` sequentially with `op`.
 
 Because the reduction step runs in index order (`0..N-1`), floating-point or
 non-associative folds produce identical results across runs regardless of thread
@@ -45,7 +48,6 @@ scheduling. The checker does not verify algebraic associativity or check that
 
 ## Overhead
 
-Each element dispatches one worker closure call and writes one `Val` slot
-(`O(N)` temporary result storage). Use `par for` when per-element scalar work is
-heavy enough to outweigh task-queue dispatch; chunk small inputs into coarser
-work items first.
+Each element costs one closure call and one `Val` slot (`O(N)` temporary result
+storage); each chunk costs one task on the queue. Use `par for` when the body
+does enough work per element to outweigh the closure call.
