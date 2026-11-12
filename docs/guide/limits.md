@@ -199,8 +199,8 @@ example.brat: 0 type error(s)
 ```
 
 Top-level statements are not a function body. A `fn` declared inside one (in
-the block of an `if` or a loop, or in a closure bound there) is refused by
-`build` and `run`; `check` does not report it. Declare it at the top level.
+the block of an `if` or a loop, or in a closure bound there) is an error.
+Declare it at the top level.
 
 ## Indexing, variants and map keys
 

@@ -2765,32 +2765,29 @@ void collect_heads(const std::vector<StmtP> &body, FnTable &funcs) {
 
 }  // namespace
 
-// A `fn` inside a body is callable from that body. The pass above only sees
-// top-level declarations, so a nested `fn` used to read as undeclared.
-static void register_nested(const std::vector<StmtP> &body, FnTable &funcs);
+// Every `fn` statement in a body, at any depth, in source order. The pass
+// above only sees top-level declarations.
+static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out);
 
 // A closure has a body of its own, and a `fn` can be declared in it.
-static void register_nested_expr(const Expr *e, FnTable &funcs) {
+static void nested_fns_expr(const Expr *e, std::vector<const Stmt *> &out) {
     if (!e) return;
-    for (const auto &k : e->kids) register_nested_expr(k.get(), funcs);
-    if (e->fn) register_nested(e->fn->body, funcs);
+    for (const auto &k : e->kids) nested_fns_expr(k.get(), out);
+    if (e->fn) nested_fns(e->fn->body, out);
 }
 
-static void register_nested_stmt(const Stmt &s, FnTable &funcs) {
-    if (s.k == SK::Fn || s.k == SK::ExportFn) {
-        const FnDecl &f = s.fns[0];
-        funcs.sigs[f.name.value_or("")] = fn_modes(f.params);
-    }
-    for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()}) register_nested_expr(e, funcs);
-    register_nested(s.body, funcs);
-    register_nested(s.body2, funcs);
-    if (s.els) register_nested_stmt(*s.els, funcs);
-    for (const FnDecl &f : s.fns) register_nested(f.body, funcs);
+static void nested_fns_stmt(const Stmt &s, std::vector<const Stmt *> &out) {
+    if (s.k == SK::Fn || s.k == SK::ExportFn) out.push_back(&s);
+    for (const Expr *e : {s.e1.get(), s.e2.get(), s.e3.get()}) nested_fns_expr(e, out);
+    nested_fns(s.body, out);
+    nested_fns(s.body2, out);
+    if (s.els) nested_fns_stmt(*s.els, out);
+    for (const FnDecl &f : s.fns) nested_fns(f.body, out);
 }
 
-static void register_nested(const std::vector<StmtP> &body, FnTable &funcs) {
+static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out) {
     for (const auto &sp : body) {
-        if (sp) register_nested_stmt(*sp, funcs);
+        if (sp) nested_fns_stmt(*sp, out);
     }
 }
 
@@ -3176,7 +3173,23 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
         }
     }
     Borrows borrows;
-    register_nested(body, funcs);
+    // Top-level statements are not a function, so a fn declared inside one
+    // has no scope a call could resolve in.
+    std::vector<const Stmt *> nested;
+    for (const auto &sp : body) {
+        const Stmt &node = *pub_inner(*sp);
+        if (node.k != SK::Fn && node.k != SK::ExportFn && node.k != SK::Impl)
+            nested_fns_stmt(node, nested);
+    }
+    for (const Stmt *n : nested) {
+        errs.line = n->line;
+        errs.note("fn `" + n->fns[0].name.value_or("") + "` is declared inside a top-level "
+                  "statement: declare it at the top level or inside a fn");
+    }
+    nested.clear();
+    nested_fns(body, nested);
+    for (const Stmt *n : nested)
+        funcs.sigs[n->fns[0].name.value_or("")] = fn_modes(n->fns[0].params);
     walk_block(wrap(body), decl, borrows, errs, funcs);
     unused_in(wrap(body), warns);
     for (const auto &[ln, text] : stray) {

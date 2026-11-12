@@ -190,7 +190,8 @@ fn main() -> i64 {
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
                    "2 true ['end']\n" * 4 + "job 1\n[1, 2]\n")
 # What the emitter refuses, with the line of the declaration. In a closure or
-# a spawn the local is a captured name, not a slot of the C frame.
+# a spawn the local is a captured name, not a slot of the C frame. The checker
+# stops a top-level one first, so the emitter is reached with `--no-check`.
 NESTED_REFUSED = {
     "capture": ('''fn main() -> i64 {
   let a = 3
@@ -338,7 +339,7 @@ def main():
     assert (nested_native.returncode, nested_native.stdout, nested_native.stderr) == \
            (0, NESTED_EXPECTED, ""), nested_native.stderr
     for name, (text, want) in NESTED_REFUSED.items():
-        refused = run([cxx, "cc", put(name + ".brat", text)])
+        refused = run([cxx, "cc", "--no-check", put(name + ".brat", text)])
         assert refused.returncode != 0 and want in refused.stderr, \
                "%s: %s%s" % (name, refused.stdout[-300:], refused.stderr)
 

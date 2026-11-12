@@ -78,6 +78,9 @@ OWNERSHIP = {
     'spawn_fn.brat': ('fn f() -> i64 {\n  spawn {\n    fn one() -> i64 { return 1 }\n'
                       '    print(one())\n  }\n  return 0\n}\n'),
     'spawn_return.brat': 'fn f() -> i64 {\n  let v = [1]\n  spawn {\n    return 1\n  }\n  return v[0]\n}\n',
+    'top_fn.brat': ('if true {\n  fn inner() -> i64 { return 1 }\n  print(inner())\n}\n'
+                    'let f = fn(k) {\n  fn boxed(n) { return [n] }\n  return boxed(k)\n}\n'
+                    'print(f(1))\n'),
     'try_move.brat': 'fn f() -> i64 {\n  let v = [1]\n  try {\n    move v\n  } catch e {\n    print(e)\n  }\n  return len(v)\n}\n',
     'typo.brat': 'fn f() -> i64 {\n  return pritn(1)\n}\n',
     'undeclared.brat': 'fn f() -> i64 {\n  s = 1\n  return 0\n}\n',
@@ -307,6 +310,11 @@ EXPECT = {
     'spawn_return.brat': [
         'spawn_return.brat: 1 error(s), 0 warning(s)',
         'spawn_return.brat:4: error: return escapes spawn',
+    ],
+    'top_fn.brat': [
+        'top_fn.brat: 2 error(s), 0 warning(s)',
+        'top_fn.brat:2: error: fn `inner` is declared inside a top-level statement: declare it at the top level or inside a fn',
+        'top_fn.brat:6: error: fn `boxed` is declared inside a top-level statement: declare it at the top level or inside a fn',
     ],
     'try_move.brat': [
         'try_move.brat: 1 error(s), 0 warning(s)',
