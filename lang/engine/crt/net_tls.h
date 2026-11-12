@@ -1375,7 +1375,6 @@ BFN Val vfs_read_line(Val hv) {
                     }
                     if (acc == stack_acc) memcpy(nb, stack_acc, acc_len);
                     acc = nb;
-                    acc_cap = ncap;
                 }
                 memcpy(acc + acc_len, s->buf + s->pos, chunk);
                 acc_len += chunk;
