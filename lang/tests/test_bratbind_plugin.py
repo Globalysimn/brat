@@ -245,7 +245,7 @@ app_exe_py = os.path.join(app_dir, "app_py")
 app_exe_cx = os.path.join(app_dir, "app_cx")
 # Build WITHOUT --header and WITHOUT --unsafe-ffi through both drivers!
 b_py = run_py("build", app_brat, "--link", vendored_o, "-o", app_exe_py, cwd=app_dir)
-check(b_py.returncode == 0, "Python build with .bratbind failed: %s" % (b_py.stdout + b_py.stderr))
+check(b_py.returncode == 0, "CLI build with .bratbind failed: %s" % (b_py.stdout + b_py.stderr))
 b_cx = run_cxx("build", app_brat, "--link", vendored_o, "-o", app_exe_cx, cwd=app_dir)
 check(b_cx.returncode == 0, "C++ build with .bratbind failed: %s" % (b_cx.stdout + b_cx.stderr))
 out_py = subprocess.check_output([app_exe_py], text=True)
@@ -366,7 +366,7 @@ int64_t apply_cb(int64_t (*cb)(int64_t), int64_t x) { return cb(x) + 1; }
 ''')
 subprocess.check_call(["gcc", "-shared", "-fPIC", "-O2", plug_c, "-o", plug_so])
 
-# Unowned `own ptr` leak refused identically by Python & C++ checkers:
+# Unowned `own ptr` leak is refused the same way through both doors:
 leak_own = os.path.join(p38_dir, "leak_own.brat")
 with open(leak_own, "w", encoding="utf-8") as f:
     f.write('''

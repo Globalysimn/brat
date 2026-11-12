@@ -7,8 +7,8 @@ Each case is a defect that was found by driving the CLI, not by reading it:
     at a directory that does not exist, so `read_file` looked in the wrong place;
   * a string literal that spans lines used to be re-indented by `brat fmt`, which
     rewrote the literal's own bytes and changed what the program prints;
-  * a source file that is not UTF-8 used to crash `run`/`emit-c`/`fmt` with a
-    Python traceback while `check` answered `0 type error(s)`;
+  * a source file that is not UTF-8 used to crash `run`/`emit-c`/`fmt` while
+    `check` answered `0 type error(s)`;
   * the NUL-in-literal diagnostic pointed at the line after the literal;
   * no command answered `--help`;
   * `brat dist` blamed the type checker for a file it could not read.

@@ -287,7 +287,7 @@ print("http_srv_ok")
 def test_steps_12_3_and_12_4_speed_and_sanitizers(cxx):
     with tempfile.TemporaryDirectory(prefix="brat_speed_") as td:
         # 1. Verify exact `free_vars`, `vclosure0`, `vmap_with` stack frame, `ub_floats`,
-        # and byte-for-byte Python-CLI delegation to the sole native `emit-c`!
+        # and that the CLI wrapper hands `emit-c` through byte for byte.
         src_p = os.path.join(td, "dyn_speed.brat")
         with open(src_p, "w", encoding="utf-8") as f:
             f.write('''fn sq(x) {

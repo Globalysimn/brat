@@ -1,7 +1,4 @@
-"""Native parser contracts and AST-preserving formatting of the source corpus.
-
-The default checks do not import the Python language implementation.
-"""
+"""Native parser contracts and AST-preserving formatting of the source corpus."""
 import argparse
 import os
 import subprocess

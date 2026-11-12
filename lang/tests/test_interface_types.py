@@ -68,7 +68,7 @@ for r in (run(bad), build(bad, "ret_none")):
     assert r.returncode != 0 and "returns `none` in the interface, `i64` in the implementation" in out, out
 
 # The root source is a module too: a sibling .bri must be parsed and enforced
-# even though the root has no namespace. Python and C++ now share this rule.
+# even though the root has no namespace.
 root_src = write("rootapi/main.brat", "fn main() -> i64 { return 0 }\n")
 write("rootapi/main.bri", "fn main() -> i64\n")
 for env in ({}, {}):

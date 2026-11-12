@@ -85,10 +85,9 @@ def main():
         if name.startswith("jump_") and "outside a loop" not in cx:
             print("FAIL %s: a jump with no loop around it was accepted:\n%s" % (name, cx))
             bad += 1
-    # Invalid UTF-8 follows a different load path in Python, so the text
-    # need not match there. The C++ diagnostic itself must still be valid
-    # UTF-8: echoing byte 0xff into a terminal, pipe or JSON consumer just
-    # moves the decoding failure into the tool reading the diagnostic.
+    # The diagnostic for a file that is not UTF-8 must itself be valid UTF-8:
+    # echoing byte 0xff into a terminal, pipe or JSON consumer just moves the
+    # decoding failure into the tool reading the diagnostic.
     bad_path = os.path.join(TMP, "invalid_utf8.brat")
     with open(bad_path, "wb") as f:
         f.write(b'let x = "\xff"\n')

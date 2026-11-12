@@ -646,7 +646,7 @@ def test_security_and_soundness_hardening(cxx, env):
         r2 = subprocess.run(_cxx.cli_args("check", p), capture_output=True, text=True)
         assert r1.returncode != 0 and r2.returncode != 0, (tag, r1.returncode, r2.returncode, r1.stderr, r2.stderr)
 
-    # 5c. Formatter preserves raw strings `r"..."` and multi-line string bodies across C++ & Python.
+    # 5c. Formatter preserves raw strings `r"..."` and multi-line string bodies.
     fmt_p = os.path.join(d, "fmt_raw.brat")
     fmt_in = 'fn main() -> i64 {\nlet p=r"C:\\dir\\"\nlet m="line1\n    indented_line2"\nreturn 0\n}\n'
     with open(fmt_p, "w", encoding="utf-8") as f:
@@ -656,7 +656,7 @@ def test_security_and_soundness_hardening(cxx, env):
     assert '\n    indented_line2"\n' in r_f1.stdout
     assert '  return 0\n' in r_f1.stdout
 
-    # 5d. `brat new` rejects ASCII control characters in project names across C++ & Python.
+    # 5d. `brat new` rejects ASCII control characters in project names.
     assert subprocess.run([cxx, "new", "bad\x07name"], cwd=d, env=env,
                           capture_output=True, text=True).returncode != 0
     assert subprocess.run(_cxx.cli_args("new", "bad\x07name"), cwd=d,
@@ -683,7 +683,7 @@ def test_security_and_soundness_hardening(cxx, env):
     subprocess.run([cxx, "run", std_p], env=env, check=True)
     subprocess.run(_cxx.cli_args("run", "-O0", std_p), check=True)
 
-    # 5f. MCP rejects non-scalar/boolean JSON-RPC `id` with -32600 across C++ & Python.
+    # 5f. MCP rejects non-scalar/boolean JSON-RPC `id` with -32600.
     for bad_req in ('{"jsonrpc":"2.0","id":[1],"method":"ping"}\n',
                     '{"jsonrpc":"2.0","id":true,"method":"ping"}\n'):
         r_m1 = subprocess.run([cxx, "mcp"], input=bad_req, capture_output=True, text=True, check=True)

@@ -82,8 +82,8 @@ def main():
         assert r.returncode == 0 and r.stdout == "1\n", \
             "variant run_o0: rc=%d %r %r" % (r.returncode, r.stdout, r.stderr)
 
-        # Calling an instance method through the type name: one sentence, not
-        # a CPython NameError on one side and `unresolved call` on the other.
+        # Calling an instance method through the type name: one sentence that
+        # names the fix, where the emitter alone said `unresolved call`.
         needs = write(tmp, "needs.brat", WANTS_SELF)
         r = run(_cxx.cli_args("run", "-O0", needs))
         assert r.returncode != 0, "run_o0 accepted Color.code()"

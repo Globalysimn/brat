@@ -91,11 +91,11 @@ def check_both_reject(td, name, src, needle):
         f.write(src)
     r_py = run_cmd(_cxx.cli_args("check", p), cwd=td)
     r_cx = run_cmd([CXX, "check", p], cwd=td)
-    assert r_py.returncode != 0, f"{name}: Python check unexpectedly succeeded"
+    assert r_py.returncode != 0, f"{name}: CLI check unexpectedly succeeded"
     assert r_cx.returncode != 0, f"{name}: C++ check unexpectedly succeeded"
     out_py = (r_py.stdout + r_py.stderr).decode("utf-8", "replace")
     out_cx = (r_cx.stdout + r_cx.stderr).decode("utf-8", "replace")
-    assert needle in out_py, f"{name}: {needle!r} missing from Python diag: {out_py!r}"
+    assert needle in out_py, f"{name}: {needle!r} missing from CLI diag: {out_py!r}"
     assert needle in out_cx, f"{name}: {needle!r} missing from C++ diag: {out_cx!r}"
 
 

@@ -237,9 +237,9 @@ try:
         check('own(' in out or name == 'closure_capture',
               'reject %s: the refusal should point at `own(...)` as the way out' % name)
         if HAVE_CXX:
-            # `brat run` decides with the native checker, so a rule that only
-            # the Python side implements is a program that builds and runs with
-            # a dangling arena pointer. Require identical bytes from both.
+            # `brat run` decides with the same checker, so a refusal that one
+            # door misses is a program that builds and runs with a dangling
+            # arena pointer. Require identical bytes from both.
             py = subprocess.run(_cxx.cli_args('check', p),
                                 capture_output=True, text=True, timeout=300)
             cx = subprocess.run([CXX, 'check', p],

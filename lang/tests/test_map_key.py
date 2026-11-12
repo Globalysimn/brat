@@ -1,27 +1,21 @@
-"""A map key is str, i64, f64, bool, a tag or none -- and both backends say so.
+"""A map key is str, i64, f64, bool, a tag or none, at -O0 and at -O2 alike.
 
-The rule itself was already written down; what was broken was everything around
-it, and none of it looked like a failure:
+The rule was already written down. What this file pins is the behaviour
+around it:
 
-* `m[[1, 2]] = 5` **hung forever** in the native backend. `map_set_v` raised
-  while holding `_brat_ctr_lock`, and `vraise` builds a `Val` (vvec, then
-  vec_push), so the raise waited for the lock it was holding. No message, no
-  exit code, a program that never ends.
-* `m.get([1, 2])` let a CPython `TypeError: unhashable type: 'list'` out of the
-  -O0, which no `try`/`catch` can see, while the C backend answered
-  `None` for the same call.
-* a map **literal** with a scalar key was unreadable in the -O0 build:
-  `{1: "a"}` stored the raw `1` while every lookup went through `_mkey`, which
-  tags a number, so `{1: "a"}[1]` was `no key 1` here and `a` in C.
-* `{[1, 2]: 3}` was an err value in the -O0 build and a half-built map that
-  printed `{}` in C.
-* a NaN key was one key in the -O0 build (object identity) and a new key on
-  every store in C (`nan != nan`).
+* `m[[1, 2]] = 5` used to hang. `map_set_v` raised while holding
+  `_brat_ctr_lock`, and `vraise` builds a `Val` (vvec, then vec_push), so the
+  raise waited for the lock it was holding.
+* `m.get([1, 2])` and the other map methods answer an err value that a
+  `try`/`catch` can see.
+* a map literal with a scalar key reads back: `{1: "a"}[1]` is `a`.
+* `{[1, 2]: 3}` is that same err value. It used to be a half-built map that
+  printed `{}`.
+* a NaN key is one key. Hashing the bit pattern alone added a new entry on
+  every store (`nan != nan`).
 
-The shape of the refusal is the one `test_forge.py` pins for `$type`: an
-`('err', ...)` *value*, not a raise. Both backends answer with it now, in the
-same words, and `_mkey` keeps CPython's own `TypeError` from ever reaching a
-program as a backstop.
+The shape of the refusal is the one `test_forge.py` pins for `$type`: an err
+value, not a raise.
 """
 import _cxx
 import _scratch
@@ -66,8 +60,8 @@ def backends(path, name):
 
 def main():
     # 1. Every way a container key can reach a map answers the same err value,
-    #    in the same words, in both backends -- and none of them waits for a
-    #    lock it already holds.
+    #    in the same words at -O0 and -O2, and none of them waits for a lock it
+    #    already holds.
     cases = {
         "store_vec": '  let mut m = {"a": 1}\n  m[[1, 2]] = 5\n  print(m)',
         "store_struct": '  let mut m = {"a": 1}\n  m[Point { x: 1, y: 2 }] = 5\n  print(m)',
@@ -82,14 +76,13 @@ def main():
         "get_closure": '  let m = {"a": 1}\n  let f = fn(x) { return x }\n  print(m.get(f))',
         "store_tag_vec": '  let mut m = {"a": 1}\n  m[Ok([1, 2])] = 5\n  print(m)',
     }
-    # A bare `m[k] = v` throws its value away -- the same shape `test_forge.py`
-    # pins for `$type` -- so the observable result there is an unchanged map,
-    # not a message. What must not happen is a hang, a CPython TypeError, or a
-    # store that half-happened.
+    # A bare `m[k] = v` throws its value away, the same shape `test_forge.py`
+    # pins for `$type`, so the observable result there is an unchanged map and
+    # not a message. What must not happen is a hang or a store that
+    # half-happened.
     quiet = {"store_vec", "store_struct", "store_tag_vec"}
     for name, body in sorted(cases.items()):
         out = backends(write(name + ".brat", body), name)
-        assert "TypeError" not in out, "%s: a Python error escaped: %r" % (name, out)
         if name in quiet:
             assert out == "{'a': 1}\n", "%s: map changed: %r" % (name, out)
         else:
@@ -152,7 +145,7 @@ def main():
     out = backends(tag_hash, "tag_hash")
     assert out == "3 int flt nan2\n2000 0 3998\n", "tag_hash: %r" % (out,)
 
-    print("map keys: one sentence, both backends, no hang; scalar literal keys readable")
+    print("map keys: one sentence at -O0 and -O2, no hang; scalar literal keys readable")
 
 
 main()

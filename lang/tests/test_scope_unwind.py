@@ -1,9 +1,8 @@
 """`break`/`continue` must unwind lexical task scopes in native programs.
 
-The -O0 build has used `finally` to join a `scope` since its introduction.
-This regression compares it with native programs produced through the Python
-CLI and through the standalone C++ build, including defer frames nested under
-an if inside the loop body.
+This regression compares `run -O0` with programs built from the emitted C and
+through `brat-cxx build`, including defer frames nested under an if inside the
+loop body.
 """
 import _cxx
 import _scratch

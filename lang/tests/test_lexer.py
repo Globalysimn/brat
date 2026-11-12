@@ -1,8 +1,7 @@
 """The lexer, on the cases that the single-pass rewrite could break.
 
 Tokens are compared as `(kind, text, line)` triples against literal lists via
-`brat-cxx lex` (.
-legacy Python lexer).
+`brat-cxx lex`.
 """
 
 import os

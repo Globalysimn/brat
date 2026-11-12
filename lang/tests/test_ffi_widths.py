@@ -240,9 +240,8 @@ def main():
     # the call is bound to a temp: inlined per field it would run three times
     assert out.count("apply_pt(brat_cb_mk") == 1, out
     assert native(structs, "structs.bin") == STRUCTS_NATIVE_WANT
-    # This used to be unoptimized (-O0) one hole -- ctypes has no path for a record
-    # coming back out of a Python callback. It now compiles a C trampoline for
-    # exactly that shape, so both backends must print the same bytes.
+    # A record coming back out of a callback goes through a C trampoline, so
+    # `run -O0` must print the same bytes as the built binary.
     assert run_o0(structs) == STRUCTS_NATIVE_WANT
 
     # the header proves the widths we just emitted

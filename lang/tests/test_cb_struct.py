@@ -1,12 +1,9 @@
-"""A callback may return a record by value: both backends, every layout.
+"""A callback may return a record by value: `run -O0` and a built binary, every layout.
 
-CPython's ctypes answers `invalid result type for callback function` for that
-shape, so the reference -O0 used to be the one place where a legal C
-callback was refused. There is a way through: the callback slot is only an
-address, so the -O0 build compiles a small C trampoline that keeps the real
-prototype and shows Python nothing but `void *`. The trampoline reuses the same
-widths ctypes uses and `_Static_assert`s the size and every field offset, so a
-disagreement is a compile error instead of a wrong number.
+The slot handed to C is only an address, so the emitted C carries a trampoline
+per named callback that keeps the real prototype. The record layout is checked
+with `_Static_assert` on its size and on every field offset, so a disagreement
+with the C side is a compile error instead of a wrong number.
 
 The cases cover small integer, mixed float/integer, large, nested, and packed
 records, plus strings whose backing storage must survive the callback return.
@@ -126,7 +123,7 @@ def run(args, timeout=600, **kw):
                           timeout=timeout, env=env, **kw)
 
 
-# Both backends must print the same bytes for every shape: the numbers are read
+# Both runs must print the same bytes for every shape: the numbers are read
 # by C out of the record the callback returned, so they prove the layout, not the
 # BRAT-side copy of it.
 native_exe = os.path.join(TMP, "cbs.exe")
@@ -141,8 +138,8 @@ run_o0 = run(["run", "-O0", path])
 check(run_o0.returncode == 0, "run_o0 exit=%d %s" % (run_o0.returncode, run_o0.stdout + run_o0.stderr))
 check(run_o0.stdout == WANT, "run_o0 %r != native %r" % (run_o0.stdout, WANT))
 
-# The trampoline is compiled once per named callback and shape and cached on disk, so a second run
-# with the cache in place has to give the same answer.
+# `run` keeps what it compiled on disk, so a second run with the cache in place
+# has to give the same answer.
 again = run(["run", "-O0", path])
 check(again.returncode == 0 and again.stdout == WANT, "second run_o0 run %r" % (again.stdout,))
 

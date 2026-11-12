@@ -9,7 +9,7 @@ the two ways out:
     brat build prog.brat --header lib.h    the declarations compared to C
     brat build prog.brat --unsafe-ffi      build it anyway, on your head
 
-`-O0` still crosses the C ABI through ctypes, so it takes the same proof gate.
+`run -O0` calls the same C, so it takes the same proof gate.
 """
 import _cxx
 import _scratch
@@ -70,8 +70,7 @@ plain = write("plain.brat", 'fn main() -> i64 {\n  print(7);\n  return 0\n}\n')
 REFUSAL = "calls C and no header was given"
 HATCHES = ("--header FILE", "--unsafe-ffi")
 
-# Native `brat run` gates before exec; `-O0` uses the same proof because
-# ctypes crosses the C ABI in the current process.
+# `brat run` gates before exec, and `-O0` goes through the same proof.
 NATIVE = os.path.isfile(CXX) and os.access(CXX, os.X_OK)
 
 # 1. Every command that builds or runs a binary refuses the same way
@@ -177,8 +176,8 @@ check(r.returncode != 0 and REFUSAL in r.stderr,
       "an extern declaration must still require FFI proof in native run: %r"
       % (r.stdout + r.stderr))
 
-# 6. The -O0 build uses ctypes and therefore requires an explicit unsafe
-# acknowledgement when no header or .bratbind proves the foreign prototype.
+# 6. The -O0 build requires an explicit unsafe acknowledgement when no header
+# or .bratbind proves the foreign prototype.
 r = cli("run", "-O0", prog)
 check(r.returncode != 0 and REFUSAL in r.stderr, r.stderr)
 r = cli("run", "-O0", "--no-check", prog)

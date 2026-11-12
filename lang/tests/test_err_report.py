@@ -110,9 +110,7 @@ for name, (src, message) in CASES.items():
                             timeout=120)
     assert run_o0.returncode == 1, "%s run_o0 rc=%d" % (name, run_o0.returncode)
     assert run_o0.stdout == "", "%s run_o0 printed a value: %r" % (name, run_o0.stdout)
-    # The report format differs between backends (Python names the exception class
-    # and line, native prints the `unhandled: ('err', ...)` tag), so the message
-    # and the exit code are what this test holds both to.
+    # The message and the exit code are what this test holds `run -O0` to.
     assert message in run_o0.stderr, "%s run_o0 stderr=%r" % (name, run_o0.stderr)
 
 # A store whose RHS raised must not land: the target keeps its old value and the

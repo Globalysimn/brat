@@ -244,7 +244,7 @@ tamper_py = subprocess.run(_cxx.cli_args("build", app_p, "-o", exe_py),
 tamper_cx = subprocess.run([BIN, "build", app_p, "-o", exe_cx],
                            capture_output=True, text=True, cwd=proj, timeout=30)
 check(tamper_py.returncode != 0 and "HASH MISMATCH" in tamper_py.stderr,
-      f"Python build missed tampered C source: {tamper_py.stderr}")
+      f"CLI build missed tampered C source: {tamper_py.stderr}")
 check(tamper_cx.returncode != 0 and "HASH MISMATCH" in tamper_cx.stderr,
       f"C++ build missed tampered C source: {tamper_cx.stderr}")
 open(vendored_c, "wb").write(orig_c)

@@ -60,7 +60,7 @@ FIXTURES = {
     'multi.brat': 'fn f(a: i64) -> i64 {\n  return "x"\n}\nfn g(a: i64) -> i64 {\n  return a\n}\nlet x = g(f(1), g(2))\nlet y: str = 3\nlet v = [1]\nv.push("s")\nv.push(2, 3)\n',
 }
 
-# Expected errors, including source locations. Python agreement is optional.
+# Expected errors, including source locations.
 EXPECT = {
     "ret.brat": ["ret.brat:2: error: return: want i64, got str"],
     "arg.brat": ["arg.brat:4: error: arg 1 of `f`: want i64, got str"],

@@ -1,4 +1,4 @@
-"""Runtime edge cases, both backends, literal expected output (Python semantics).
+"""Runtime edge cases at -O0 and -O2, literal expected output.
 
 Covers: Unicode simple and multi-char case mapping, replace with an empty pattern
 (which used to size its buffer with an overflowable product), and str() of an int.

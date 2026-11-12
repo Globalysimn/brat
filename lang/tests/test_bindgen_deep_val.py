@@ -224,7 +224,7 @@ def test_bindgen_and_inline_arrays():
     vf_dwarf = run_cli(["ffi", gen_brat, "--object", shlib])
     check(vf_dwarf.returncode == 0, "ffi DWARF failed: %r" % (vf_dwarf.stdout + vf_dwarf.stderr))
 
-    # End-to-end execution across native C AND `-O0` (`ctypes` marshaling of `Elem[N]` + nested struct + fn ptr)!
+    # End-to-end execution of the built binary and of `run -O0` (`Elem[N]`, a nested struct, a fn ptr).
     app = write("use_pkt.brat",
                 "import pkt_gen\n"
                 "fn mul_add(a: i32, b: i32) -> i32 { return a * b + 1 }\n"
@@ -313,7 +313,7 @@ def test_iterative_walkers_and_tsan():
           "deep_iter ASan+LSan failed: rc=%d out=%r err=%r"
           % (rn_asan.returncode, rn_asan.stdout, rn_asan.stderr))
     check(ri_deep.returncode == 0 and ri_deep.stdout == want_deep,
-          "deep_iter -O0 (depth=1500 > Python 1000 limit) failed: rc=%d out=%r err=%r"
+          "deep_iter -O0 (depth=1500) failed: rc=%d out=%r err=%r"
           % (ri_deep.returncode, ri_deep.stdout, ri_deep.stderr))
 
     # 2. ThreadSanitizer (`-fsanitize=thread`) concurrency regression suite:

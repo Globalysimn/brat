@@ -85,7 +85,7 @@ def main():
     with open(path, "w", encoding="utf-8") as f:
         f.write(PROGRAM.replace("LIB", lib))
 
-    # 1. The -O0 build: ctypes c_float in, out, and inside a struct.
+    # 1. The -O0 build: f32 in, out, and inside a struct.
     p = subprocess.run(_cxx.cli_args("run", "-O0", "--unsafe-ffi", path),
                        capture_output=True, text=True, timeout=300)
     check(p.returncode == 0, "run_o0 rc=%d: %s" % (p.returncode, (p.stdout + p.stderr)[-600:]))

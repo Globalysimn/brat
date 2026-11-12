@@ -37,7 +37,7 @@ CASES = {
                   '  }\n'
                   '  return 0\n'
                   '}',
-    # A refused name is an err value; its repr must match Python.
+    # A refused name is an err value; its repr is pinned here.
     'env_secret': 'fn main() -> i64 {\n'
                   '  print(env_get("MY_SECRET"))\n'
                   '  return 0\n'

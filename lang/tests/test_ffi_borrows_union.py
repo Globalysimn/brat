@@ -5,13 +5,13 @@ Covers:
   - `borrows(p)` FFI provenance effect (L4 foreign pointer lifetimes
     without `'a`), NLL borrow checking, use-after-free / free-of-view /
     escaping-return / `ptr_offset` / cross-module `pub extern` enforcement, and
-    contradictory declaration refusals across both Python & C++ front ends.
+    contradictory declaration refusals.
   - `brat_plugin_abi_v1` table in `--shared` builds + runtime
     `call(sym, sig, ...)` ABI verification in both `-O0` and native `crt.h`.
   - `extern union` + C11 anonymous/named inline `union` & `struct`
     across `bindgen`, `ffi` (`--header`, DWARF `--object`, L5 `--abi-matrix`,
-    `verify --bin` `BRATFFI1`), Python/C++ AST parity, identical C through
-    the CLI and native CLI doors, and runtime.
+    `verify --bin` `BRATFFI1`), identical C through both CLI doors, and
+    runtime.
   - `KNOWN_LEAKS == set()`, ASan/LSan/UBSan + TSan cleanliness, and
     mock `-D_WIN32 -Wall -Wextra -Werror` `crt.h` header hygiene.
 """
@@ -168,7 +168,7 @@ export fn scale_f64(x: f64, k: i64) -> f64 { return x * k }
 export fn passthru(p: ptr) -> ptr { return p }
 fn main() -> i32 { return 0 }
 """)
-    # Byte-for-byte Python-CLI/native-CLI output + warning cleanliness.
+    # Byte-for-byte output through both CLI doors + warning cleanliness.
     ec_py = subprocess.run(
         _cxx.cli_args("emit-c", plug_brat),
         capture_output=True, text=True, check=True,

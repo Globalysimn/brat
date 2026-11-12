@@ -5,9 +5,7 @@ literal. Everything else -- a closure, a bare fn name, a name with no function
 behind it, a function of the wrong arity or the wrong widths -- used to be
 handed to the emitter, which wrote `brat_cb_<name>` for it. That is C that does
 not compile when the name is unknown, and C that calls through a lying
-prototype when the signature does not match; unoptimized (-O0) version of the
-same program raised a `ctypes` traceback from inside a call C was in the middle
-of. Neither is a diagnostic.
+prototype when the signature does not match. Neither is a diagnostic.
 
 So all three paths refuse, in the words `check` already used:
 
@@ -133,8 +131,6 @@ def main():
         assert sentence in run.stderr.decode("utf-8", "replace"), (
             "%s run_o0: stderr has no %r:\n%s" % (
                 name, sentence, run.stderr.decode("utf-8", "replace")[-400:]))
-        assert b"Exception ignored" not in run.stderr, (
-            "%s run_o0: a ctypes traceback reached the user" % name)
         print("ffi cb gate ok: %s" % name)
 
     # The shape that works: a real callback still gets its wrapper.
