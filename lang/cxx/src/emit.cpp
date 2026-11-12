@@ -5367,7 +5367,7 @@ V Emitter::ex_parfor(const Expr &e) {
                           ", _cv); }"));
         pre.push_back(cat("Val ", m, " = vtagv(\"closure\", _cb", body_cb, ");"));
     }
-    const int opcode = fn_code("fn:" + e.b);
+    const int opcode = fn_code("fn:" + fn_key(e.b));
     pre.push_back(cat("Val ", opc, " = vclosure0(", opcode, ");"));
     std::string t = new_tmp("pf");
     pre.push_back(cat("Val ", t, " = vparfor(", it.val, ", ", m, ", ", unit.val,

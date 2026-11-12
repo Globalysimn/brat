@@ -118,6 +118,7 @@ CLOSURE_EXPECTED = ("capture-value-alphacapture-value-betacapture-value-gamma\n7
 # accepted as a callback. `pick` is emitted from a copy of its body: the inner
 # `r` is renamed there and `p` is split into its fields.
 # The result of a nested call was never released: `pair` and `down`.
+# `par for` took its operation by bare name, which no nested fn has: `add`.
 NESTED_SOURCE = '''struct P { x: i64 }
 impl P {
   fn twice(self) -> i64 {
@@ -184,11 +185,17 @@ fn main() -> i64 {
   }
   print(ch.recv())
   print(boxed(1))
+  fn add(x: i64, y: i64) -> i64 { return x + y }
+  let nums = [1, 2, 3]
+  let folded = par for n in nums reduce(add, 0) {
+    return n * 2
+  }
+  print(folded)
   return 0
 }
 '''
 NESTED_EXPECTED = ("in a in b top\nthen else\ntrue [2, 3] 8 6\n" +
-                   "2 true ['end']\n" * 4 + "job 1\n[1, 2]\n")
+                   "2 true ['end']\n" * 4 + "job 1\n[1, 2]\n12\n")
 # What the emitter refuses, with the line of the declaration. In a closure or
 # a spawn the local is a captured name, not a slot of the C frame. The checker
 # reports each of these first, so the emitter is reached with `--no-check`.
