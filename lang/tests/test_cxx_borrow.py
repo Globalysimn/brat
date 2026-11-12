@@ -68,6 +68,10 @@ OWNERSHIP = {
     'nested_scope.brat': ('fn a() -> i64 {\n  fn inner() -> i64 { return 1 }\n'
                           '  let g = fn() { return inner() }\n  return inner() + g()\n}\n'
                           'fn b() -> i64 {\n  return inner()\n}\n'),
+    'nested_modes.brat': ('fn helper(move v: vec[i64]) -> i64 {\n  return len(v)\n}\n'
+                          'fn a() -> i64 {\n  fn helper(v: vec[i64]) -> i64 {\n    return len(v)\n  }\n'
+                          '  let xs = [1]\n  let n = helper(xs)\n  return n + len(xs)\n}\n'
+                          'fn b() -> i64 {\n  let ys = [1, 2]\n  let n = helper(ys)\n  return n + len(ys)\n}\n'),
     'owned_move.brat': 'fn f(v: move vec[i64]) -> i64 {\n  let owned = move v\n  return len(owned)\n}\n',
     'mut_self.brat': 'impl Point {\n  fn bump(mut self) -> i64 {\n    return 0\n  }\n}\nfn f() -> i64 {\n  let p = Point { x: 1 }\n  print(p.bump())\n  return 0\n}\n',
     'mut_while_borrowed.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let a = v\n  v.push(1)\n  return len(a)\n}\n',
@@ -276,6 +280,11 @@ EXPECT = {
         'nested_capture.brat: note: help: `a` belongs to the enclosing fn, and a nested fn does not capture: take it as a parameter, or bind a closure with `let name = fn(...) { ... }`',
         'nested_capture.brat:6: error: use of undeclared var `a`',
         'nested_capture.brat: note: help: `a` belongs to the enclosing fn, and a nested fn does not capture: take it as a parameter, or bind a closure with `let name = fn(...) { ... }`',
+    ],
+    'nested_modes.brat': [
+        'nested_modes.brat: 1 error(s), 0 warning(s)',
+        'nested_modes.brat:15: error: use of moved `ys` (hint: the value was moved; use a copy or re-bind)',
+        'nested_modes.brat:14: note: `ys` moved here',
     ],
     'nested_scope.brat': [
         'nested_scope.brat: 1 error(s), 0 warning(s)',

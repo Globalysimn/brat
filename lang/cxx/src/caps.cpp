@@ -940,6 +940,17 @@ void one_body(const View &stmts, const std::vector<Param> &params,
     for (BorrowDiag &d : walk.out) out.push_back(std::move(d));
 }
 
+// The modes a call resolves to inside `f`: a fn declared there hides a
+// top-level fn of the same name.
+std::map<std::string, std::vector<Mode>> modes_inside(
+    const FnDecl &f, std::map<std::string, std::vector<Mode>> modes) {
+    std::vector<const Stmt *> nested;
+    nested_fns(f.body, nested);
+    for (const Stmt *n : nested)
+        if (n->fns[0].name) modes[*n->fns[0].name] = modes_of(n->fns[0]);
+    return modes;
+}
+
 }  // namespace
 
 std::vector<BorrowDiag> cap_verdicts(
@@ -975,13 +986,14 @@ std::vector<BorrowDiag> cap_verdicts(
         while (node->k == SK::Pub && !node->body.empty()) node = node->body[0].get();
         if ((node->k == SK::Fn || node->k == SK::ExportFn) && !node->fns.empty()) {
             const FnDecl &f = node->fns[0];
-            one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out);
+            one_body(view(f.body), f.params, modes_inside(f, modes), struct_fields, fn_rets, out);
             continue;
         }
         if (is_decl_stmt(node->k)) {
             if (node->k == SK::Impl) {
                 for (const FnDecl &f : node->fns) {
-                    one_body(view(f.body), f.params, modes, struct_fields, fn_rets, out, node->a);
+                    one_body(view(f.body), f.params, modes_inside(f, modes), struct_fields,
+                             fn_rets, out, node->a);
                 }
             }
             continue;

@@ -2117,9 +2117,6 @@ void walk_set(const std::string &path, const Expr *value, Decls &decl, Borrows &
     }
 }
 
-// Every `fn` statement in a body, at any depth, in source order.
-static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out);
-
 // A fn declared inside `f` is a name in `f` and in the fns nested in it, and
 // in no other function. A top-level fn of the same name is put back on exit.
 struct NestedScope {
@@ -2821,13 +2818,13 @@ static void nested_fns_stmt(const Stmt &s, std::vector<const Stmt *> &out) {
     for (const FnDecl &f : s.fns) nested_fns(f.body, out);
 }
 
-static void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out) {
+}  // namespace
+
+void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out) {
     for (const auto &sp : body) {
         if (sp) nested_fns_stmt(*sp, out);
     }
 }
-
-}  // namespace
 
 
 static std::vector<size_t> extern_borrows_indices(const ExternDecl &ext) {

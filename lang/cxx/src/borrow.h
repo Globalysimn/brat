@@ -62,6 +62,9 @@ struct BorrowOut {
 FnTable pub_sigs(const std::vector<StmtP> &body,
                  const std::set<std::string> &exp_fns = {});
 
+// Every `fn` statement in a body, at any depth, in source order.
+void nested_fns(const std::vector<StmtP> &body, std::vector<const Stmt *> &out);
+
 // `stray` is what the parser kept as literal `{...}` text for this file.
 BorrowOut borrow_check(const std::vector<StmtP> &body,
                        const std::map<std::string, std::vector<ParamMode>> &extra,
