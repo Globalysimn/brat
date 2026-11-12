@@ -456,9 +456,10 @@ BFN const char *vfmt_double(double x) {
         int ok = 0;
         if (_bstrtod_c(b, strlen(b), &ok) == x && ok) break;
     }
-    /* repr()'s fixed range, exactly: zero and [1e-4, 1e16). */
+    /* repr()'s fixed range, exactly: zero and [1e-4, 1e16). Seventeen digits
+       of 1e-4 end at the twentieth place after the point. */
     if (x == 0.0 || (fabs(x) >= 1e-4 && fabs(x) < 1e16)) {
-        for (p = 0; p <= 17; p++) {
+        for (p = 0; p <= 20; p++) {
             snprintf(b, 48, "%.*f", p, x);
 #if defined(_WIN32)
             const char *dp = localeconv()->decimal_point;

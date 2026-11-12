@@ -135,6 +135,17 @@ print(f(0))
   return 0
 }
 """, "true\nfalse\ntrue\ntrue\ntrue\ntrue\n[2, 1152921504606846976, 1152921504606846977]\n"),
+    # A float below 0.1 can need all seventeen digits, and they start after the
+    # leading zeros. Printing gave up at seventeen places after the point, so
+    # `x` came out two digits short and its text read back as another number.
+    "small_float_reads_back": ("""fn main() -> i64 {
+  let x = 0.0011111111111111111
+  print(x)
+  print(unwrap(str(x).parse_float()) == x)
+  print(0.00012345678901234567, 0.012345678901234567, 0.1, 0.0001)
+  return 0
+}
+""", "0.0011111111111111111\ntrue\n0.00012345678901234567 0.012345678901234567 0.1 0.0001\n"),
 }
 
 
