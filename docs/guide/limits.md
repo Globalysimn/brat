@@ -276,17 +276,21 @@ no key [1]
 
 ## UTF-8 code-point strings and raw OS bytes
 
-`len(s)`, `s[i]`, `s.slice(a, b)` and `s.chars()` count Unicode scalar values
-(code points), not UTF-8 bytes and not extended grapheme clusters. NUL bytes are
-rejected in string literals and across FFI string boundaries. For non-UTF-8 OS
-arguments, environment variables or paths, use `args_bytes()`, `env_get_bytes()`
-and byte-vector paths in `read_file`/`write_file`/`sql_open`/`proc_run`:
+`len(s)`, `s[i]`, `s.slice(a, b)`, `s.chars()` and `for ch in s` count Unicode
+scalar values (code points), not UTF-8 bytes and not extended grapheme clusters.
+NUL bytes are rejected in string literals and across FFI string boundaries. For
+non-UTF-8 OS arguments, environment variables or paths, use `args_bytes()`,
+`env_get_bytes()` and byte-vector paths in
+`read_file`/`write_file`/`sql_open`/`proc_run`:
 
 ```brat run
 fn main() -> i64 {
   let s = "héllo"
   print(len(s))
   print(s[1])
+  for ch in "né" {
+    print(ch)
+  }
   print(s.upper())
   print("ß".upper())
   return 0
@@ -295,6 +299,8 @@ fn main() -> i64 {
 
 ```output
 5
+é
+n
 é
 HÉLLO
 SS
