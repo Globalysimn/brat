@@ -488,6 +488,8 @@ std::string format_source_canonical(std::string_view raw_src) {
         }
         out.push_back(std::string(static_cast<size_t>(line_indent) * 2, ' ') + norm);
         advance_indent_line(norm, in_str, raw_str, in_blk, indent_stack);
+        // The blanks at the end of a line that stays inside a string literal belong to it.
+        if (in_str) out.back() += raw.substr(raw.find_last_not_of(" \t\n\v\f\r") + 1);
     }
     while (!out.empty() && out.back().empty()) out.pop_back();
     std::string res;

@@ -7,6 +7,8 @@ Each case is a defect that was found by driving the CLI, not by reading it:
     at a directory that does not exist, so `read_file` looked in the wrong place;
   * a string literal that spans lines used to be re-indented by `brat fmt`, which
     rewrote the literal's own bytes and changed what the program prints;
+  * a line that ends inside a string literal lost its trailing blanks to
+    `brat fmt`, and with them part of the string;
   * a source file that is not UTF-8 used to crash `run`/`emit-c`/`fmt` while
     `check` answered `0 type error(s)`;
   * the NUL-in-literal diagnostic pointed at the line after the literal;
@@ -106,6 +108,24 @@ after_text = open(fmt_src, encoding="utf-8").read()
 after = run(CLI + ["run", "-O0", fmt_src]).stdout
 ok("fmt_multiline_literal", rf.returncode == 0 and before == after and before == b"5\na\n  b\n",
    "rc=%d before=%r after=%r text=%r" % (rf.returncode, before, after, after_text))
+
+# and so are the blanks at the end of a line that stays inside the literal
+BLANKS = ('fn main() -> i64 {\n'
+          '  let s = "a  \n'
+          'b"\n'
+          '  print(len(s))\n'
+          '  return 0\n'
+          '}\n')
+for label, text, want in (("blanks", BLANKS, b"5\n"),):
+    path = os.path.join(TMP, label + ".brat")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    rc = run(CLI + ["fmt", "--check", path])
+    before = run(CLI + ["run", "-O0", path]).stdout
+    run(CLI + ["fmt", path])
+    after = run(CLI + ["run", "-O0", path]).stdout
+    ok("fmt_%s_inside_literal" % label, rc.returncode == 0 and before == after == want,
+       "check rc=%d before=%r after=%r" % (rc.returncode, before, after))
 
 BAD = os.path.join(TMP, "bad8.brat")
 with open(BAD, "wb") as f:
