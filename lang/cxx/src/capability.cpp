@@ -676,6 +676,12 @@ void cycles(const View &body, std::vector<BorrowDiag> &out, Owner &own,
             std::string rc = ed.c_override.empty() ? root(ed.c_expr) : ed.c_override;
             std::string rv = root(ed.v_expr);
             if (rc.empty() || rv.empty()) continue;
+            // `x[i] = x[j]` and `x.next = x.next.next`: what sits below `x`
+            // already cannot come to hold `x` by moving up to it.
+            if ((s->k == SK::SetIdx || s->k == SK::SetField) && ed.c_expr &&
+                ed.c_expr == s->e1.get() && ed.c_expr->k == EK::Var && rc == rv &&
+                is_nested_place(ed.v_expr))
+                continue;
             if (vars.count(rv) && is_acyclic_type(vars.at(rv), acyc)) continue;
             rc = resolve(rc, alias);
             rv = resolve(rv, alias);

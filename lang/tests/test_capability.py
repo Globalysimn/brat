@@ -105,6 +105,25 @@ CASES = {
   return 0
 }
 ''', None, "2\n"),
+    # an element stored back into its own container was below it already
+    "elem_into_own_container": ('''fn main() -> i64 {
+  let mut rows = [[1], [2], [3]]
+  rows[0] = rows[2]
+  let mut m = {"a": [1]}
+  m["b"] = m["a"]
+  let mut list = Node { val: 1, next: Node { val: 2, next: Node { val: 3, next: None } } }
+  list.next = list.next.next
+  print(rows, m, list.next.val)
+  return 0
+}
+''', None, "[[3], [2], [3]] {'a': [1], 'b': [1]} 3\n"),
+    # into a sibling is different: the element may already hold that sibling
+    "elem_into_sibling": ('''fn main() -> i64 {
+  let mut rows = [[1], [2]]
+  rows[0].push(rows[1])
+  return 0
+}
+''', CYCLE, ""),
 
     # a write inside spawn, read by the parent with no join in between
     "spawn_write_no_join": ('''fn main() -> i64 {
