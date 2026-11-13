@@ -221,4 +221,14 @@ if NATIVE:
 else:
     print("mandate skip: no brat-cxx here, the native run path is not exercised")
 
+# 8. The gate reads the file the compiler read
+# A `\r` does not end a comment for the lexer, so what follows one inside a
+# comment is no code. A reader that takes it for a line end finds code that does
+# not parse and leaves the module out of the gate.
+hidden = write("hidden.brat", "// note\r ) ) garbage\n" + CALLS_C)
+for cmd, extra in COMMANDS:
+    r = cli(cmd, hidden, *extra)
+    check(r.returncode != 0 and REFUSAL in r.stdout + r.stderr,
+          "%s: a `\\r` in a comment hid the declaration from the gate: %r" % (cmd, r.stdout + r.stderr))
+
 print("FFI MANDATE ALL GREEN (%d asserts)" % n)

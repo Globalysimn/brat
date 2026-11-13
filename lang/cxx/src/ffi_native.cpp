@@ -2432,12 +2432,9 @@ int ffi_gate(const std::string &entry_path,
     fs::path abs_entry = fs::weakly_canonical(fs::path(entry_path));
 
     for (const auto &[mpath, msrc] : module_sources) {
-        std::vector<StmtP> mbody;
-        try {
-            mbody = parse(norm_lf(msrc)).body;
-        } catch (...) {
-            continue;
-        }
+        // The text the loader parsed. A `\r` does not end a comment for the lexer, so a
+        // normalised copy can fail to parse and the module's externs would go unchecked.
+        const std::vector<StmtP> mbody = parse(msrc).body;
         auto msurf = extract_surface(mbody);
         if (msurf.structs.empty() && msurf.fns.empty() && !msurf.has_dynamic_plugin_call) continue;
         has_any_ffi = true;
