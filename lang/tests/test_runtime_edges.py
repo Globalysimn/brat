@@ -1,7 +1,8 @@
 """Runtime edge cases at -O0 and -O2, literal expected output.
 
 Covers: Unicode simple and multi-char case mapping, replace with an empty pattern
-(which used to size its buffer with an overflowable product), and str() of an int.
+(which used to size its buffer with an overflowable product), str() of an int, and
+`for` over a string, which walks code points and used to raise "not iterable".
 """
 import _cxx
 import _scratch
@@ -25,6 +26,18 @@ SRC = r'''fn main() -> i64 {
     print("abc".replace("", ""))
     print("a-b-c".replace("-", "::"))
     print(str(42) + "!")
+    let word = "añb"
+    let mut seen = ""
+    for ch in word {
+        if ch == "b" {
+            break
+        }
+        seen = ch + seen
+    }
+    print(seen)
+    for ch in word.upper() {
+        print(ch)
+    }
     return 0;
 }
 '''
@@ -43,6 +56,10 @@ WANT = (
     "abc\n"
     "a::b::c\n"
     "42!\n"
+    "ña\n"
+    "A\n"
+    "Ñ\n"
+    "B\n"
 ).encode("utf-8")
 
 
@@ -58,7 +75,7 @@ def main():
     assert b.returncode == 0, "build failed:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
-    print("EDGES ALL GREEN (13 lines, -O0 and -O2)")
+    print("EDGES ALL GREEN (17 lines, -O0 and -O2)")
 
 
 if __name__ == "__main__":

@@ -308,13 +308,16 @@ BFN Val vslice_set(Val s, Val i, Val v) {
     return vint(0);
 }
 
-/* A `for` over a map iterates a fresh vector of its keys; over a vec it walks
- * the vec itself. The loop releases only what it built. */
+/* A `for` over a map iterates a fresh vector of its keys and over a string a
+ * fresh vector of its characters; over a vec it walks the vec itself. The loop
+ * releases only what it built. */
+BFN Val vchars(Val s);
 BFN void viter_done(Val src, Vec *it) {
     if (src.tag != V_VEC && it) vrc_dec(vvecv(it));
 }
 BFN Vec *viter_vec(Val v) {
     if (v.tag == V_VEC) return v.as.vec;
+    if (v.tag == V_STR) return vchars(v).as.vec;
     if (v.tag == V_STRUCT) {
         if (vclosure_env_map(v.as.map)) { vraise("not iterable"); return NULL; }
         Vec *o = vvec();
