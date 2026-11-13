@@ -1003,7 +1003,7 @@ static int native_pkg_verify(const std::string &target) {
             std::fprintf(stderr, "brat pkg: %s has no valid URL\n", label.c_str());
             return 1;
         }
-        const uint32_t sha_node = is_archive ? tape.get(item_node, "sha256") : tape.get(item_node, "sha256");
+        const uint32_t sha_node = tape.get(item_node, "sha256");
         if (!tape.is_string(sha_node) || !native_lower_hex_sha(tape.str_view(sha_node))) {
             std::fprintf(stderr, "brat pkg: %s has no valid SHA-256\n", label.c_str());
             return 1;
