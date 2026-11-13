@@ -302,11 +302,6 @@ static bool path_is_within(const std::filesystem::path &child, const std::filesy
     return true;
 }
 
-static bool mcp_unconfined_enabled() {
-    const char *ev = std::getenv("BRAT_MCP_UNCONFINED");
-    return ev && (std::strcmp(ev, "1") == 0 || std::strcmp(ev, "true") == 0 || std::strcmp(ev, "yes") == 0);
-}
-
 static bool is_protected_source_ext(std::string ext) {
     for (char &c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     static const char *const kProtected[] = {
@@ -422,7 +417,7 @@ static ToolResult invoke_tool(std::string_view name, const lsp_wire::LspJsonTape
                 return {"`out` must not overwrite input source file", true};
             if (explicit_out && is_protected_source_ext(out_fs.extension().string()))
                 return {"refusing to overwrite source or config file extension: " + out_path, true};
-            if (explicit_out && !mcp_unconfined_enabled()) {
+            if (explicit_out) {
                 auto src_dir = std::filesystem::weakly_canonical(std::filesystem::path(path).parent_path(), ec);
                 auto cwd_dir = std::filesystem::weakly_canonical(std::filesystem::current_path(ec), ec);
                 // Walk up from src_dir to nearest ancestor with brat.lock if any.

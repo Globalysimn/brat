@@ -28,11 +28,11 @@ def pythonless_env(directory):
 
 
 class Client:
-    def __init__(self, binary, env, jsonl=False):
+    def __init__(self, binary, env, jsonl=False, cwd=None):
         self.jsonl = jsonl
         self.proc = subprocess.Popen([binary, "mcp"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                     env=env)
+                                     env=env, cwd=cwd)
         self.next_id = 1
 
     def send(self, payload):
@@ -119,6 +119,18 @@ def main():
         build_payload = json.loads(built["content"][0]["text"])
         assert not built["isError"] and build_payload["binary"] == built_path
         assert os.path.isfile(built_path)
+
+        # `out` stays inside the project or the working directory, whatever the environment says.
+        elsewhere = tempfile.mkdtemp(prefix="brat-mcp-out-")
+        escape = os.path.join(elsewhere, "escape.exe")
+        for extra in ({}, {"BRAT_MCP_UNCONFINED": "1"}):
+            fenced = Client(binary, dict(env, **extra), cwd=td)
+            fenced.request("initialize")
+            refused = call(fenced, "brat_build", {"path": source, "out": escape})
+            assert refused["isError"] and "outside" in refused["content"][0]["text"], refused
+            assert not os.path.exists(escape)
+            fenced.close()
+        os.rmdir(elsewhere)
 
         module = os.path.join(td, "shapes.brat")
         with open(module, "w", encoding="utf-8") as f:
