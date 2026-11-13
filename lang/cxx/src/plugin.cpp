@@ -226,6 +226,10 @@ std::string c_type(const std::optional<std::string> &ann) {
     return c_type_str(ann ? *ann : "");
 }
 
+std::string c_ret(const std::optional<std::string> &ann) {
+    return ann && !ann->empty() ? c_type_str(*ann) : "none";
+}
+
 struct ParsedSig {
     std::string ret;
     std::vector<std::string> params;
@@ -930,7 +934,7 @@ std::vector<BorrowDiag> plugin_check(const std::vector<StmtP> &body) {
                         d.params.push_back(c_type(p.ann));
                         d.pmoves.push_back(p.mode == Mode::Move);
                     }
-                    d.ret = c_type(node->ext.ret);
+                    d.ret = c_ret(node->ext.ret);
                     d.ret_owned = node->ext.owned;
                     decls[node->ext.name] = d;
                     continue;
@@ -955,7 +959,7 @@ std::vector<BorrowDiag> plugin_check(const std::vector<StmtP> &body) {
                             d.params.push_back(c_type(p.ann));
                             d.pmoves.push_back(p.mode == Mode::Move);
                         }
-                        d.ret = c_type(f.ret);
+                        d.ret = c_ret(f.ret);
                         decls[fname] = d;
                     }
                     bodies.push_back({view(f.body), std::move(init_muts)});

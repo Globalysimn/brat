@@ -213,6 +213,25 @@ r = subprocess.run(_cxx.cli_args("check", good), capture_output=True,
                    text=True, timeout=120, env=env)
 check(r.returncode == 0, "sig_ok check: %r" % (r.stdout + r.stderr))
 
+# A declaration without `->` is a void function, so the signature must say `none`.
+VOID = '''
+extern fn poke(p: ptr, v: i64)
+fn main() -> i64 {
+  let h = lib_open("%s")
+  let poke = lib_sym(h, "poke")
+  call(poke, "%s", 0, 1)
+  lib_close(h)
+  return 0
+}
+'''
+
+static_fail("sig_void_ret", VOID % (LIB, "i64(ptr,i64)"),
+            "call: `poke` returns none, the signature says i64")
+good = write("sig_void_ok.brat", VOID % (LIB, "none(ptr,i64)"))
+r = subprocess.run(_cxx.cli_args("check", good), capture_output=True,
+                   text=True, timeout=120, env=env)
+check(r.returncode == 0, "sig_void_ok check: %r" % (r.stdout + r.stderr))
+
 # The runtime keeps its own guard for a handle the checker cannot follow: here
 # it arrives as a parameter, so no `lib_open` is visible at the close.
 runtime_fail("untracked_close", '''
