@@ -337,8 +337,8 @@ void pat(const Pat &p, std::string &o) {
 std::string repr_f64(double v) {
     // Canonical float formatting: fixed decimal inside [1e-4, 1e16), scientific
     // notation outside that range, always keeping a `.0` suffix on whole floats;
-    // `1e-320`, not `1.0e-320`. Checked against 60 000 doubles, including
-    // subnormals: identical on every one.
+    // `1e-320`, not `1.0e-320`. test_f64_semantics.py reads 3000 doubles back,
+    // subnormals included.
     if (v != v) return "NAN";                                  // vfloat(inf) is not C
     if (std::isinf(v)) return v > 0 ? "INFINITY" : "-INFINITY";
     bool neg = std::signbit(v);

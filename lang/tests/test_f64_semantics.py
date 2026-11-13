@@ -16,6 +16,9 @@ Every case is checked against its expected output at -O0 and -O2.
 import _cxx
 import _scratch
 import os
+import random
+import re
+import struct
 import subprocess
 import sys
 
@@ -185,6 +188,33 @@ def main():
     if "10000000000.0" not in c.stdout:
         print("FAIL literal_shape: the emitted C has no float literal for 1e10")
         bad += 1
+
+    # Every float literal reaches the C through `repr_f64`, and the C compiler
+    # must read back the same double: the boundaries, then random bit patterns
+    # with the subnormals among them.
+    rng = random.Random(7)
+    doubles = [5e-324, 1e-320, 2.2250738585072014e-308, 1.7976931348623157e308, 1e16, 1e15,
+               9999999999999998.0, 0.0001, 0.00009999999999999999, 0.1, 123456789.125]
+    while len(doubles) < 3000:
+        v = struct.unpack("<d", struct.pack("<Q", rng.getrandbits(63)))[0]
+        if v == v and v != float("inf"):
+            doubles.append(v)
+    path = os.path.join(TMP, "literal_roundtrip.brat")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("fn main() -> i64 {\n  let xs = [%s]\n  print(len(xs))\n  return 0\n}\n"
+                % ", ".join(repr(v) for v in doubles))
+    c = run(_cxx.cli_args("emit-c", path))
+    lits = re.findall(r"vec_push\(\w+, vfloat\(([^()]*)\)\);", c.stdout)
+    if len(lits) != len(doubles):
+        print("FAIL literal_roundtrip: %d literals in the C, want %d: %s"
+              % (len(lits), len(doubles), (c.stdout + c.stderr)[-300:]))
+        bad += 1
+    else:
+        wrong = [(t, v) for t, v in zip(lits, doubles) if float(t) != v]
+        if wrong:
+            print("FAIL literal_roundtrip: %d of %d literals read back as another double, first %r for %r"
+                  % (len(wrong), len(doubles), wrong[0][0], wrong[0][1]))
+            bad += 1
 
     if bad:
         print("F64 SEMANTICS: %d case(s) failed" % bad)
