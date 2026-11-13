@@ -182,7 +182,7 @@ check(not missing, "documentation names files that do not exist: %s" % (missing,
 cli_doc = open(os.path.join(ROOT, "docs", "guide", "cli.md"), encoding="utf-8").read()
 rows = re.findall(r"^\| `(brat [^`]+)` \|", cli_doc, re.M)
 check(rows, "cli.md has no command rows")
-UNKNOWN = re.compile(r"unknown (flag|option|command)")
+UNKNOWN = re.compile(r"unknown (flag|option|command|subcommand)")
 for row in rows:
     sub = row.split()[1]
     p = subprocess.run(_cxx.cli_args(sub, "--help"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
@@ -190,6 +190,21 @@ for row in rows:
     for flag in sorted(set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*|-[A-Za-z])(?![\w-])", row))):
         p = subprocess.run(_cxx.cli_args(sub, flag, "x"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
         check(not UNKNOWN.search(p.stdout + p.stderr), "cli.md documents `brat %s %s`, which it rejects" % (sub, flag))
+
+# Every `brat ...` command line in the documents takes the flags it is shown with.
+shapes = {}
+command = re.compile(r"(?:\./bin/brat|\./lang/cxx/bin/brat-cxx|brat-cxx|(?<![\w/.-])brat)\s+(%s)((?:\s+[^\s`|]+)*)"
+                     % "|".join(sorted(_cxx._CLI_SUBS, key=len, reverse=True)))
+for doc in DOCS:
+    for lineno, line in enumerate(open(doc, encoding="utf-8"), 1):
+        for m in command.finditer(line):
+            lead = (m.group(1),) + tuple(m.group(2).split()[:1] if m.group(1) == "pkg" else ())
+            for flag in re.findall(r"(?<![\w-])(--[a-z][\w-]*)", m.group(2)):
+                shapes.setdefault((lead, flag), "%s:%d" % (os.path.relpath(doc, ROOT), lineno))
+check(shapes, "no command line with a flag found in the documents")
+for (lead, flag), where in sorted(shapes.items()):
+    p = subprocess.run(_cxx.cli_args(*lead, flag, "x"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
+    check(not UNKNOWN.search(p.stdout + p.stderr), "%s shows `brat %s %s`, which is rejected" % (where, " ".join(lead), flag))
 
 # The environment variables the code reads are exactly the ones the reference lists.
 read = set()

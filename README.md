@@ -197,8 +197,9 @@ fn main() -> i64 {
 Type annotations are optional. Functions annotated with `i64`, `f64`, `bool`, or
 `vec[i64]`/`vec[f64]` compile to unboxed C scalar signatures alongside boxed
 wrappers for dynamic callers. At `-O2`, scalar replacement splits non-escaping
-local `struct` values into C locals (`--why-opt` prints which bindings were
-scalarized and which bounds or division checks were proved redundant). A
+local `struct` values into C locals (`brat-cxx cc -O2 --why-opt` prints which
+bindings were scalarized and which bounds or division checks were proved
+redundant). A
 feature bitmask (`BRAT_CRT_MASK`) strips unused runtime subsystems (HTTP, TLS,
 SQLite, regex, worker pool) before invoking the C compiler.
 

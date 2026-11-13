@@ -29,7 +29,7 @@ Performance tracks value representation (implementation details are in
 - Declared `struct` types use fixed declaration-order field slots, and `-O2`
   scalar replacement splits non-escaping local structs (including `.copy()`)
   into C locals (`0.141 s` vs `0.134 s` in `gcc -O2`; inspect with
-  `brat-cxx emit-c -O2 --why-opt`).
+  `brat-cxx cc -O2 --why-opt`).
 - Dynamic maps and strings use 16-byte `Val` tags with 14-byte inline SSO,
   in-place growth on unique (`rc == 1`) strings across `s = s + ...` (`0.031 s`
   for 200k appends), and inline caches on constant map keys (`0.020 s` for 100k
