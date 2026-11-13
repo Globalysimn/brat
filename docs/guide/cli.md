@@ -10,37 +10,39 @@ paths invoke the same binary and accept the same subcommands and flags.
 | Command | Purpose |
 |---|---|
 | `brat check [--json] <file.brat>` | Parse, load modules, check ownership (`borrow.cpp`) and types (`check.cpp`) without invoking a C compiler. `--json` emits machine-readable diagnostics (`code`, `severity`, `line`, `col`, `message`, `hint`, `fix`). |
-| `brat run [-O0\|-O1\|-O2] [-g\|--debug] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. |
-| `brat build [-O0\|-O1\|-O2] [-g\|--debug] [--shared] [--out-header out.h] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). `-g` / `--debug` emits C11 `#line` source maps and compiles with DWARF debug info pointing back to `.brat` files. |
+| `brat run [-O0\|-O1\|-O2] [-g\|--debug] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-- args...]` | Check, compile (using the content-addressed native cache), and execute immediately. Arguments after `--` become `args()` in the program. `--mem SIZE` (for example `16M` or `1G`) caps the address space of the program. |
+| `brat build [-O0\|-O1\|-O2] [-g\|--debug] [--static\|--dynamic] [--shared] [--link FLAG] [--target TRIPLE] [--trace-lines] [--mem SIZE] [FFI flags] <file.brat> [-o out]` | Emit C11 and compile a standalone native binary or `--shared` dynamic library (`brat_plugin_abi_v1`). `-g` / `--debug` emits C11 `#line` source maps and compiles with DWARF debug info pointing back to `.brat` files. |
+| `brat dist [--static\|--dynamic] [--shared] [--target TRIPLE[,TRIPLE...]] [FFI flags] <file.brat> [-o dir]` | Build the program once per target triple into `dir` (default `dist`). Takes the FFI flags of `build`. |
 | `brat emit-c [-O0\|-O1\|-O2] [-g\|--debug] [--trace-lines] <file.brat> [-o out.c]` | Write the generated C11 translation unit to `stdout` or `-o out.c` so you can read it or feed a custom build system. |
-| `brat repl` | Interactive read-eval-print loop with persistent bindings, definitions, and `:help` / `:quit`. |
+| `brat new <name> [--kind service\|tool]` | Create `<name>/main.brat` and `<name>/README.md` for a TCP service (default) or a command-line tool. Refuses a directory that exists. |
 
 ### C FFI verification and binding generation
 
 | Command | Purpose |
 |---|---|
 | `brat ffi [--json] [--preprocess] [-I dir] [-D K=V] [--target triple] [--abi-matrix] [--header h.h] [--object lib.o\|.a\|.so] <file.brat>` | Verify every `extern fn`, `extern struct`, and `extern union` in `<file.brat>` against C headers and/or compiled ELF/Mach-O/PE DWARF debug info. Without `--preprocess`, raw `#ifdef` directives in headers are rejected explicitly. |
-| `brat bindgen <header.h> [--preprocess] [-I dir] [-D K=V] [--target triple] [--link lib] [-o out.brat]` | Generate checked `.brat` `extern` declarations (plus an adjacent `.bratbind` SHA-256 verification manifest when `-o` is used) directly from a C header. |
+| `brat bindgen <header.h\|lib.rs> [--preprocess] [-I dir] [-D K=V] [--target triple] [--lib name] [--lang brat\|python\|go\|rust] [-o out]` | Generate checked `.brat` `extern` declarations (plus an adjacent `.bratbind` SHA-256 verification manifest when `-o` is used) directly from a C header or a Rust source. `--lang` writes the bindings of another language from the same header. |
 
 Build-time FFI flags accepted by `build` and `run`:
 
-- `--header <h.h>` (repeatable), `-I <dir>` / `-I<dir>`, `-D <macro>` / `-D<macro>`, `--target <triple>`
+- `--header <h.h>` (one header; a second `--header` replaces the first)
 - `--object <lib.o|.a|.so|.dylib|.dll>` (repeatable; inspects symbol tables + DWARF v2-v5 without `dlopen`)
-- `--abi-matrix` (probe struct layouts across LP64, LLP64, and ILP32 target widths)
 - `--unsafe-ffi` (explicit opt-out allowing unverified `extern` declarations to compile)
+
+`-I`, `-D`, `--target` and `--abi-matrix` are flags of `brat ffi`, and `brat bindgen` takes `-I`, `-D` and `--target`. `brat build` and `brat dist` take `--target`; `brat run` does not.
 
 ### Formatting, testing, packages, and introspection
 
 | Command | Purpose |
 |---|---|
-| `brat fmt [--check\|--write] <file.brat...>` | Canonical formatter. Prints formatted source by default, checks formatting in CI with `--check` (exit `1` on diff), or rewrites in place with `--write`. |
+| `brat fmt [--check\|--stdout] <file.brat...>` | Canonical formatter. Rewrites each file in place by default, prints the result with `--stdout`, and with `--check` exits `1` for a file that needs formatting. |
 | `brat test [-j N] [--filter substr] <file_or_dir...>` | Discover `test_*.brat` files recursively in directories (or run explicit paths) in parallel and report pass/fail counts. |
 | `brat pkg <add\|install\|verify\|list\|update\|publish>` | Vendored `.tar.gz` package manager backed by `brat.lock` and `./vendor/`. See [Modules & `pkg`](modules.md). |
 | `brat deps [--dot\|--json] [-o out] <file.brat>` | Inspect the transitive import graph as text, Graphviz DOT, or JSON. |
 | `brat api [--json] <file.brat>` | Extract the public `.bri` interface signature of a module. |
 | `brat api --diff [--json] <old.bri> <new.bri>` | Compare two interfaces and classify the change as `none`, `minor`, or `major` (exits non-zero on `major`). |
 | `brat doc [-o out.md\|out.html] <file.brat>` | Render Markdown or standalone HTML API documentation from module signatures and doc comments. |
-| `brat bundle <file.brat> -o <out.tar.gz>` | Pack `<file.brat>`, all transitive local/vendored `.brat`/`.bri` imports, `crt.h`, and `crt/*.h` into a self-contained tarball buildable anywhere with a C11 compiler. |
+| `brat bundle <out_dir>` | Copy this compiler, the runtime headers (`crt.h`, `crt/*.h`), `lang/std` and a `bin/brat` launcher into the new directory `<out_dir>`. |
 | `brat explain [--json] <code>` | Print a worked explanation and fix example for diagnostic code `<code>` (listed below). |
 | `brat lsp` | Start the JSON-RPC 2.0 Language Server on `stdio` (diagnostics, hover, go-to-definition, completions, formatting, code actions). |
 | `brat mcp` | Start the Model Context Protocol tool server on `stdio`. |

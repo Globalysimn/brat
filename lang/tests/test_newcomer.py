@@ -173,4 +173,18 @@ for doc in DOCS:
                 missing.append("%s -> %s" % (os.path.relpath(doc, ROOT), name))
 check(not missing, "documentation names tests that do not exist: %s" % (missing,))
 
+# Every command row of the CLI reference names a command the binary has, and
+# every flag in the row is one that command accepts.
+cli_doc = open(os.path.join(ROOT, "docs", "guide", "cli.md"), encoding="utf-8").read()
+rows = re.findall(r"^\| `(brat [^`]+)` \|", cli_doc, re.M)
+check(rows, "cli.md has no command rows")
+UNKNOWN = re.compile(r"unknown (flag|option|command)")
+for row in rows:
+    sub = row.split()[1]
+    p = subprocess.run(_cxx.cli_args(sub, "--help"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
+    check(not UNKNOWN.search(p.stdout + p.stderr), "cli.md documents `brat %s`, which does not exist" % sub)
+    for flag in sorted(set(re.findall(r"(?<![\w-])(--[a-z][a-z-]*|-[A-Za-z])(?![\w-])", row))):
+        p = subprocess.run(_cxx.cli_args(sub, flag, "x"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
+        check(not UNKNOWN.search(p.stdout + p.stderr), "cli.md documents `brat %s %s`, which it rejects" % (sub, flag))
+
 print("NEWCOMER ALL GREEN (%d asserts)" % n)
