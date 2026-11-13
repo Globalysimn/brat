@@ -425,26 +425,18 @@ static std::string trim_ws(std::string_view s) {
 
 std::string format_source_canonical(std::string_view raw_src) {
     if (raw_src.empty()) return {};
-    std::string norm_nl;
-    norm_nl.reserve(raw_src.size());
-    for (size_t i = 0; i < raw_src.size(); ++i) {
-        if (raw_src[i] == '\r') {
-            if (i + 1 < raw_src.size() && raw_src[i + 1] == '\n') continue;
-            norm_nl.push_back('\n');
-        } else {
-            norm_nl.push_back(raw_src[i]);
-        }
-    }
+    // A `\r` is a blank outside a string and part of the string inside one, so the
+    // line ends are not rewritten up front: the trimming below drops it where it is a blank.
     std::vector<std::string> lines;
     {
         size_t pos = 0;
-        while (pos < norm_nl.size()) {
-            size_t nl = norm_nl.find('\n', pos);
+        while (pos < raw_src.size()) {
+            size_t nl = raw_src.find('\n', pos);
             if (nl == std::string::npos) {
-                lines.push_back(norm_nl.substr(pos));
+                lines.emplace_back(raw_src.substr(pos));
                 break;
             }
-            lines.push_back(norm_nl.substr(pos, nl - pos));
+            lines.emplace_back(raw_src.substr(pos, nl - pos));
             pos = nl + 1;
         }
     }

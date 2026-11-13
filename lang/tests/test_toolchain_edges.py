@@ -8,8 +8,8 @@ Each case is a defect that was found by driving the CLI, not by reading it:
   * a string literal that spans lines used to be re-indented by `brat fmt`, which
     rewrote the literal's own bytes and changed what the program prints;
   * `brat fmt` rewrote the inside of a string in a few more shapes: the blanks
-    at the end of a line that stays in the literal, and a string nested in a
-    `{...}` placeholder, whose `=` it spaced;
+    at the end of a line that stays in the literal, a `\r` in it, and a string
+    nested in a `{...}` placeholder, whose `=` it spaced;
   * a source file that is not UTF-8 used to crash `run`/`emit-c`/`fmt` while
     `check` answered `0 type error(s)`;
   * the NUL-in-literal diagnostic pointed at the line after the literal;
@@ -126,15 +126,22 @@ BLANKS = ('fn main() -> i64 {\n'
           '  print(len(s))\n'
           '  return 0\n'
           '}\n')
-for label, text, want in (("blanks", BLANKS, b"5\n"), ("placeholder", NESTED, b"v: <a=b>\n")):
+CRLF = ('fn main() -> i64 {\r\n'
+        '  let s = "a\r\n'
+        'b"\r\n'
+        '  print(len(s))\r\n'
+        '  return 0\r\n'
+        '}\r\n')
+for label, text, want in (("blanks", BLANKS, b"5\n"), ("placeholder", NESTED, b"v: <a=b>\n"),
+                          ("crlf", CRLF, b"4\n")):
     path = os.path.join(TMP, label + ".brat")
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     rc = run(CLI + ["fmt", "--check", path])
     before = run(CLI + ["run", "-O0", path]).stdout
     run(CLI + ["fmt", path])
     after = run(CLI + ["run", "-O0", path]).stdout
-    ok("fmt_%s_inside_literal" % label, rc.returncode == 0 and before == after == want,
+    ok("fmt_%s_inside_literal" % label, (rc.returncode == 0) == (label != "crlf") and before == after == want,
        "check rc=%d before=%r after=%r" % (rc.returncode, before, after))
 
 BAD = os.path.join(TMP, "bad8.brat")
