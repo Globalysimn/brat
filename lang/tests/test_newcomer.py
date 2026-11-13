@@ -223,6 +223,16 @@ limits = open(os.path.join(ROOT, "docs", "guide", "limits.md"), encoding="utf-8"
 check("at most %s OS threads" % pool in ledger, "LEDGER.md does not give the pool size %s" % pool)
 check("`cap <= %s`" % format(chan_cap, ",") in ledger, "LEDGER.md does not give the channel limit %d" % chan_cap)
 check(re.search(r"BRAT_THREADS.*at most %s\." % pool, cli_doc), "cli.md does not give the pool size %s" % pool)
+arena_md = open(os.path.join(ROOT, "docs", "design", "ARENA.md"), encoding="utf-8").read()
+kept_chunks = constant("engine/crt/core.h", r"#define BARENA_POOL_CHUNKS (\d+)")
+kept_kib = int(constant("engine/crt/core.h", r"#define BARENA_POOL_BYTES \(\(size_t\)(\d+) \* 1024\)"))
+chunk_kib = int(constant("engine/crt/core.h", r"#define BARENA_CHUNK \(\(size_t\)(\d+) \* 1024\)"))
+value_depth = constant("engine/crt/core.h", r"#define BRAT_MAX_VALUE_DEPTH (\d+)")
+check("(with a %s-level recursion guard)" % value_depth in arena_md, "ARENA.md does not give the own() depth %s" % value_depth)
+check("same %s-level nesting cap" % value_depth in open(os.path.join(ROOT, "docs", "guide", "limits.md"), encoding="utf-8").read(),
+      "limits.md does not give the value depth %s" % value_depth)
+check("up to %s chunks (`%d KiB`)" % (kept_chunks, kept_kib) in arena_md, "ARENA.md does not give the kept pool")
+check("at least\n  %d KiB" % chunk_kib in arena_md, "ARENA.md does not give the chunk size %d KiB" % chunk_kib)
 check("nested %s levels deep" % nest in limits, "limits.md does not give the nesting limit %s" % nest)
 check("more than %s levels tall" % height in limits, "limits.md does not give the tree limit %s" % height)
 

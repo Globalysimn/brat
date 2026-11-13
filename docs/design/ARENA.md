@@ -22,9 +22,11 @@ value.
 - Exiting the block (`normal`, `return`, `break`, `continue`, `?`, or `raise`)
   runs `varena_leave` via `defer`, rewinding the cursor in `O(chunks)` time and
   retaining up to 4 chunks (`256 KiB`) per thread for the next `arena` entry.
-  Allocations larger than 32 KiB get dedicated chunks freed on exit.
+  A request that does not fit the current chunk opens a new one of at least
+  64 KiB and at least twice the size of the previous chunk; a chunk that would
+  take the kept pool past 256 KiB is freed on exit.
 - `own(x)` deep-copies `x` onto the regular reference-counted heap outside the
-  active arena (with a 256-level recursion guard). Scalars, inline short strings
+  active arena (with a 2000-level recursion guard). Scalars, inline short strings
   (`<= 14` bytes), and objects already on the regular heap return unchanged.
 - Under AddressSanitizer, `varena_leave` poisons rewound bytes so any bug in the
   static escape pass faults on the first read.
