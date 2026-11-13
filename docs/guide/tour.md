@@ -84,7 +84,9 @@ Numbers and bools are `Copy`: `let t = n` copies, and `n` can change afterwards.
 A value counts as one when it is a literal, a call to `len` (or another builtin
 that answers a number or a bool), a binding annotated `i64`, `f64` or `bool`, or
 arithmetic and comparisons over those. An unannotated parameter is dynamic and
-is not:
+is not, and neither is an element read from a vector without an element type:
+`let t = v[0]` borrows `v`, so swapping two elements needs `vec[i64]` on the
+vector:
 
 ```brat run
 fn main() -> i64 {
@@ -92,13 +94,17 @@ fn main() -> i64 {
   let mut hi = len(v) - 1
   let end = hi
   hi = hi - 1
-  print("{end} {hi}")
+  let mut w: vec[i64] = [3, 1, 2]
+  let tmp = w[0]
+  w[0] = w[2]
+  w[2] = tmp
+  print("{end} {hi} {w}")
   return 0
 }
 ```
 
 ```output
-2 1
+2 1 [2, 1, 3]
 ```
 
 Moving a struct field (`move p.x`) marks `p.x` moved statically while leaving
