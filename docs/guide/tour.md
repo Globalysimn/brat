@@ -80,6 +80,27 @@ fn main() -> i64 {
 }
 ```
 
+Numbers and bools are `Copy`: `let t = n` copies, and `n` can change afterwards.
+A value counts as one when it is a literal, a call to `len` (or another builtin
+that answers a number or a bool), a binding annotated `i64`, `f64` or `bool`, or
+arithmetic and comparisons over those. An unannotated parameter is dynamic and
+is not:
+
+```brat run
+fn main() -> i64 {
+  let v = [1, 2, 3]
+  let mut hi = len(v) - 1
+  let end = hi
+  hi = hi - 1
+  print("{end} {hi}")
+  return 0
+}
+```
+
+```output
+2 1
+```
+
 Moving a struct field (`move p.x`) marks `p.x` moved statically while leaving
 other fields like `p.y` usable (unlike Rust partial moves, the parent slot keeps
 a counted reference at run time rather than becoming partially uninitialized).
