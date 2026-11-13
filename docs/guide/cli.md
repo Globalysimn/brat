@@ -112,7 +112,7 @@ before/after example in your terminal.
 | Code | Summary | Typical cause & fix |
 |---|---|---|
 | `P0001` | Syntax / parse error | Malformed token, unclosed delimiter, or non-exhaustive `match` on an in-file `enum`/`bool`. |
-| `T0001` | Type or arity mismatch | Passing `str` to an `i64` parameter, implicit `i64`/`f64` mixing, wrong argument count, or `arena` escape. |
+| `T0001` | Type or arity mismatch | Passing `str` or an `f64` to an `i64` parameter, narrowing an `f64` into an `i64` binding, wrong argument count, or `arena` escape. |
 | `F0001` | Unverified or incompatible FFI declaration | `extern fn` lacks `--header`/`--object`/`.bratbind`, or C parameter/return width/constness disagrees with the header or DWARF DIE. |
 | `W0001` | Unused variable | Local binding is never read; prefix intentionally ignored bindings with `_` (`let _unused = ...`). |
 | `W0002` | Unnecessary `let mut` | Binding is declared `let mut` but never reassigned or mutated in place. |

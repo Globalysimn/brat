@@ -132,6 +132,8 @@ print(f(0))
   return 0
 }
 """, "0.0011111111111111111\ntrue\n0.00012345678901234567 0.012345678901234567 0.1 0.0001\n"),
+    # An i64 mixed with an f64 is promoted; the other way round is refused below.
+    "i64_promoted_by_f64": ("print(1 + 2.0)\nprint(2.0 * 3)\n", "3.0\n6.0\n"),
     # `/` and `%` by zero raise on f64 as on i64; overflow is `inf`, not an error.
     "f64_zero_divisor_raises": ("""fn g(a: f64, b: f64) -> f64 {
   return a / b
@@ -215,6 +217,15 @@ def main():
             print("FAIL literal_roundtrip: %d of %d literals read back as another double, first %r for %r"
                   % (len(wrong), len(doubles), wrong[0][0], wrong[0][1]))
             bad += 1
+
+    # An f64 is never narrowed into an i64.
+    path = os.path.join(TMP, "narrowing.brat")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("fn main() -> i64 {\n  let x: i64 = 1.5\n  print(x)\n  return 0\n}\n")
+    r = run(_cxx.cli_args("check", path))
+    if r.returncode == 0 or "type error" not in r.stdout + r.stderr:
+        print("FAIL narrowing: `let x: i64 = 1.5` was accepted: %r" % (r.stdout + r.stderr)[-200:])
+        bad += 1
 
     if bad:
         print("F64 SEMANTICS: %d case(s) failed" % bad)
