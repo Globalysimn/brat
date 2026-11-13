@@ -60,6 +60,8 @@ FIXTURES = {
     'multi.brat': 'fn f(a: i64) -> i64 {\n  return "x"\n}\nfn g(a: i64) -> i64 {\n  return a\n}\nlet x = g(f(1), g(2))\nlet y: str = 3\nlet v = [1]\nv.push("s")\nv.push(2, 3)\n',
     # A closure inside a placeholder, on the first line of its literal and on the second.
     'interp_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nlet v = [1]\nprint("{v.map(fn(x) { return f() })}")\nprint("two\n{v.map(fn(x) { return f() })}")\n',
+    # The arguments after a closure belong to the statement, not to the closure's last line.
+    'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
 
 # Expected errors, including source locations.
@@ -111,6 +113,10 @@ EXPECT = {
     "interp_line.brat": [
         "interp_line.brat:5: error: `f` wants 1 args, got 0",
         "interp_line.brat:7: error: `f` wants 1 args, got 0",
+    ],
+    "closure_line.brat": [
+        "closure_line.brat:7: error: use of undeclared var `nope`",
+        "closure_line.brat:7: error: `f` wants 1 args, got 2",
     ],
 }
 
@@ -177,6 +183,9 @@ NOTES = {
         "note: help: a bare fn name is a callback argument to `map`, `filter`, `fold`, `any`, `all`, `find` and `sort_by` only",
     ],
     "multi.brat": ["9: note: `v` declared here without `mut` (help: `let mut v`)"] * 2,
+    "closure_line.brat": [
+        "note: help: in scope here are `let` bindings, fn parameters, `for` bindings and `match` arm bindings; functions come from `fn`/`impl`; a name from another file needs `import that.file`",
+    ],
 }
 
 

@@ -1043,6 +1043,7 @@ void walk_closure_arg(const Expr &a, Decls &decl, Errs &errs, FnTable &funcs) {
     for (auto &kv : sub.v) kv.second->clo_outer = true;
     auto saved_floor = errs.fn_floor;
     auto saved_defers = errs.active_defers;
+    const int saved_line = errs.line;
     errs.fn_floor.clear();
     for (const auto &kv : decl.v) errs.fn_floor.insert(kv.first);
     if (a.fn->name) {
@@ -1055,6 +1056,7 @@ void walk_closure_arg(const Expr &a, Decls &decl, Errs &errs, FnTable &funcs) {
     walk_block(wrap(a.fn->body), sub, none, errs, funcs);
     errs.fn_floor = std::move(saved_floor);
     errs.active_defers = std::move(saved_defers);
+    errs.line = saved_line;
 }
 
 

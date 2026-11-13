@@ -1295,6 +1295,7 @@ struct FnTyper {
         std::map<std::string, int> saved_decl = decl_regions;
         std::map<std::string, int> saved_reg = regions;
         Ty saved_ret = ret;
+        const int saved_line = line;
         for (size_t i = 0; i < e.fn->params.size(); i++) {
             const auto &p = e.fn->params[i];
             Ty pt = ann_type(p.ann);
@@ -1310,6 +1311,7 @@ struct FnTyper {
         // predicate, and typing it against the enclosing `ret` rejected it.
         ret = Ty::dyn();
         block(e.fn->body);
+        line = saved_line;
         ret = saved_ret;
         regions = std::move(saved_reg);
         decl_regions = std::move(saved_decl);
