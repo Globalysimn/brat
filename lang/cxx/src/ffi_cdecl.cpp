@@ -393,7 +393,6 @@ bool preprocess_header_cc(const std::string &path,
     if (root_only_out) root_only_out->clear();
     std::error_code canon_ec;
     fs::path abs_target = fs::weakly_canonical(fs::absolute(path, canon_ec), canon_ec);
-    std::string target_base = fs::path(path).filename().string();
 
     auto is_same_root = [&](const std::string &fname) -> bool {
         if (fname.empty() || fname[0] == '<') return false;
