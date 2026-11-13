@@ -10,14 +10,16 @@ and `crt.h` (`lang/engine/`).
 - Comments start with `//` and run to `
 `.
 - Identifiers match `[A-Za-z_][A-Za-z0-9_]*`.
-- Reserved keywords:
+- Keywords:
   `fn`, `pub`, `let`, `mut`, `move`, `return`, `if`, `else`, `while`, `for`,
-  `in`, `break`, `continue`, `match`, `struct`, `enum`, `trait`, `impl`,
-  `import`, `as`, `try`, `catch`, `raise`, `defer`, `spawn`, `scope`, `par`,
-  `reduce`, `arena`, `own`, `extern`, `export`, `unsafe`, `true`, `false`,
-  `nil`.
-- Numeric literals: decimal, `0x` hex, and `0b` binary integers (`_` separators
-  allowed) denote `i64`; decimals with `.` or `e`/`E` denote IEEE-754 `f64`.
+  `in`, `break`, `continue`, `match`, `enum`, `trait`, `impl`, `import`, `use`,
+  `const`, `self`, `or`, `try`, `catch`, `defer`, `spawn`, `extern`, `export`,
+  `unsafe`, `true`, `false`. `struct`, `scope`, `par`, `reduce` and `arena` mean
+  something only where the parser expects them and are plain identifiers
+  elsewhere.
+- Numeric literals: decimal, `0x` hex, `0o` octal, and `0b` binary integers
+  (`_` separators allowed) denote `i64`; decimals with `.` or `e`/`E` denote
+  IEEE-754 `f64`.
 - String literals `"..."` interpolate `{expr}` unless braced with `{{` / `}}`;
   raw strings `r"..."` disable escapes and interpolation.
 
@@ -25,7 +27,7 @@ and `crt.h` (`lang/engine/`).
 
 ### 2.1 Core types
 
-- Primitives (`Copy`): `i64`, `f64`, `bool`, `nil`, `ptr` (when not `move ptr`).
+- Primitives (`Copy`): `i64`, `f64`, `bool`, `ptr` (when not `move ptr`).
 - Heap-counted (`Move`): `str`, `vec[T]`, `map[K, V]`, nominal `struct`, payload
   `enum` variants, closures `fn(T1, ...) -> R`, channels `chan`, sockets, SQLite
   handles, plugin handles, and FFI `slice` views.
@@ -81,14 +83,16 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 
 - `i64` `+`, `-`, `*`, and unary `-` wrap in two's-complement (`uint64_t` casts
   plus `-fwrapv`).
-- `/` and `%` on `i64` raise a catchable runtime error when the divisor is `0`.
-  `INT64_MIN / -1` wraps to `INT64_MIN` and `INT64_MIN % -1` evaluates to `0`.
+- `/` and `%` raise a catchable `div by zero` error when the divisor is `0`, on
+  `i64` and on `f64`. `INT64_MIN / -1` wraps to `INT64_MIN` and
+  `INT64_MIN % -1` evaluates to `0`.
 - A shift uses the low six bits of its count, so `1 << 64` is `1`; `>>`
   sign-extends.
-- `f64` follows IEEE-754; `NaN == NaN` is `false`.
+- Otherwise `f64` follows IEEE-754: overflow gives `inf` and `NaN == NaN` is
+  `false`.
 - `==` and `!=` compare structural value equality on primitives, strings,
   vectors, maps, structs, and enums without implicit type coercion (`1 == "1"`
-  is `false` under `Dyn` and a static type error when typed).
+  is `false`, annotated or not).
 - `str` values are valid UTF-8. `len(s)`, `s[i]`, and `for ch in s` operate on
   Unicode scalar values (code points); `std.bytes` exposes raw UTF-8 byte views
   and `O(1)` byte indexing.
@@ -108,7 +112,7 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 - `defer expr` statements run in LIFO order on every lexical scope exit (`normal`,
   `return`, `break`, `continue`, `?`, and `raise`).
 - Call depth is capped at 2,000 frames alongside a 64-frame stack-floor probe,
-  raising a catchable `recursion limit exceeded` error before stack exhaustion.
+  raising a catchable `recursion too deep` error before stack exhaustion.
 
 ## 6. Concurrency (`conc.h`, `borrow.cpp`, `parfor.cpp`)
 

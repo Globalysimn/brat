@@ -200,6 +200,15 @@ listed = set(re.findall(r"^\| `(BRAT_[A-Z0-9_]+)` \|", cli_doc, re.M))
 check(read == listed, "read but not listed in cli.md: %s; listed but never read: %s"
       % (sorted(read - listed), sorted(listed - read)))
 
+# The keyword list of the specification is the lexer's.
+lexer = open(os.path.join(ROOT, "lang", "cxx", "src", "lexer.cpp"), encoding="utf-8").read()
+table = lexer[lexer.index("words[] = {"):]
+keywords = set(re.findall(r'"([a-z]+)"', table[:table.index("};")]))
+spec = open(os.path.join(ROOT, "lang", "spec", "SPEC.md"), encoding="utf-8").read()
+listed_words = set(re.findall(r"`([a-z]+)`", spec[spec.index("- Keywords:"):spec.index(" `struct`, `scope`")]))
+check(keywords == listed_words, "SPEC.md keywords differ from the lexer: only in the lexer %s, only in SPEC.md %s"
+      % (sorted(keywords - listed_words), sorted(listed_words - keywords)))
+
 # The numbers the documents quote are the ones the code compiles in.
 def constant(path, pattern):
     return re.search(pattern, open(os.path.join(ROOT, "lang", path), encoding="utf-8").read()).group(1)

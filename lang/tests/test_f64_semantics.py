@@ -129,6 +129,22 @@ print(f(0))
   return 0
 }
 """, "0.0011111111111111111\ntrue\n0.00012345678901234567 0.012345678901234567 0.1 0.0001\n"),
+    # `/` and `%` by zero raise on f64 as on i64; overflow is `inf`, not an error.
+    "f64_zero_divisor_raises": ("""fn g(a: f64, b: f64) -> f64 {
+  return a / b
+}
+try {
+  print(g(1.0, 0.0))
+} catch e {
+  print(e)
+}
+try {
+  print(1.0 % 0.0)
+} catch e {
+  print(e)
+}
+print(1e308 * 10.0)
+""", "div by zero\ndiv by zero\ninf\n"),
 }
 
 
