@@ -801,8 +801,10 @@ int cmd_doc(int argc, char **argv) {
                             bri_fns.emplace(toks[ti + 1].text);
                         }
                     }
-                } catch (...) {
-                    has_bri = false;
+                } catch (const ParseError &e) {
+                    std::fprintf(stderr, "brat doc: %s: %s at line %u\n",
+                                 bri_path.c_str(), e.what(), e.line);
+                    return 1;
                 }
             }
         }

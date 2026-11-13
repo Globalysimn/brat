@@ -1,4 +1,7 @@
-"""Module tooling: `brat deps` and `brat api` read the same loader the compiler uses."""
+"""Module tooling: `brat deps` and `brat api` read the same loader the compiler uses.
+
+`brat doc` refuses an interface file that does not lex, as `brat check` does.
+"""
 import _scratch
 
 import json
@@ -91,5 +94,13 @@ check(p.returncode == 1 and "no module nope" in (p.stdout + p.stderr),
 p = cli("api", bad)
 check(p.returncode == 1 and "no module nope" in (p.stdout + p.stderr),
       "api bad: rc=%d %r" % (p.returncode, p.stdout + p.stderr))
+
+torn = write("torn/shapes.brat", "pub fn area(r: i64) -> i64 { return r * r }\n")
+write("torn/shapes.bri", "fn area(r: i64) -> i64\n@@\n")
+p = cli("doc", torn)
+check(p.returncode == 1 and "shapes.bri" in p.stderr and not p.stdout,
+      "doc torn .bri: rc=%d %r" % (p.returncode, p.stdout + p.stderr))
+p = cli("check", torn)
+check(p.returncode != 0, "check torn .bri: rc=%d %r" % (p.returncode, p.stdout + p.stderr))
 
 print("MODULE TOOLS ALL GREEN (%d asserts)" % n)
