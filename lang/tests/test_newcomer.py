@@ -191,6 +191,24 @@ for row in rows:
         p = subprocess.run(_cxx.cli_args(sub, flag, "x"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
         check(not UNKNOWN.search(p.stdout + p.stderr), "cli.md documents `brat %s %s`, which it rejects" % (sub, flag))
 
+# The diagnostics the ownership table quotes are ones the compiler prints. A row that
+# shows one instance of a message built from names, not the message, is listed here.
+INSTANCES = ("impl Shout for Point missing loud",)
+compiler = "".join(open(p, encoding="utf-8").read() for p in glob.glob(os.path.join(ROOT, "lang", "cxx", "src", "*.cpp")))
+ownership = open(os.path.join(ROOT, "docs", "guide", "ownership.md"), encoding="utf-8").read()
+rules = ownership[ownership.index("## Checked rules"):ownership.index("### Call-site exclusivity")]
+for row in rules.split("\n"):
+    if not row.startswith("| ") or row.startswith("| Condition") or row.startswith("|---"):
+        continue
+    message = row.strip("| ").split(" | ")[-1].replace("\\`", "\0")
+    for quoted in re.findall(r"`([^`]+)`", message):
+        quoted = quoted.replace("\0", "`")
+        if quoted in INSTANCES:
+            continue
+        for part in re.split(r"`[^`]*`|\.\.\.", quoted):
+            if len(part.strip()) >= 8:
+                check(part.strip() in compiler, "ownership.md quotes a diagnostic the compiler does not print: %r" % part.strip())
+
 # Every `brat ...` command line in the documents takes the flags it is shown with.
 shapes = {}
 command = re.compile(r"(?:\./bin/brat|\./lang/cxx/bin/brat-cxx|brat-cxx|(?<![\w/.-])brat)\s+(%s)((?:\s+[^\s`|]+)*)"

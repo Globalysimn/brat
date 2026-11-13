@@ -142,7 +142,7 @@ the checker sees both arms together.
 | Move out of a borrowed parameter | `cannot move borrowed parameter ...` |
 | Immutable binding passed to `mut` param | `pass immutable \`x\` as mut param \`p\`` |
 | Local borrow returned from function | `ref \`x\` escapes via return` |
-| Local `ptr_of_str(s)` returned | `` `ptr_of_str` borrows local `s`, which dies on return `` |
+| Local `ptr_of_str(s)` returned | `ref \`s\` escapes via return` |
 | Local borrow captured by `spawn` | `ref \`x\` escapes via spawn` |
 | Mutate container during `for` loop | `cannot mutate \`v\` while iterating it` |
 | Unfreed `move ptr` from FFI | `leaked owned pointer \`p\`` |
