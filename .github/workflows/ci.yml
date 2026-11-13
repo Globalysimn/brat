@@ -34,7 +34,7 @@ jobs:
           make -j"$(nproc)"
           make -j"$(nproc)" asan
 
-      - name: Run 109/109 native conformance and regression suites
+      - name: Run native conformance and regression suites
         run: make test-native
 
       - name: Run native C++20 frontend, checker, borrow, module and docs contracts
