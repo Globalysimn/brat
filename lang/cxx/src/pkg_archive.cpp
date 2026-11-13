@@ -526,11 +526,6 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
         return false;
     }
 
-    std::string eff_target = target;
-    if (eff_target.empty()) {
-        if (const char *et = std::getenv("BRAT_TARGET"); et && *et) eff_target = et;
-    }
-
     ScopedTempDir td("brat-bindchk-");
     if (!td.ok) {
         error = "cannot create temporary directory for archive FFI verification";
@@ -572,11 +567,11 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
         std::vector<std::string> cc_cmd;
         bool is_zig = false;
         if (!find_c_compiler(cc_cmd, is_zig, error)) {
-            if (eff_target.empty()) {
+            if (target.empty()) {
                 error = "cannot verify c_sources for " + pkg_name + ": " + error;
                 return false;
             }
-        } else if (eff_target.empty() || is_zig ||
+        } else if (target.empty() || is_zig ||
                    (!cc_cmd.empty() && std::filesystem::path(cc_cmd[0]).filename().string().rfind("zig", 0) == 0)) {
             const bool zig_any = !cc_cmd.empty() &&
                                  std::filesystem::path(cc_cmd[0]).filename().string().rfind("zig", 0) == 0;
@@ -621,7 +616,7 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
                 const std::filesystem::path opath = td.path / ("__cs_" + std::to_string(cs_idx++) + ".o");
                 std::vector<std::string> cmd = cc_cmd;
                 if (is_zig) cmd.push_back("cc");
-                if (zig_any && !eff_target.empty()) cmd.push_back("--target=" + eff_target);
+                if (zig_any && !target.empty()) cmd.push_back("--target=" + target);
                 cmd.insert(cmd.end(), {"-c", "-g", cpath.string(), "-o", opath.string(),
                                        "-std=gnu11", "-O2", "-fwrapv", "-I", pkg_td.string()});
                 int rc = 0;
@@ -653,7 +648,7 @@ bool verify_extracted_bratbinds(const std::map<std::string, std::string> &extrac
         const auto d_it = bin_paths_by_dir.find(dkey);
         const std::map<std::string, std::string> empty_objs;
         const auto &objs = d_it == bin_paths_by_dir.end() ? empty_objs : d_it->second;
-        if (!native_ffi::verify_bratbind_bytes(brats[mrel], bbytes, eff_target, objs, brel, error))
+        if (!native_ffi::verify_bratbind_bytes(brats[mrel], bbytes, target, objs, brel, error))
             return false;
     }
     return true;

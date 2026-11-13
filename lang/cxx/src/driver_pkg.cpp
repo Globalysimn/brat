@@ -702,12 +702,7 @@ static bool verify_archive_c_sources(const std::string &archive,
     return true;
 }
 
-static int native_pkg_verify(const std::string &requested_target) {
-    std::string target = requested_target;
-    if (target.empty()) {
-        if (const char *env_target = std::getenv("BRAT_TARGET"); env_target && *env_target)
-            target = env_target;
-    }
+static int native_pkg_verify(const std::string &target) {
     const std::string proof_target = target.empty() ? host_default_triple() : target;
     const std::filesystem::path lock_path = std::filesystem::current_path() / "brat.lock";
     std::string lock_raw;
