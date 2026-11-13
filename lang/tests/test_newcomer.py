@@ -200,4 +200,21 @@ listed = set(re.findall(r"^\| `(BRAT_[A-Z0-9_]+)` \|", cli_doc, re.M))
 check(read == listed, "read but not listed in cli.md: %s; listed but never read: %s"
       % (sorted(read - listed), sorted(listed - read)))
 
+# The numbers the documents quote are the ones the code compiles in.
+def constant(path, pattern):
+    return re.search(pattern, open(os.path.join(ROOT, "lang", path), encoding="utf-8").read()).group(1)
+
+
+pool = constant("engine/crt/conc.h", r"#define BPOOL_MAX (\d+)")
+chan_cap = int(constant("engine/crt/conc.h", r"#define BRAT_MAX_CHAN_CAP (\d+)"))
+nest = constant("cxx/src/parser.cpp", r"kMaxNest = (\d+)")
+height = constant("cxx/src/parser.cpp", r"kMaxTreeDepth = (\d+)")
+ledger = open(os.path.join(ROOT, "docs", "project", "LEDGER.md"), encoding="utf-8").read()
+limits = open(os.path.join(ROOT, "docs", "guide", "limits.md"), encoding="utf-8").read()
+check("at most %s OS threads" % pool in ledger, "LEDGER.md does not give the pool size %s" % pool)
+check("`cap <= %s`" % format(chan_cap, ",") in ledger, "LEDGER.md does not give the channel limit %d" % chan_cap)
+check(re.search(r"BRAT_THREADS.*at most %s\." % pool, cli_doc), "cli.md does not give the pool size %s" % pool)
+check("nested %s levels deep" % nest in limits, "limits.md does not give the nesting limit %s" % nest)
+check("more than %s levels tall" % height in limits, "limits.md does not give the tree limit %s" % height)
+
 print("NEWCOMER ALL GREEN (%d asserts)" % n)

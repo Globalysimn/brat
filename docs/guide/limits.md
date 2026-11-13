@@ -74,6 +74,14 @@ turning stack exhaustion under large budgets into a catchable error instead of a
 crash. Other targets rely on the frame-count budget alone. Recursive value
 walkers (`print`, `==`, `<`, `own`) enforce the same 2000-level nesting cap.
 
+## Nesting in source
+
+The parser refuses a block or a parenthesized expression nested 200 levels deep
+(`block nested too deeply`, `expression nested too deeply`) and an expression
+tree more than 1000 levels tall (`expression tree too deep`), which a chain such
+as `1 + 1 + ... + 1` reaches at about 1000 operators. Every later pass walks the
+tree recursively, and these bounds keep that inside an 8 MiB stack.
+
 ## Signed 64-bit wrapping integers
 
 All BRAT integers are `i64`. `+`, `-`, `*` and unary `-` wrap in two's
