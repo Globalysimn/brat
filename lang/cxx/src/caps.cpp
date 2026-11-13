@@ -100,6 +100,7 @@ struct State {
     std::map<std::string, std::string> alias;                // binding -> the place it denotes
     std::map<std::string, std::pair<std::string, int>> second;  // place -> a second writer
     std::set<std::string> copies;                            // bindings holding a Copy value
+    std::set<std::string> nums;                              // bindings holding a number
     std::set<std::string> params;                            // storage belongs to the caller
     std::set<std::string> muts;                              // bindings declared `let mut`
     struct Verb {
@@ -392,6 +393,39 @@ struct Walk {
     int index = 0;
     int cur = 0;                                      // line of the current statement
 
+    // A number by construction. `+` and `*` also build strings and vectors, so they
+    // count only over operands that are numbers themselves.
+    bool numeric(const State &st, const Expr *e) const {
+        if (e == nullptr) return false;
+        switch (e->k) {
+        case EK::Num: return true;
+        case EK::Var: return st.nums.count(e->a) > 0;
+        case EK::Un: return e->a == "-" || e->a == "~";
+        case EK::Bin: {
+            const std::string &op = e->a;
+            if (op == "+" || op == "*")
+                return numeric(st, e->kids[0].get()) && numeric(st, e->kids[1].get());
+            return op == "-" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^" ||
+                   op == "<<" || op == ">>";
+        }
+        case EK::Call:
+            return (e->a == "len" || e->a == "slice_len" || e->a == "sbuf_len" ||
+                    e->a == "time_ms" || e->a == "mono_ns" || e->a == "errno") &&
+                   modes.count(e->a) == 0;
+        default: return false;
+        }
+    }
+
+    // A number or a bool whatever the operands hold, so `let y = x` of it is a copy.
+    bool scalar_result(const State &st, const Expr *e) const {
+        if (e == nullptr) return false;
+        if (e->k == EK::Un) return e->a != "&";
+        if (e->k == EK::Bin) return is_scalar_result_op(e->a) || numeric(st, e);
+        if (e->k == EK::Call)
+            return e->a != "own" && is_scalar_only_builtin(e->a) && modes.count(e->a) == 0;
+        return false;
+    }
+
     std::string infer_ann(const State &st, const Expr *e) const {
         while (e && e->k == EK::Move && !e->kids.empty())
             e = e->kids[0].get();
@@ -682,15 +716,17 @@ struct Walk {
         std::string ann = s.ann.value_or("");
         if (ann.empty()) ann = infer_ann(st, e);
         expr(e, st, false, cur);
-        bool copylike = is_copy_scalar_ann(ann) || copy_expr(e) ||
+        bool copylike = is_copy_scalar_ann(ann) || copy_expr(e) || scalar_result(st, e) ||
                         (e && e->k == EK::Var && st.copies.count(e->a)) ||
                         (e && e->k == EK::Idx && elem_copy(st, e->kids[0].get()));
+        const bool number = is_numeric_ann(ann) || numeric(st, e);
         auto place = place_of(e);
         if (!place || !is_alias(e) || root_name(st.place(*place)) != name) {
             st.forget(name);
             st.anns.erase(name);
             st.muts.erase(name);
             st.copies.erase(name);
+            st.nums.erase(name);
             st.consts.erase(name);
         }
         if (!ann.empty()) st.anns[name] = ann;
@@ -699,6 +735,7 @@ struct Walk {
         // no borrow, no second place.
         if (copylike) {
             st.copies.insert(name);
+            if (number) st.nums.insert(name);
             return;
         }
         if (!place || !is_alias(e)) {
@@ -934,6 +971,7 @@ void one_body(const View &stmts, const std::vector<Param> &params,
         if (!ann.empty()) {
             st.anns[p.name] = ann;
             if (is_copy_scalar_ann(ann)) st.copies.insert(p.name);
+            if (is_numeric_ann(ann)) st.nums.insert(p.name);
         }
     }
     walk.block(stmts, st);

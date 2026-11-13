@@ -36,6 +36,9 @@ OWNERSHIP = {
     'if_move.brat': 'fn f(c: bool) -> i64 {\n  let v = [1]\n  if c {\n    move v\n  }\n  return len(v)\n}\n',
     'immutable_set.brat': 'fn f() -> i64 {\n  let s = Point { x: 1 }\n  s.x = 2\n  return 0\n}\n',
     'leak_owned.brat': 'extern "c" fn mk() -> move ptr[i64]\nfn f() -> i64 {\n  let p = mk()\n  return 0\n}\n',
+    'len_copy.brat': ('fn grow(mut v: vec[i64], n: i64) -> i64 {\n  v.push(n)\n  return n\n}\n'
+                      'fn f(mut v: vec[i64]) -> i64 {\n  let n = len(v)\n  let mut i = n\n  i = i - 1\n  let mut hi = len(v) - 1\n  let end = hi\n  hi = hi / 2\n  grow(v, len(v))\n  return n + i + end + hi\n}\n'),
+    'sum_copy.brat': ('fn f(a: i64, b: i64) -> i64 {\n  let mut s = a + b\n  let t = s\n  s = s * 2\n  let x = 1\n  let y = 2\n  let mut z = x + y\n  let w = z\n  z = 5\n  return t + s + w + z\n}\n'),
     'iter_push.brat': ('fn f() -> i64 {\n  let mut v = [1, 2]\n  for x in v {\n'
                        '    v.push(x)\n  }\n  return 0\n}\n'),
     'iter_set.brat': ('fn f() -> i64 {\n  let mut m = {"a": 1}\n  for k in m {\n'
@@ -199,6 +202,12 @@ EXPECT = {
         'leak_owned.brat:4: error: leaked owned pointer `p`: free it or return it',
         'leak_owned.brat:3: note: `p` allocated here',
         'leak_owned.brat:3: warning: unused var `p`',
+    ],
+    'len_copy.brat': [
+        'len_copy.brat: 0 error(s), 0 warning(s)',
+    ],
+    'sum_copy.brat': [
+        'sum_copy.brat: 0 error(s), 0 warning(s)',
     ],
     'loe.brat': [
         'loe.brat: 1 error(s), 0 warning(s)',

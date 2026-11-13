@@ -56,6 +56,10 @@ inline constexpr bool is_copy_scalar_ann(std::string_view a) {
            a == "bool";
 }
 
+inline constexpr bool is_numeric_ann(std::string_view a) {
+    return a != "bool" && is_copy_scalar_ann(a);
+}
+
 inline constexpr bool is_insert_mutator(std::string_view m) {
     return m == "push" || m == "ins" || m == "set";
 }
@@ -85,6 +89,14 @@ inline constexpr bool is_ptr_read_builtin(std::string_view n) {
            n == "ptr_read_f64" || n == "ptr_read_f32" ||
            n == "ptr_read_u8" || n == "ptr_read_str" ||
            n == "ptr_read_ptr" || n == "ptr_read_struct";
+}
+
+// `+` and `*` also build strings and vectors, `&&` and `||` answer an operand;
+// these answer a number or a bool, or raise.
+inline constexpr bool is_scalar_result_op(std::string_view op) {
+    return op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
+           op == "-" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^" ||
+           op == "<<" || op == ">>";
 }
 
 inline constexpr bool is_scalar_only_builtin(std::string_view n) {

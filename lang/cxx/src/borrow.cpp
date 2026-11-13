@@ -493,6 +493,8 @@ bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullp
     }
     case EK::Call:
         return (funcs != nullptr && funcs->scalar_ret.count(e->a) > 0) ||
+               (e->a != "own" && is_scalar_only_builtin(e->a) &&
+                (funcs == nullptr || funcs->sigs.count(e->a) == 0)) ||
                expr_is_copy_slot(e, decl, funcs);
     case EK::Quest:
     case EK::MCall:
@@ -501,11 +503,13 @@ bool is_copy_expr(const Expr *e, const Decls &decl, const FnTable *funcs = nullp
     case EK::Field:
         return expr_is_copy_slot(e, decl, funcs) ||
                (e->k == EK::Idx && elem_copy(decl, e->kids.empty() ? nullptr : e->kids[0].get()));
-    case EK::Un: return is_copy_expr(e->kids[0].get(), decl, funcs);
+    case EK::Un:
+        return e->a != "&" || is_copy_expr(e->kids[0].get(), decl, funcs);
     case EK::Move: return is_copy_expr(e->kids[0].get(), decl, funcs);
     case EK::Bin:
-        return is_copy_expr(e->kids[0].get(), decl, funcs) &&
-               is_copy_expr(e->kids[1].get(), decl, funcs);
+        return is_scalar_result_op(e->a) ||
+               (is_copy_expr(e->kids[0].get(), decl, funcs) &&
+                is_copy_expr(e->kids[1].get(), decl, funcs));
     default: return false;
     }
 }
