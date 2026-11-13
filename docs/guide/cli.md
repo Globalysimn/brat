@@ -60,6 +60,9 @@ Build-time FFI flags accepted by `build` and `run`:
 | `BRAT_NO_PCH` | unset | Set to `1` to disable precompiled `crt.h` headers during C compilation. |
 | `BRAT_STDLIB` | `<repo>/lang/std` | Override path searched for `import std.*`. |
 | `BRAT_INDEX` | `./brat-index.json` | Path or URL to the JSON package index consulted by `brat pkg`. |
+| `BRAT_PKG_ALLOW_INTERNAL` | unset | Set to `1` to let `brat pkg` connect to loopback, private and link-local addresses, which it refuses by default. |
+| `BRAT_CASE_MAP_VERSION` | `1500` | Unicode version of the case tables behind `upper()` and `lower()`: `1500` is Unicode 15.0 and `1600` is 16.0. Read when the C is emitted. |
+| `BRAT_MOVE_RT` | unset | `0` emits a program without ownership drops, so a change in drops can be bisected. Such a program leaks on purpose. |
 
 ### Runtime confinement and resource budgets
 
@@ -73,7 +76,6 @@ Build-time FFI flags accepted by `build` and `run`:
 | `BRAT_ENV_DENY_ALL` | unset | Set to `1` to make `env_get` / `std.env` return `None` for every variable. |
 | `BRAT_RECURSION_BUDGET` | `2000` | Maximum BRAT call depth (`1..1000000`) before raising catchable `recursion too deep`. |
 | `BRAT_PIN_BUDGET_BYTES` | `67108864` (64 MiB) | Maximum slab memory used to pin short SSO strings passed across C FFI (`ptr_of_str` / `str`); `0` disables the cap (unlimited, not recommended for untrusted inputs). |
-| `BRAT_MEM_BYTES` | unset (unlimited) | Hard process resident/heap cap in bytes (also settable via `--mem <SIZE>`, e.g. `16M` or `1G`). |
 | `BRAT_THREADS` | hardware concurrency | Worker thread count for `par for` and the runtime task pool. |
 | `BRAT_TRACE` | unset | Set to `1` to enable line-number trace updates when compiled with `--trace-lines`. |
 

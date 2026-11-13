@@ -191,4 +191,13 @@ for row in rows:
         p = subprocess.run(_cxx.cli_args(sub, flag, "x"), capture_output=True, text=True, timeout=60, env=ENV, cwd=TMP)
         check(not UNKNOWN.search(p.stdout + p.stderr), "cli.md documents `brat %s %s`, which it rejects" % (sub, flag))
 
+# The environment variables the code reads are exactly the ones the reference lists.
+read = set()
+for pattern in ("cxx/src/*.cpp", "cxx/src/*.h", "engine/crt/*.h"):
+    for path in glob.glob(os.path.join(ROOT, "lang", pattern)):
+        read.update(re.findall(r'getenv\(\s*"(BRAT_[A-Z0-9_]+)"', open(path, encoding="utf-8").read()))
+listed = set(re.findall(r"^\| `(BRAT_[A-Z0-9_]+)` \|", cli_doc, re.M))
+check(read == listed, "read but not listed in cli.md: %s; listed but never read: %s"
+      % (sorted(read - listed), sorted(listed - read)))
+
 print("NEWCOMER ALL GREEN (%d asserts)" % n)
