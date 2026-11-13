@@ -34,6 +34,15 @@ os.symlink(os.path.join(BASE, 'outside.txt'), os.path.join(PROG, 'escape_link'))
 os.symlink(os.path.join(PROG, 'inside.txt'), os.path.join(PROG, 'inside_link'))
 
 CASES = {
+    # `\{` and `\}` write the braces, a brace pair with no expression stays text,
+    # and a backslash sequence the language does not know stays as written.
+    'string_escapes': (r'''fn main() -> i64 {
+  let x = 5
+  print("a \{x\} {x} { }")
+  print("t\tq \"q\" \\ \q")
+  return 0
+}
+''', 'a {x} 5 { }\nt\tq "q" \\ \\q\n'),
     # Defer drains LIFO, before catch, for a top-level try.
     'defer_try_toplevel': ('''fn main() -> i64 {
   try {

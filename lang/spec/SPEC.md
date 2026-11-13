@@ -20,8 +20,10 @@ and `crt.h` (`lang/engine/`).
 - Numeric literals: decimal, `0x` hex, `0o` octal, and `0b` binary integers
   (`_` separators allowed) denote `i64`; decimals with `.` or `e`/`E` denote
   IEEE-754 `f64`.
-- String literals `"..."` interpolate `{expr}` unless braced with `{{` / `}}`;
-  raw strings `r"..."` disable escapes and interpolation.
+- String literals `"..."` interpolate `{expr}`. The escapes are `\n`, `\t`, `\r`,
+  `\\`, `\"`, `\'`, `\{` and `\}`. A brace pair that holds no expression stays
+  text, and so does any other backslash sequence. A literal that holds NUL is an
+  error.
 
 ## 2. Types and runtime representation
 
