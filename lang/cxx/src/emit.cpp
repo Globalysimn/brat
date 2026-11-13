@@ -264,54 +264,6 @@ std::string clit(const std::string &s) {
     return o;
 }
 
-bool ident_start(char c) {
-    return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-bool ident_char(char c) {
-    return ident_start(c) || (c >= '0' && c <= '9');
-}
-
-// `{name}` / `{a.b.c}` placeholders, split into ("lit", text) / ("var", path).
-std::vector<std::pair<std::string, std::string>> split_interp(const std::string &s) {
-    std::vector<std::pair<std::string, std::string>> parts;
-    std::string buf;
-    size_t i = 0;
-    while (i < s.size()) {
-        if (s[i] == '{') {
-            size_t j = i + 1;
-            bool ok = false;
-            if (j < s.size() && ident_start(s[j])) {
-                j++;
-                while (j < s.size() && ident_char(s[j])) j++;
-                size_t save = j;
-                while (j < s.size() && s[j] == '.' && j + 1 < s.size() && ident_start(s[j + 1])) {
-                    j += 2;
-                    while (j < s.size() && ident_char(s[j])) j++;
-                }
-                if (j < s.size() && s[j] == '}') {
-                    ok = true;
-                } else {
-                    j = save;
-                }
-            }
-            if (ok) {
-                if (!buf.empty()) {
-                    parts.emplace_back("lit", buf);
-                    buf.clear();
-                }
-                parts.emplace_back("var", s.substr(i + 1, j - i - 1));
-                i = j + 1;
-                continue;
-            }
-        }
-        buf.push_back(s[i]);
-        i++;
-    }
-    if (!buf.empty()) parts.emplace_back("lit", buf);
-    return parts;
-}
-
 // `_cstr_path`: the two characters that can end the literal, and nothing else.
 // The backslash is escaped first, so a path holding `\n` does not reach C as a
 // newline escape; a byte above 0x7F is left as it is, because a UTF-8 path is
@@ -968,8 +920,6 @@ struct Emitter {
     void collect_nested(const Stmt &s);
 
     V ex(const Expr &e);
-    V ex_str(const std::string &s);
-    std::string path_ref(const std::string &path);
     V ex_bin(const Expr &e);
     V ex_plugin(const std::string &name, const ExprList &args);
     V ex_slice(const std::string &name, const ExprList &args);
@@ -1220,17 +1170,7 @@ bool Emitter::print_ok(const Expr &e, const std::map<std::string, FnEntry> &cand
     int fslots = 0;
     for (const auto &ap : e.kids) {
         const Expr &a = *ap;
-        if (a.k == EK::Str) {
-            for (const auto &p : split_interp(a.a)) {
-                if (p.first == "var") {
-                    if (p.second.find('.') != std::string::npos || vecvars.count(p.second) ||
-                        fboolvars.count(p.second) || global_lets.count(p.second))
-                        return false;
-                    if (dbl && !intvars.count(p.second)) fslots++;
-                }
-            }
-            continue;
-        }
+        if (a.k == EK::Str) continue;
         if (booly(a) || (a.k == EK::Var && fboolvars.count(a.a))) return false;
         if (!int_expr(a, cand, kind, intvars, vecvars)) return false;
         if (a.k == EK::Num && a.is_float) fslots++;
@@ -2199,18 +2139,9 @@ void Emitter::fprint(const ExprList &args, const std::string &ind) {
         const Expr &a = *args[ai];
         if (ai) fmt.push_back(' ');
         if (a.k == EK::Str) {
-            for (const auto &[kind, val] : split_interp(a.a)) {
-                if (kind == "lit") {
-                    for (char c : val) {
-                        if (c == '%') fmt += "%%";
-                        else fmt.push_back(c);
-                    }
-                } else {
-                    const bool vi = !dbl || fintvars.count(val) > 0;
-                    fmt += vi ? "%lld" : "%s";
-                    vals += vi ? cat(", (long long)(", fsym[val], ")")
-                               : cat(", vfmt_double(", fsym[val], ")");
-                }
+            for (char c : a.a) {
+                if (c == '%') fmt += "%%";
+                else fmt.push_back(c);
             }
         } else if (a.k == EK::Num && a.is_float) {
             fmt += "%s";
@@ -2987,7 +2918,6 @@ V Emitter::ex(const Expr &e) {
     case EK::Bool:
         return {{}, cat("vbool(", e.flag ? 1 : 0, ")")};
     case EK::Str:
-        return ex_str(e.a);
     case EK::RStr:
         return {{}, cat("vlit(\"", clit(e.a), "\")")};
     case EK::None:
@@ -3162,62 +3092,6 @@ struct CleanupGuard {
         if (vec.size() > base) vec.resize(base);
     }
 };
-
-V Emitter::ex_str(const std::string &s) {
-    auto parts = split_interp(s);
-    if (parts.empty()) return {{}, "vlit(\"\")"};
-    if (parts.size() == 1 && parts[0].first == "lit")
-        return {{}, cat("vlit(\"", clit(parts[0].second), "\")")};
-    std::string t = new_tmp("s");
-    std::vector<std::string> pre = {cat("Val ", t, " = vlit(\"\");")};
-    CleanupGuard guard{call_cleanup, call_cleanup.size()};
-    call_cleanup.push_back(t);
-    for (const auto &[kind, val] : parts) {
-        if (kind == "lit") {
-            pre.push_back(cat(t, " = vadd_self(", t, ", vlit(\"", clit(val), "\"));"));
-        } else {
-            std::string sv = new_tmp("sv");
-            pre.push_back(cat("Val ", sv, " = vstr_of(", path_ref(val), ");"));
-            pre.push_back(err_check_line({sv}));
-            pre.push_back(cat(t, " = vadd_self(", t, ", ", sv, ");"));
-            pre.push_back(cat("vdrop_temp(", sv, ");"));
-        }
-        pre.push_back(err_check_line());
-    }
-    return {pre, t};
-}
-
-std::string Emitter::path_ref(const std::string &path) {
-    std::vector<std::string> parts;
-    std::string cur;
-    for (char c : path) {
-        if (c == '.') {
-            parts.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(c);
-        }
-    }
-    parts.push_back(cur);
-    std::string e = var_ref(parts[0]);
-    std::string cur_st;
-    auto vit = var_structs.find(parts[0]);
-    if (vit != var_structs.end()) cur_st = vit->second;
-    for (size_t i = 1; i < parts.size(); i++) {
-        int slot = !cur_st.empty() ? struct_field_slot(cur_st, parts[i]) : -1;
-        if (slot >= 0) {
-            int sid = canonical_struct_shape(cur_st);
-            e = cat("vstruct_slot_val(", e, ", &_shp[", sid, "], ", slot, ", \"",
-                    clit(parts[i]), "\")");
-            auto fann = struct_field_ann(cur_st, parts[i]);
-            cur_st = (fann && native_structs.count(*fann)) ? *fann : "";
-        } else {
-            e = cat("vfield_ic(", e, ", \"", clit(parts[i]), "\", ", next_fic(), ")");
-            cur_st.clear();
-        }
-    }
-    return e;
-}
 
 bool Emitter::ub_expr_ok(const Expr &e, const std::set<std::string> &cand) const {
     return !cand.empty() && pure_int_arith_expr(e, cand);
@@ -3849,22 +3723,10 @@ V Emitter::ex_vec(const ExprList &items) {
 }
 
 static bool plain_cstr_key(const Expr &e, std::string &out) {
-    if (e.k == EK::RStr) {
+    if (e.k == EK::Str || e.k == EK::RStr) {
         if (e.a.find('\0') != std::string::npos || e.a == "$type") return false;
         out = e.a;
         return true;
-    }
-    if (e.k == EK::Str) {
-        auto parts = split_interp(e.a);
-        if (parts.empty()) {
-            out.clear();
-            return true;
-        }
-        if (parts.size() == 1 && parts[0].first == "lit" &&
-            parts[0].second.find('\0') == std::string::npos && parts[0].second != "$type") {
-            out = parts[0].second;
-            return true;
-        }
     }
     return false;
 }
@@ -4957,14 +4819,9 @@ bool Emitter::fusible_expr(const Expr &e, const std::set<std::string> &pset) con
     switch (e.k) {
     case EK::Num:
     case EK::Bool:
+    case EK::Str:
     case EK::RStr:
     case EK::None:
-        return true;
-    case EK::Str:
-        for (const auto &[ck, cv] : split_interp(e.a)) {
-            if (ck == "var" && !pset.count(cv) && (!sym.count(cv) || global_lets.count(cv)))
-                return false;
-        }
         return true;
     case EK::Var:
         return pset.count(e.a) > 0 || (sym.count(e.a) > 0 && !global_lets.count(e.a));
@@ -5198,14 +5055,6 @@ void Emitter::closure_walk_expr(const Expr *e, const std::set<std::string> &boun
         if (!bound.count(root)) free.insert(root);
         return;
     }
-    case EK::Str:
-        for (const auto &[ck, cv] : split_interp(e->a)) {
-            if (ck == "var") {
-                std::string root = cv.substr(0, cv.find('.'));
-                if (!bound.count(root)) free.insert(root);
-            }
-        }
-        return;
     case EK::Call: {
         std::string root = e->a.substr(0, e->a.find('.'));
         if (!bound.count(root)) free.insert(root);
@@ -5783,11 +5632,6 @@ std::set<std::string> Emitter::compute_ub_vars(const StmtList &body, const std::
             const Expr *cur = st.back();
             st.pop_back();
             if (!cur) continue;
-            if (cur->k == EK::Str) {
-                for (const auto &[ck, cv] : split_interp(cur->a))
-                    if (ck == "var") r.insert(cv.substr(0, cv.find('.')));
-                continue;
-            }
             if (cur->k == EK::Call && !cur->a.empty())
                 r.insert(cur->a.substr(0, cur->a.find('.')));
             for (const auto &k : cur->kids)
@@ -6401,11 +6245,6 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
                 std::function<bool(const Expr *)> mentions_tgt = [&](const Expr *x) -> bool {
                     if (!x) return false;
                     if (x->k == EK::Var && x->a == tgt) return true;
-                    if (x->k == EK::Str) {
-                        for (const auto &[ck, cv] : split_interp(x->a))
-                            if (ck == "var" && (cv == tgt || cv.rfind(tgt + ".", 0) == 0))
-                                return true;
-                    }
                     if (x->fn) return true;
                     for (const auto &k : x->kids)
                         if (mentions_tgt(k.get())) return true;
@@ -7738,10 +7577,6 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
         if (e->k == EK::Var) acc.insert(e->a);
         else if (e->k == EK::Call && !e->a.empty())
             acc.insert(e->a.substr(0, e->a.find('.')));
-        else if (e->k == EK::Str) {
-            for (const auto &[ck, cv] : split_interp(e->a))
-                if (ck == "var") acc.insert(cv.substr(0, cv.find('.')));
-        }
         for (const auto &k : e->kids) all_mentions_expr(k.get(), acc);
         if (e->fn) {
             for (const auto &p : e->fn->params) all_mentions_expr(p.def.get(), acc);
@@ -7770,16 +7605,8 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
 
     auto plain_lit_str = [](const Expr *e, std::string &out) -> bool {
         if (!e || e->k != EK::Str) return false;
-        auto parts = split_interp(e->a);
-        if (parts.empty()) {
-            out.clear();
-            return true;
-        }
-        if (parts.size() == 1 && parts[0].first == "lit") {
-            out = parts[0].second;
-            return true;
-        }
-        return false;
+        out = e->a;
+        return true;
     };
 
     std::set<std::string> copy_called;
@@ -7833,20 +7660,6 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
             for (const auto &k : e->kids) scan_expr(k.get());
             return;
         }
-        case EK::Str:
-            for (const auto &[ck, cv] : split_interp(e->a)) {
-                if (ck != "var") continue;
-                size_t dot = cv.find('.');
-                if (dot == std::string::npos) {
-                    banned.insert(cv);
-                } else {
-                    std::string root = cv.substr(0, dot);
-                    std::string rest = cv.substr(dot + 1);
-                    std::string fld = rest.substr(0, rest.find('.'));
-                    used_fields[root].insert(fld);
-                }
-            }
-            return;
         case EK::Closure:
             if (e->fn) {
                 auto sub = closure_free_vars(*e->fn);
@@ -8097,33 +7910,6 @@ bool Emitter::sra_round(const std::string &fn_name, FnDecl &decl) {
                 bool ans = (e->a == "__stag_is") ? (st == lit) : (struct_field_slot(st, lit) >= 0);
                 return mk_bool(ans);
             }
-        }
-        if (e->k == EK::Str) {
-            auto parts = split_interp(e->a);
-            bool changed = false;
-            std::string rebuilt;
-            for (const auto &[ck, cv] : parts) {
-                if (ck == "lit") {
-                    rebuilt += cv;
-                } else {
-                    size_t dot = cv.find('.');
-                    if (dot != std::string::npos) {
-                        std::string root = cv.substr(0, dot);
-                        if (approved.count(root)) {
-                            std::string rest = cv.substr(dot + 1);
-                            size_t d2 = rest.find('.');
-                            std::string fld = rest.substr(0, d2);
-                            std::string tail = d2 == std::string::npos ? "" : rest.substr(d2);
-                            rebuilt += "{" + sra_names[root][fld] + tail + "}";
-                            changed = true;
-                            continue;
-                        }
-                    }
-                    rebuilt += "{" + cv + "}";
-                }
-            }
-            if (changed) e->a = std::move(rebuilt);
-            return e;
         }
         if (e->k == EK::Closure || e->k == EK::ParFor) {
             for (auto &k : e->kids) k = rw_expr(std::move(k));

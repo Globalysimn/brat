@@ -674,38 +674,6 @@ Body else_body(const Stmt &s) {
 
 void vars_in(const Expr *e, std::vector<std::string> &acc);
 
-// `{name}` placeholders left in a `str`: the parser lowers interpolation, so
-// this only sees text the lowering left alone.
-void interp_names(const std::string &text, std::vector<std::string> &acc) {
-    for (size_t i = 0; i < text.size(); i++) {
-        if (text[i] != '{') continue;
-        size_t j = i + 1;
-        if (j >= text.size()) continue;
-        char c = text[j];
-        bool start_ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
-        if (!start_ok) continue;
-        while (j < text.size() && ((text[j] >= 'A' && text[j] <= 'Z') ||
-                                   (text[j] >= 'a' && text[j] <= 'z') ||
-                                   (text[j] >= '0' && text[j] <= '9') || text[j] == '_')) {
-            j++;
-        }
-        while (j < text.size() && text[j] == '.') {
-            size_t k = j + 1;
-            char d = k < text.size() ? text[k] : '\0';
-            bool ok = (d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z') || d == '_';
-            if (!ok) break;
-            size_t m = k;
-            while (m < text.size() && ((text[m] >= 'A' && text[m] <= 'Z') ||
-                                       (text[m] >= 'a' && text[m] <= 'z') ||
-                                       (text[m] >= '0' && text[m] <= '9') || text[m] == '_')) {
-                m++;
-            }
-            j = m;
-        }
-        if (j < text.size() && text[j] == '}') acc.push_back(root_of(text.substr(i + 1, j - i - 1)));
-    }
-}
-
 // Collect variable names referenced inside `e` into `acc`.
 void vars_in(const Expr *e, std::vector<std::string> &acc) {
     if (!e) return;
@@ -714,7 +682,7 @@ void vars_in(const Expr *e, std::vector<std::string> &acc) {
     case EK::Num:
     case EK::Bool:
     case EK::None: break;
-    case EK::Str: interp_names(e->a, acc); break;
+    case EK::Str:
     case EK::RStr: break;
     case EK::Un:
     case EK::Move:
@@ -1382,7 +1350,6 @@ bool claim_loe(const std::string &path,
 void eval_vars_in(const Expr *e, std::vector<std::string> &acc) {
     if (!e || e->k == EK::Closure) return;
     if (e->k == EK::Var) { acc.push_back(e->a); return; }
-    if (e->k == EK::Str) { interp_names(e->a, acc); return; }
     for (const auto &sub : e->kids) eval_vars_in(sub.get(), acc);
 }
 
