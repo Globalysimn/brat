@@ -2917,11 +2917,8 @@ static int native_pkg_publish(int argc, char **argv) {
         if (ec == std::errc::no_such_file_or_directory ||
             (!ec && status.type() == std::filesystem::file_type::not_found)) {
             ec.clear();
-            if (!std::filesystem::create_directory(path, ec) && !ec) {
-                status = std::filesystem::symlink_status(path, ec);
-            } else if (!ec) {
-                status = std::filesystem::symlink_status(path, ec);
-            }
+            std::filesystem::create_directory(path, ec);
+            if (!ec) status = std::filesystem::symlink_status(path, ec);
         }
         if (ec || std::filesystem::is_symlink(status) || !std::filesystem::is_directory(status)) {
             error = "not a real directory: " + path.string();
