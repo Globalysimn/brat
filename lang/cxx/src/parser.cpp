@@ -1784,7 +1784,7 @@ private:
             step();
             auto p = std::make_unique<Pat>();
             p->k = PK::Lit;
-            p->lit = expand_str(std::string(c.text.substr(1, c.text.size() - 2)));
+            p->lit = expand_str(std::string(c.text.substr(1, c.text.size() - 2)), c.line);
             // The literal's own line: `line()` is already the token after it.
             check_nul(*p->lit, c.line);
             return p;
@@ -2495,7 +2495,7 @@ private:
             return par_for(t.line);
         }
         if (t.kind == TK::Str) {
-            auto e = expand_str(std::string(t.text.substr(1, t.text.size() - 2)));
+            auto e = expand_str(std::string(t.text.substr(1, t.text.size() - 2)), t.line);
             check_nul(*e, t.line);
             return e;
         }
@@ -2592,7 +2592,7 @@ private:
     // `"a{x}b"` becomes `("bin" "+" ("rstr" "a") ("bin" "+" x ("rstr" "b")))`.
     // A placeholder that does not parse as a whole expression stays text, which
     // is what keeps JSON templates working.
-    ExprP expand_str(const std::string &raw) {
+    ExprP expand_str(const std::string &raw, uint32_t line) {
         if (raw.find('{') == std::string::npos) return mk_str(unescape(raw));
         struct Part {
             bool is_text;
@@ -2638,6 +2638,7 @@ private:
         std::vector<Part> parts;
         std::string buf;
         size_t i = 0;
+        size_t counted = 0;  // newlines before this offset are already in `line`
         while (i < raw.size()) {
             if (raw[i] == '\\' && i + 1 < raw.size()) {
                 buf.append(raw, i, 2);
@@ -2652,7 +2653,10 @@ private:
                 if (match != matches.end() && match->second.second <= kMaxNest) {
                     const size_t j = match->second.first;
                     std::string inner = unescape(raw.substr(i + 1, j - 1 - (i + 1)));
-                    if (auto sub = sub_expr(inner)) {
+                    line += static_cast<uint32_t>(
+                        std::count(raw.begin() + counted, raw.begin() + i, '\n'));
+                    counted = i;
+                    if (auto sub = sub_expr(inner, line)) {
                         if (!buf.empty()) {
                             parts.push_back({true, unescape(buf), nullptr});
                             buf.clear();
@@ -2721,9 +2725,11 @@ private:
         return 4;
     }
 
-    ExprP sub_expr(const std::string &text) const {
+    // `line` is where the placeholder sits in the file: a closure inside it
+    // has statements, and they report errors under their own line.
+    ExprP sub_expr(const std::string &text, uint32_t line) const {
         try {
-            Parser p(text, 1, nest_expr_, nest_block_);
+            Parser p(text, line, nest_expr_, nest_block_);
             auto e = p.expr();
             if (p.peek().kind != TK::Eof) return nullptr;
             return e;

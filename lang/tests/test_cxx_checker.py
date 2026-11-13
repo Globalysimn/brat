@@ -58,6 +58,8 @@ FIXTURES = {
     'cb_width_abi.brat': 'fn wrong(a: i32) -> i64 {\n  return a\n}\nfn run(f: fn(i64) -> i64) -> i64 {\n  return 1\n}\nlet x = run("wrong")\n',
     'cb_unknown.brat': 'fn run(f: fn(i64) -> i64) -> i64 {\n  return 1\n}\nlet x = run("nope")\n',
     'multi.brat': 'fn f(a: i64) -> i64 {\n  return "x"\n}\nfn g(a: i64) -> i64 {\n  return a\n}\nlet x = g(f(1), g(2))\nlet y: str = 3\nlet v = [1]\nv.push("s")\nv.push(2, 3)\n',
+    # A closure inside a placeholder, on the first line of its literal and on the second.
+    'interp_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nlet v = [1]\nprint("{v.map(fn(x) { return f() })}")\nprint("two\n{v.map(fn(x) { return f() })}")\n',
 }
 
 # Expected errors, including source locations.
@@ -105,6 +107,10 @@ EXPECT = {
         "multi.brat:8: error: let `y`: annotated str, got i64",
         "multi.brat:10: error: method `push` arg 1: want i64, got str",
         "multi.brat:11: error: method `push` wants 1 args",
+    ],
+    "interp_line.brat": [
+        "interp_line.brat:5: error: `f` wants 1 args, got 0",
+        "interp_line.brat:7: error: `f` wants 1 args, got 0",
     ],
 }
 
