@@ -9,10 +9,10 @@ modular C11 runtime (`lang/engine/crt.h` and `lang/engine/crt/*.h`, ~13k lines).
 ```text
 source (.brat / .bri)
   -> lexer.cpp + parser.cpp      (tokens, AST, span table)
-  -> modules.cpp + pkg.cpp       (imports, .bri interfaces, brat.lock)
+  -> module.cpp + driver_pkg.cpp (imports, .bri interfaces, brat.lock)
   -> check.cpp                   (gradual type inference, traits, exhaustiveness)
   -> borrow.cpp + parfor.cpp     (moves, local borrows, arenas, spawn/par-for rules)
-  -> ffi_hdr.cpp + dwarf.cpp     (C header, ELF/Mach-O/PE symbol & DWARF checks)
+  -> ffi_cdecl.cpp + ffi_object.cpp (C header, ELF/Mach-O/PE symbol & DWARF checks)
   -> ir.cpp                      (SSA-style analysis: SRA, range/div/RC elision)
   -> emit.cpp                    (two-pass C11 code generator + BRAT_CRT_MASK)
   -> system C11 compiler         (cc / gcc / clang / $BRAT_CC)

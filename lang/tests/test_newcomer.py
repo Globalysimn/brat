@@ -163,6 +163,7 @@ PAST = ("used to", "merged", "replaced", "deleted", "renamed", "was ", "were ")
 DOCS = [os.path.join(ROOT, n) for n in ("README.md", "CONTRIBUTING.md", "SECURITY.md")]
 DOCS.append(os.path.join(ROOT, "lang", "spec", "SPEC.md"))
 DOCS.extend(sorted(glob.glob(os.path.join(ROOT, "docs", "*", "*.md"))))
+SOURCES = {os.path.basename(p) for p in glob.glob(os.path.join(ROOT, "lang", "cxx", "src", "*.cpp"))}
 missing = []
 for doc in DOCS:
     for line in open(doc, encoding="utf-8"):
@@ -171,7 +172,10 @@ for doc in DOCS:
         for name in set(re.findall(r"test_[a-z0-9_]+\.py", line)):
             if not os.path.isfile(os.path.join(HERE, name)):
                 missing.append("%s -> %s" % (os.path.relpath(doc, ROOT), name))
-check(not missing, "documentation names tests that do not exist: %s" % (missing,))
+        for name in set(re.findall(r"\b[a-z_]+\.cpp\b", line)):
+            if name not in SOURCES:
+                missing.append("%s -> %s" % (os.path.relpath(doc, ROOT), name))
+check(not missing, "documentation names files that do not exist: %s" % (missing,))
 
 # Every command row of the CLI reference names a command the binary has, and
 # every flag in the row is one that command accepts.

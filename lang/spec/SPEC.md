@@ -125,14 +125,14 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 
 ## 7. Modules and `.bri` interfaces
 
-- `import a.b` resolves `std.*` modules embedded in `brat-cxx`, local
-  `a/b.brat` relative to the entry root, or locked packages in `brat.toml` /
-  `brat.lock`. Circular imports are rejected.
+- `import a.b` resolves `std.*` modules from the `lang/std` directory next to
+  `brat-cxx`, local `a/b.brat` relative to the entry root, or locked packages in
+  `brat.toml` / `brat.lock`. Circular imports are rejected.
 - `pub` marks functions, structs, enums, and traits exported across module
   boundaries. When a sibling `.bri` interface file is present, `check.cpp`
   verifies exported signatures against it.
 
-## 8. C FFI and ABI verification (`ffi_hdr.cpp`, `dwarf.cpp`)
+## 8. C FFI and ABI verification (`ffi_cdecl.cpp`, `ffi_object.cpp`)
 
 - Foreign widths (`i8`, `i16`, `i32`, `u8`, `u16`, `u32`, `u64`, `usize`, `f32`,
   `ptr`, `ptr[T]`) convert at `extern fn` / `export fn` boundaries with range
