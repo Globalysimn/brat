@@ -99,15 +99,46 @@ using `move` and `borrows(p)`:
 ```brat
 extern fn malloc(size: usize) -> move ptr
 extern fn free(move p: ptr)
-extern fn c_inspect(p: ptr) -> i64 borrows(p)
+extern fn c_view(p: ptr) -> ptr borrows(p)
 
 fn main() -> i64 {
   let p = malloc(16)
   ptr_write_i64(p, 42)
-  print(c_inspect(p))
+  let v = c_view(p)
+  print(ptr_read_i64(v))
   free(move p)
   return 0
 }
+```
+
+`borrows(p)` needs a pointer result, and the view `v` ends at its last read.
+Freeing the owner before that read is refused:
+
+```brat check
+extern fn malloc(size: usize) -> move ptr
+extern fn free(move p: ptr)
+extern fn c_view(p: ptr) -> ptr borrows(p)
+
+fn main() -> i64 {
+  let p = malloc(16)
+  let v = c_view(p)
+  free(move p)
+  print(ptr_read_i64(v))
+  return 0
+}
+```
+
+```diagnostics
+example.brat: 2 error(s), 0 warning(s)
+example.brat:8: error: cannot move `p` while borrowed by `v`
+  |   free(move p)
+example.brat:7: note: borrowed by `v` here
+  |   let v = c_view(p)
+example.brat:10: error: leaked owned pointer `p`: free it or return it
+  |   return 0
+example.brat:6: note: `p` allocated here
+  |   let p = malloc(16)
+example.brat: 0 type error(s)
 ```
 
 - Forgetting `free(move p)` fails `brat-cxx check` with `leaked owned pointer`.
