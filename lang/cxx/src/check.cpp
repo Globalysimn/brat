@@ -2709,10 +2709,13 @@ void FnTyper::stmt(const Stmt &s) {
         break;
     }
     case SK::SetIdx: {
-        expr(*s.e1);
+        Ty bt = expr(*s.e1);
         expr(*s.e2);
-        expr(*s.e3);
+        Ty got = expr(*s.e3);
         std::string root = first_var(*s.e1);
+        if (bt.k == Ty::Vec && !type_ok(*bt.inner, got))
+            note("assign to an element of `" + root + "`: want " + type_name(*bt.inner) + ", got " +
+                 type_name(got));
         if (current_region() != 0 && !root.empty()) {
             if (!inner(root) && escapes(*s.e3)) {
                 arena_note("a value made inside the block is stored into `" + root +
