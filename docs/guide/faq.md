@@ -98,7 +98,7 @@ analysis and will stay alive until process exit unless freed by a region:
    runtime features (`NET`, `TLS`, `SQL`, `PROC`, `RE`, `CONC`, `JSON`) so
    programs do not compile or link unused runtime code.
 
-The trade-off is C compiler time on cold builds (~0.7s for a minimal program at
+The trade-off is C compiler time on cold builds (~0.85 s for a minimal program at
 `-O2`), offset during development by `brat run`'s content-addressed binary cache.
 
 ## Why does `brat build` refuse `extern fn puts(s: str) -> i32` by default?

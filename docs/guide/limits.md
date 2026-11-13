@@ -316,17 +316,18 @@ SS
 
 Pass-2 subsystem trimming (`BRAT_CRT_MASK`) strips unused runtime sections from
 `crt.h` before invoking the C compiler, so a minimal `fn main() -> i64 { return
-0 }` cold `brat-cxx build -O2` finishes in `0.74 s` (GCC 14.2 on Xeon 2.60 GHz).
+0 }` cold `brat-cxx build -O2` finishes in `0.85 s` (median of 7 on the machine of
+the speed table, `BRAT_NATIVE_CACHE_DISABLE=1`).
 Functions with 24 or more boxed `Val` locals pack them into a single `Val
 __fv[N]` array so `-O2` compile times scale linearly with local count (`make
-bench`, `BRAT_NATIVE_CACHE_DISABLE=1`):
+bench`, one cold build per row on the same machine):
 
 | Heap string locals (`N`) | Emitted C | Cold `brat-cxx build -O2` |
 |---:|---:|---:|
-| 50 | 27.3 KB | 1.10 s |
-| 100 | 47.4 KB | 1.40 s |
-| 200 | 88.2 KB | 2.20 s |
-| 400 | 169.6 KB | 3.98 s |
+| 50 | 28.3 KB | 1.32 s |
+| 100 | 48.4 KB | 1.65 s |
+| 200 | 89.2 KB | 2.63 s |
+| 400 | 170.6 KB | 4.72 s |
 
 `brat-cxx run` caches compiled binaries keyed by compiler binary digest,
 effective environment, emitted C, `crt.h` digest, optimization flags and
