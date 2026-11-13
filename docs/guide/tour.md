@@ -194,6 +194,31 @@ error): pass them directly as callbacks (`[1, 2, 3].map(double)`) to `map`,
 `filter`, `fold`, `any`, `all`, `find` and `sort_by`, or wrap them in
 `let f = fn(x) { return double(x) }`.
 
+A closure gets its own copy of each captured binding. Assigning to the binding
+inside the closure is lost when the call returns: the caller does not see it,
+and the next call starts from the captured value again. A container behind the
+binding is shared, so a `push` shows outside:
+
+```brat run
+fn main() -> i64 {
+  let mut n = 0
+  let mut items = []
+  let step = fn() {
+    n = n + 1
+    items.push(n)
+    return n
+  }
+  print(step(), step())
+  print(n, items)
+  return 0
+}
+```
+
+```output
+1 1
+0 [1, 1]
+```
+
 ## 7. Memory and `arena` blocks
 
 Strings, vectors, maps, tags and closures are reference-counted. For request
