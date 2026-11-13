@@ -298,7 +298,7 @@ Details on runtime caps and edge cases are in [limits](docs/guide/limits.md) and
 | [BRAT by Example](docs/guide/by-example.md) | [CLI, Env & Error Codes](docs/guide/cli.md) | [Bump Arenas (`arena`)](docs/design/ARENA.md) |
 | [Ownership & Borrows](docs/guide/ownership.md) | [Modules & `pkg`](docs/guide/modules.md) | [Deterministic `par for`](docs/design/PARFOR.md) |
 | [Verified C FFI](docs/guide/ffi.md) | [Language Spec (v0.7)](lang/spec/SPEC.md) | [Engineering Roadmap](docs/project/ROADMAP.md) |
-| [Design FAQ](docs/guide/faq.md) | [Limits & Sharp Edges](docs/guide/limits.md) | [Known Risks Ledger](docs/project/LEDGER.md) |
+| [Design FAQ](docs/guide/faq.md) | [Limits & Sharp Edges](docs/guide/limits.md) | [Known Engineering Limits Ledger](docs/project/LEDGER.md) |
 
 See also [Quickstart Examples](examples/README.md), [Security Policy](SECURITY.md),
 and [Contributing](CONTRIBUTING.md).
