@@ -643,14 +643,13 @@ def test_security_and_soundness_hardening(cxx, env):
         r1 = subprocess.run([cxx, "check", p], capture_output=True, text=True)
         assert r1.returncode != 0, (tag, r1.stdout, r1.stderr)
 
-    # 5c. Formatter preserves raw strings `r"..."` and multi-line string bodies.
-    fmt_p = os.path.join(d, "fmt_raw.brat")
-    fmt_in = 'fn main() -> i64 {\nlet p=r"C:\\dir\\"\nlet m="line1\n    indented_line2"\nreturn 0\n}\n'
+    # 5c. Formatter preserves multi-line string bodies.
+    fmt_p = os.path.join(d, "fmt_multiline.brat")
+    fmt_in = 'fn main() -> i64 {\nlet m="line1\n    indented_line2"\nreturn 0\n}\n'
     with open(fmt_p, "w", encoding="utf-8") as f:
         f.write(fmt_in)
     r_f1 = subprocess.run([cxx, "fmt", "--stdout", fmt_p], capture_output=True, text=True, check=True)
-    assert '  let p = r"C:\\dir\\"\n' in r_f1.stdout
-    assert '\n    indented_line2"\n' in r_f1.stdout
+    assert '  let m = "line1\n    indented_line2"\n' in r_f1.stdout
     assert '  return 0\n' in r_f1.stdout
 
     # 5d. `brat new` rejects ASCII control characters in project names.

@@ -39,28 +39,35 @@ bool is_alnum(unsigned char c) { return is_alpha(c) || is_digit(c); }
 // inside placeholders and inside their parentheses. A quote closes the literal
 // at depth 0, or at depth > 0 with no open `(`: that is what `"{"` looks like:
 // a JSON template whose braces are meant literally.
-size_t str_end(std::string_view s, size_t start) {
+struct StrDepth {
     int depth = 0, paren = 0;
-    size_t j = start + 1;
-    while (j < s.size()) {
-        char c = s[j];
-        if (c == '\\' && j + 1 < s.size()) {
-            j += 2;
+};
+
+// One step of that scan: true when `c` is the quote that closes the open literal.
+bool str_closes(char c, StrDepth &d) {
+    if (c == '{') {
+        d.depth++;
+    } else if (c == '}' && d.depth > 0) {
+        d.depth--;
+        if (d.depth == 0) d.paren = 0;
+    } else if (c == '(' && d.depth > 0) {
+        d.paren++;
+    } else if (c == ')' && d.paren > 0) {
+        d.paren--;
+    } else if (c == '"' && (d.depth == 0 || d.paren == 0)) {
+        return true;
+    }
+    return false;
+}
+
+size_t str_end(std::string_view s, size_t start) {
+    StrDepth d;
+    for (size_t j = start + 1; j < s.size(); ++j) {
+        if (s[j] == '\\' && j + 1 < s.size()) {
+            ++j;
             continue;
         }
-        if (c == '{') {
-            depth++;
-        } else if (c == '}' && depth > 0) {
-            depth--;
-            if (depth == 0) paren = 0;
-        } else if (c == '(' && depth > 0) {
-            paren++;
-        } else if (c == ')' && paren > 0) {
-            paren--;
-        } else if (c == '"' && (depth == 0 || paren == 0)) {
-            return j;
-        }
-        j++;
+        if (str_closes(s[j], d)) return j;
     }
     return std::string_view::npos;
 }
@@ -275,21 +282,13 @@ std::vector<Tok> lex(std::string_view src, uint32_t start_line) {
     return out;
 }
 
-static bool fmt_is_raw_open(std::string_view line, size_t quote_idx) {
-    if (quote_idx == 0 || line[quote_idx - 1] != 'r') return false;
-    if (quote_idx >= 2) {
-        const unsigned char prev = static_cast<unsigned char>(line[quote_idx - 2]);
-        if (std::isalnum(prev) || prev == '_') return false;
-    }
-    return true;
-}
-
 static std::string normalize_equals_line(std::string_view line, bool &in_blk) {
     std::string out;
     out.reserve(line.size() + 4);
     size_t i = 0;
     const size_t n = line.size();
-    bool in_str = false, raw_str = false;
+    bool in_str = false;
+    StrDepth sd;
     while (i < n) {
         const char c = line[i];
         if (in_blk) {
@@ -305,22 +304,21 @@ static std::string normalize_equals_line(std::string_view line, bool &in_blk) {
         }
         if (in_str) {
             out.push_back(c);
-            if (!raw_str && c == '\\') {
+            if (c == '\\') {
                 if (i + 1 < n) {
                     out.push_back(line[i + 1]);
                     i += 2;
                     continue;
                 }
-            } else if (c == '"') {
+            } else if (str_closes(c, sd)) {
                 in_str = false;
-                raw_str = false;
             }
             ++i;
             continue;
         }
         if (c == '"') {
             in_str = true;
-            raw_str = fmt_is_raw_open(line, i);
+            sd = {};
             out.push_back(c);
             ++i;
             continue;
@@ -365,7 +363,7 @@ static std::string normalize_equals_line(std::string_view line, bool &in_blk) {
     return out;
 }
 
-static void advance_indent_line(std::string_view line, bool &in_str, bool &raw_str, bool &in_blk,
+static void advance_indent_line(std::string_view line, bool &in_str, StrDepth &sd, bool &in_blk,
                                 std::vector<int> &stack) {
     auto cur_depth = [&]() -> int { return stack.empty() ? 0 : (stack.back() + 1); };
     bool opened_on_line = false;
@@ -384,20 +382,17 @@ static void advance_indent_line(std::string_view line, bool &in_str, bool &raw_s
             continue;
         }
         if (in_str) {
-            if (!raw_str && c == '\\') {
+            if (c == '\\') {
                 i += (i + 1 < n) ? 2 : 1;
                 continue;
             }
-            if (c == '"') {
-                in_str = false;
-                raw_str = false;
-            }
+            if (str_closes(c, sd)) in_str = false;
             ++i;
             continue;
         }
         if (c == '"') {
             in_str = true;
-            raw_str = fmt_is_raw_open(line, i);
+            sd = {};
             ++i;
             continue;
         }
@@ -455,11 +450,12 @@ std::string format_source_canonical(std::string_view raw_src) {
     }
     std::vector<std::string> out;
     std::vector<int> indent_stack;
-    bool in_str = false, raw_str = false, in_blk = false;
+    bool in_str = false, in_blk = false;
+    StrDepth sd;
     for (const std::string &raw : lines) {
         if (in_str) {
             out.push_back(raw);
-            advance_indent_line(raw, in_str, raw_str, in_blk, indent_stack);
+            advance_indent_line(raw, in_str, sd, in_blk, indent_stack);
             continue;
         }
         std::string stripped = trim_ws(raw);
@@ -487,7 +483,7 @@ std::string format_source_canonical(std::string_view raw_src) {
                               : 0;
         }
         out.push_back(std::string(static_cast<size_t>(line_indent) * 2, ' ') + norm);
-        advance_indent_line(norm, in_str, raw_str, in_blk, indent_stack);
+        advance_indent_line(norm, in_str, sd, in_blk, indent_stack);
         // The blanks at the end of a line that stays inside a string literal belong to it.
         if (in_str) out.back() += raw.substr(raw.find_last_not_of(" \t\n\v\f\r") + 1);
     }
