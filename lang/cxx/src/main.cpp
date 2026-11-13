@@ -1472,15 +1472,11 @@ static const char *no_check_forbidden_reason(const std::vector<SourceFile> &file
     for (const auto &sf : files) {
         if (has_arena_block_tokens(sf.src))
             return "arena blocks depend on the escape rules";
-        try {
-            const auto toks = lex(sf.src);
-            for (const auto &tok : toks) {
-                if (tok.text == "spawn")
-                    return "spawn blocks depend on the sharing rule";
-                if (tok.text == "lib_open")
-                    return "plugin handles depend on the lifetime rule";
-            }
-        } catch (...) {
+        for (const auto &tok : lex(sf.src)) {
+            if (tok.text == "spawn")
+                return "spawn blocks depend on the sharing rule";
+            if (tok.text == "lib_open")
+                return "plugin handles depend on the lifetime rule";
         }
     }
     return nullptr;
