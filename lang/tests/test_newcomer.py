@@ -52,6 +52,15 @@ for _link in _re.findall(r"\]\(([^)#]+)\)", readme):
         continue
     check(os.path.exists(os.path.join(ROOT, _link)), "README links a missing file: %s" % _link)
 
+# The benchmark tables say "Median of N runs": `make bench` has to run N.
+bench_src = open(os.path.join(ROOT, "scripts", "bench.py"), encoding="utf-8").read()
+bench_runs = re.search(r'"--runs", type=int, default=(\d+)', bench_src)
+check(bench_runs, "bench.py lost its --runs option")
+limits_md = open(os.path.join(ROOT, "docs", "guide", "limits.md"), encoding="utf-8").read()
+for label, text in (("README", readme), ("limits.md", limits_md)):
+    check("Median of %s runs" % bench_runs.group(1) in text,
+          "%s names a different run count than bench.py (default %s)" % (label, bench_runs.group(1)))
+
 check(os.path.isfile(NEWCOMER), "newcomer.brat missing")
 
 lines = open(NEWCOMER, encoding="utf-8").read().splitlines()

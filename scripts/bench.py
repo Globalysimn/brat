@@ -499,7 +499,7 @@ def build_go(td: str, name: str, src: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--runs", type=int, default=3, help="repetitions per runtime benchmark (default: 3)")
+    ap.add_argument("--runs", type=int, default=5, help="repetitions per runtime benchmark (default: 5)")
     ap.add_argument("--skip-python-slow", action="store_true", help="skip slow 50M/100M-step Python loops")
     ap.add_argument("--no-go", action="store_true", help="omit Go comparison even when `go` is installed")
     args = ap.parse_args()

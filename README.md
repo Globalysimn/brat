@@ -243,7 +243,9 @@ OpenSSL only when referenced. `./bin/brat` (~5 MB) includes the compiler, 12
 [`scripts/bench.py`](scripts/bench.py) compiles and times every workload from
 source (`make bench`).
 
-Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CPython 3.14.2):
+Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CPython 3.14.2),
+except the two long CPython loops, which run once. Two runs of the same build on that
+CPU model differ by up to 20% in the rows under 0.1 s (BRAT `fib(35)`: 0.050 s and 0.059 s):
 
 | Workload | C (`gcc -O2`) | Go 1.27 (`go build`) | BRAT (`brat-cxx build -O2`) | CPython 3.14 |
 |---|---:|---:|---:|---:|
