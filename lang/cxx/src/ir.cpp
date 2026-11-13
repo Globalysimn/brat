@@ -1,6 +1,7 @@
 #include "ir.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -1129,10 +1130,12 @@ struct DBM {
     int n = 1;   // node 0 is constant zero `z0 = 0`
     std::map<std::string, int> ids;
     std::vector<std::string> names{"0"};
-    __int128 m[MAX_DBM][MAX_DBM];
+    // On the heap: the O2 walker holds three copies per branch in its frame, and
+    // 36 KB each made that frame 145 KB, so 55 nested branches overflowed the stack.
+    std::vector<std::array<__int128, MAX_DBM>> m;
     bool inconsistent = false;
 
-    DBM() {
+    DBM() : m(MAX_DBM) {
         for (int i = 0; i < MAX_DBM; ++i)
             for (int j = 0; j < MAX_DBM; ++j)
                 m[i][j] = (i == j) ? 0 : DBM_INF;

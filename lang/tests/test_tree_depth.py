@@ -5,12 +5,14 @@ parser walks the tree recursively, so an unbounded depth is a stack overflow on
 a file that has already tokenised and parsed.
 
 The bound is `kMaxTreeDepth` in `parser.cpp`: far above hand-written code, far
-under the stack. This file pins four things:
+under the stack. This file pins five things:
 
 - a chain past the bound is refused by `check`, which does not die by a signal;
 - the refusal names the line the chain starts on;
 - the same shape in strings (`"a"+"b"+...`) is refused the same way;
-- a chain under the bound is accepted and still builds and runs at -O0 and -O2.
+- a chain under the bound is accepted and still builds and runs at -O0 and -O2;
+- an `else if` chain or a nest of `if` under the bounds still builds at -O2,
+  whose range analysis keeps state per branch and is recursive too.
 """
 import _cxx
 import _scratch
@@ -37,6 +39,18 @@ def run(cmd, **kw):
 
 def chain(n, op="+"):
     return "print(" + op.join(["1"] * n) + ")\n"
+
+
+def else_if_chain(n):
+    src = "fn pick(c: i64) -> i64 {\n  if c == 0 {\n    return 0\n  }"
+    for i in range(1, n):
+        src += " else if c == %d {\n    return %d\n  }" % (i, i)
+    return src + " else {\n    return -1\n  }\n}\nfn main() -> i64 {\n  print(pick(%d))\n  return 0\n}\n" % (n - 1)
+
+
+def nested_ifs(n):
+    return ("fn main() -> i64 {\n  let c = 7\n" + "  if c > 0 {\n" * n + "    print(c)\n"
+            + "  }\n" * n + "  return 0\n}\n")
 
 
 def write(name, src):
@@ -99,6 +113,21 @@ def main():
         fail("wide_line", "no snippet in the diagnostic")
     elif len(snippet[0]) > 260:
         fail("wide_line", "the snippet echoes %d characters of source" % len(snippet[0]))
+
+    # 4. Branches under the bounds: -O2 analyses them without dying by a signal.
+    for name, src, want in (("else_if_300", else_if_chain(300), "299\n"),
+                            ("nested_if_150", nested_ifs(150), "7\n")):
+        path = write(name, src)
+        exe = os.path.join(TMP, name + ".exe")
+        b = run(_cxx.cli_args("build", path, "-O2", "-o", exe))
+        if b is None or b.returncode != 0:
+            fail(name, "build -O2: rc=%s %s" % (None if b is None else b.returncode,
+                                                (b.stdout + b.stderr)[-200:] if b else "timeout"))
+            continue
+        nat = run([exe])
+        if nat is None or nat.returncode != 0 or nat.stdout != want:
+            fail(name, "ran %r/%r, want rc 0 and %r"
+                 % (None if nat is None else nat.returncode, None if nat is None else nat.stdout, want))
 
     if failures:
         raise SystemExit("TREE DEPTH FAILED (%d)" % failures)
