@@ -103,6 +103,16 @@ fn main() -> i64 {
 # and is the shape of every printf-style API that takes a struct.
 STRUCTS_NATIVE_WANT = "7\n2\n46\n"
 
+# The size of this record depends on the pointer width, so it shows whether
+# anything but the target decides the layout asserted in the C.
+NODE = '''extern struct Node { tag: i8, next: ptr, n: i64 }
+extern "LIB" fn walk(p: ptr) -> i64
+
+fn main() -> i64 {
+  return 0
+}
+'''
+
 # A move whose source is read again is refused by the checker; the runtime marker
 # is the backstop behind it, and it has to survive -O2.
 MOVE = '''fn take(s: move str) -> str {
@@ -230,6 +240,15 @@ def main():
                        env=CXX_ENV)
     assert p.returncode == 0, p.stdout + p.stderr
     assert p.stdout == out, "the CLI doors disagree on the extern declarations"
+
+    # The layout asserted in the C is the target's: the environment cannot move it.
+    node = write("node.brat", NODE.replace('"LIB"', '"%s"' % lib))
+    plain = subprocess.run([CXX, "cc", node], capture_output=True, text=True, timeout=600, env=CXX_ENV)
+    assert plain.returncode == 0, plain.stdout + plain.stderr
+    assert "_Static_assert(sizeof(bf_Node) ==" in plain.stdout, plain.stdout
+    ambient = subprocess.run([CXX, "cc", node], capture_output=True, text=True, timeout=600,
+                             env=dict(CXX_ENV, BRAT_FFI_PTR="4", BRAT_FFI_A8="4"))
+    assert ambient.stdout == plain.stdout, "BRAT_FFI_PTR moved the layout asserted in the C"
 
     # and -O0 and -O2 agree on the values
     assert run_o0(widths) == WIDTHS_WANT, run_o0(widths)

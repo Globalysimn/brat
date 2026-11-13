@@ -9397,8 +9397,7 @@ std::string Emitter::emit_program() {
     // `long` is 4 bytes while `i64` claims 8, fails the build instead of
     // corrupting the struct at run time.
     // Use the target's widths, not the host's. An explicit triple determines
-    // them below; BRAT_FFI_PTR/BRAT_FFI_A8 are overrides for the no-triple
-    // path used by focused tests.
+    // them below; without one the layout is LP64's.
     int ffi_pw = 8, ffi_a8 = 8;
     if (!target_triple.empty()) {
         std::string t = target_triple;
@@ -9423,9 +9422,6 @@ std::string Emitter::emit_program() {
                                 t.find("gnux32") != std::string::npos;
             ffi_a8 = x86_32 ? 4 : 8;
         }
-    } else {
-        if (const char *e = std::getenv("BRAT_FFI_PTR")) ffi_pw = std::atoi(e);
-        if (const char *e = std::getenv("BRAT_FFI_A8")) ffi_a8 = std::atoi(e);
     }
     auto ffi_field_shape = [ffi_pw, ffi_a8](const std::string &t) -> std::optional<std::pair<int, int>> {
         static const std::map<std::string, std::pair<int, int>> shape = {
