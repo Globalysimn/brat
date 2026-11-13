@@ -9626,7 +9626,6 @@ std::string Emitter::emit_program() {
         if (e.lib.empty() && sys_c_syms.count(e.name)) continue;
         if (!e.lib.empty() && (e.lib.find("libc.so") != std::string::npos || e.lib == "libc"))
             continue;
-        const std::string cret = ffi_decl_type(e.ret ? *e.ret : std::string());
         std::string cparams;
         for (const auto &p : *e.params) {
             const std::string t = ffi_decl_type(p.ann ? *p.ann : std::string());
