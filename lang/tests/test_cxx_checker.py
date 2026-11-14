@@ -76,6 +76,11 @@ FIXTURES = {
                       'let mut v = [3, 1, 2]\nv.sort_by(fn(a, b) { return a < b })\nv.sort_by(less)\n'
                       'print(v.fold(0, fn(a) { return a }))\n'
                       'v.sort_by(fn(x) { return 0 - x })\nprint(v.fold(0, fn(a, x) { return a + x }))\n'),
+    # `get` hands back the value or `None`; only a method of the program's own can say `Some`.
+    'match_get.brat': ('impl Cache {\n  fn get(self, k: str) -> Option[i64] {\n    return Some(self.n)\n  }\n}\n'
+                       'let m = {"a": 1}\nmatch m.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'
+                       'match m.get("a") {\n  None => { print(0) },\n  x => { print(x) }\n}\n'
+                       'let c = Cache { n: 7 }\nmatch c.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -139,6 +144,9 @@ EXPECT = {
         "cb_count.brat:5: error: method `sort_by` wants a callback with 1 args, got 2 (it orders by the key the callback returns)",
         "cb_count.brat:6: error: method `sort_by` wants a callback with 1 args, got 2 (it orders by the key the callback returns)",
         "cb_count.brat:7: error: method `fold` wants a callback with 2 args, got 1",
+    ],
+    "match_get.brat": [
+        "match_get.brat:7: error: non-exhaustive match: `get` answers the value itself or `None`, so `Some(...)` never matches (hint: match `None` and `_`)",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",

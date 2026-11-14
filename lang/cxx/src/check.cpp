@@ -1516,9 +1516,26 @@ struct FnTyper {
         const Stmt &lt = *stmts[idx];
         if (lt.k != SK::LetTmp || !lt.from_match) return;
         Ty scrut = env_get(lt.a);
+        const Stmt *cur = stmts[idx + 1].get();
+        // `get`, `first`, `last` and `find` of a map or a vector answer the value
+        // itself or `None`, so an arm that asks for `Some(...)` never runs.
+        static const std::set<std::string> bare = {"get", "first", "last", "find"};
+        if (lt.e1 && lt.e1->k == EK::MCall && bare.count(lt.e1->b)) {
+            const Ty rt = peek_expr(*lt.e1->kids[0]);
+            const bool builtin = rt.k == Ty::Map || rt.k == Ty::Vec;
+            for (const Stmt *arm = cur; builtin && arm && arm->k == SK::If; arm = arm->els.get()) {
+                std::string v, tag;
+                if (!extract_tagof_eq(arm->e1.get(), v, tag) || v != lt.a || tag != "some") continue;
+                int saved_line = line;
+                if (lt.line) line = lt.line;
+                note("non-exhaustive match: `" + lt.e1->b + "` answers the value itself or "
+                     "`None`, so `Some(...)` never matches (hint: match `None` and `_`)");
+                line = saved_line;
+                break;
+            }
+        }
         const bool is_enum = (scrut.k == Ty::Enum && g_enums && g_enums->count(scrut.text));
         if (!is_enum && scrut.k != Ty::Option && scrut.k != Ty::Result) return;
-        const Stmt *cur = stmts[idx + 1].get();
         if (!cur || cur->k != SK::If) return;
         std::set<std::string> seen;
         while (cur && cur->k == SK::If) {

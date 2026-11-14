@@ -162,8 +162,8 @@ example.brat:4: error: arena: a value made inside the block is returned out of i
 
 `map` is an open-addressed hash table with inline storage for small maps and
 4-way inline caches on constant string keys. Indexing (`m[k]`) raises on a
-missing key; `.get(k)` returns `None`; `.get_or(k, fallback)` supplies a
-default:
+missing key; `.get(k)` returns the value itself or `None`, not `Some(...)`;
+`.get_or(k, fallback)` supplies a default:
 
 ```brat run
 fn main() -> i64 {
