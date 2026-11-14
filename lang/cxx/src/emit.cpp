@@ -3976,6 +3976,9 @@ static bool stmt_returns_owned(const Stmt &s, const std::set<std::string> &heap,
                         ((self_a && s.e1->a == *self_a) || (self_b && s.e1->a == *self_b)));
         if (!is_self) saw = true;
         if (s.e1->k == EK::Var) return true;
+        // A bare uppercase local parses as a zero-argument call.
+        if (s.e1->k == EK::Call && s.e1->kids.empty() &&
+            heap.count(LOCAL_BINDING_PREFIX + s.e1->a)) return true;
         if (s.e1->k == EK::Move && !s.e1->kids.empty() && s.e1->kids[0]->k == EK::Var) return true;
         return dec_able(*s.e1, heap);
     }
@@ -6464,7 +6467,18 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         return;
     }
     case SK::Return: {
-        V v = ex(*s.e1);
+        // A bare uppercase binding parses as a zero-argument call. `return X`
+        // reads a place like `return x` does, and has to hand the caller a
+        // reference of its own the same way.
+        const Expr *ret = s.e1.get();
+        ExprP ret_var;
+        if (ret->k == EK::Call && ret->kids.empty() && !ret->a.empty() &&
+            ret->a[0] >= 'A' && ret->a[0] <= 'Z' && !fns.count(fn_key(ret->a)) &&
+            (sym.count(ret->a) || (cap && cap->second.count(ret->a)))) {
+            ret_var = mk_var(ret->a);
+            ret = ret_var.get();
+        }
+        V v = ex(*ret);
         for (auto &p : v.pre) ln(ind, p);
         emit_err_check(ind);
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it)
@@ -6479,10 +6493,10 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         // `a[i]` already hands back a reference the holder owns (vat_owned), so
         // the container can just be dropped at the exit like any other local;
         // lifting the part out and stealing it was the pre-vat_owned shape.
-        const bool owned_part = dec_able(*s.e1, heap_returns());
+        const bool owned_part = dec_able(*ret, heap_returns());
         // `r.sort()` is `r` itself and `r.first()` is a part of it, so the value belongs to the
         // root `r` belongs to.
-        const Expr *alias = s.e1.get();
+        const Expr *alias = ret;
         bool part_call = false;
         while (alias->k == EK::MCall && !alias->kids.empty() &&
                (SELF_RESULT.count(alias->b) || PART_RESULT.count(alias->b))) {
@@ -6523,7 +6537,7 @@ void Emitter::st(const Stmt &s, const std::string &ind) {
         std::string handed = (root && !owned_part && !is_part) ? *root : "";
         if (fin == "__fin_top") {
             Names keep;
-            refs_in_expr(s.e1.get(), keep);
+            refs_in_expr(ret, keep);
             for (size_t i = iter_cleanups.size(); i > 0; --i) ln(ind, iter_cleanups[i - 1]);
             emit_fn_drops(ind, handed, true, keep);
             ln(ind, cat("{ fprintf(stderr, \"unhandled: \"); vprint_err(", v.val,

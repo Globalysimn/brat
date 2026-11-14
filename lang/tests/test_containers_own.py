@@ -7,7 +7,7 @@ elements: a vector literal, a map literal, a push of a fresh value, a slice, a
 key list, concatenation, a struct field, a nested vector, an iterator over a
 map, a captured binding, a capture handed to a spawned closure, an error
 carried out of a function, and a value a function returns through an enum
-constructor or a closure call.
+constructor, a closure call or an uppercase binding.
 """
 import _cxx
 import _scratch
@@ -509,6 +509,28 @@ fn main() -> i64 {
   return 0
 }
 ''', "600\n")
+
+CASES["upper_binding_returned"] = ('''let TABLE = ["g1", "g2"]
+
+fn build(v: i64) {
+  let Items = ["x {v}", "y {v}"]
+  return Items
+}
+
+fn pass(X) { return X }
+
+fn table() { return TABLE }
+
+fn main() -> i64 {
+  let mut n = 0
+  for i in 0..100 {
+    let xs = ["k {i}"]
+    n = n + len(build(i)) + len(pass(xs)) + len(xs) + len(table())
+  }
+  print(n, TABLE)
+  return 0
+}
+''', "600 ['g1', 'g2']\n")
 
 CASES["vlit_overflow_cached"] = (
     'fn pick() -> str {\n  let mut s = ""\n  for k in 0..3 {\n'
