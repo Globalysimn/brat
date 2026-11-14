@@ -284,6 +284,8 @@ span stacks to stdout without external dependencies.
   `std.crypto`, `std.fs`, `std.path`, `std.cli`, `std.csv`, `std.env`,
   `std.proc`, `std.bytes`, `std.time`). Details: [modules.md](modules.md) and
   [stdlib.md](stdlib.md).
+- Built-in functions and the methods of strings, vectors and maps:
+  [builtins.md](builtins.md).
 - `extern fn`, `extern struct`, `extern union`, `ptr[T]`, `slice_of_ptr`,
   callbacks, `--header` / `--object` verification and `brat-cxx bindgen`:
   [ffi.md](ffi.md).

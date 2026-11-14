@@ -241,6 +241,15 @@ listed = set(re.findall(r"^\| `(BRAT_[A-Z0-9_]+)` \|", cli_doc, re.M))
 check(read == listed, "read but not listed in cli.md: %s; listed but never read: %s"
       % (sorted(read - listed), sorted(listed - read)))
 
+# The methods builtins.md lists are the ones the checker knows the size of.
+checker = open(os.path.join(ROOT, "lang", "cxx", "src", "check.cpp"), encoding="utf-8").read()
+table = checker[checker.index("builtin_arity = {"):]
+known = set(re.findall(r'\{"([a-z_]+)", \{', table[:table.index("};")]))
+builtins_md = open(os.path.join(ROOT, "docs", "guide", "builtins.md"), encoding="utf-8").read()
+listed_methods = set(re.findall(r"`[a-z]+\.([a-z_]+)\(", builtins_md))
+check(known == listed_methods, "methods only in check.cpp: %s; only in builtins.md: %s"
+      % (sorted(known - listed_methods), sorted(listed_methods - known)))
+
 # The keyword list of the specification is the lexer's.
 lexer = open(os.path.join(ROOT, "lang", "cxx", "src", "lexer.cpp"), encoding="utf-8").read()
 table = lexer[lexer.index("words[] = {"):]

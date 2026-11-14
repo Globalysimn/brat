@@ -19,6 +19,7 @@ DOCS = [
     "docs/guide/ownership.md",
     "docs/guide/ffi.md",
     "docs/guide/stdlib.md",
+    "docs/guide/builtins.md",
     "docs/guide/limits.md",
     "docs/guide/faq.md",
 ]

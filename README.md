@@ -9,9 +9,9 @@ or `'a` lifetime parameters on types and functions.
 
 [Language tour](docs/guide/tour.md) | [By example](docs/guide/by-example.md) |
 [Ownership](docs/guide/ownership.md) | [C interop](docs/guide/ffi.md) |
-[Standard library](docs/guide/stdlib.md) | [CLI & error codes](docs/guide/cli.md) |
-[Specification](lang/spec/SPEC.md) | [Limits](docs/guide/limits.md) |
-[FAQ](docs/guide/faq.md)
+[Standard library](docs/guide/stdlib.md) | [Built-ins](docs/guide/builtins.md) |
+[CLI & error codes](docs/guide/cli.md) | [Specification](lang/spec/SPEC.md) |
+[Limits](docs/guide/limits.md) | [FAQ](docs/guide/faq.md)
 
 Heap values use reference counting, local borrows stay inside one function, and
 `arena { ... }` routes request-scoped allocations to a bump region reset at
