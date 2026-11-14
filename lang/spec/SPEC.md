@@ -102,6 +102,10 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 - `i64(x)` and `f64(x)` convert a number to the other type. `i64` drops the
   fraction toward zero and raises `integer out of range` for a value that does
   not fit; both raise `not a number` for anything else.
+- `chr(n)` is the one-character string of code point `n` and raises
+  `not a code point` for a surrogate or a value outside `0..0x10FFFF`. `ord(s)`
+  is the code point of a one-character string and raises
+  `ord wants one character` for anything else.
 - `==` and `!=` compare structural value equality on primitives, strings,
   vectors, maps, structs, and enums without implicit type coercion (`1 == "1"`
   is `false`, annotated or not).

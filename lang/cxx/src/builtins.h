@@ -115,5 +115,6 @@ inline constexpr bool is_scalar_only_builtin(std::string_view n) {
            n == "ptr_read_f64" || n == "ptr_read_f32" || n == "ptr_read_u8" ||
            n == "re_match" || n == "fs_exists" || n == "fs_is_dir" ||
            n == "sbuf_len" || n == "slice_len" ||
-           n == "time_ms" || n == "mono_ns" || n == "errno" || n == "i64" || n == "f64";
+           n == "time_ms" || n == "mono_ns" || n == "errno" || n == "i64" || n == "f64" ||
+           n == "ord";
 }

@@ -998,6 +998,7 @@ static const std::vector<MethDef> MAP_METH = {
 static const std::map<std::string, Ty> BRES = {
     {"len", Ty::of(Ty::Int)}, {"str", Ty::of(Ty::Str)},
     {"i64", Ty::of(Ty::Int)}, {"f64", Ty::of(Ty::Float)},
+    {"chr", Ty::of(Ty::Str)}, {"ord", Ty::of(Ty::Int)},
     {"is_ok", Ty::of(Ty::Bool)}, {"is_err", Ty::of(Ty::Bool)},
     {"is_some", Ty::of(Ty::Bool)}, {"is_none", Ty::of(Ty::Bool)},
     {"tagof", Ty::of(Ty::Str)},

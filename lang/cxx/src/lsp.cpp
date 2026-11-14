@@ -1365,6 +1365,8 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"str", "fn str(x) -> str: convert value to UTF-8 string"},
         {"i64", "fn i64(x) -> i64: a number as an integer, a float truncated toward zero"},
         {"f64", "fn f64(x) -> f64: a number as a float"},
+        {"chr", "fn chr(n: i64) -> str: the one-character string of a code point"},
+        {"ord", "fn ord(s: str) -> i64: the code point of a one-character string"},
         {"read_file", "fn read_file(path: str|vec[i64]) -> Result[str, str] (confined)"},
         {"write_file", "fn write_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined)"},
         {"append_file", "fn append_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined atomic append)"},

@@ -288,6 +288,23 @@ BFN Val vto_f64(Val v) {
     if (v.tag == V_INT) return vfloat((double)v.as.ival);
     vraise("not a number"); return vunwind;
 }
+/* `chr(n)` and `ord(s)`: a code point as a one-character string, and back. */
+BFN Val vchr(Val v) {
+    if (v.tag != V_INT || v.as.ival < 0 || v.as.ival > 0x10FFFF ||
+        (v.as.ival >= 0xD800 && v.as.ival <= 0xDFFF)) {
+        vraise("not a code point"); return vunwind;
+    }
+    char b[4];
+    return vstrn(b, vcp_put((unsigned)v.as.ival, b));
+}
+BFN Val vord(Val v) {
+    unsigned cp = 0;
+    if (v.tag != V_STR || vstr_len_fast(&v) == 0 ||
+        (size_t)vcp_next(vstr_c(&v), &cp) != vstr_len_fast(&v)) {
+        vraise("ord wants one character"); return vunwind;
+    }
+    return vint((bint)cp);
+}
 /* A vec operation that got the wrong receiver raises and returns an empty vec:
    the generated code keeps running until the next error check and would
    dereference NULL there. `meth` names the method for the message, so the

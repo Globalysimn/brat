@@ -22,6 +22,7 @@ Two conventions run through the tables:
 | `len(x)` | code points of a string, items of a vector, keys of a map |
 | `str(x)` | the text `print` writes for `x` |
 | `i64(x)`, `f64(x)` | a number as the other type; `i64` drops the fraction toward zero |
+| `chr(n)`, `ord(s)` | the one-character string of code point `n`; the code point of a one-character string |
 | `assert(cond)`, `assert(cond, msg)` | raises `assert failed`, or `msg`, when `cond` is false |
 | `raise(x)` | leaves the fn with `Err(x)`: a `try` around it in the same fn catches `x`, a caller gets the `Err` as a value and unwraps it with `?`, and `main` ends the program with status 1 |
 | `exit(code)` | ends the program with that status |

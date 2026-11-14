@@ -9965,6 +9965,8 @@ V Emitter::ex_call(const Expr &e) {
         {"is_float", {"vbool((", ").tag == V_FLOAT)"}},
         {"i64", {"vto_i64(", ")"}},
         {"f64", {"vto_f64(", ")"}},
+        {"chr", {"vchr(", ")"}},
+        {"ord", {"vord(", ")"}},
     };
     if (auto ro = READ_ONLY_1.find(name); ro != READ_ONLY_1.end()) {
         need_arity(args, 1, name);
