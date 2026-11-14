@@ -100,6 +100,7 @@ OWNERSHIP = {
     'spawn_ref.brat': 'fn f(v: vec[i64]) -> i64 {\n  let a = v\n  spawn {\n    print(a)\n  }\n  return 0\n}\n',
     'spawn_fn.brat': ('fn f() -> i64 {\n  spawn {\n    fn one() -> i64 { return 1 }\n'
                       '    print(one())\n  }\n  return 0\n}\n'),
+    'spawn_closure.brat': 'fn f() -> i64 {\n  let ch = chan(1)\n  spawn {\n    let twice = fn(x) {\n      return x * 2\n    }\n    ch.send([1, 2].map(fn(x) { return twice(x) }))\n  }\n  join_all()\n  return len(ch.recv())\n}\n',
     'spawn_return.brat': 'fn f() -> i64 {\n  let v = [1]\n  spawn {\n    return 1\n  }\n  return v[0]\n}\n',
     'top_fn.brat': ('if true {\n  fn inner() -> i64 { return 1 }\n  print(inner())\n}\n'
                     'let f = fn(k) {\n  fn boxed(n) { return [n] }\n  return boxed(k)\n}\n'
@@ -360,6 +361,10 @@ EXPECT = {
     ],
     'spawn_fn.brat': [
         'spawn_fn.brat: 0 error(s), 0 warning(s)',
+    ],
+    # A `return` in a closure leaves the closure, so the spawn rule is silent.
+    'spawn_closure.brat': [
+        'spawn_closure.brat: 0 error(s), 0 warning(s)',
     ],
     'spawn_return.brat': [
         'spawn_return.brat: 1 error(s), 0 warning(s)',
