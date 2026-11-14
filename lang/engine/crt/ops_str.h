@@ -2779,12 +2779,17 @@ typedef struct {
     const char *pat;
     bint i, plen;
     bint ngroups;
+    bint depth;
     int err;
 } RProg;
 
 #define BRAT_RE_MAX_INST 65536
 #define BRAT_RE_MAX_REP 1024
 #define BRAT_RE_MAX_GROUPS 64
+/* The pattern compiler recurses once per open group. A thread stack can be
+   512 KiB (macOS) or 1 MiB (Windows), and the instruction limit alone allows
+   some 20,000 levels. */
+#define BRAT_RE_MAX_DEPTH 200
 
 static bint r_emit(RProg *g, char op, bint x, bint y) {
     if (g->n >= BRAT_RE_MAX_INST) { g->err = 1; return 0; }
@@ -2881,12 +2886,14 @@ static bint r_atom(RProg *g) {
     if (c == '*' || c == '+' || c == '?') { g->err = 1; return -1; }
     if (c == '(') {
         g->i++;
+        if (++g->depth > BRAT_RE_MAX_DEPTH) { g->err = 1; return -1; }
         bint gid = ++g->ngroups;
         bint sv0 = (gid <= BRAT_RE_MAX_GROUPS) ? r_emit(g, 'v', 2 * gid, 0) : -1;
         bint inner = r_alt(g);
         if (g->err) return -1;
         if (g->i >= g->plen || g->pat[g->i] != ')') { g->err = 1; return -1; }
         g->i++;
+        g->depth--;
         if (gid <= BRAT_RE_MAX_GROUPS) r_emit(g, 'v', 2 * gid + 1, 0);
         body = (sv0 >= 0) ? sv0 : inner;
     } else if (c == '[') {
@@ -3092,7 +3099,7 @@ static int r_compile_prog_n(RProg *g, const char *pat, bint plen, bint *start_ou
     g->p = NULL; g->n = 0; g->cap = 0;
     g->bodies = NULL; g->nbodies = 0; g->bodies_cap = 0;
     g->pat = pat; g->i = 0; g->plen = plen;
-    g->ngroups = 0; g->err = 0;
+    g->ngroups = 0; g->depth = 0; g->err = 0;
     bint sv0 = r_emit(g, 'v', 0, 0);
     bint body = r_alt(g);
     if (g->err || body < 0 || g->i != g->plen) { r_free(g); return 0; }

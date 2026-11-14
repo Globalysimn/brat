@@ -31,6 +31,24 @@ print(ch.recv())
 ch.close()
 print(ch.recv())
 """, 0, "a\nb\nNone\n"),
+    # Groups nest 200 deep; the pattern compiler recurses once per level.
+    "regex_nesting_at_limit": ("""fn main() -> i64 {
+  print(re_match("xay", "(".repeat(200) + "a" + ")".repeat(200)))
+  return 0
+}
+""", 0, "true\n"),
+    "regex_nesting_over_limit": ("""fn main() -> i64 {
+  for n in [201, 20000] {
+    try {
+      print(re_match("xay", "(".repeat(n) + "a" + ")".repeat(n)))
+    } catch e {
+      print(e)
+    }
+  }
+  print(re_match("xay", "(a)".repeat(300) + "|a"))
+  return 0
+}
+""", 0, "bad regex pattern\nbad regex pattern\ntrue\n"),
 }
 
 
@@ -89,6 +107,18 @@ def main():
             if (r.returncode, r.stdout) != (0, "true\n"):
                 print("FAIL regex_class_repeat_memory: %r/%r %r" % (r.returncode, r.stdout, r.stderr))
                 bad += 1
+
+    # The same refusal on a 1 MiB stack, the Windows default.
+    deep_exe = os.path.join(TMP, "regex_nesting_over_limit.exe")
+    if os.path.exists(deep_exe):
+        def limit_stack():
+            resource.setrlimit(resource.RLIMIT_STACK, (1 << 20, 1 << 20))
+
+        r = subprocess.run([deep_exe], capture_output=True, text=True, timeout=60,
+                           preexec_fn=limit_stack)
+        if (r.returncode, r.stdout) != (0, CASES["regex_nesting_over_limit"][2]):
+            print("FAIL regex_nesting_small_stack: %r/%r %r" % (r.returncode, r.stdout, r.stderr[-300:]))
+            bad += 1
 
     quad_path = os.path.join(TMP, "regex_no_match_scan.brat")
     with open(quad_path, "w", encoding="utf-8") as f:
