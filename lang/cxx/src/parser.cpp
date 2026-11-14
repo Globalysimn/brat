@@ -687,7 +687,15 @@ private:
                 step();
                 auto s = std::make_unique<Stmt>();
                 s->k = SK::Import;
+                const uint32_t ln = c.line;
                 s->a = dotted_path();
+                // Read on, `as http` is two expression statements and the
+                // error names an undeclared `as`.
+                if (peek().kind == TK::Id && peek().text == "as" && peek().line == ln &&
+                    peek(1).kind == TK::Id && peek(1).line == ln) {
+                    const std::string last = s->a.substr(s->a.rfind('.') + 1);
+                    fail("import takes no `as`: after `import " + s->a + "` the prefix is `" + last + ".`", ln);
+                }
                 return one(std::move(s));
             }
         }

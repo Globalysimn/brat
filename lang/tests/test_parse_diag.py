@@ -57,6 +57,8 @@ CASES = {
     "missing_comma_struct": "let p = Point { x: 1 y: 2 }\nprint(p.x)\n",
     # A keyword is not a name: once bound it could not be read back.
     "kw_let": "let if = 41\nprint(1)\n",
+    "import_as": "import std.json as js\nprint(1)\n",
+    "import_then_as": "import std.json\nlet as = 1\nprint(as)\n",
     "kw_fn": "fn while(x) {\n  return x\n}\n",
     "kw_param": "fn f(mut: i64) {\n  return 1\n}\n",
     "kw_catch": 'try {\n  raise("x")\n} catch for {\n  print(1)\n}\n',
@@ -99,6 +101,8 @@ WANT = {
     "missing_comma_map": "1: error: want ',' have '\"b\"' at line 1",
     "missing_comma_struct": "1: error: want ',' have 'y' at line 1",
     "kw_let": "1: error: let wants a plain name, got 'if' at line 1",
+    "import_as": "1: error: import takes no `as`: after `import std.json` the prefix is `json.` at line 1",
+    "import_then_as": None,
     "kw_fn": "1: error: fn wants a plain name, got 'while' at line 1",
     "kw_param": "1: error: parameter wants a plain name, got 'mut' at line 1",
     "kw_catch": "3: error: catch wants a plain name, got 'for' at line 3",
