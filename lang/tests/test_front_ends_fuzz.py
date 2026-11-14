@@ -103,8 +103,8 @@ seeds = corpus()
 assert len(seeds) > 50, len(seeds)
 mutated = [edit(rng, rng.choice(seeds)) for _ in range(CASES)]
 
-# Batch-run mutated corpus through `brat-cxx ast` in chunks of 250 files so default fuzzing
-# verifies all 3,000 cases natively in <1s without importing legacy front-end internals.
+# The mutated corpus goes through `brat-cxx ast` in chunks of 250 files, so
+# 3,000 cases cost 12 processes and not 3,000.
 for idx, (src, want_ok) in enumerate(PINNED):
     got_kind, _ = native_verdict(src, idx)
     assert (got_kind == "ok") == want_ok, "pinned #%d expected ok=%s, got %s" % (idx, want_ok, got_kind)

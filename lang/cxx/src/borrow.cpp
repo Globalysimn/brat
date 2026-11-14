@@ -2663,9 +2663,7 @@ void cut_expr(const Expr &e, int line, std::vector<BorrowDiag> &warns) {
         return;
     }
     case EK::MapLit:
-        // The reference walks the pair list, whose entries are `(key, value)`
-        // tuples: the key is read as a node tag and never matches, the value is
-        // reached as the tuple's second element. Keys are left alone.
+        // Kids alternate key, value. Only the values are walked.
         for (size_t i = 1; i < e.kids.size(); i += 2) cut_expr(*e.kids[i], line, warns);
         return;
     case EK::StructLit:

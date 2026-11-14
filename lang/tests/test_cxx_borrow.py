@@ -113,7 +113,7 @@ OWNERSHIP = {
     'unused.brat': 'fn f() -> i64 {\n  let x = 1\n  let y = 2\n  return 0\n}\n',
 }
 
-# Every line the reference prints for the fixture, path shortened to its name.
+# Every line `check` prints for the fixture, path shortened to its name.
 # Sources and count lines included: a warning that turns into an error is a diff.
 EXPECT = {
     'alias_conflict.brat': [

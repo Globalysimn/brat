@@ -642,8 +642,8 @@ private:
     }
 
 
-    // The reference stamps every node with the line its statement started on,
-    // innermost first, so an error inside a nested block keeps the inner line.
+    // Every node gets the line its statement started on, innermost first, so
+    // an error inside a nested block keeps the inner line.
     static void stamp(Stmt &s, uint32_t ln) {
         if (!s.line) s.line = static_cast<int>(ln);
         for (auto &b : s.body) stamp(*b, ln);

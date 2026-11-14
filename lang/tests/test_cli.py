@@ -52,9 +52,8 @@ try:
     for f in BRATS:
         orig = os.path.join(EXAMPLES, f)
         tp = os.path.join(tmp, f)
-        # The -O0 build: the reference. `brat run` is now the native product
-        # path, and it refuses the examples the checker rejects, which is the
-        # contract this loop is about.
+        # `brat run` refuses the examples the checker rejects, which is the
+        # contract this loop is about. -O0 keeps the two runs short.
         r1 = run_cli("run", "-O0", orig)
         r2 = run_cli("run", "-O0", tp)
         check(r1.returncode == r2.returncode, "fmt broke %s orig=%d fmt=%d err=%s" % (f, r1.returncode, r2.returncode, r2.stderr[-500:]))
