@@ -528,6 +528,62 @@ static bool is_fn_like(const Stmt &s) {
     return s.k == SK::Fn || s.k == SK::Extern || s.k == SK::ExportFn;
 }
 
+// A `break` that leaves the loop this statement sits in.
+static bool has_break(const Stmt &s) {
+    if (s.k == SK::Break) return true;
+    if (s.k == SK::While || s.k == SK::ForRange || s.k == SK::ForIter) return false;
+    for (const auto &b : s.body)
+        if (b && has_break(*b)) return true;
+    for (const auto &b : s.body2)
+        if (b && has_break(*b)) return true;
+    return s.els && has_break(*s.els);
+}
+
+static bool stmt_returns(const Stmt &s);
+
+// Control cannot run off the end of the body: some statement of it always
+// leaves the fn, by `return`, `raise` or `exit`.
+static bool body_returns(const std::vector<StmtP> &body) {
+    for (const auto &s : body)
+        if (s && stmt_returns(*s)) return true;
+    return false;
+}
+
+static bool stmt_returns(const Stmt &s) {
+    switch (s.k) {
+    case SK::Return: return true;
+    case SK::Expr:
+        return s.e1 && s.e1->k == EK::Call && (s.e1->a == "raise" || s.e1->a == "exit");
+    case SK::Block:
+    case SK::Unsafe:
+    case SK::Scope: return body_returns(s.body);
+    case SK::Try: return body_returns(s.body) && body_returns(s.body2);
+    case SK::While: {
+        if (!s.e1 || s.e1->k != EK::Bool || !s.e1->flag) return false;
+        for (const auto &b : s.body)
+            if (b && has_break(*b)) return false;
+        return true;
+    }
+    case SK::If: {
+        // `arena { ... }` reaches here as `if true { ... }`.
+        if (s.e1 && s.e1->k == EK::Bool && s.e1->flag) return body_returns(s.body);
+        bool variants = true;
+        const Stmt *cur = &s;
+        while (cur->k == SK::If) {
+            if (!cur->els || !body_returns(cur->body)) return false;
+            variants = variants && cur->pat_uncond;
+            cur = cur->els.get();
+        }
+        // A `match` without a catch-all ends in an empty block. Arms that each
+        // test a variant leave nothing for it: a missing variant is an error
+        // of its own.
+        if (cur->from_match && cur->body.empty()) return variants;
+        return stmt_returns(*cur);
+    }
+    default: return false;
+    }
+}
+
 static bool readonly_mcall_name(const std::string &m) {
     static const std::set<std::string> ro = {
         "get", "has", "keys", "vals", "len", "contains", "starts_with", "ends_with",
@@ -1287,6 +1343,20 @@ struct FnTyper {
         note("arena: " + msg);
     }
 
+    // A fn that declares what it returns has to return on every path: the
+    // value it would hand back otherwise is 0, false or None, whatever the type.
+    void need_return(const FnDecl &f, int decl_line) {
+        if (!f.ret || ret.k == Ty::None || body_returns(f.body)) return;
+        line = f.body.empty() ? decl_line : f.body.back()->line;
+        const bool tail = !f.body.empty() && f.body.back()->k == SK::Expr;
+        const bool quiet = arity_and_arena;
+        arity_and_arena = false;
+        note("`" + f.name.value_or("fn") + "` is declared `-> " + *f.ret +
+             "` but can end without a `return`" +
+             (tail ? " (hint: the last expression is not returned, write `return` before it)" : ""));
+        arity_and_arena = quiet;
+    }
+
     void closure_body(const Expr &e, int elem_reg = 0, Ty elem_ty = Ty::dyn(),
                       size_t elem_idx = 0) {
         std::map<std::string, Ty> saved = env;
@@ -1345,6 +1415,7 @@ struct FnTyper {
         }
         ret = ann_type(f.ret);
         block(f.body);
+        need_return(f, s.line);
         ret = saved_ret;
         regions = std::move(saved_reg);
         decl_regions = std::move(saved_decl);
@@ -3275,6 +3346,7 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
                     tp.block(m.body);
                     tp.arity_and_arena = false;
                 }
+                tp.need_return(m, node.line);
             }
             continue;
         }
@@ -3297,9 +3369,11 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
             tp.arity_and_arena = true;
             tp.block(node.fns[0].body);
             tp.arity_and_arena = false;
+            tp.need_return(node.fns[0], node.line);
             continue;
         }
         tp.block(node.fns[0].body);
+        tp.need_return(node.fns[0], node.line);
     }
     FnTyper top(sigs, Ty::dyn(), errs);
     top.env = const_env;

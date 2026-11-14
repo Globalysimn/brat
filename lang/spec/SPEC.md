@@ -111,6 +111,10 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
     and returns `Err(e)` / `None` early.
   - Otherwise unwraps `Ok(v)` and raises `e` into the thread-local error channel
     caught by `try { ... } catch err { ... }`.
+- A fn that declares a result (`-> T`) leaves by `return` or `raise` on every
+  path: a body that can run off its end is a compile error. An `if` with an
+  `else`, a `match` over variants and a `while true` without `break` count when
+  each of their branches leaves.
 - `defer expr` statements run in LIFO order on every lexical scope exit (`normal`,
   `return`, `break`, `continue`, `?`, and `raise`).
 - Call depth is capped at 2,000 frames alongside a 64-frame stack-floor probe,

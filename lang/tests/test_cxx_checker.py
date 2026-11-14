@@ -60,6 +60,17 @@ FIXTURES = {
     'multi.brat': 'fn f(a: i64) -> i64 {\n  return "x"\n}\nfn g(a: i64) -> i64 {\n  return a\n}\nlet x = g(f(1), g(2))\nlet y: str = 3\nlet v = [1]\nv.push("s")\nv.push(2, 3)\n',
     # A closure inside a placeholder, on the first line of its literal and on the second.
     'interp_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nlet v = [1]\nprint("{v.map(fn(x) { return f() })}")\nprint("two\n{v.map(fn(x) { return f() })}")\n',
+    # A fn with a declared result returns on every path; `raise`, a `while true`
+    # without `break` and a `match` over variants count as leaving.
+    'no_return.brat': ('enum Light {\n  Red,\n  Green\n}\n'
+                       'fn code(l: Light) -> i64 {\n  match l {\n    Red => { return 1 },\n'
+                       '    Green => { return 2 }\n  }\n}\n'
+                       'fn must(n: i64) -> i64 {\n  if n > 0 {\n    return n\n  }\n  raise("not positive")\n}\n'
+                       'fn wait(n: i64) -> i64 {\n  while true {\n    if n > 0 {\n      return n\n    }\n  }\n}\n'
+                       'fn sign(n: i64) -> i64 {\n  if n > 0 {\n    return 1\n  }\n}\n'
+                       'fn name(n: i64) -> str {\n  match n {\n    0 => { return "zero" },\n'
+                       '    1 => { return "one" }\n  }\n}\n'
+                       'fn stop(n: i64) -> i64 {\n  while true {\n    if n > 0 {\n      break\n    }\n  }\n}\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -113,6 +124,11 @@ EXPECT = {
     "interp_line.brat": [
         "interp_line.brat:5: error: `f` wants 1 args, got 0",
         "interp_line.brat:7: error: `f` wants 1 args, got 0",
+    ],
+    "no_return.brat": [
+        "no_return.brat:25: error: `sign` is declared `-> i64` but can end without a `return`",
+        "no_return.brat:30: error: `name` is declared `-> str` but can end without a `return`",
+        "no_return.brat:36: error: `stop` is declared `-> i64` but can end without a `return`",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",
