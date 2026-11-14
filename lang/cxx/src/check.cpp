@@ -584,6 +584,22 @@ static bool stmt_returns(const Stmt &s) {
     }
 }
 
+// A `raise` that leaves the fn: one inside a `try` body is caught there.
+static bool body_raises(const std::vector<StmtP> &body);
+
+static bool stmt_raises(const Stmt &s) {
+    if (s.k == SK::Fn) return false;
+    if (s.k == SK::Expr) return s.e1 && s.e1->k == EK::Call && s.e1->a == "raise";
+    if (s.k == SK::Try) return body_raises(s.body2);
+    return body_raises(s.body) || body_raises(s.body2) || (s.els && stmt_raises(*s.els));
+}
+
+static bool body_raises(const std::vector<StmtP> &body) {
+    for (const auto &s : body)
+        if (s && stmt_raises(*s)) return true;
+    return false;
+}
+
 static bool readonly_mcall_name(const std::string &m) {
     static const std::set<std::string> ro = {
         "get", "has", "keys", "vals", "len", "contains", "starts_with", "ends_with",
@@ -891,6 +907,7 @@ void collect_sigs(const std::vector<StmtP> &prog, Sigs &sigs) {
         const bool is_ext = node.k == SK::Extern;
         sig.extern_fn = is_ext;
         if (!is_ext && !node.fns.empty()) {
+            sig.raises = body_raises(node.fns[0].body);
             compute_sink_summary(node.fns[0].body, *params, mod_sinks, sig.sink_params,
                                  sig.sink_edges);
         }
@@ -1104,6 +1121,15 @@ struct FnTyper {
             !(msg.rfind("method `", 0) == 0 && msg.find(" wants ") != std::string::npos &&
               msg.find(" args") != std::string::npos)) return;
         errs.push_back(TypeErr{line, msg});
+    }
+
+    // Reported in a fn without annotations too, where `note` holds most
+    // messages back.
+    void must(const std::string &msg) {
+        const bool quiet = arity_and_arena;
+        arity_and_arena = false;
+        note(msg);
+        arity_and_arena = quiet;
     }
 
     int current_region() const { return region_stack.back(); }
@@ -1374,12 +1400,9 @@ struct FnTyper {
         if (!f.ret || ret.k == Ty::None || body_returns(f.body)) return;
         line = f.body.empty() ? decl_line : f.body.back()->line;
         const bool tail = !f.body.empty() && f.body.back()->k == SK::Expr;
-        const bool quiet = arity_and_arena;
-        arity_and_arena = false;
-        note("`" + f.name.value_or("fn") + "` is declared `-> " + *f.ret +
+        must("`" + f.name.value_or("fn") + "` is declared `-> " + *f.ret +
              "` but can end without a `return`" +
              (tail ? " (hint: the last expression is not returned, write `return` before it)" : ""));
-        arity_and_arena = quiet;
     }
 
     void closure_body(const Expr &e, int elem_reg = 0, Ty elem_ty = Ty::dyn(),
@@ -2879,6 +2902,13 @@ void FnTyper::stmt(const Stmt &s) {
     case SK::Expr: {
         expr(*s.e1);
         const Expr &e = *s.e1;
+        if (e.k == EK::Call && !env.count(e.a)) {
+            auto f = sigs.find(e.a);
+            if (f != sigs.end() && f->second.raises)
+                must("`" + e.a + "` can raise, and the `Err` it returns is dropped here "
+                     "(hint: `" + e.a + "(...)?` passes it on, `let _ = " + e.a +
+                     "(...)` ignores it)");
+        }
         if (current_region() == 0) break;
         if (e.k == EK::Closure) {
             std::set<std::string> ms;

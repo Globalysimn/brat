@@ -121,6 +121,9 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
     and returns `Err(e)` / `None` early.
   - Otherwise unwraps `Ok(v)` and raises `e` into the thread-local error channel
     caught by `try { ... } catch err { ... }`.
+- `raise(x)` unwinds to a `try` around it in the same fn. With none, the fn
+  returns `Err(x)` to its caller; a call statement that drops the result of such
+  a fn is a compile error.
 - A fn that declares a result (`-> T`) leaves by `return` or `raise` on every
   path: a body that can run off its end is a compile error. An `if` with an
   `else`, a `match` over variants and a `while true` without `break` count when

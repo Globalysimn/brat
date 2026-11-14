@@ -81,6 +81,12 @@ FIXTURES = {
                        'let m = {"a": 1}\nmatch m.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'
                        'match m.get("a") {\n  None => { print(0) },\n  x => { print(x) }\n}\n'
                        'let c = Cache { n: 7 }\nmatch c.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'),
+    # A fn that can `raise` hands its caller an `Err`: a call that drops the
+    # result loses it. A `raise` under the fn's own `try` does not leave the fn.
+    'raise_drop.brat': ('fn save(n) {\n  if n > 9 {\n    raise("too big")\n  }\n  return n\n}\n'
+                        'fn guarded(n) {\n  try {\n    raise("inside")\n  } catch e {\n    return 0\n  }\n  return n\n}\n'
+                        'fn run() {\n  save(1)\n  guarded(1)\n  let _ = save(2)\n  let kept = save(3)\n'
+                        '  try {\n    save(4)\n    save(5)?\n  } catch e {\n    print(e)\n  }\n  return kept\n}\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -147,6 +153,12 @@ EXPECT = {
     ],
     "match_get.brat": [
         "match_get.brat:7: error: non-exhaustive match: `get` answers the value itself or `None`, so `Some(...)` never matches (hint: match `None` and `_`)",
+    ],
+    "raise_drop.brat": [
+        "raise_drop.brat:16: error: `save` can raise, and the `Err` it returns is dropped here "
+        "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
+        "raise_drop.brat:21: error: `save` can raise, and the `Err` it returns is dropped here "
+        "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",
