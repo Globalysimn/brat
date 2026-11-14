@@ -4046,6 +4046,16 @@ std::set<std::string> Emitter::heap_returns() {
             std::set<std::string> with_self = grown;
             with_self.insert(short_name);
             with_self.insert(name);
+            // `return g(x)` through a closure bound in this body, a parameter
+            // or a script-level `let` is an owned value here as well, not only
+            // while this function is the one being emitted.
+            Names bound(global_lets.begin(), global_lets.end());
+            collect_vars(view(entry.decl->body), bound);
+            for (const auto &p : entry.decl->params) bound.insert(p.name);
+            for (const auto &b : bound) {
+                with_self.insert(b);
+                with_self.insert(LOCAL_BINDING_PREFIX + b);
+            }
             if (!body_returns_owned(view(entry.decl->body), with_self, &name, &short_name)) continue;
             grown.insert(short_name);
             grown.insert(name);
