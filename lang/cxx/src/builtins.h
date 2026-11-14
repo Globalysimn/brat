@@ -5,6 +5,12 @@
 #include <string>
 #include <string_view>
 
+// A bare `"` inside a `{...}` placeholder ends the literal there. The checker
+// warns where the pieces are joined with `+`; the parser stops where the next
+// piece follows with no comma.
+inline constexpr char kCutShortString[] =
+    R"BRAT(string literal looks cut short: a `{...}` placeholder stops at a bare `"`, so `"{e[\"hits\"]}"` is not the placeholder it looks like (help: `"{e.hits}"`, or `let hits = e["hits"]` then `"{hits}"`; a quote inside a call is fine: `"{m.get(\"hits\")}"`))BRAT";
+
 inline std::string trim_type_ann(std::string_view raw) {
     const size_t b = raw.find_first_not_of(" \t\r\n");
     if (b == std::string_view::npos) return {};

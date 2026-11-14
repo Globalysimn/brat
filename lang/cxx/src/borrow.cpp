@@ -2584,10 +2584,7 @@ bool cut_string_ops(const std::vector<const Expr *> &ops) {
 
 void cut_warn(const std::vector<const Expr *> &ops, int line, std::vector<BorrowDiag> &warns) {
     for (const Expr *o : ops) CUT_PARTS.insert(o);
-    warns.push_back(BorrowDiag{
-        line,
-        R"BRAT(string literal looks cut short: a `{...}` placeholder stops at a bare `"`, so `"{e[\"hits\"]}"` is not the placeholder it looks like (help: `"{e.hits}"`, or `let hits = e["hits"]` then `"{hits}"`; a quote inside a call is fine: `"{m.get(\"hits\")}"`))BRAT",
-        std::nullopt});
+    warns.push_back(BorrowDiag{line, kCutShortString, std::nullopt});
 }
 
 void plus_operands(const Expr *e, std::vector<const Expr *> &out) {

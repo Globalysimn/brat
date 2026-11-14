@@ -48,6 +48,15 @@ CASES = {
     "jump_in_closure": "for i in 0..3 {\n  let f = fn(x) {\n    continue\n    return x\n  }\n"
                        "  print(f(i))\n}\n",
     "jump_in_spawn": "for i in 0..3 {\n  spawn {\n    break\n  }\n}\njoin_all()\n",
+    # The comma between two items is required. Without that rule `[1 -2]`
+    # reads as two items and still parses as `[-1]`.
+    "missing_comma_call": "fn add(a: i64, b: i64) -> i64 {\n  return a + b\n}\nprint(add(1 2))\n",
+    "missing_comma_method": "let v = [1, 2, 3]\nprint(v.slice(0 2))\n",
+    "missing_comma_vec": "let v = [1 2]\nprint(v)\n",
+    "missing_comma_map": 'let m = {"a": 1 "b": 2}\nprint(m)\n',
+    "missing_comma_struct": "let p = Point { x: 1 y: 2 }\nprint(p.x)\n",
+    "trailing_comma": 'let v = [1, 2,]\nlet m = {"a": 1,}\nlet p = Point { x: 1, }\n'
+                      'print(len(v), m["a"], p.x,)\n',
 }
 
 
@@ -78,6 +87,12 @@ WANT = {
     "jump_at_top": "1: error: `continue` outside a loop at line 1",
     "jump_in_closure": "3: error: `continue` outside a loop at line 3",
     "jump_in_spawn": "3: error: `break` outside a loop at line 3",
+    "missing_comma_call": "4: error: want ',' have '2' at line 4",
+    "missing_comma_method": "2: error: want ',' have '2' at line 2",
+    "missing_comma_vec": "1: error: want ',' have '2' at line 1",
+    "missing_comma_map": "1: error: want ',' have '\"b\"' at line 1",
+    "missing_comma_struct": "1: error: want ',' have 'y' at line 1",
+    "trailing_comma": None,
 }
 
 

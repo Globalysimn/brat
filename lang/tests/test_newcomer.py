@@ -96,9 +96,8 @@ def probe(src):
 
 
 p = probe('fn main() -> i64 {\n  print("{e["hits"]}")\n  return 0\n}\n')
-check("use of undeclared var `hits`" in p.stdout, "cut string wants the var %r" % p.stdout[-400:])
-check("string literal looks cut short" in p.stdout, "cut string wants the warning %r" % p.stdout[-400:])
-check(p.stdout.count("cut short") == 1, "cut string warns once have %r" % p.stdout[-600:])
+check("string literal looks cut short" in p.stderr, "cut string wants the error %r" % p.stderr[-400:])
+check(p.stderr.count("cut short") == 1, "cut string is reported once, have %r" % p.stderr[-600:])
 
 p = probe("fn main() -> i64 {\n  let rec = []\n  rec = 1\n  return 0\n}\n")
 check("assign to immutable `rec`" in p.stdout, "immutable wants the error %r" % p.stdout[-400:])

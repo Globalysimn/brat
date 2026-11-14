@@ -83,6 +83,8 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 
 ## 4. Expressions, arithmetic, and strings
 
+- Call arguments and the items of a vector, map or struct literal are separated
+  by commas; a trailing comma is allowed.
 - `i64` `+`, `-`, `*`, and unary `-` wrap in two's-complement (`uint64_t` casts
   plus `-fwrapv`).
 - `/` and `%` raise a catchable `div by zero` error when the divisor is `0`, on

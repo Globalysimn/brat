@@ -511,6 +511,19 @@ private:
         return step();
     }
 
+    // The comma between two items of a list is required. Were it optional,
+    // `[1 -2]` would read as two items and parse as `[-1]`.
+    void sep(std::string_view close) {
+        if (at(close) || eat(",")) return;
+        const Tok &item = t_[i_ - 1];
+        const size_t open = item.text.rfind('{');
+        if (item.kind == TK::Str && open != std::string_view::npos &&
+            item.text.find('}', open) == std::string_view::npos) {
+            fail(kCutShortString, item.line);
+        }
+        want(",");
+    }
+
     bool eat(std::string_view v) {
         if (!at(v)) return false;
         step();
@@ -2427,7 +2440,7 @@ private:
                     std::vector<ExprP> args;
                     while (!at(")")) {
                         args.push_back(expr());
-                        eat(",");
+                        sep(")");
                     }
                     want(")");
                     if (e->k == EK::Var && e->a == "trace" && at("{")) {
@@ -2522,7 +2535,7 @@ private:
             std::vector<ExprP> items;
             while (!at("]")) {
                 items.push_back(expr());
-                eat(",");
+                sep("]");
             }
             want("]");
             return mk_veclit(std::move(items));
@@ -2534,7 +2547,7 @@ private:
                 m->kids.push_back(expr());
                 want(":");
                 m->kids.push_back(expr());
-                eat(",");
+                sep("}");
             }
             want("}");
             return m;
@@ -2552,7 +2565,7 @@ private:
             std::vector<ExprP> args;
             while (!at(")")) {
                 args.push_back(expr());
-                eat(",");
+                sep(")");
             }
             want(")");
             return mk_call(name, std::move(args));
@@ -2571,7 +2584,7 @@ private:
                 } else {
                     s->kids.push_back(mk_var(fname));
                 }
-                eat(",");
+                sep("}");
             }
             want("}");
             return s;

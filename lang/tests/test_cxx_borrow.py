@@ -17,7 +17,7 @@ OWNERSHIP = {
     'borrowed_move.brat': 'fn f(v: vec[i64]) -> i64 {\n  let owned = move v\n  return len(owned)\n}\n',
     'const_assign.brat': 'const LIMIT = 10\nfn f() -> i64 {\n  LIMIT = 3\n  return 0\n}\n',
     'consume_close.brat': 'fn f(fd: i64) -> i64 {\n  tcp_close(fd)\n  tcp_close(fd)\n  return 0\n}\n',
-    'cut_call.brat': 'fn f(e: map[str, i64]) -> i64 {\n  print("{e["hits"]}")\n  return 0\n}\n',
+    'cut_call.brat': 'fn f(e: map[str, i64]) -> i64 {\n  print("{e[", hits, "]}")\n  return 0\n}\n',
     'cut_plus.brat': 'fn f() -> str {\n  let n = 1\n  return "{e[" + str(n) + "]}"\n}\n',
     'double_mut.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let mut a = v\n  let mut b = v\n  print(a)\n  print(b)\n  a.push(1)\n  return 0\n}\n',
     'dup_fn.brat': ('fn h() -> i64 { return 1 }\nfn h() -> i64 { return 2 }\n'
