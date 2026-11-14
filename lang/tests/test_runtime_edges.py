@@ -63,7 +63,7 @@ fn main() -> i64 {
         }
     }
     print(chr(98), chr(0x44F), ord("b"), ord("я"), ord(chr(0x1F600)))
-    for bad in [-1, 0xD800, 0x110000, "b"] {
+    for bad in [-1, 0xD800, 0x110000, "b", 0] {
         try {
             print(chr(bad))
         } catch e {
@@ -128,6 +128,7 @@ WANT = (
     "not a code point\n"
     "not a code point\n"
     "not a code point\n"
+    "chr(0): a str cannot hold NUL\n"
     "ord wants one character\n"
     "ord wants one character\n"
     "ord wants one character\n"

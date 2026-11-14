@@ -294,6 +294,9 @@ BFN Val vchr(Val v) {
         (v.as.ival >= 0xD800 && v.as.ival <= 0xDFFF)) {
         vraise("not a code point"); return vunwind;
     }
+    /* No str holds a NUL: literals and file reads refuse it, and the string
+       functions that hand text to C stop at the first one. */
+    if (v.as.ival == 0) { vraise("chr(0): a str cannot hold NUL"); return vunwind; }
     char b[4];
     return vstrn(b, vcp_put((unsigned)v.as.ival, b));
 }
