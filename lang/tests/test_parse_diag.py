@@ -65,6 +65,15 @@ CASES = {
     "self_param": "impl P {\n  fn get(mut self, ref a, mut b) {\n    return self.x\n  }\n}\n",
     "trailing_comma": 'let v = [1, 2,]\nlet m = {"a": 1,}\nlet p = Point { x: 1, }\n'
                       'print(len(v), m["a"], p.x,)\n',
+    "esc_ok": 'assert("\\x41\\u00e9\\u{1F600}\\u{41}{1 + 1}\\d" == "A" + chr(233) + chr(128512) + "A2" + "\\\\" + "d")\n'
+              'assert(len("\\x1b[0m") == 4)\n',
+    "esc_x_short": 'print(1)\nprint("a\\x4")\n',
+    "esc_x_high": 'print("\\xff")\n',
+    "esc_u_short": 'print("\\u12")\n',
+    "esc_u_open": 'print("\\u{12")\n',
+    "esc_u_surrogate": 'print("\\ud800")\n',
+    "esc_u_big": 'print("\\u{110000}")\n',
+    "esc_nul": 'print("\\x00")\n',
 }
 
 
@@ -108,6 +117,14 @@ WANT = {
     "kw_catch": "3: error: catch wants a plain name, got 'for' at line 3",
     "self_param": None,
     "trailing_comma": None,
+    "esc_ok": None,
+    "esc_x_short": "2: error: `\\x` wants two hex digits, as in `\\x1b` at line 2",
+    "esc_x_high": "1: error: `\\x` stops at 7f: a str is UTF-8, write `\\u{...}` for the character at line 1",
+    "esc_u_short": "1: error: `\\u` wants four hex digits or braces, as in `\\u00e9` or `\\u{1F600}` at line 1",
+    "esc_u_open": "1: error: `\\u` wants four hex digits or braces, as in `\\u00e9` or `\\u{1F600}` at line 1",
+    "esc_u_surrogate": "1: error: `\\u` escape is not a code point at line 1",
+    "esc_u_big": "1: error: `\\u` escape is not a code point at line 1",
+    "esc_nul": "1: error: string literal contains NUL at line 1",
 }
 
 

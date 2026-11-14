@@ -42,6 +42,10 @@ in insertion order. `Point { x: 3, y: 4 }` needs no declaration.
 hold an expression stay as they are, so `"{\"a\": 1}"` is the JSON it looks
 like.
 
+The escapes are `\n`, `\t`, `\r`, `\\`, `\"`, `\{`, `\x1b` (two hex digits, up to
+`7f`) and `\u00e9` or `\u{1F600}` for a code point. Any other backslash stays as
+written, so `"\d+"` is a pattern without doubling.
+
 Integers are 64-bit and wrap on overflow. `/` on two integers rounds down and
 `%` takes the sign of the divisor. An integer next to a float becomes a float;
 a float becomes an integer only through `i64(x)`. Strings are UTF-8, and `len`,

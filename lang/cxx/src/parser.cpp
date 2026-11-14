@@ -221,7 +221,81 @@ std::string unquoted(std::string_view s) {
     return std::string(s);
 }
 
-std::string unescape(std::string_view s) {
+int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+void put_utf8(std::string &out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// `\xNN`, `\uXXXX` and `\u{X...}` at s[i], where s[i] is the `x` or `u`.
+// Appends the character and leaves i on the last byte of the escape; a
+// malformed one is reported through `bad`.
+void hex_escape(std::string_view s, size_t &i, std::string &out, std::string &bad) {
+    const bool is_x = s[i] == 'x';
+    size_t j = i + 1;
+    size_t want = is_x ? 2 : 4;
+    bool braced = false;
+    if (!is_x && j < s.size() && s[j] == '{') {
+        braced = true;
+        j++;
+        want = 6;
+    }
+    uint32_t cp = 0;
+    size_t digits = 0;
+    while (j < s.size() && digits < want && hex_val(s[j]) >= 0) {
+        cp = cp * 16 + static_cast<uint32_t>(hex_val(s[j]));
+        j++;
+        digits++;
+    }
+    const bool closed = !braced || (j < s.size() && s[j] == '}');
+    if (digits == 0 || (!braced && digits != want) || !closed) {
+        bad = is_x ? "`\\x` wants two hex digits, as in `\\x1b`"
+                   : "`\\u` wants four hex digits or braces, as in `\\u00e9` or `\\u{1F600}`";
+        return;
+    }
+    if (is_x && cp > 0x7F) {
+        bad = "`\\x` stops at 7f: a str is UTF-8, write `\\u{...}` for the character";
+        return;
+    }
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        bad = "`\\u` escape is not a code point";
+        return;
+    }
+    put_utf8(out, cp);
+    i = braced ? j : j - 1;
+}
+
+// Bytes of the escape that starts at the backslash s[k]. `\u{...}` is one
+// unit, so its braces are not taken for a placeholder.
+size_t escape_len(std::string_view s, size_t k) {
+    if (k + 2 < s.size() && s[k + 1] == 'u' && s[k + 2] == '{') {
+        size_t j = k + 3;
+        while (j < s.size() && hex_val(s[j]) >= 0) j++;
+        return (j < s.size() && s[j] == '}') ? j + 1 - k : 3;
+    }
+    return 2;
+}
+
+std::string unescape_text(std::string_view s, std::string &bad) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); i++) {
@@ -240,6 +314,9 @@ std::string unescape(std::string_view s) {
         case '0': out.push_back('\0'); break;
         case '{': out.push_back('{'); break;
         case '}': out.push_back('}'); break;
+        case 'x':
+        case 'u': hex_escape(s, i, out, bad); break;
+        // Anything else stays as written, so `"\d+"` is the pattern it looks like.
         default: out.push_back('\\'); out.push_back(c);
         }
     }
@@ -2622,6 +2699,13 @@ private:
     // A placeholder that does not parse as a whole expression stays text, which
     // is what keeps JSON templates working.
     ExprP expand_str(const std::string &raw, uint32_t line) {
+        const uint32_t first_line = line;
+        auto unescape = [first_line](std::string_view text) {
+            std::string bad;
+            std::string out = unescape_text(text, bad);
+            if (!bad.empty()) throw ParseError(bad, first_line);
+            return out;
+        };
         if (raw.find('{') == std::string::npos) return mk_str(unescape(raw));
         struct Part {
             bool is_text;
@@ -2639,7 +2723,7 @@ private:
         bool in_inner_str = false;
         for (size_t k = 0; k < raw.size();) {
             if (raw[k] == '\\' && k + 1 < raw.size()) {
-                k += 2;
+                k += escape_len(raw, k);
                 continue;
             }
             if (in_inner_str) {
@@ -2670,8 +2754,9 @@ private:
         size_t counted = 0;  // newlines before this offset are already in `line`
         while (i < raw.size()) {
             if (raw[i] == '\\' && i + 1 < raw.size()) {
-                buf.append(raw, i, 2);
-                i += 2;
+                const size_t n = escape_len(raw, i);
+                buf.append(raw, i, n);
+                i += n;
                 continue;
             }
             const size_t len = utf8_len(static_cast<unsigned char>(raw[i]));
