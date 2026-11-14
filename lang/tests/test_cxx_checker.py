@@ -92,7 +92,13 @@ FIXTURES = {
     'raise_drop.brat': ('fn save(n) {\n  if n > 9 {\n    raise("too big")\n  }\n  return n\n}\n'
                         'fn guarded(n) {\n  try {\n    raise("inside")\n  } catch e {\n    return 0\n  }\n  return n\n}\n'
                         'fn run() {\n  save(1)\n  guarded(1)\n  let _ = save(2)\n  let kept = save(3)\n'
-                        '  try {\n    save(4)\n    save(5)?\n  } catch e {\n    print(e)\n  }\n  return kept\n}\n'),
+                        '  try {\n    save(4)\n    save(5)?\n  } catch e {\n    print(e)\n  }\n  return kept\n}\n'
+                        # A `raise` in an `else` counts; one in a nested fn belongs to that fn.
+                        # A parameter called `save` is not the fn `save`.
+                        'fn outer(n) {\n  fn inner(k) {\n    raise("k")\n  }\n  return n\n}\n'
+                        'fn other(n) {\n  if n > 0 {\n    return n\n  } else {\n    raise("neg")\n  }\n}\n'
+                        'fn more() {\n  outer(1)\n  other(1)\n  return 0\n}\n'
+                        'fn shadow(save) {\n  save(1)\n  return 0\n}\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -174,6 +180,8 @@ EXPECT = {
         "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
         "raise_drop.brat:21: error: `save` can raise, and the `Err` it returns is dropped here "
         "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
+        "raise_drop.brat:43: error: `other` can raise, and the `Err` it returns is dropped here "
+        "(hint: `other(...)?` passes it on, `let _ = other(...)` ignores it)",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",
