@@ -174,8 +174,9 @@ for name in sorted(CASES):
         with open(cfile, "w", encoding="utf-8") as f:
             f.write(emit(kind, path))
 
-        # The README promises C99 without warnings: the emitted program is the
-        # only thing compiled here, so any warning is this compiler's.
+        # The README names C11; the output is kept warning-free under the
+        # stricter `-std=c99` as well. The emitted program is the only thing
+        # compiled here, so any warning is this compiler's.
         w = run(["cc"] + WARN_FLAGS + ["-I", ENGINE, "-c", cfile, "-o", os.devnull])
         if w.returncode != 0 or w.stderr.strip():
             print("FAIL %s/%s: emitted C is not warning-free:\n%s"
