@@ -313,7 +313,9 @@ SS
   `try { ... } catch e { ... }` receives the payload string directly.
 - Built-in method arity errors are caught statically by `brat-cxx check` (for
   example, `"abc".chars(1)` reports `method \`chars\` wants 0 args`), while user
-  `impl` methods with the same name override built-in arity freely.
+  `impl` methods with the same name override built-in arity freely. The
+  parameters of a callback are counted too: `v.sort_by(fn(a, b) { ... })` is
+  refused, because `sort_by` orders by the key its one-argument callback returns.
 - On untyped dynamic receivers passed wrong argument types at run time, compiled
   binaries reject the call cleanly without leaking internal C helper names
   (`test_method_arguments_text.py` pins all 1,571 cases).

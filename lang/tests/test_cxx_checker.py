@@ -71,6 +71,11 @@ FIXTURES = {
                        'fn name(n: i64) -> str {\n  match n {\n    0 => { return "zero" },\n'
                        '    1 => { return "one" }\n  }\n}\n'
                        'fn stop(n: i64) -> i64 {\n  while true {\n    if n > 0 {\n      break\n    }\n  }\n}\n'),
+    # A builtin method calls its callback with one element, `fold` with two values.
+    'cb_count.brat': ('fn less(a: i64, b: i64) -> bool {\n  return a < b\n}\n'
+                      'let mut v = [3, 1, 2]\nv.sort_by(fn(a, b) { return a < b })\nv.sort_by(less)\n'
+                      'print(v.fold(0, fn(a) { return a }))\n'
+                      'v.sort_by(fn(x) { return 0 - x })\nprint(v.fold(0, fn(a, x) { return a + x }))\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -129,6 +134,11 @@ EXPECT = {
         "no_return.brat:25: error: `sign` is declared `-> i64` but can end without a `return`",
         "no_return.brat:30: error: `name` is declared `-> str` but can end without a `return`",
         "no_return.brat:36: error: `stop` is declared `-> i64` but can end without a `return`",
+    ],
+    "cb_count.brat": [
+        "cb_count.brat:5: error: method `sort_by` wants a callback with 1 args, got 2 (it orders by the key the callback returns)",
+        "cb_count.brat:6: error: method `sort_by` wants a callback with 1 args, got 2 (it orders by the key the callback returns)",
+        "cb_count.brat:7: error: method `fold` wants a callback with 2 args, got 1",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",

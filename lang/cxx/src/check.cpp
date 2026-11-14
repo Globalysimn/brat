@@ -1343,6 +1343,30 @@ struct FnTyper {
         note("arena: " + msg);
     }
 
+    // A builtin method calls its callback with the element, `fold` with the
+    // accumulator and the element. A callback of another size fails only when
+    // the call runs, with no line to point at.
+    void check_callback_arity(const Ty &ot, const Expr &e) {
+        static const std::set<std::string> one = {"map", "filter", "any", "all", "find",
+                                                  "sort_by"};
+        const size_t want = e.b == "fold" ? 2 : 1;
+        if ((want == 1 && !one.count(e.b)) || e.kids.size() != want + 1) return;
+        const bool untyped = ot.k == Ty::Dyn || ot.k == Ty::Tag;
+        if (ot.k != Ty::Vec && !(untyped && !sigs.count("__impl__." + e.b))) return;
+        const Expr &cb = *e.kids[want];
+        size_t have = want;
+        if (cb.k == EK::Closure && cb.fn) {
+            have = cb.fn->params.size();
+        } else if (cb.k == EK::Var && !env.count(cb.a)) {
+            auto sit = sigs.find(cb.a);
+            if (sit != sigs.end()) have = sit->second.params.size();
+        }
+        if (have == want) return;
+        note("method `" + e.b + "` wants a callback with " + std::to_string(want) + " args, got " +
+             std::to_string(have) +
+             (e.b == "sort_by" ? " (it orders by the key the callback returns)" : ""));
+    }
+
     // A fn that declares what it returns has to return on every path: the
     // value it would hand back otherwise is 0, false or None, whatever the type.
     void need_return(const FnDecl &f, int decl_line) {
@@ -1784,6 +1808,7 @@ Ty FnTyper::expr(const Expr &e) {
                 expr(*e.kids[i]);
             }
         }
+        check_callback_arity(ot, e);
         check_arena_call_expr(e);
         return meth(ot, e.b, e.kids, 1);
     }
