@@ -410,7 +410,8 @@ struct Walk {
         }
         case EK::Call:
             return (e->a == "len" || e->a == "slice_len" || e->a == "sbuf_len" ||
-                    e->a == "time_ms" || e->a == "mono_ns" || e->a == "errno") &&
+                    e->a == "time_ms" || e->a == "mono_ns" || e->a == "errno" ||
+                    e->a == "i64" || e->a == "f64") &&
                    modes.count(e->a) == 0;
         default: return false;
         }

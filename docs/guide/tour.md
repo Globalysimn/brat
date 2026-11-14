@@ -57,7 +57,10 @@ Integers are signed 64-bit (`i64`), support decimal, `0x` hex, `0b` binary and
 `&`, `|`, `^`, `~`, `<<` and arithmetic `>>` work directly on `i64`.
 Integer `/` rounds toward negative infinity and `%` takes the sign of the
 divisor. An `i64` mixed with an `f64` is promoted (`1 + 2.0` is `3.0`), while an
-`f64` is never narrowed: `let x: i64 = 1.5` is a type error.
+`f64` is never narrowed: `let x: i64 = 1.5` is a type error. `i64(x)` converts
+on request and drops the fraction toward zero, `f64(n)` goes the other way.
+`sqrt`, `floor` and the rest of `math.h` are an `extern fn` away, see
+[ffi.md](ffi.md).
 
 ## 3. Ownership: `move`, `ref`, `mut`
 

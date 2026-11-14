@@ -2,8 +2,9 @@
 
 Covers: Unicode simple and multi-char case mapping, replace with an empty pattern
 (which used to size its buffer with an overflowable product), str() of an int,
-`for` over a string, which walks code points, and the message of a closure called
-with the wrong number of arguments.
+`for` over a string, which walks code points, the message of a closure called
+with the wrong number of arguments, and `i64()` / `f64()` between the two number
+types.
 """
 import _cxx
 import _scratch
@@ -45,6 +46,14 @@ SRC = r'''fn main() -> i64 {
     } catch e {
         print(e)
     }
+    print(i64(3.99), i64(-3.99), f64(7) / 2)
+    for bad in [1e30, "7"] {
+        try {
+            print(i64(bad))
+        } catch e {
+            print(e)
+        }
+    }
     return 0;
 }
 '''
@@ -68,6 +77,9 @@ WANT = (
     "Ñ\n"
     "B\n"
     "function wants 2 args, got 1\n"
+    "3 -3 3.5\n"
+    "integer out of range\n"
+    "not a number\n"
 ).encode("utf-8")
 
 
@@ -83,7 +95,7 @@ def main():
     assert b.returncode == 0, "build failed:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
-    print("EDGES ALL GREEN (18 lines, -O0 and -O2)")
+    print("EDGES ALL GREEN (21 lines, -O0 and -O2)")
 
 
 if __name__ == "__main__":

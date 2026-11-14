@@ -98,6 +98,9 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
   sign-extends.
 - Otherwise `f64` follows IEEE-754: overflow gives `inf` and `NaN == NaN` is
   `false`.
+- `i64(x)` and `f64(x)` convert a number to the other type. `i64` drops the
+  fraction toward zero and raises `integer out of range` for a value that does
+  not fit; both raise `not a number` for anything else.
 - `==` and `!=` compare structural value equality on primitives, strings,
   vectors, maps, structs, and enums without implicit type coercion (`1 == "1"`
   is `false`, annotated or not).

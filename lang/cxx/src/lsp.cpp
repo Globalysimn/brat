@@ -1363,6 +1363,8 @@ const std::map<std::string, std::string> &builtin_docs() {
         {"eprint", "fn eprint(...): write formatted values to stderr"},
         {"len", "fn len(x) -> i64: length of str (codepoints), vec or map"},
         {"str", "fn str(x) -> str: convert value to UTF-8 string"},
+        {"i64", "fn i64(x) -> i64: a number as an integer, a float truncated toward zero"},
+        {"f64", "fn f64(x) -> f64: a number as a float"},
         {"read_file", "fn read_file(path: str|vec[i64]) -> Result[str, str] (confined)"},
         {"write_file", "fn write_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined)"},
         {"append_file", "fn append_file(path: str|vec[i64], text: str) -> Result[i64, str] (confined atomic append)"},

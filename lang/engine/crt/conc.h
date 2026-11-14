@@ -277,6 +277,17 @@ BFN bint vlong(Val v) {
     }
     vraise("not a number"); return 0;
 }
+/* `i64(x)` and `f64(x)`: the same number in the other type. A float loses its
+ * fraction toward zero; a value that is not a number raises. */
+BFN Val vto_i64(Val v) {
+    bint n = vlong(v);
+    return verr_pending() ? vunwind : vint(n);
+}
+BFN Val vto_f64(Val v) {
+    if (v.tag == V_FLOAT) return v;
+    if (v.tag == V_INT) return vfloat((double)v.as.ival);
+    vraise("not a number"); return vunwind;
+}
 /* A vec operation that got the wrong receiver raises and returns an empty vec:
    the generated code keeps running until the next error check and would
    dereference NULL there. `meth` names the method for the message, so the
