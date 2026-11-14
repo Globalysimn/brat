@@ -1766,6 +1766,14 @@ BFN void vraisef(const char *fmt, const char *arg) {
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) buf[--n] = 0;
     vraise(buf);
 }
+/* A fn or a closure called with the wrong number of arguments. */
+BFN Val varity(bint want, const Vec *args) {
+    char m[64];
+    snprintf(m, sizeof m, "function wants " BINT_FMT " args, got " BINT_FMT, want,
+             args ? args->len : 0);
+    vraise(m);
+    return vunwind;
+}
 static Val vown_copy(Val v);
 BFN void vraisev(Val v) {
     int saved = barena_depth;

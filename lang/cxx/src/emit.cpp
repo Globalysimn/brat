@@ -7084,7 +7084,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         emit_dbg_loc(fn_line, cur_src_file);
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
         ln("  ", "(void)cap;");
-        ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
+        ln("  ", cat("if (!args || args->len != ", names.size(), ") return varity(", names.size(), ", args);"));
         std::string call = cat(impl, "(cap");
         for (size_t i = 0; i < names.size(); i++) call += cat(", args->items[", i, "]");
         ln("  ", cat("return ", call, ");"));
@@ -7097,7 +7097,7 @@ void Emitter::define_fn(const std::string &cn, const std::vector<Param> &params,
         emit_dbg_loc(fn_line, cur_src_file);
         ln("", cat("static Val ", cn, "(Map *cap, Vec *args) {"));
         ln("  ", "(void)cap;");
-        ln("  ", cat("if (!args || args->len != ", names.size(), ") { vraise(\"arity\"); return vunwind; }"));
+        ln("  ", cat("if (!args || args->len != ", names.size(), ") return varity(", names.size(), ", args);"));
     }
     ln("  ", "(void)cap;");
     if (fastraw) {
