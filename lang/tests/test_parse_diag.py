@@ -55,6 +55,12 @@ CASES = {
     "missing_comma_vec": "let v = [1 2]\nprint(v)\n",
     "missing_comma_map": 'let m = {"a": 1 "b": 2}\nprint(m)\n',
     "missing_comma_struct": "let p = Point { x: 1 y: 2 }\nprint(p.x)\n",
+    # A keyword is not a name: once bound it could not be read back.
+    "kw_let": "let if = 41\nprint(1)\n",
+    "kw_fn": "fn while(x) {\n  return x\n}\n",
+    "kw_param": "fn f(mut: i64) {\n  return 1\n}\n",
+    "kw_catch": 'try {\n  raise("x")\n} catch for {\n  print(1)\n}\n',
+    "self_param": "impl P {\n  fn get(mut self, ref a, mut b) {\n    return self.x\n  }\n}\n",
     "trailing_comma": 'let v = [1, 2,]\nlet m = {"a": 1,}\nlet p = Point { x: 1, }\n'
                       'print(len(v), m["a"], p.x,)\n',
 }
@@ -70,8 +76,8 @@ WANT = {
     "stray_brace_after_let": "1: error: stuck at '}' at line 1",
     "stray_paren": "2: error: stuck at ')' at line 2",
     "call_of_a_value": "3: error: a call needs a name, a function value is not first class at line 3",
-    "bad_let": "1: error: want '=' have '5' at line 1",
-    "bad_fn": "1: error: want '(' have 'a' at line 1",
+    "bad_let": "1: error: let wants a plain name, got '=' at line 1",
+    "bad_fn": "1: error: fn wants a plain name, got '(' at line 1",
     "want_colon": "1: error: want ':' have '1' at line 1",
     "unterminated_string": "1: error: unterminated string literal at line 1",
     "dangling_else": "3: error: want ':' have '}' at line 3",
@@ -92,6 +98,11 @@ WANT = {
     "missing_comma_vec": "1: error: want ',' have '2' at line 1",
     "missing_comma_map": "1: error: want ',' have '\"b\"' at line 1",
     "missing_comma_struct": "1: error: want ',' have 'y' at line 1",
+    "kw_let": "1: error: let wants a plain name, got 'if' at line 1",
+    "kw_fn": "1: error: fn wants a plain name, got 'while' at line 1",
+    "kw_param": "1: error: parameter wants a plain name, got 'mut' at line 1",
+    "kw_catch": "3: error: catch wants a plain name, got 'for' at line 3",
+    "self_param": None,
     "trailing_comma": None,
 }
 

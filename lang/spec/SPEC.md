@@ -16,7 +16,8 @@ and `crt.h` (`lang/engine/`).
   `const`, `self`, `or`, `try`, `catch`, `defer`, `spawn`, `extern`, `export`,
   `unsafe`, `true`, `false`. `struct`, `scope`, `par`, `reduce` and `arena` mean
   something only where the parser expects them and are plain identifiers
-  elsewhere.
+  elsewhere. A keyword cannot name a binding, a fn or a parameter (`self`
+  excepted).
 - Numeric literals: decimal, `0x` hex, `0o` octal, and `0b` binary integers
   (`_` separators allowed) denote `i64`; decimals with `.` or `e`/`E` denote
   IEEE-754 `f64`.

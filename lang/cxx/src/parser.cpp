@@ -502,6 +502,16 @@ private:
         return step();
     }
 
+    // A name the program introduces. A keyword bound here could not be read
+    // back: `let if = 1` parses, `if + 1` does not.
+    std::string new_name(const char *what) {
+        const Tok &c = peek();
+        if (c.kind == TK::Eof) fail("unexpected end of file", c.line);
+        if (c.kind != TK::Id && !(c.kind == TK::Kw && c.text == "self"))
+            fail(std::string(what) + " wants a plain name, got '" + to_str(c.text) + "'", c.line);
+        return to_str(step().text);
+    }
+
     Tok want_id(const char *what) {
         const Tok &c = peek();
         if (!is_name(c)) {
@@ -775,7 +785,7 @@ private:
             step();
             std::vector<std::string> names;
             while (!at("]") && peek().kind != TK::Eof) {
-                names.push_back(to_str(step().text));
+                names.push_back(new_name("let"));
                 eat(",");
             }
             want("]");
@@ -830,7 +840,7 @@ private:
             lower_let_struct(tm, *pat, mut, out);
             return out;
         }
-        std::string name = to_str(step().text);
+        std::string name = new_name("let");
         std::optional<std::string> ann;
         if (at(":")) {
             step();
@@ -950,7 +960,7 @@ private:
         want("}");
         want("catch");
         std::optional<std::string> err;
-        if (!at("{")) err = to_str(step().text);
+        if (!at("{")) err = new_name("catch");
         want("{");
         auto handler = block();
         want("}");
@@ -1628,7 +1638,7 @@ private:
         LoopScope fresh(*this, false);
         want("fn");
         FnDecl f;
-        f.name = to_str(step().text);
+        f.name = new_name("fn");
         if (at("<")) {
             step();
             while (!at(">")) {
@@ -1680,13 +1690,11 @@ private:
                 continue;
             }
             Param p;
-            p.name = to_str(step().text);
-            if (auto m = mode_of(p.name)) {
-                if (!at(":")) {
-                    p.mode = *m;
-                    p.name = to_str(step().text);
-                }
+            if (auto m = mode_of(to_str(peek().text)); m && peek(1).text != ":") {
+                p.mode = *m;
+                step();
             }
+            p.name = new_name("parameter");
             if (at(":")) {
                 step();
                 std::vector<std::string> toks;

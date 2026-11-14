@@ -40,7 +40,7 @@ BROKEN = {
     "unclosed.brat": ("fn main() -> i64 {\n  let x = (1 + 2\n  return 0\n}\n", 3, "want ')'"),
     "nobraces.brat": ("fn main() -> i64\n  return 0\n", 2, "unexpected end of file"),
     "eof.brat": ("let x = 1 +\n", 1, "unexpected end of file"),
-    "noname.brat": ("fn () -> i64 { return 0 }\n", 1, "want '('"),
+    "noname.brat": ("fn () -> i64 { return 0 }\n", 1, "fn wants a plain name"),
 }
 
 
