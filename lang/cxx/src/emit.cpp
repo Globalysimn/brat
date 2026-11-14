@@ -412,6 +412,8 @@ void refs_in_expr(const Expr *e, Names &acc) {
             acc.insert(cur->a.substr(0, cur->a.find('.')));
             continue;
         }
+        // The callee may be a binding that holds a closure.
+        if (cur->k == EK::Call) acc.insert(cur->a.substr(0, cur->a.find('.')));
         for (const auto &kid : cur->kids)
             if (kid) stack.push_back(kid.get());
         if (cur->fn)

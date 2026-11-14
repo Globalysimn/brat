@@ -214,6 +214,30 @@ CASES["many_live_channels"] = '''fn main() -> i64 {
 }
 '''
 
+# A closure bound outside the task and called by name inside it is a capture
+# of the task, the same as one read as a value.
+CASES["closure_called_in_spawn"] = '''fn main() -> i64 {
+  let base = 10
+  let bump = fn(x) {
+    return x + base
+  }
+  let ch = chan(4)
+  scope {
+    spawn {
+      ch.send(bump(1))
+    }
+    for k in 0..2 {
+      spawn {
+        let got = [k].map(fn(x) { return bump(x) })
+        ch.send(got[0])
+      }
+    }
+  }
+  print(ch.recv() + ch.recv() + ch.recv())
+  return 0
+}
+'''
+
 def build(src, name):
     path = os.path.join(TMP, name + ".brat")
     with open(path, "w", encoding="utf-8") as f:
@@ -252,6 +276,7 @@ WANT = {
     "child_error_caught": "child\ndone\n",
     "parent_error_first": "parent\ndone\n",
     "many_live_channels": "4950\n100\n",
+    "closure_called_in_spawn": "32\n",
 }
 
 for name, src in CASES.items():
