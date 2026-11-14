@@ -72,7 +72,9 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 4. Iteration lock: while `for el in v { ... }` runs, mutating or moving `v`
    directly or through a called closure is rejected.
 5. Closures capture outer variables by shallow value copy. A closure body cannot
-   `move` an outer non-`Copy` capture or take ownership of an outer `move ptr`.
+   assign to a capture (the write would be lost), `move` an outer non-`Copy`
+   capture or take ownership of an outer `move ptr`. A top-level `let` is not
+   captured: every fn and closure reads and writes the one value.
 6. `unsafe { ... }` marks raw pointer / FFI sections for audit without disabling
    type checking, borrow exclusivity, or post-block `move` state propagation.
 7. `arena { ... }` routes heap allocations inside its dynamic extent to a

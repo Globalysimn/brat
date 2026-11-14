@@ -126,30 +126,6 @@ CASES = {
         '  return 0\n'
         '}',
         'abcdefghij\n', ''),
-    # An assigned captured name must start from the snapshot, not an uninitialized local.
-    'closure_capture_write': (
-        None, None, False,
-        'fn main() -> i64 {\n'
-        '  let mut s = "abcdefghij"\n'
-        '  let c = fn() { print(s)  s = "zz"  return s }\n'
-        '  print(c())\n'
-        '  print(c())\n'
-        '  print(s)\n'
-        '  return 0\n'
-        '}',
-        'abcdefghij\nzz\nabcdefghij\nzz\nabcdefghij\n', ''),
-    # Same closure under the move runtime: the capture must survive both calls.
-    'closure_capture_write_mrt': (
-        None, None, True,
-        'fn main() -> i64 {\n'
-        '  let mut s = "abcdefghij"\n'
-        '  let c = fn() { print(s)  s = "zz"  return s }\n'
-        '  print(c())\n'
-        '  print(c())\n'
-        '  print(s)\n'
-        '  return 0\n'
-        '}',
-        'abcdefghij\nzz\nabcdefghij\nzz\nabcdefghij\n', ''),
     # A spawn reads its captured copy from another thread.
     'spawn_capture_alias': (
         None, None, False,

@@ -179,9 +179,10 @@ example.brat: 0 type error(s)
 
 A `for x in v` loop holds a read-only view over `v` for the entire loop body
 (blocking direct mutation as well as calls to closures that mutate `v`).
-Closures capture outer bindings by shallow copy and cannot `move` outer
-non-`Copy` bindings or take ownership of outer `move ptr` allocations; `unsafe`
-blocks keep type, borrow, and post-block `move` state checks active:
+Closures capture outer bindings by shallow copy and cannot assign to them,
+`move` outer non-`Copy` bindings or take ownership of outer `move ptr`
+allocations; `unsafe` blocks keep type, borrow, and post-block `move` state
+checks active:
 
 ```brat check
 fn main() -> i64 {

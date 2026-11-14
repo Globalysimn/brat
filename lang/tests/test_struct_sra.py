@@ -457,9 +457,9 @@ fn quest_cmp_unwind(k: i64) -> Result[bool, str] {
 
 fn unwind_partial_containers(k: i64) -> str {
   let mut caught = 0
-  let mut tail_ran = 0
+  let mut tail_ran = [0]
   let bump_tail = fn() {
-    tail_ran = tail_ran + 1
+    tail_ran[0] = tail_ran[0] + 1
     return "tail"
   }
   try {
@@ -496,7 +496,7 @@ fn unwind_partial_containers(k: i64) -> str {
   }
   if quest_struct_unwind(k).is_err() { caught = caught + 1 }
   if quest_cmp_unwind(k).is_err() { caught = caught + 1 }
-  return "{caught}:{tail_ran}"
+  return "{caught}:{tail_ran[0]}"
 }
 
 fn main() -> i64 {

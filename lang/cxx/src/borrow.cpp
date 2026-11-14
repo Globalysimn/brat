@@ -108,6 +108,7 @@ struct Decl {
     bool borrowed_ptr = false;
     bool spawn_frozen = false;
     bool clo_outer = false;
+    bool global = false;               // a `let` of the file itself, one value for every closure
     std::set<std::string> clo_muts;
     std::optional<std::pair<std::string, int>> frozen_by;
 };
@@ -118,6 +119,8 @@ struct Decls {
     std::vector<std::pair<std::string, std::shared_ptr<Decl>>> v;
     // In a fn body: the scope the fn is declared in. Null outside any fn.
     const Decls *outer = nullptr;
+    // The scope of the file itself. A copy made for a block or a fn is not.
+    bool file = false;
 
     Decl *find(const std::string &n) {
         for (auto &kv : v) {
@@ -950,6 +953,7 @@ void check_expr(const Expr *e, Decls &decl, Errs &errs, FnTable &funcs, bool inp
         check_expr(e->kids[0].get(), decl, errs, funcs);
         check_expr(e->kids[1].get(), decl, errs, funcs);
         Decls sub = decl;
+        sub.file = false;
         Decl pd = bare_decl();
         pd.copy = true;
         pd.ann = "i64";
@@ -1287,6 +1291,12 @@ bool check_write(const std::string &path, Decls &decl, Borrows &borrows, Errs &e
     if (d->spawn_frozen && rebind) {
         errs.note("assign to captured `" + root +
                   "` in spawn (captured by copy, write is lost)");
+        return false;
+    }
+    if (d->clo_outer && !d->global && rebind && path == root) {
+        errs.note("assign to captured `" + root + "` in a closure: it is captured by copy and "
+                  "the write is lost (hint: keep the state in a vector and write `" + root +
+                  "[0]`)");
         return false;
     }
     if (strict && !d->mut) {
@@ -2159,6 +2169,7 @@ void walk_stmt(const Stmt &s, Decls &decl, Borrows &borrows, Errs &errs, FnTable
         d.pinned = ann_copy;
         d.ann = s.ann ? s.ann : infer_expr_ann(e, decl, &funcs);
         d.dl = errs.line;
+        d.global = decl.file;
         bool owned_call = e && e->k == EK::Call && funcs.owned_ret.count(e->a) > 0;
         if (owned_call) d.owned = true;
         if (is_borrowed_ptr_expr(e, decl, funcs)) d.borrowed_ptr = true;
@@ -3158,6 +3169,7 @@ BorrowOut borrow_check(const std::vector<StmtP> &body,
 
     cut_body(wrap(body), warns);
     Decls decl;
+    decl.file = true;
     for (const std::string &cn : extra_consts) {
         Decl d;
         d.konst = true;

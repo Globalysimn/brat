@@ -194,29 +194,32 @@ error): pass them directly as callbacks (`[1, 2, 3].map(double)`) to `map`,
 `filter`, `fold`, `any`, `all`, `find` and `sort_by`, or wrap them in
 `let f = fn(x) { return double(x) }`.
 
-A closure gets its own copy of each captured binding. Assigning to the binding
-inside the closure is lost when the call returns: the caller does not see it,
-and the next call starts from the captured value again. A container behind the
-binding is shared, so a `push` shows outside:
+A closure gets its own copy of each captured binding, so it cannot assign to
+one: `n = n + 1` inside the closure is an error, because the write would be gone
+when the call returns. A container behind the binding is shared, and that is
+where a counter keeps its state. A `let` at the top level of the file is not
+captured: every closure reads and writes the same value.
 
 ```brat run
-fn main() -> i64 {
-  let mut n = 0
-  let mut items = []
-  let step = fn() {
-    n = n + 1
-    items.push(n)
-    return n
+fn make_counter(step: i64) {
+  let mut n = [0]
+  return fn() {
+    n[0] = n[0] + step
+    return n[0]
   }
-  print(step(), step())
-  print(n, items)
+}
+
+fn main() -> i64 {
+  let count = make_counter(3)
+  count()
+  count()
+  print(count())
   return 0
 }
 ```
 
 ```output
-1 1
-0 [1, 1]
+9
 ```
 
 ## 7. Memory and `arena` blocks

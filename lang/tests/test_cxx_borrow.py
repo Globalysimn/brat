@@ -59,6 +59,11 @@ OWNERSHIP = {
                              '  for x in v {\n    add.push(x)\n  }\n  for a in add {\n'
                              '    v.push(a)\n  }\n  return len(v)\n}\n'),
     'loe.brat': 'fn f(mut p: Point, mut q: Point) -> i64 {\n  set2(p, p)\n  return 0\n}\nfn set2(mut a: Point, mut b: Point) -> i64 {\n  return 0\n}\n',
+    # A closure holds copies of the locals it names, so a write to one is lost.
+    # A `let` of the file is one shared value, and so is a container.
+    'closure_capture.brat': ('let mut hits = 0\nfn f() -> i64 {\n  let mut n = 0\n  let mut seen = [0]\n'
+                             '  let bump = fn() {\n    hits = hits + 1\n    seen[0] = seen[0] + 1\n'
+                             '    n = n + 1\n    return n\n  }\n  return bump() + seen[0] + n\n}\n'),
     'loop_move.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  while len(v) > 0 {\n    move v\n  }\n  return 0\n}\n',
     'missing_method.brat': 'trait Shape {\n  fn area(self) -> i64\n  fn name(self) -> str\n}\nimpl Shape for Point {\n  fn area(self) -> i64 {\n    return 0\n  }\n}\n',
     'move_borrowed.brat': 'fn f(mut v: vec[i64]) -> i64 {\n  let a = v\n  move v\n  return len(a)\n}\n',
@@ -212,6 +217,10 @@ EXPECT = {
     'loe.brat': [
         'loe.brat: 1 error(s), 0 warning(s)',
         'loe.brat:2: error: law of exclusivity: `p` passed as mut twice in one expression (clashes with `p` used by `a`)',
+    ],
+    'closure_capture.brat': [
+        'closure_capture.brat: 1 error(s), 0 warning(s)',
+        'closure_capture.brat:8: error: assign to captured `n` in a closure: it is captured by copy and the write is lost (hint: keep the state in a vector and write `n[0]`)',
     ],
     'iter_index_write.brat': [
         'iter_index_write.brat: 1 error(s), 0 warning(s)',
