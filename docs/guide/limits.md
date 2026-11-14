@@ -1,8 +1,7 @@
-# Limits and Sharp Edges
+# Limits
 
-This page documents concrete operational limits, representation costs and edge
-cases in `brat-cxx` and the C11 runtime. Every `brat run` and `brat check`
-example on this page is verified by `lang/tests/test_docs_examples.py`.
+What the compiler and the runtime bound, what a representation costs, and where
+behaviour may surprise. The programs on this page run in CI.
 
 ## Speed
 
@@ -20,29 +19,23 @@ CPU model differ by up to 20% in the rows under 0.1 s (BRAT `fib(35)`: 0.050 s a
 | `dyn_records(100k)` (`map` + `str` concat + RC drops) | n/a | 0.017 s | 0.020 s | 0.047 s |
 | `json_roundtrip(5k)` (`std.json` parse + stringify) | n/a | 0.039 s | 0.010 s | 0.067 s |
 
-Performance tracks value representation (implementation details are in
-[ARCHITECTURE.md](../design/ARCHITECTURE.md)):
+Where the numbers come from:
 
-- Annotated `i64`, `f64`, `bool`, and `vec[i64]`/`vec[f64]` functions compile to
-  unboxed C scalar signatures (`int64_t` / `double`), matching `gcc -O2` on
-  tight loops (`0.126 s` vs `0.126 s`). Recursive scalar functions (`fib(35)`)
-  keep the remaining recursion budget in a register and check the stack floor
-  every 64 frames (`0.050 s` vs `0.024 s` in unchecked C and `0.055 s` in Go).
-- Declared `struct` types use fixed declaration-order field slots, and `-O2`
-  scalar replacement splits non-escaping local structs (including `.copy()`)
-  into C locals (`0.141 s` vs `0.134 s` in `gcc -O2`; inspect with
-  `brat-cxx cc -O2 --why-opt`).
-- Dynamic maps and strings use 16-byte `Val` tags with 14-byte inline SSO,
-  in-place growth on unique (`rc == 1`) strings across `s = s + ...` (`0.031 s`
-  for 200k appends), and inline caches on constant map keys (`0.020 s` for 100k
-  records).
-- `std.json` parses and formats RFC 8259 directly in C (`0.010 s` for 5k nested
-  roundtrips vs `0.039 s` in Go `encoding/json`).
+- A fn annotated with `i64`, `f64`, `bool`, `vec[i64]` or `vec[f64]` compiles to
+  a C function over `int64_t` and `double`, so a tight loop is the loop `gcc`
+  would get from C. A recursive one also counts frames and checks the stack
+  floor every 64 calls, which is the gap to C in `fib(35)`.
+- A local `struct` that does not escape is split into C locals at `-O2`.
+  `brat-cxx cc -O2 --why-opt` says which were.
+- Everything else is a 16-byte tagged value. A string of up to 14 bytes is
+  stored inline, `s = s + ...` grows in place when `s` has one owner, and a
+  constant map key is cached at the use site.
+- `std.json` is written in C.
 
 ## Recursion budget (2000 frames)
 
-The runtime caps BRAT call depth at 2000 frames (`main` included) and raises a
-catchable `recursion too deep` error:
+Call depth is capped at 2000 frames, `main` included. Going past it is an error
+a `try` can catch:
 
 ```brat run
 fn depth(n: i64) -> i64 {
@@ -68,13 +61,10 @@ fn main() -> i64 {
 recursion too deep
 ```
 
-Set `BRAT_RECURSION_BUDGET=N` (`1..1000000`) to adjust the frame cap. On Linux
-(`pthread_getattr_np`), macOS (`pthread_get_stackaddr_np`), and Windows 8+
-(`GetCurrentThreadStackLimits`), compiled binaries also query the thread stack
-bounds and raise `recursion too deep` when less than 256 KiB of stack remains,
-turning stack exhaustion under large budgets into a catchable error instead of a
-crash. Other targets rely on the frame-count budget alone. Recursive value
-walkers (`print`, `==`, `<`, `own`) enforce the same 2000-level nesting cap.
+`BRAT_RECURSION_BUDGET=N` (`1..1000000`) changes the cap. On Linux, macOS and
+Windows 8+ the program also raises `recursion too deep` when less than 256 KiB
+of stack is left, so a large budget ends in an error and not in a crash. `print`,
+`==`, `<` and `own` walk nested values under the same 2000-level nesting cap.
 
 ## Nesting in source
 
@@ -306,29 +296,29 @@ HÉLLO
 SS
 ```
 
-## Top-level error reporting and dynamic method checks
+## Errors nobody caught
 
-- Uncaught top-level errors print `unhandled: Err('...')` to `stderr` (with `at
-  line N` when built or run with `--trace-lines`) and exit with status `1`.
-  `try { ... } catch e { ... }` receives the payload string directly.
-- Built-in method arity errors are caught statically by `brat-cxx check` (for
-  example, `"abc".chars(1)` reports `method \`chars\` wants 0 args`), while user
-  `impl` methods with the same name override built-in arity freely. The
-  parameters of a callback are counted too: `v.sort_by(fn(a, b) { ... })` is
-  refused, because `sort_by` orders by the key its one-argument callback returns.
-- On untyped dynamic receivers passed wrong argument types at run time, compiled
-  binaries reject the call cleanly without leaking internal C helper names
-  (`test_method_arguments_text.py` pins all 1,571 cases).
+An error that reaches the top prints `unhandled: Err('...')` on `stderr` and the
+program exits 1. `--trace-lines` adds `at line N`. Inside `catch e`, `e` is the
+payload itself.
+
+`brat check` counts the arguments of a built-in method (`"abc".chars(1)` is
+``method `chars` wants 0 args``) and of the callback it takes. When the receiver
+has no known type the same mistake is a run-time error.
+
+## No implicit conversions
+
+`+` joins two strings or adds two numbers. `"n=" + 5`, `true + 1` and `if n` on
+an `i64` are compile errors where the types are known. Write `str(n)`, or a
+`"n={n}"` placeholder, and `n != 0`.
 
 ## Compile time and caching
 
-Pass-2 subsystem trimming (`BRAT_CRT_MASK`) strips unused runtime sections from
-`crt.h` before invoking the C compiler, so a minimal `fn main() -> i64 { return
-0 }` cold `brat-cxx build -O2` finishes in `0.85 s` (median of 7 on the machine of
-the speed table, `BRAT_NATIVE_CACHE_DISABLE=1`).
-Functions with 24 or more boxed `Val` locals pack them into a single `Val
-__fv[N]` array so `-O2` compile times scale linearly with local count (`make
-bench`, one cold build per row on the same machine):
+The runtime is C headers compiled into each program. The compiler strips the
+subsystems a program does not use, so a cold `brat-cxx build -O2` of
+`fn main() -> i64 { return 0 }` takes `0.85 s` (median of 7 on the machine of the
+speed table, `BRAT_NATIVE_CACHE_DISABLE=1`). Build time grows linearly with the
+number of locals in a function (`make bench`, one cold build per row):
 
 | Heap string locals (`N`) | Emitted C | Cold `brat-cxx build -O2` |
 |---:|---:|---:|
@@ -337,18 +327,14 @@ bench`, one cold build per row on the same machine):
 | 200 | 89.2 KB | 2.63 s |
 | 400 | 170.6 KB | 4.72 s |
 
-`brat-cxx run` caches compiled binaries keyed by compiler binary digest,
-effective environment, emitted C, `crt.h` digest, optimization flags and
-resolved foreign library contents (`test_native_cache_inputs.py`). Set
-`BRAT_NATIVE_CACHE_DISABLE=1` to force a cold compile, `BRAT_CC` to select an
-alternate C compiler executable, and `BRAT_CC_TIMEOUT_MS` (default `120000`, max
-`3600000`) to bound C compiler run time.
+`brat-cxx run` caches the binary. The key covers the compiler, the environment,
+the emitted C, the runtime, the flags and the contents of the linked libraries.
+`BRAT_NATIVE_CACHE_DISABLE=1` forces a cold build, `BRAT_CC` picks the C
+compiler, and `BRAT_CC_TIMEOUT_MS` (default `120000`) bounds its run time.
 
 ## Platform status
 
-Linux x86-64 runs the full 175-file test suite (GCC and Clang, 8-way sharded) and
-ASan/UBSan/LSan checks in CI on every push. Native macOS arm64 (`macos-26`, Apple
-Clang) and Windows x86-64 (`windows-2022`, MinGW-w64 LLP64) CI jobs build
-`brat-cxx`, verify the frontend/checker/borrow/module suites, exercise `bindgen
---preprocess` and `ffi --preprocess` header/object verification, and test
-portable `bundle` archives; POSIX-specific process/socket tests remain Linux-only.
+CI runs all 175 test files on Linux x86-64 with GCC and Clang, plus an
+ASan/UBSan/LSan build, on every push. On macOS arm64 and Windows x86-64 (MinGW-w64)
+it builds the compiler and runs the frontend, checker, borrow, module, header
+verification and `bundle` tests. The process and socket tests are Linux-only.

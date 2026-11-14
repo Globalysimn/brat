@@ -1,13 +1,11 @@
-# Ownership and Borrow Checking
+# Ownership
 
-`brat-cxx check` runs an intra-function ownership, mutability, and concurrency
-pass over every BRAT function without `'a` lifetime annotations or `RefCell` /
-`Arc<Mutex<T>>` wrappers. Memory reclamation relies on deterministic reference
-counting, value moves, and lexical `arena` blocks rather than inter-procedural
-lifetime solving. Passing `check` catches common local aliasing, use-after-move,
-iterator invalidation, and thread-sharing mistakes while keeping function
-signatures flat; it is not a complete soundness proof. Remaining gaps are listed
-at the end of this page and in [LEDGER.md](../project/LEDGER.md).
+`brat-cxx check` follows who owns each value inside one function. It needs no
+lifetime annotations, because it does not follow borrows across calls: between
+functions a value is kept alive by its reference count. That makes it a checker
+for the common local mistakes (use after move, a container changed during its
+loop, a write shared between threads) and not a proof. What it misses is listed
+at the end and in [LEDGER.md](../project/LEDGER.md).
 
 ```sh
 ./lang/cxx/bin/brat-cxx check file.brat
@@ -16,32 +14,22 @@ python3 lang/tests/test_cxx_borrow.py
 python3 lang/tests/test_defer_try_soundness.py
 ```
 
-## Place-based model
+## Parameters
 
-Every non-Copy value has one logical owner. Parameter annotations declare how a
-callee accesses each argument:
+A parameter says how the function takes its argument:
 
-- `ref` (default when omitted): read-only borrow for the duration of the call.
-- `mut`: exclusive read-write borrow for the duration of the call; requires a
-  mutable place (`let mut`) with no overlapping live borrows in the same call.
-- `move`: transfers ownership into the callee and invalidates the caller's place.
+- `ref`, the default: reads it for the length of the call.
+- `mut`: reads and writes it. The argument has to be a `let mut` that nothing
+  else in the same call uses.
+- `move`: takes it over. The caller's name is dead afterwards.
 
-Places are tracked at path granularity (`x`, `x.f`, `x.f.g`, `x[i]`, where all
-indices of `x` map to one element place).
+The checker tracks paths: `x`, `x.f`, `x.f.g`, and `x[i]` with every index of
+`x` counted as one place.
 
-### Whole-binding moves vs projection moves (`move p.x`)
+## Moving a field
 
-Whole-variable `move x` invalidates `x` both statically and at run time
-(`V_MOVED`). Projection moves (`move p.x`) work differently from Rust partial
-moves:
-
-- Statically, `move p.x` marks `p.x` moved while leaving sibling fields such as
-  `p.y` readable; reading or moving `p.x` a second time before re-assigning it
-  is rejected (`E0382`).
-- At run time, container and struct slots never hold uninitialized poison holes,
-  so `move p.x` increments the field value's reference count when transferring
-  it out while the parent slot retains its reference until `p.x` is overwritten
-  or `p` itself is dropped.
+`move x` kills the whole name. `move p.x` kills only that field: `p.y` stays
+readable, and a second read of `p.x` is `E0382`.
 
 ```brat check
 struct Pair { x: str, y: str }
@@ -66,21 +54,23 @@ example.brat:11: error: use of moved `p.x`
 example.brat: 0 type error(s)
 ```
 
-### Comparison with Rust
+At run time the slot of `p.x` is not emptied. The field's count goes up by one
+and the slot keeps its reference until `p.x` is overwritten or `p` is dropped.
 
-| Aspect | Rust | BRAT |
+## Next to Rust
+
+| | Rust | BRAT |
 |---|---|---|
-| Heap reclamation | Static drop (`Drop`) | Reference counting + `move` + lexical `arena` |
-| Lifetimes in signatures | Explicit (`'a`) | None; borrows stay intra-function |
-| Moving a struct field (`move p.x`) | Partial move invalidates whole `p` | `p.x` marked moved statically; `p.y` stays live; RC `+1` at run time |
-| Reference cycles | Allowed (`Rc` leaks silently) | Intra-function cycles rejected statically; cross-function cycles leak unless in `arena` |
-| Thread `spawn` | `move` closure + `Send` / `Sync` | Copies frame bindings; concurrent readers share RC heap; concurrent writes rejected |
-| Foreign pointer writes | `*mut T` inside `unsafe` | Declared `move ptr` ownership plus `writes(p)` / `&x` checked across `spawn` and borrows |
+| Freeing | `Drop` at a point known statically | Reference count, `move`, `arena` |
+| Lifetimes in signatures | `'a` | None. Borrows do not cross a call |
+| `move p.x` | The whole `p` is partly moved | `p.x` is dead, `p.y` lives |
+| Cycles | `Rc` cycles leak | Refused inside a function, leak across functions unless in an `arena` |
+| Threads | `move` closure, `Send`, `Sync` | `spawn` copies the frame. Shared reads are allowed, shared writes refused |
+| Raw pointers | `*mut T` in `unsafe` | `move ptr` ownership and declared `writes(p)`, checked across `spawn` |
 
-## Borrow liveness, branches, and known false positives
+## When a borrow ends
 
-Borrows end at the last read of the borrowing binding, including reads inside
-`if`, `match`, and `while` blocks:
+A borrow ends at the last read of the name that holds it, wherever that read is:
 
 ```brat
 let s = "payload"
@@ -91,10 +81,9 @@ if verbose {
 let owned = move s  // accepted
 ```
 
-Branch joins are path-insensitive: the checker merges move states across
-branches without proving relationships between separate boolean conditions. Two
-`if` statements guarded by `cond` and `!cond` therefore trigger a conservative
-false positive because `s` looks possibly moved after the first `if`:
+Branches are merged without reasoning about their conditions. After
+`if cond { move s }` the checker treats `s` as possibly moved, so a second `if`
+on `!cond` is refused even though only one of them runs:
 
 ```brat check
 fn consume(s: move str) {
@@ -125,8 +114,7 @@ example.brat:7: note: `s` moved here
 example.brat: 0 type error(s)
 ```
 
-Write mutually exclusive moves as `if cond { ... } else { ... }` (or `match`) so
-the checker sees both arms together.
+Write it as `if cond { ... } else { ... }` or a `match`.
 
 ## Checked rules
 
@@ -150,11 +138,9 @@ the checker sees both arms together.
 
 ### Call-site exclusivity (`E0499`)
 
-Within one call expression, the same root binding cannot be passed twice as
-`mut` or passed as `ref` alongside a `mut` or `move` parameter (including
-closure arguments that mutate a captured binding). Reading a binding on one side
-of a binary operator while moving it on the other (`s + consume(move s)`) is
-rejected under the same rule:
+One call cannot take the same value twice as `mut`, or as `ref` next to a `mut`
+or a `move`. The same holds for reading a value on one side of an operator and
+moving it on the other, as in `s + consume(move s)`.
 
 ```brat check
 fn drain_and_len(mut dst: vec[str], src: vec[str]) -> i64 {
@@ -175,19 +161,14 @@ example.brat:8: error: law of exclusivity: `items` borrowed and mutated in one e
 example.brat: 0 type error(s)
 ```
 
-A borrow lasts for its call, so two calls in one expression do not meet:
-`fib(n - 1, memo) + fib(n - 2, memo)` with a `mut memo` is accepted. A call
-written inside an argument is different: in `f(memo, g(memo))` the inner `g`
-runs while `f` already holds `memo`, and that is refused.
+A borrow lasts for its call, so `fib(n - 1, memo) + fib(n - 2, memo)` with a
+`mut memo` is fine. In `f(memo, g(memo))` the inner call runs while `f` already
+holds `memo`, and that is refused.
 
-### Container iteration lock, closures, and `.copy()`
+## Loops and closures
 
-A `for x in v` loop holds a read-only view over `v` for the entire loop body
-(blocking direct mutation as well as calls to closures that mutate `v`).
-Closures capture outer bindings by shallow copy and cannot assign to them,
-`move` outer non-`Copy` bindings or take ownership of outer `move ptr`
-allocations; `unsafe` blocks keep type, borrow, and post-block `move` state
-checks active:
+`for x in v` holds `v` for the whole body. Changing `v` there is an error,
+directly or through a closure:
 
 ```brat check
 fn main() -> i64 {
@@ -208,17 +189,16 @@ example.brat:3: note: iterated here by this `for`
 example.brat: 0 type error(s)
 ```
 
-Iterating over an index range (`for i in 0..len(v)`) or a shallow copy
-(`for x in v.copy()`) does not lock `v`. For `vec[T]`, `v.copy()` allocates a
-new vector buffer and copies each element `Val` (copying scalar `i64`/`f64`/`bool`
-values directly and incrementing reference counts for heap `str` or nested
-container elements), so `v.push(...)` reallocating `v` cannot invalidate `x`.
+`for i in 0..len(v)` and `for x in v.copy()` do not hold `v`. `v.copy()` is a
+new vector with the same elements.
 
-### Early returns, `defer`, and cleanup across `try`/`catch`
+A closure gets a shallow copy of the names it uses. It cannot assign to them,
+move them, or take over a `move ptr` from outside.
 
-Branches that exit the function (`return` or `raise`) do not merge their moves
-into the fallthrough path, so C-style guard clauses work without false
-double-free errors:
+## Early return, `try` and `defer`
+
+A branch that leaves the function keeps its moves to itself, so a guard clause
+works:
 
 ```brat
 let p = malloc(64)
@@ -229,13 +209,11 @@ if bad_header() {
 free(move p)        // accepted: the early-return branch never reaches here
 ```
 
-`break` and `continue` stay inside the current function, so moving an outer
-binding before `break` marks it moved after the loop.
+`break` and `continue` stay in the function: a move before `break` counts after
+the loop.
 
-Inside `try { ... } catch e { ... }`, any move that may happen before an error
-in `try` propagates into `catch`. Freeing `move p` in both `try` and `catch` is
-rejected because an error raised after the first `free(move p)` would double-free
-`p` in `catch`:
+A move in `try` counts in `catch` too, because the error may come after it.
+Freeing in both is refused:
 
 ```brat check
 extern fn malloc(n: i64) -> move ptr;
@@ -274,10 +252,7 @@ example.brat:15: note: `p` moved here
 example.brat: 0 type error(s)
 ```
 
-Bind cleanup with `defer free(move p)` before entering `try` and borrow `p` inside
-the body (`defer` keeps `p` readable throughout the scope while preventing a
-second `free(move p)`). If a callee itself takes `p: move ptr`, that callee owns
-freeing `p` on all of its internal error paths:
+Put the cleanup in a `defer` before the `try` and only borrow inside:
 
 ```brat
 let p = malloc(n)
@@ -289,25 +264,21 @@ try {
 }
 ```
 
-Details on declaring `-> move ptr`, `move p: ptr`, and `borrows(p)` on C
-functions are in [C Interop (FFI)](ffi.md#4-owned-pointers-borrows-and-ptr_of_str).
+The C side of this (`-> move ptr`, `move p: ptr`, `borrows(p)`) is in
+[C interop](ffi.md#4-owned-pointers-borrows-and-ptr_of_str).
 
-## Static reference-cycle rejection
+## Cycles
 
-Because heap containers do not have a cycle collector, the checker tracks
-intra-function ownership edges across container writes (`v[i] = x`, `v.push(x)`,
-`v.ins(i, x)`, `m.set(k, x)`, `m[k] = x`) and rejects mutations that close a
-local cycle (`v.push(v)`, or `a["next"] = b; b["prev"] = a`). Cycles assembled
-across separate functions are not caught; represent long-lived cyclic graphs
-with integer indices into a `vec` or build short-lived cyclic structures inside
-an `arena` block.
+There is no cycle collector. The checker follows writes into containers inside
+one function and refuses the one that closes a cycle, such as `v.push(v)`. A
+cycle built across functions is not seen and leaks. Keep long-lived graphs as
+indices into a vector, and build short-lived ones inside an `arena`.
 
-## Thread sharing and channel sessions
+## Threads
 
-`spawn` copies the local frame bindings while sharing the reference-counted heap
-objects behind them (upgrading reference counts to atomic operations). Until
-`join_all()`, `join(h)`, or the end of the enclosing `scope { ... }`, multiple
-concurrent readers are allowed:
+`spawn` copies the names it uses and shares the values behind them. Any number
+of tasks may read a value until `join_all()`, `join(h)` or the end of the
+`scope`:
 
 ```brat run
 fn main() -> i64 {
@@ -326,9 +297,8 @@ fn main() -> i64 {
 10
 ```
 
-Any write inside `spawn` conflicts with concurrent reads or writes in sibling
-tasks or the parent frame, including foreign writes declared via `writes(p)`,
-out-parameters (`&x`), `ptr_write_*`, `slice_set`, and `move` transfers:
+A write inside `spawn` conflicts with any other use of the value before the
+join. Writes through C count: `writes(p)`, `&x`, `ptr_write_*`, `slice_set`.
 
 ```brat check
 fn main() -> i64 {
@@ -348,27 +318,21 @@ example.brat:5: error: `v` is written inside `spawn` and touched again with no `
 example.brat: 0 type error(s)
 ```
 
-Pass mutable values across threads over `chan(cap)`: `ch.send(x)` moves non-Copy
-`x` into the channel (`use of sent \`x\`` on reuse), and straight-line channel
-protocols that exceed `cap` or block without a matching `recv`/`close` are
-rejected statically.
+To hand a value to another thread, send it. `ch.send(x)` moves `x` into the
+channel, and using `x` afterwards is ``use of sent `x` ``.
 
-## Machine-readable diagnostics (`--json` and error codes)
+## Error codes
 
-`brat-cxx check --json file.brat` emits structured JSON diagnostics with error
-codes (`E0382`, `E0502`, `B0522`, `F0001`, `W0001`, ...), line/column spans,
-notes, and fix hints used by `brat lsp` and CI scripts. Run `brat explain E0382`
-for a terminal example, or see the full code table in
-[CLI & Diagnostic Codes](cli.md#3-diagnostic-code-index-brat-explain-code).
+`brat-cxx check --json file.brat` prints the same diagnostics as JSON with
+codes, spans, notes and hints. `brat explain E0382` shows an example for a code.
+The table of codes is in
+[CLI](cli.md#3-diagnostic-code-index-brat-explain-code).
 
 ## What is not checked
 
-1. Inter-procedural aliasing: signatures declare `move`, `ref`, and `mut` per
-   parameter, not lifetime relationships between returned views or nested
-   containers.
-2. Runtime projection poisoning under `--no-check`: whole-name `move x` still
-   trips `V_MOVED` at run time when `--no-check` is passed, whereas `move p.f`
-   is enforced only by static checking.
-3. Unannotated foreign mutations: if a C function mutates memory through `ptr`
-   without `writes(p)` or stores a borrowed pointer past return without taking
-   `move p: ptr`, the checker cannot see it.
+1. Aliasing across calls. A signature says `move`, `ref` or `mut` for each
+   parameter and nothing about how a returned value relates to them.
+2. `move p.f` under `--no-check`. `move x` is also caught at run time, a moved
+   field is caught only by the checker.
+3. C that does more than it declares: a write through a `ptr` without
+   `writes(p)`, or a pointer kept past the call without `move p: ptr`.

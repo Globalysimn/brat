@@ -1,17 +1,12 @@
-# BRAT by Example
+# BRAT by example
 
-Ten self-contained programs covering common tasks in BRAT.
-
-Every `brat run` and `brat check` block on this page is compiled and checked in
-CI by `lang/tests/test_docs_examples.py`.
+Ten programs, each for one common task. All of them are compiled and run in CI.
 
 ## 1. Records, `impl` methods, and exhaustive `enum` matching
 
-Record literals work without a prior `struct` declaration: `Job { id: 7, ms: 18 }`
-creates a tagged record immediately (add `struct Job { ... }` only when you want
-checked fixed slots). `enum` variants can optionally declare payload types, and
-`match` checks exhaustiveness across local and imported `pub enum`s, `Option[T]`,
-and `Result[T, E]`:
+`Job { id: 7, ms: 18 }` works without a `struct Job` declaration. Declare the
+struct when you want the fields checked. A `match` over an `enum`, an `Option`
+or a `Result` has to cover every variant:
 
 ```brat run
 enum Outcome {
@@ -62,9 +57,8 @@ job #3: cancelled
 
 ## 2. Errors as values (`Result`, `?`, and LIFO `defer`)
 
-Recoverable errors travel as `Ok(v)` and `Err(e)`. The `?` suffix unwraps `Ok`
-and returns `Err` early from the enclosing function, running any registered
-`defer` statements in reverse order on the way out:
+`?` unwraps an `Ok` and returns an `Err` from the enclosing function. The
+`defer` statements run on the way out, last one first:
 
 ```brat run
 fn parse_port(line: str) -> Result[i64, str] {
@@ -102,10 +96,8 @@ rejected: expected key=value
 
 ## 3. Unknown-size JSON in an `arena`, keeping one result with `own()`
 
-When parsing untrusted or nested JSON, intermediate `vec`, `map`, and `str`
-allocations don't need individual `free()` traffic. Wrap the request in `arena {
-... }`, walk the parsed tree dynamically, and promote only the surviving value
-to the heap with `own(...)`:
+Everything allocated inside `arena { ... }` is freed together at the closing
+brace. `own(...)` copies the one value that has to outlive it:
 
 ```brat run
 import std.json
@@ -139,8 +131,7 @@ fn main() -> i64 {
 billing:/charge=120ms, billing:/refund=85ms
 ```
 
-Forgetting `own(slow)` does not silently dangle at run time; `brat check`
-rejects the program before C code is generated:
+Without `own(slow)` the program does not compile:
 
 ```brat check
 fn bad() -> vec[str] {
@@ -160,10 +151,8 @@ example.brat:4: error: arena: a value made inside the block is returned out of i
 
 ## 4. Hash table CRUD (`map`)
 
-`map` is an open-addressed hash table with inline storage for small maps and
-4-way inline caches on constant string keys. Indexing (`m[k]`) raises on a
-missing key; `.get(k)` returns the value itself or `None`, not `Some(...)`;
-`.get_or(k, fallback)` supplies a default:
+`m[k]` raises on a missing key. `.get(k)` returns the value or `None` (the value
+itself, not `Some(...)`), and `.get_or(k, fallback)` takes a default:
 
 ```brat run
 fn main() -> i64 {
@@ -199,14 +188,12 @@ missing /nope: true
 
 ## 5. Doubly-linked lists and LRU queues without pointer cycles
 
-BRAT uses deterministic reference counting without a background cycle collector.
-Intra-function ownership loops (`v.push(v)` or `a["next"] = b; b["prev"] = a`)
-fail statically at `brat check`, and indirect back-pointer cycles wired across
-functions leak unless scoped inside an `arena`.
+Two nodes that point at each other never reach a count of zero, and there is no
+cycle collector. The checker refuses such a cycle inside one function and does
+not see it across functions.
 
-Just as in Rust or data-oriented C, long-lived doubly-linked lists and LRU
-queues store nodes in flat vectors and link them with `i64` indices (`-1` for
-null). You get O(1) splice/detach, cache locality, and zero reference cycles:
+So a long-lived list keeps its nodes in vectors and links them by index, with
+`-1` for no node:
 
 ```brat run
 struct LruList {
@@ -283,11 +270,11 @@ touched a: page:a -> page:c -> page:b
 
 ## 6. Linear-time regular expressions (Pike VM)
 
-Built-in `re_match`, `re_find`, `re_captures`, and `re_replace` run on a
-non-backtracking Thompson/Pike VM in `crt/ops_str.h`, so pathological inputs do
-not go exponential. A pattern matches characters, so `.` takes a whole `é`
-and `[а-я]` is a range of letters; `\d`, `\w` and `\s` cover ASCII only. Note
-`\{4\}`: unescaped `{4}` inside `"..."` would interpolate the integer `4`:
+`re_match`, `re_find`, `re_captures` and `re_replace` do not backtrack, so no
+pattern takes exponential time. A pattern matches characters: `.` takes a whole
+`é` and `[а-я]` is a range of letters. `\d`, `\w` and `\s` are ASCII only.
+`{4}` in a string literal is a placeholder, so a repeat count is written
+`\{4\}`:
 
 ```brat run
 fn main() -> i64 {
@@ -315,9 +302,8 @@ token=[REDACTED] token=[REDACTED]
 
 ## 7. Parameterized SQLite queries (`std.sqlite`)
 
-`std.sqlite` binds directly to `libsqlite3` with defensive mode enabled,
-extension loading off, and `?1`-style positional bindings so user strings never
-touch SQL syntax:
+Values are bound to `?1`, `?2` and never pasted into the SQL text. Extension
+loading is off:
 
 ```brat run
 import std.sqlite
@@ -348,9 +334,8 @@ auth_sum=42ms slowest=billing(64ms)
 
 ## 8. SHA-256, HMAC, and constant-time MAC verification (`std.crypto`)
 
-`std.crypto` ships FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, OS CSPRNG bytes,
-and branchless byte-length-aware `constant_time_eq` for webhook or session
-signatures:
+SHA-256, HMAC-SHA256, random bytes from the OS, and a comparison that takes the
+same time wherever the inputs differ:
 
 ```brat run
 import std.crypto
@@ -378,9 +363,6 @@ tampered: false
 ```
 
 ## 9. CLI flags, paths, and ISO-8601 UTC timestamps
-
-`std.cli`, `std.path`, and `std.time` handle command-line tools without external
-packages or `strftime` locale surprises:
 
 ```brat run
 import std.cli
@@ -412,10 +394,9 @@ target=configs/prod.json stem=prod deadline=2026-11-07T09:31:30Z
 
 ## 10. Deterministic `par for` folds and bounded channels
 
-`par for ... reduce(fn, init)` splits a vector across worker threads while
-folding partial results in canonical index order, so multi-threaded floating or
-string reductions produce identical output on 1 thread or 16. For pipeline
-stages, `scope` + bounded `chan(cap)` enforces structured thread lifetimes:
+`par for ... reduce(fn, init)` splits a vector across threads and folds the
+partial results in index order, so the answer is the same on 1 thread and on 16.
+`scope` waits for every `spawn` inside it:
 
 ```brat run
 fn add_i64(a: i64, b: i64) -> i64 {

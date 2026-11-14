@@ -300,7 +300,8 @@ example.brat:9: error: `save` can raise, and the `Err` it returns is dropped her
 ```
 
 An error nobody handles ends the program with status 1 and
-`unhandled: Err('...')` on stderr.
+`unhandled: Err('...')` on stderr. `brat run --trace-lines` adds the line it
+came from. It is off by default because it costs recursive code its fast path.
 
 ## Ownership
 

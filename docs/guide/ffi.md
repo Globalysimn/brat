@@ -1,11 +1,10 @@
-# C Interop (FFI)
+# C interop
 
-BRAT compiles to C11, so `extern` functions and structs map directly to the
-platform C ABI without a marshalling VM. Because a mismatched C prototype
-corrupts the process, `brat-cxx build`, `run`, `dist` and `emit-c` refuse to
-compile any program that calls C unless you supply a header or object proof
-(`--header`, `--object`, or a `.bratbind` package manifest) or opt out
-explicitly with `--unsafe-ffi`.
+BRAT compiles to C, so an `extern fn` is a plain C call with nothing in between.
+A wrong prototype corrupts the process, so `build`, `run`, `dist` and `emit-c`
+refuse a program that calls C until the declarations are checked against a
+header or an object file (`--header`, `--object`, or a `.bratbind` manifest).
+`--unsafe-ffi` skips the check.
 
 ## 1. Declarations and scalar widths
 
@@ -30,17 +29,15 @@ Supported FFI types:
 - Aggregates and functions: `extern struct`, `extern union`, `fn(...) -> T`, `none`
 - Variadic tails: `..ptr`, `..i64`, `..f64`, or `..StructName`
 
-Standard C typedef names (`size_t`, `ssize_t`, `ptrdiff_t`, `intptr_t`,
-`uintptr_t`, `int8_t`..`uint64_t`, `short`, `unsigned short`, `float`, `double`,
-`_Bool`, `const char *`) are canonicalized to their exact BRAT width. C `long`
-is target-dependent (`8` bytes on LP64 Linux/macOS, `4` bytes on Windows LLP64
-and 32-bit ILP32), so write the target width explicitly or generate bindings
-with `brat-cxx bindgen --target TRIPLE`.
+The C names `size_t`, `ssize_t`, `ptrdiff_t`, `intptr_t`, `uintptr_t`,
+`int8_t`..`uint64_t`, `short`, `float`, `double` and `_Bool` map to the BRAT
+type of the same width. C `long` is 8 bytes on Linux and macOS and 4 on Windows,
+so write the width you mean or let `brat-cxx bindgen --target TRIPLE` do it.
 
-Narrow integer arguments (`i8`..`u32`) are range-checked before entering C;
-narrow integer returns sign- or zero-extend to `i64`, and `u64`/`usize` returns
-above `i64::MAX` raise a catchable `ffi: result of f does not fit i64` error.
-`f32` narrows once on call entry and widens back to `f64` on return.
+A narrow integer argument (`i8`..`u32`) is range-checked before the call. A
+narrow result is extended to `i64`. A `u64` or `usize` result above the `i64`
+maximum raises `ffi: result of f does not fit i64`. `f32` is narrowed on the way
+in and widened on the way out.
 
 ## 2. Verifying bindings (`--header`, `--object`, `--bin`)
 
@@ -52,23 +49,19 @@ Check a program's `extern` declarations against a C header and compiled library:
 ./lang/cxx/bin/brat-cxx build prog.brat --header api.h --link -lapi -o prog
 ```
 
-Verification runs four checks:
+What is checked:
 
-1. Header signature match: parameter count, variadic tail, integer vs float
-   register class (`i32` != `f32`, `i64` != `f64`), mutability (`str` matches
-   `const char *`, never writable `char *`), and nested callback signatures.
-2. Layout assertions: emitted C includes compile-time
-   `_Static_assert(sizeof(...) == N)` and `_Static_assert(offsetof(...) == M)`
-   for every `extern struct` and field, catching packing or data-model drift at
-   C compile time.
-3. Object and DWARF inspection (`--object`): reads ELF, Mach-O 64, and PE/COFF
-   x64 symbol tables plus DWARF v2-v5 type DIEs directly from `.o`, `.a`, `.so`,
-   `.dylib`, and `.dll` files without `dlopen`.
-4. Post-build binary audit (`--bin`): compiled binaries embed a `BRATFFI1`
-   section recording their `extern` declarations, struct layouts, and header
-   SHA-256 (preserved across `strip`). Run `brat-cxx ffi --bin ./prog` or
-   `brat-cxx ffi prog.brat --header api.h --bin ./prog` in release builds to
-   catch header drift.
+1. Against the header: parameter count, the variadic tail, integer against
+   float, `str` against `const char *` (never a writable `char *`), and the
+   signatures of callbacks.
+2. Layout: the emitted C has a `_Static_assert` on the size of every
+   `extern struct` and on the offset of every field.
+3. Against an object (`--object`): the symbol table and the DWARF types of a
+   `.o`, `.a`, `.so`, `.dylib` or `.dll`, read from the file without loading it.
+4. Against a built binary (`--bin`): the binary carries its `extern`
+   declarations, struct layouts and the SHA-256 of the header in a `BRATFFI1`
+   section that survives `strip`. `brat-cxx ffi prog.brat --header api.h --bin ./prog`
+   reports a header that changed since the build.
 
 ## 3. Generating bindings (`bindgen`) and exporting shared libraries
 
@@ -141,24 +134,19 @@ example.brat:6: note: `p` allocated here
 example.brat: 0 type error(s)
 ```
 
-- Forgetting `free(move p)` fails `brat-cxx check` with `leaked owned pointer`.
-- Calling `free(move p)` twice or reading `p` afterwards fails with `use of moved`.
-- Passing `&x` at an `extern` `ptr[T]` parameter passes a width-exact writable
-  out-parameter slot (`u8` = 1 byte, `i16` = 2, `i32`/`f32` = 4, `i64`/`f64`/`ptr`
-  = 8), requires `let mut x`, and enforces exclusivity (`f(&x, &x)` is rejected).
-- BRAT strings are NUL-terminated UTF-8 and pass to `str` parameters as borrowed
-  `const char *` valid for the call. Returning a `str` from C copies and
-  validates UTF-8 (a `NULL` return raises a catchable error; `str_from_ptr(p, n)`
-  reads explicit lengths and rejects embedded NUL bytes).
-- `ptr_of_str(s)` yields a raw address for C APIs taking `void *` / `uintptr_t`:
-  long heap strings (`>= 15` bytes) point to their owned buffer (returning
-  `ptr_of_str(local)` is rejected statically), while inline SSO strings (`<= 14`
-  bytes) are interned in a demand-paged slab pool bounded by
-  `BRAT_PIN_BUDGET_BYTES` (default 64 MiB). Strings returned to C from
-  `export fn` or callbacks (directly or inside an `extern struct`) and strings
-  written via `ptr_write_str` / `ptr_write_struct` are deduplicated and pinned
-  under the same `BRAT_PIN_BUDGET_BYTES` cap so ownership of the temporary BRAT
-  value can be released without dangling pointers.
+- A `move ptr` that is never freed is `leaked owned pointer`.
+- A second `free(move p)`, or a read of `p` after it, is `use of moved`.
+- `&x` at a `ptr[T]` parameter passes a slot of exactly the width of `T` for C
+  to write. `x` has to be `let mut`, and `f(&x, &x)` is refused.
+- A BRAT string goes to a `str` parameter as a `const char *` that is valid for
+  the call. A `str` result is copied and checked to be UTF-8, and a `NULL`
+  raises. `str_from_ptr(p, n)` reads a given length.
+- `ptr_of_str(s)` is the address of the bytes, for C that takes `void *`.
+  Returning `ptr_of_str(local)` is refused. A string of 14 bytes or less has no
+  buffer of its own, so it is copied into a pool that is never freed, capped by
+  `BRAT_PIN_BUDGET_BYTES` (default 64 MiB). The same pool holds strings returned
+  to C from an `export fn` or a callback and strings written with
+  `ptr_write_str`.
 
 ## 5. Typed slices, structs behind pointers and `errno`
 
