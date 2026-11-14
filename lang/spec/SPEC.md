@@ -69,6 +69,8 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
      also passing a closure that mutates `x`), is rejected.
    - Reading a place on one side of a binary operator while moving it on the
      other (`s + consume(move s)`) is rejected.
+   - A borrow lasts for its call: `f(x) + f(x)` is two calls one after the
+     other and is accepted, `f(x, g(x))` runs `g` inside the borrow of `f`.
 4. Iteration lock: while `for el in v { ... }` runs, mutating or moving `v`
    directly or through a called closure is rejected.
 5. Closures capture outer variables by shallow value copy. A closure body cannot

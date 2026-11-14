@@ -59,6 +59,12 @@ OWNERSHIP = {
                              '  for x in v {\n    add.push(x)\n  }\n  for a in add {\n'
                              '    v.push(a)\n  }\n  return len(v)\n}\n'),
     'loe.brat': 'fn f(mut p: Point, mut q: Point) -> i64 {\n  set2(p, p)\n  return 0\n}\nfn set2(mut a: Point, mut b: Point) -> i64 {\n  return 0\n}\n',
+    # Two calls in one expression run one after the other; a call inside an
+    # argument runs while the outer call already holds the binding.
+    'loe_calls.brat': ('fn bump(mut v: vec[i64]) -> i64 {\n  v.push(1)\n  return len(v)\n}\n'
+                       'fn add(mut a: vec[i64], n: i64) -> i64 {\n  a.push(n)\n  return len(a)\n}\n'
+                       'fn f(mut v: vec[i64]) -> i64 {\n  let n = bump(v) + bump(v)\n'
+                       '  return n + add(v, bump(v))\n}\n'),
     # A closure holds copies of the locals it names, so a write to one is lost.
     # A `let` of the file is one shared value, and so is a container.
     'closure_capture.brat': ('let mut hits = 0\nfn f() -> i64 {\n  let mut n = 0\n  let mut seen = [0]\n'
@@ -217,6 +223,10 @@ EXPECT = {
     'loe.brat': [
         'loe.brat: 1 error(s), 0 warning(s)',
         'loe.brat:2: error: law of exclusivity: `p` passed as mut twice in one expression (clashes with `p` used by `a`)',
+    ],
+    'loe_calls.brat': [
+        'loe_calls.brat: 1 error(s), 0 warning(s)',
+        'loe_calls.brat:11: error: law of exclusivity: `v` passed as mut twice in one expression (clashes with `v` used by `a`)',
     ],
     'closure_capture.brat': [
         'closure_capture.brat: 1 error(s), 0 warning(s)',

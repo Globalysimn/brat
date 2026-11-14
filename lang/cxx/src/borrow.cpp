@@ -1726,7 +1726,13 @@ void scan_calls(const Expr *e, Decls &decl, Borrows &borrows, Errs &errs, FnTabl
             }
         }
     }
-    for (const auto &sub : e->kids) scan_calls(sub.get(), decl, borrows, errs, funcs, claimed);
+    // A claim lasts as long as the call that made it: `f(m) + f(m)` runs one
+    // call after the other, while in `f(m, g(m))` `g` runs with `m` held by `f`.
+    for (const auto &sub : e->kids) {
+        const size_t held = claimed.size();
+        scan_calls(sub.get(), decl, borrows, errs, funcs, claimed);
+        claimed.resize(held);
+    }
     bool check_sib = (e->k == EK::Bin && e->kids.size() == 2 && e->a != "&&" && e->a != "||");
     if (!check_sib) return;
     size_t start_k = (e->k == EK::MCall) ? 1 : 0;

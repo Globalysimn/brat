@@ -175,6 +175,11 @@ example.brat:8: error: law of exclusivity: `items` borrowed and mutated in one e
 example.brat: 0 type error(s)
 ```
 
+A borrow lasts for its call, so two calls in one expression do not meet:
+`fib(n - 1, memo) + fib(n - 2, memo)` with a `mut memo` is accepted. A call
+written inside an argument is different: in `f(memo, g(memo))` the inner `g`
+runs while `f` already holds `memo`, and that is refused.
+
 ### Container iteration lock, closures, and `.copy()`
 
 A `for x in v` loop holds a read-only view over `v` for the entire loop body

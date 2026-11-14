@@ -211,7 +211,7 @@ fn f(a: mut i64, b: mut i64) -> i64 {
 
 fn main() -> i64 {
   let mut x = 1
-  let r = f(g(x), g(x))
+  let r = f(x, g(x))
   return r
 }
 """}, "as mut"))
@@ -402,6 +402,24 @@ fn main() -> i64 {
 
 
 ACCEPT = []
+
+ACCEPT.append(("a39_loe_calls_in_turn", {"m.brat": """fn g(a: mut i64) -> i64 {
+  a = a + 1
+  return a
+}
+
+fn f(a: mut i64, b: mut i64) -> i64 {
+  a = a + b
+  b = b + 1
+  return a
+}
+
+fn main() -> i64 {
+  let mut x = 1
+  let r = f(g(x), g(x))
+  return r
+}
+"""}))
 
 ACCEPT.append(("a37_fn_name_in_callback_slot", {"m.brat": """fn dbl(x) {
   return x * 2
