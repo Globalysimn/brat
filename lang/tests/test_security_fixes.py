@@ -20,28 +20,28 @@ _ALT65 = '|'.join(['a'] * 65)
 
 # name -> (source, expected stdout, expected exit code)
 CASES = {
-    'fs_read_fd': ("fn main() -> i64 {\n  print(read_file(0))\n  0\n}\n",
+    'fs_read_fd': ("fn main() -> i64 {\n  print(read_file(0))\n  return 0\n}\n",
                    b"Err('read_file wants a string path')\n", 0),
-    'fs_read_int': ("fn main() -> i64 {\n  print(read_file(5))\n  0\n}\n",
+    'fs_read_int': ("fn main() -> i64 {\n  print(read_file(5))\n  return 0\n}\n",
                     b"Err('read_file wants a string path')\n", 0),
     'fs_write_fd': ('fn main() -> i64 {\n  print("BEFORE")\n'
-                    '  print(write_file(1, "RAW\\n"))\n  print("AFTER")\n  0\n}\n',
+                    '  print(write_file(1, "RAW\\n"))\n  print("AFTER")\n  return 0\n}\n',
                     b"BEFORE\nErr('write_file wants string path and text')\nAFTER\n", 0),
-    'fs_write_list': ('fn main() -> i64 {\n  print(write_file([1,2], "x"))\n  0\n}\n',
+    'fs_write_list': ('fn main() -> i64 {\n  print(write_file([1,2], "x"))\n  return 0\n}\n',
                       b"Ok(1)\n", 0),
-    'fs_write_int': ('fn main() -> i64 {\n  print(write_file("o.txt", 5))\n  0\n}\n',
+    'fs_write_int': ('fn main() -> i64 {\n  print(write_file("o.txt", 5))\n  return 0\n}\n',
                      b"Err('write_file wants string path and text')\n", 0),
     'fs_roundtrip': ('fn main() -> i64 {\n  print(write_file("round.txt", "hi"))\n'
-                     '  print(read_file("round.txt"))\n  0\n}\n',
+                     '  print(read_file("round.txt"))\n  return 0\n}\n',
                      b"Ok(2)\nOk('hi')\n", 0),
     'defer_unwind': ('fn main() -> i64 {\n  try {\n    if true {\n'
                      '      defer print("cleanup")\n      raise("boom")\n    }\n'
                      '  } catch e {\n    print("caught")\n  }\n  return 0\n}\n',
                      b"cleanup\ncaught\n", 0),
-    'regex_alt65': ('fn main() -> i64 {\n  print(re_match("a", "%s"))\n  0\n}\n' % _ALT65,
+    'regex_alt65': ('fn main() -> i64 {\n  print(re_match("a", "%s"))\n  return 0\n}\n' % _ALT65,
                     b"true\n", 0),
     'regex_dot_utf8': ('fn main() -> i64 {\n  print(re_match("\u00e9", ".."))\n'
-                       '  print(re_match("\u00e9", "^.$"))\n  0\n}\n',
+                       '  print(re_match("\u00e9", "^.$"))\n  return 0\n}\n',
                        b"false\ntrue\n", 0),
 }
 

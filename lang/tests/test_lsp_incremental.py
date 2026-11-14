@@ -195,9 +195,9 @@ def test_wire_and_simd_lines(bin_path):
         boundary_lines = []
         for idx, width in enumerate([15, 16, 17, 31, 32, 33, 63, 64, 65]):
             pad = "a" * max(1, width - 12)
-            boundary_lines.append('fn b%d() -> str { "%s" }' % (idx, pad))
+            boundary_lines.append('fn b%d() { return "%s" }' % (idx, pad))
         # Add Cyrillic (2B UTF-8 = 1 UTF-16) + Emoji (4B UTF-8 = 2 UTF-16) line
-        boundary_lines.append('fn uni() -> str { "Привет 🦀🚀 мир" }')
+        boundary_lines.append('fn uni() { return "Привет 🦀🚀 мир" }')
         src = "\n".join(boundary_lines) + "\n"
         uri = "file://" + os.path.join(td, "simd_bounds.brat")
 
@@ -216,8 +216,8 @@ def test_wire_and_simd_lines(bin_path):
 
         # 2. JSON `\uD83D\uDE80` surrogate escape decoding in tape + string ID preservation
         emoji_line = len(boundary_lines) - 1
-        # Line is: `fn uni() -> str { "Привет 🦀🚀 мир" }`
-        # Prefix before 🚀: `fn uni() -> str { "Привет 🦀` -> 19 ASCII + 6 Cyrillic + 1 space + 2 UTF-16 (🦀) = 28 UTF-16 units
+        # Line is: `fn uni() { return "Привет 🦀🚀 мир" }`
+        # Prefix before 🚀: `fn uni() { return "Привет 🦀` -> 19 ASCII + 6 Cyrillic + 1 space + 2 UTF-16 (🦀) = 28 UTF-16 units
         # 🚀 occupies UTF-16 cols [28, 30). Splitting at col 29 must fail cleanly.
         cli.notify("textDocument/didChange", {
             "textDocument": {"uri": uri, "version": 2},
@@ -280,7 +280,7 @@ def test_incremental_salsa_and_workspace(bin_path):
         lib_v1 = (
             "/// Doubles and shifts an integer.\n"
             "pub fn scale_add(x: i64, bias: i64) -> i64 {\n"
-            "  x * 2 + bias\n"
+            "  return x * 2 + bias\n"
             "}\n"
         )
         with open(lib_path, "w", encoding="utf-8") as f:
@@ -311,7 +311,7 @@ def test_incremental_salsa_and_workspace(bin_path):
             "\n"
             "impl Mode {\n"
             "  fn boost(self: Mode, v: i64) -> i64 {\n"
-            "    v + 1\n"
+            "    return v + 1\n"
             "  }\n"
             "}\n"
             "\n"
@@ -320,16 +320,16 @@ def test_incremental_salsa_and_workspace(bin_path):
             "fn first_fn(a: i64) -> i64 {\n"
             "  let _ = json.parse(\"{}\")\n"
             "  let res: i64 = scale_add(a, FACTOR)\n"
-            "  res\n"
+            "  return res\n"
             "}\n"
             "\n"
             "fn middle_fn(s: str) -> str {\n"
-            "  s\n"
+            "  return s\n"
             "}\n"
             "\n"
             "fn tail_fn() -> i64 {\n"
             "  let bad: i64 = \"oops\"\n"
-            "  bad\n"
+            "  return bad\n"
             "}\n"
         )
         with open(app_path, "w", encoding="utf-8") as f:
@@ -399,8 +399,8 @@ def test_incremental_salsa_and_workspace(bin_path):
 
         # 1. Introduce use-after-move (E0382) + multi-line shift inside `middle_fn`
         d = edit_and_assert_oracle(
-            "fn middle_fn(s: str) -> str {\n  s\n}",
-            "fn middle_fn(s: str) -> str {\n  let t = move s\n  let _u = t\n  s\n}",
+            "fn middle_fn(s: str) -> str {\n  return s\n}",
+            "fn middle_fn(s: str) -> str {\n  let t = move s\n  let _u = t\n  return s\n}",
             "middle_fn E0382 + +2 line shift on tail_fn",
         )
         check([x["code"] for x in d] == ["E0507", "E0382", "T0001"],
@@ -408,21 +408,21 @@ def test_incremental_salsa_and_workspace(bin_path):
 
         # 2. Fix E0382 inside `middle_fn` and introduce multi-arm extern union error (T0001)
         edit_and_assert_oracle(
-            "  let t = move s\n  let _u = t\n  s",
-            "  let _bad_u = WordU { i: 1, f: 2.0 }\n  s",
+            "  let t = move s\n  let _u = t\n  return s",
+            "  let _bad_u = WordU { i: 1, f: 2.0 }\n  return s",
             "extern union two-arm T0001 inside incremental fn",
         )
 
         # 3. Fix extern union to single valid arm
         edit_and_assert_oracle(
-            "  let _bad_u = WordU { i: 1, f: 2.0 }\n  s",
-            "  let _ok_u = WordU { i: 7 }\n  s",
+            "  let _bad_u = WordU { i: 1, f: 2.0 }\n  return s",
+            "  let _ok_u = WordU { i: 7 }\n  return s",
             "valid single-arm extern union",
         )
 
         # 4. Edit inside `impl Mode` method body (`v + 1` -> type error `"bad"`, then fix)
-        edit_and_assert_oracle("    v + 1", '    "bad_impl_ret"', "impl method body T0001")
-        edit_and_assert_oracle('    "bad_impl_ret"', "    v + 2", "impl method body fixed")
+        edit_and_assert_oracle("    return v + 1", '    return "bad_impl_ret"', "impl method body T0001")
+        edit_and_assert_oracle('    return "bad_impl_ret"', "    return v + 2", "impl method body fixed")
 
         # 5. Introduce syntax error (P0001) inside `middle_fn`, then recover clean AST.
         edit_and_assert_oracle("  let _ok_u = WordU { i: 7 }", "  let broken = (", "P0001 syntax error")
@@ -442,7 +442,7 @@ def test_incremental_salsa_and_workspace(bin_path):
         )
 
         # 7. Fix `tail_fn` so `app.brat` has 0 diagnostics.
-        d_clean = edit_and_assert_oracle('  let bad: i64 = "oops"\n  bad', "  first_fn(5)", "clean app")
+        d_clean = edit_and_assert_oracle('  let bad: i64 = "oops"\n  return bad', "  return first_fn(5)", "clean app")
         check(d_clean == [], "app is now 100% clean")
 
         # 8. Cross-open-document signature hash invalidation (`propagate_signature_change`).
@@ -459,7 +459,7 @@ def test_incremental_salsa_and_workspace(bin_path):
         lib_v3 = (
             "/// Doubles and shifts an integer.\n"
             "pub fn scale_add(x: i64, bias: i64) -> str {\n"
-            "  str(x + bias)\n"
+            "  return str(x + bias)\n"
             "}\n"
         )
         cli.notify("textDocument/didChange", {
@@ -533,7 +533,7 @@ def test_ide_intelligence(bin_path):
         util_src = (
             "/// Computes deterministic checksum.\n"
             "pub fn compute_tag(seed: i64, weight: i64) -> i64 {\n"
-            "  seed * 31 + weight\n"
+            "  return seed * 31 + weight\n"
             "}\n"
         )
         svc_src = (
@@ -553,7 +553,7 @@ def test_ide_intelligence(bin_path):
             "  let label = \"compute_tag stays untouched in strings\"\n"
             "  let _ = label\n"
             "  // compute_tag in comments also stays untouched\n"
-            "  total\n"
+            "  return total\n"
             "}\n"
         )
         disk_src = (
@@ -674,7 +674,7 @@ def test_ide_intelligence(bin_path):
             "  let mut y = 10\n"
             "  let lonely = 99\n"
             "  pritn(str(y))\n"
-            "  x\n"
+            "  return x\n"
             "}\n"
         )
         cli.notify("textDocument/didOpen", {
@@ -726,9 +726,9 @@ def test_ide_intelligence(bin_path):
             "fn fmt_me(a: i64) -> i64 {\n"
             "      // keep comment\n"
             "    if a > 0 {   \n"
-            "        a + 1   \n"
+            "        return a + 1   \n"
             "      } else {\n"
-            "0\n"
+            "return 0\n"
             "}\n"
             "}\n"
         )
@@ -742,7 +742,7 @@ def test_ide_intelligence(bin_path):
         })["result"]
         check(len(f_edits) == 1, "formatting produced edit")
         clean_fmt = apply_text_edits(messy_src, f_edits)
-        check("  // keep comment\n  if a > 0 {\n    a + 1\n  } else {\n    0\n  }\n" in clean_fmt,
+        check("  // keep comment\n  if a > 0 {\n    return a + 1\n  } else {\n    return 0\n  }\n" in clean_fmt,
               "formatted indentation exact:\n" + clean_fmt)
         cli.notify("textDocument/didChange", {
             "textDocument": {"uri": messy_uri, "version": 2},
@@ -877,7 +877,7 @@ def test_asan_ubsan(cc):
             "  let s = \"Привет 🚀\"\n"
             "  let mut k = x\n"
             "  k = k + 1\n"
-            "  s\n"
+            "  return s\n"
             "}\n"
         )
         cli.notify("textDocument/didOpen", {
@@ -920,7 +920,7 @@ def test_50k_loc_benchmark(bin_path):
             "extern struct FrameHdr {\n  seq: i64,\n  flags: i64,\n}\n\n"
             "extern union MetricVal {\n  ival: i64,\n  fval: f64,\n}\n\n"
             "enum Stage {\n  Init,\n  Ready,\n}\n\n"
-            "impl Stage {\n  fn tag(self: Stage) -> i64 {\n    1\n  }\n}\n\n"
+            "impl Stage {\n  fn tag(self: Stage) -> i64 {\n    return 1\n  }\n}\n\n"
         ]
         num_fns = 2600  # 2600 * 20 lines = 52,000+ LOC
         for i in range(num_fns):
@@ -938,10 +938,10 @@ def test_50k_loc_benchmark(bin_path):
                 "  if h > 0 {\n"
                 "    let p = h + 1\n"
                 "    let q = p + 2\n"
-                "    q + e\n"
+                "    return q + e\n"
                 "  } else {\n"
                 "    let r = h - 1\n"
-                "    r - f\n"
+                "    return r - f\n"
                 "  }\n"
                 "}\n\n" % (i, i, (i % 97) + 1, (i % 53) + 1)
             )

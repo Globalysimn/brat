@@ -111,9 +111,9 @@ CASES = {
         'fn f(mut s: str) -> i64 {\n'
         '  s = "zzz"\n'
         '  print(s)\n'
-        '  0\n'
+        '  return 0\n'
         '}\n'
-        'fn main() -> i64 { f("abc")  0 }',
+        'fn main() -> i64 { f("abc")  return 0 }',
         'zzz\n', ''),
     # A closure copies the captured value, so rebinding the binding must not free it.
     'closure_capture_alias': (

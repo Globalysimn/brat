@@ -109,7 +109,7 @@ def mut_self_method_is_allowed():
            "  let mut b = Box { v: 1 }\n"
            "  b.set(0, 2)\n"
            "  print(b.v)\n"
-           "  0\n"
+           "  return 0\n"
            "}\n")
     p = write("b3_mutself.brat", src)
     rc, out = check_file(p)

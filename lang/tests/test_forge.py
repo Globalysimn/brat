@@ -59,7 +59,7 @@ def map_literal():
     src = ('fn main() -> i64 {\n'
            '  let m = {"$type": "Guard", "a": 1}\n'
            '  print(m)\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("a1.brat", src)
     rc, out = run("a1.brat")
     check(rc == 0, "map literal must run, not abort (rc=%d, out=%r)" % (rc, out[:200]))
@@ -73,7 +73,7 @@ def method_set():
            '  let r = m.set("$type", "Guard")\n'
            '  print(r)\n'
            '  print(m)\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("a2.brat", src)
     rc, out = run("a2.brat")
     check(rc == 0, "m.set must run (rc=%d, out=%r)" % (rc, out[:200]))
@@ -87,7 +87,7 @@ def index_write():
            '  m["$type"] = "Guard"\n'
            '  print(m)\n'
            '  print(len(m))\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("a3.brat", src)
     rc, out = run("a3.brat")
     check(rc == 0, "index write must run (rc=%d, out=%r)" % (rc, out[:200]))
@@ -100,7 +100,7 @@ def computed_key():
            '  let m = {"a": 1}\n'
            '  let k = "$type"\n'
            '  print(m.set(k, "Guard"))\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("a4.brat", src)
     rc, out = run("a4.brat")
     check(rc == 0, "computed key must run (rc=%d, out=%r)" % (rc, out[:200]))
@@ -115,7 +115,7 @@ def caught_error():
            '  } catch e {\n'
            '    print("caught")\n'
            '  }\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("a5.brat", src)
     rc, out = run("a5.brat")
     check(rc == 0, "try must not crash (rc=%d, out=%r)" % (rc, out[:200]))
@@ -131,7 +131,7 @@ def ordinary_map_still_works():
            '  print(len(m))\n'
            '  print(m["c"])\n'
            '  print(m.keys())\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("b1_ok.brat", src)
     rc, out = run("b1_ok.brat")
     check(rc == 0, "ordinary map must keep working (rc=%d, out=%r)" % (rc, out[:200]))
@@ -143,7 +143,7 @@ def structs_still_work():
     src = ('fn main() -> i64 {\n'
            '  let p = Point { x: 3, y: 4 }\n'
            '  print(p.x + p.y)\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("b2_struct.brat", src)
     rc, out = run("b2_struct.brat")
     check(rc == 0, "struct literals must keep working (rc=%d, out=%r)" % (rc, out[:200]))
@@ -154,7 +154,7 @@ def unhashable_key_still_refused():
     src = ('fn main() -> i64 {\n'
            '  let m = {[1, 2]: "x"}\n'
            '  print(m)\n'
-           '  0\n}\n')
+           '  return 0\n}\n')
     write("b3_unhash.brat", src)
     rc, out = run("b3_unhash.brat")
     check(rc == 0, "unhashable key: must run (rc=%d, out=%r)" % (rc, out[:200]))

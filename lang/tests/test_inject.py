@@ -77,42 +77,42 @@ def pair(name, evil_src, good_src, label):
 
 def struct_literal_key():
     pair("a1",
-         'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  0\n}\n' % BREAK_KEY,
-         'fn main() -> i64 {\n  let s = P{x: 1, y: 2}\n  print(s)\n  0\n}\n',
+         'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  return 0\n}\n' % BREAK_KEY,
+         'fn main() -> i64 {\n  let s = P{x: 1, y: 2}\n  print(s)\n  return 0\n}\n',
          "struct-literal key")
 
 
 def field_access_name():
     pair("a2",
-         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0].%s)\n  0\n}\n' % STR_NAME,
-         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0])\n  0\n}\n',
+         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0].%s)\n  return 0\n}\n' % STR_NAME,
+         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0])\n  return 0\n}\n',
          "field access")
 
 
 def method_call_name():
     pair("a3",
-         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0].%s())\n  0\n}\n' % STR_NAME,
-         'fn main() -> i64 {\n  let s = "ab"\n  print(s.upper())\n  0\n}\n',
+         'fn main() -> i64 {\n  let v = [1, 2]\n  print(v[0].%s())\n  return 0\n}\n' % STR_NAME,
+         'fn main() -> i64 {\n  let s = "ab"\n  print(s.upper())\n  return 0\n}\n',
          "method call")
 
 
 def impl_type_name():
     pair("a4",
-         'impl %s {\n  fn f(self) -> i64 { 0 }\n}\n\nfn main() -> i64 { 0 }\n' % STR_NAME,
-         'impl Q {\n  fn f(self) -> i64 { 0 }\n}\n\nfn main() -> i64 { 0 }\n',
+         'impl %s {\n  fn f(self) -> i64 { return 0 }\n}\n\nfn main() -> i64 { return 0 }\n' % STR_NAME,
+         'impl Q {\n  fn f(self) -> i64 { return 0 }\n}\n\nfn main() -> i64 { return 0 }\n',
          "impl type name")
 
 
 def enum_type_name():
     pair("a5",
-         'enum %s { A, B }\n\nfn main() -> i64 { 0 }\n' % STR_NAME,
-         'enum Color { A, B }\n\nfn main() -> i64 { 0 }\n',
+         'enum %s { A, B }\n\nfn main() -> i64 { return 0 }\n' % STR_NAME,
+         'enum Color { A, B }\n\nfn main() -> i64 { return 0 }\n',
          "enum type name")
 
 
 def struct_type_name():
     evil = write("a6_evil.brat",
-                 'fn main() -> i64 {\n  let s = %s { x: 1 }\n  print(s)\n  0\n}\n'
+                 'fn main() -> i64 {\n  let s = %s { x: 1 }\n  print(s)\n  return 0\n}\n'
                  % STR_NAME)
     r = cli(["check"], evil)
     check(r.returncode != 0, "struct type name: a string where a type name "
@@ -135,7 +135,7 @@ def emitted_string_escapes_exactly():
     for i, (raw, want) in enumerate(ESCAPE_CASES):
         literal = json.dumps(raw, ensure_ascii=False)
         src = write("b0_escape_%d.brat" % i,
-                    'fn main() -> i64 {\n  let s = %s\n  print(len(s))\n  0\n}\n'
+                    'fn main() -> i64 {\n  let s = %s\n  print(len(s))\n  return 0\n}\n'
                     % literal)
         r = cli(["emit-c"], src)
         check(r.returncode == 0, "native emit-c rejected a valid string literal "
@@ -145,7 +145,7 @@ def emitted_string_escapes_exactly():
                   "native C escape for %r did not contain %r" % (raw, want))
 
 def emitted_names_are_escaped():
-    src = write("b1_ok.brat", 'fn main() -> i64 {\n  print("ab".upper())\n  0\n}\n')
+    src = write("b1_ok.brat", 'fn main() -> i64 {\n  print("ab".upper())\n  return 0\n}\n')
     r = cli(["emit-c"], src)
     check(r.returncode == 0, "emit-c on a valid program (rc=%d, out=%r)"
           % (r.returncode, (r.stdout + r.stderr)[:250]))
@@ -157,7 +157,7 @@ def emitted_names_are_escaped():
 
 def payload_never_reaches_c():
     src = write("b2_payload.brat",
-                'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  0\n}\n'
+                'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  return 0\n}\n'
                 % BREAK_KEY)
     r = cli(["emit-c"], src)
     check(r.returncode != 0, "emit-c must refuse a file with a name that is "
@@ -166,7 +166,7 @@ def payload_never_reaches_c():
 
 def build_never_produces_binary():
     src = write("b3_build.brat",
-                'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  0\n}\n'
+                'fn main() -> i64 {\n  let s = P{x: 1, %s: 2}\n  print(s)\n  return 0\n}\n'
                 % BREAK_KEY)
     out_bin = os.path.join(TMP, "b3.exe")
     r = cli(["build", "-o", out_bin], src, timeout=300)
@@ -176,14 +176,14 @@ def build_never_produces_binary():
 
 def valid_programs_pass():
     cases = {
-        "c1_struct": 'fn main() -> i64 {\n  let s = P{x: 1, y: 2}\n  print(s)\n  0\n}\n',
-        "c2_method": 'fn main() -> i64 {\n  print("ab".upper())\n  0\n}\n',
+        "c1_struct": 'fn main() -> i64 {\n  let s = P{x: 1, y: 2}\n  print(s)\n  return 0\n}\n',
+        "c2_method": 'fn main() -> i64 {\n  print("ab".upper())\n  return 0\n}\n',
         "c3_impl": ('trait T {\n  fn f(self) -> i64\n}\n\n'
-                    'impl T for Q {\n  fn f(self) -> i64 { 7 }\n}\n\n'
-                    'fn main() -> i64 { 0 }\n'),
-        "c4_enum": 'enum Color { Red, Green }\n\nfn main() -> i64 { 0 }\n',
+                    'impl T for Q {\n  fn f(self) -> i64 { return 7 }\n}\n\n'
+                    'fn main() -> i64 { return 0 }\n'),
+        "c4_enum": 'enum Color { Red, Green }\n\nfn main() -> i64 { return 0 }\n',
         "c5_underscore": ('fn main() -> i64 {\n  let my_value_2 = 1\n'
-                          '  print(my_value_2)\n  0\n}\n'),
+                          '  print(my_value_2)\n  return 0\n}\n'),
     }
     for name, src in cases.items():
         p = write(name + ".brat", src)
