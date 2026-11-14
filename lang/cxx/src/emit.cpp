@@ -4026,6 +4026,11 @@ std::set<std::string> Emitter::heap_returns() {
             add_fn_names(out_, name);
         }
     }
+    // `Has(Ok(9))` builds a fresh tag in place of the call. The constructors
+    // go in ahead of the bodies, so that `fn leaf() { return Has(1) }` counts
+    // as a function that returns an owned value.
+    for (const auto &[name, entry] : fns)
+        if (entry.ctor) out_.insert(name);
     // Bodies that prove it, whatever the annotation claims. Two passes reach
     // the usual fixpoint: a helper used by a helper.
     for (;;) {
@@ -4060,9 +4065,6 @@ std::set<std::string> Emitter::heap_returns() {
             out_.insert(LOCAL_BINDING_PREFIX + name);
         }
     }
-    // `Has(Ok(9))` builds a fresh tag in place of the call.
-    for (const auto &[name, entry] : fns)
-        if (entry.ctor) out_.insert(name);
     return out_;
 }
 

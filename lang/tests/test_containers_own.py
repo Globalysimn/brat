@@ -5,8 +5,9 @@ native binary must print the same thing and the binary must leave nothing
 behind. These are the shapes that leaked while containers aliased their
 elements: a vector literal, a map literal, a push of a fresh value, a slice, a
 key list, concatenation, a struct field, a nested vector, an iterator over a
-map, a captured binding, a capture handed to a spawned closure, and an error
-carried out of a function.
+map, a captured binding, a capture handed to a spawned closure, an error
+carried out of a function, and a value a function returns through an enum
+constructor.
 """
 import _cxx
 import _scratch
@@ -451,6 +452,41 @@ fn main() -> i64 {
   return 0
 }
 ''', "101 102 113\n104 105 106\n[4, 2, 3]\n[3, 2]\n6\ntrue true 1\n[1, 2, 3]\n")
+
+CASES["ctor_returned"] = ('''enum Tree {
+  Leaf,
+  Branch(left, val: i64, right),
+}
+
+fn insert(t, v: i64) {
+  match t {
+    Leaf => { return Branch(Leaf, v, Leaf) },
+    Branch(l, x, r) => {
+      if v < x {
+        return Branch(insert(l, v), x, r)
+      }
+      return Branch(l, x, insert(r, v))
+    },
+  }
+}
+
+fn size(t) -> i64 {
+  match t {
+    Leaf => { return 0 },
+    Branch(l, x, r) => { return size(l) + 1 + size(r) },
+  }
+}
+
+fn main() -> i64 {
+  let mut t = Leaf
+  for v in [5, 3, 8, 1, 4, 7, 9] {
+    t = insert(t, v)
+  }
+  print(size(t))
+  print(size(insert(Leaf, 1)))
+  return 0
+}
+''', "7\n1\n")
 
 CASES["vlit_overflow_cached"] = (
     'fn pick() -> str {\n  let mut s = ""\n  for k in 0..3 {\n'
