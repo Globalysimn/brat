@@ -123,8 +123,9 @@ program (an index out of range, division by zero) unwind to a `try`, so that a
 service can fail one request and keep running without every `a / b` returning a
 `Result`.
 
-`raise(x)` sits between the two: a `try` in the same function catches it, and a
-caller receives it as `Err(x)`. Dropping that `Err` is a compile error.
+`raise(x)` sits between the two. A caller that takes the result gets `Err(x)`.
+A caller that does not, as in a bare `save(n)`, has to be inside a `try`, which
+then catches it. Outside a `try` that line is a compile error.
 
 ## Why can't I store a named function in a variable?
 

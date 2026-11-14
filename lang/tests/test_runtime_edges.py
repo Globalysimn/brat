@@ -4,7 +4,8 @@ Covers: Unicode simple and multi-char case mapping, replace with an empty patter
 (which used to size its buffer with an overflowable product), str() of an int,
 `for` over a string, which walks code points, the message of a closure called
 with the wrong number of arguments, `i64()` / `f64()` between the two number
-types, and `chr()` / `ord()` between a code point and its string.
+types, `chr()` / `ord()` between a code point and its string, and a call of a
+raising fn as a statement of a `try` body, whose `Err` goes to the `catch`.
 """
 import _cxx
 import _scratch
@@ -14,7 +15,14 @@ import subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 TMP = _scratch.mkdtemp(prefix="brat-edges-")
 
-SRC = r'''fn main() -> i64 {
+SRC = r'''fn limit(n) {
+    if n > 9 {
+        raise("over the limit")
+    }
+    return n
+}
+
+fn main() -> i64 {
     print("αβγ".upper())
     print("ΑΒΓ".lower())
     print("ſ".upper())
@@ -69,6 +77,26 @@ SRC = r'''fn main() -> i64 {
             print(e)
         }
     }
+    try {
+        limit(1)
+        let kept = limit(10)
+        print(kept)
+        for n in [2, 11, 3] {
+            limit(n)
+        }
+        print("not reached")
+    } catch e {
+        print(e)
+    }
+    let late = fn(n) {
+        try {
+            limit(n)
+        } catch e {
+            return "closure: " + e
+        }
+        return "fine"
+    }
+    print(late(12))
     return 0;
 }
 '''
@@ -103,6 +131,9 @@ WANT = (
     "ord wants one character\n"
     "ord wants one character\n"
     "ord wants one character\n"
+    "Err('over the limit')\n"
+    "over the limit\n"
+    "closure: over the limit\n"
 ).encode("utf-8")
 
 
@@ -118,7 +149,7 @@ def main():
     assert b.returncode == 0, "build failed:\n" + (b.stdout + b.stderr)[-600:].decode("utf-8", "replace")
     rn = subprocess.run([exe], capture_output=True, timeout=60)
     assert rn.returncode == 0 and rn.stdout == WANT, "native rc=%d out=%r" % (rn.returncode, rn.stdout)
-    print("EDGES ALL GREEN (29 lines, -O0 and -O2)")
+    print("EDGES ALL GREEN (32 lines, -O0 and -O2)")
 
 
 if __name__ == "__main__":

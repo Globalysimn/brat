@@ -584,9 +584,6 @@ static bool stmt_returns(const Stmt &s) {
     }
 }
 
-// A `raise` that leaves the fn: one inside a `try` body is caught there.
-static bool body_raises(const std::vector<StmtP> &body);
-
 static bool stmt_raises(const Stmt &s) {
     if (s.k == SK::Fn) return false;
     if (s.k == SK::Expr) return s.e1 && s.e1->k == EK::Call && s.e1->a == "raise";
@@ -594,10 +591,37 @@ static bool stmt_raises(const Stmt &s) {
     return body_raises(s.body) || body_raises(s.body2) || (s.els && stmt_raises(*s.els));
 }
 
-static bool body_raises(const std::vector<StmtP> &body) {
+bool body_raises(const std::vector<StmtP> &body) {
     for (const auto &s : body)
         if (s && stmt_raises(*s)) return true;
     return false;
+}
+
+// Statements of a `try` body in the program under check: a raising call there
+// goes to the `catch`.
+static std::set<const Stmt *> g_caught;
+
+static void try_stmts_in(const Expr *e, std::vector<Stmt *> &out) {
+    if (!e) return;
+    if (e->fn) try_stmts(e->fn->body, false, out);
+    for (const auto &k : e->kids) try_stmts_in(k.get(), out);
+}
+
+static void try_stmts_in(Stmt &s, bool in_try, std::vector<Stmt *> &out) {
+    if (s.k == SK::Expr && in_try) out.push_back(&s);
+    try_stmts_in(s.e1.get(), out);
+    try_stmts_in(s.e2.get(), out);
+    try_stmts_in(s.e3.get(), out);
+    for (const FnDecl &f : s.fns) try_stmts(f.body, false, out);
+    const bool own = s.k != SK::Spawn && in_try;
+    try_stmts(s.body, s.k == SK::Try || own, out);
+    try_stmts(s.body2, own, out);
+    if (s.els) try_stmts_in(*s.els, own, out);
+}
+
+void try_stmts(const std::vector<StmtP> &body, bool in_try, std::vector<Stmt *> &out) {
+    for (const auto &s : body)
+        if (s) try_stmts_in(*s, in_try, out);
 }
 
 static bool readonly_mcall_name(const std::string &m) {
@@ -2922,7 +2946,7 @@ void FnTyper::stmt(const Stmt &s) {
         const Expr &e = *s.e1;
         if (e.k == EK::Call && !env.count(e.a)) {
             auto f = sigs.find(e.a);
-            if (f != sigs.end() && f->second.raises)
+            if (f != sigs.end() && f->second.raises && !g_caught.count(&s))
                 must("`" + e.a + "` can raise, and the `Err` it returns is dropped here "
                      "(hint: `" + e.a + "(...)?` passes it on, `let _ = " + e.a +
                      "(...)` ignores it)");
@@ -3347,6 +3371,9 @@ std::vector<TypeErr> type_check(const std::vector<StmtP> &prog, const Sigs &extr
         }
     }
     collect_sigs(prog, sigs);
+    std::vector<Stmt *> in_try;
+    try_stmts(prog, false, in_try);
+    g_caught = {in_try.begin(), in_try.end()};
     for (auto &[fname, f] : sigs) {
         if (f.is_ctor && fname.rfind("__static__.", 0) != 0) continue;
         for (size_t k = 0; k < f.params.size() && k < f.param_anns.size(); k++) {

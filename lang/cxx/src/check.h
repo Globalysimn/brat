@@ -136,6 +136,11 @@ using Sigs = std::map<std::string, FnSig>;
 
 // Every function an `import` can reach: the file itself plus what it imports.
 void collect_sigs(const std::vector<StmtP> &prog, Sigs &sigs);
+// A `raise` that leaves the fn: one inside a `try` body is caught there.
+bool body_raises(const std::vector<StmtP> &body);
+// The expression statements a `try` body runs itself: those of a closure, a
+// nested fn or a `spawn` in it are not among them.
+void try_stmts(const std::vector<StmtP> &body, bool in_try, std::vector<Stmt *> &out);
 void collect_exports(const std::vector<StmtP> &prog,
                      std::map<std::string, Ty> &consts,
                      std::map<std::string, std::map<std::string, Ty>> &structs);

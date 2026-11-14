@@ -13,6 +13,7 @@
 #include <map>
 #include <sstream>
 
+#include "check.h"
 #include "lexer.h"
 #include "parser.h"
 #include "pkg_io.h"
@@ -1035,4 +1036,16 @@ void flatten(ModuleSet &set, bool prune_imports) {
     } walk{set, expanded, flat, do_prune, live_fns};
     walk.go(0);
     set.flat = std::move(flat);
+    // A call of a fn that can raise, written as a statement of a `try` body,
+    // is that call with `?`: the `Err` it returns goes to the `catch`.
+    std::set<std::string> raisers;
+    for (const auto &sp : set.flat) {
+        const Stmt *s = inner(*sp);
+        if (s->k == SK::Fn && s->fns[0].name && body_raises(s->fns[0].body))
+            raisers.insert(*s->fns[0].name);
+    }
+    std::vector<Stmt *> in_try;
+    try_stmts(set.flat, false, in_try);
+    for (Stmt *s : in_try)
+        if (s->e1->k == EK::Call && raisers.count(s->e1->a)) s->e1 = mk_quest(std::move(s->e1));
 }

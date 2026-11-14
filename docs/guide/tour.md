@@ -273,10 +273,38 @@ checked 1 items
 caught: index out of range
 ```
 
-`raise(x)` is caught by a `try` around it in the same function. With no such
-`try` it makes the function return `Err(x)`, so the caller sees a value and
-decides with `?` or `match`. Calling such a function and dropping what it
-returns is a compile error:
+`raise(x)` in a function makes it return `Err(x)`. A caller that takes the
+result sees a value and decides with `?` or `match`. A caller that writes the
+call as a statement gets the error in its `catch`:
+
+```brat run
+fn save(n) {
+  if n > 9 {
+    raise("too big")
+  }
+  return n
+}
+
+fn main() -> i64 {
+  print(save(12))
+  try {
+    save(3)
+    save(12)
+    print("not reached")
+  } catch e {
+    print("caught: {e}")
+  }
+  return 0
+}
+```
+
+```output
+Err('too big')
+caught: too big
+```
+
+With no `try` around it, such a statement would lose the error, so it is a
+compile error:
 
 ```brat check
 fn save(n) {

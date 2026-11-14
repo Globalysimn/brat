@@ -98,7 +98,10 @@ FIXTURES = {
                         'fn outer(n) {\n  fn inner(k) {\n    raise("k")\n  }\n  return n\n}\n'
                         'fn other(n) {\n  if n > 0 {\n    return n\n  } else {\n    raise("neg")\n  }\n}\n'
                         'fn more() {\n  outer(1)\n  other(1)\n  return 0\n}\n'
-                        'fn shadow(save) {\n  save(1)\n  return 0\n}\n'),
+                        'fn shadow(save) {\n  save(1)\n  return 0\n}\n'
+                        # A `try` catches for its own statements, not for a closure written in it.
+                        'fn deep() {\n  try {\n    let f = fn() {\n      save(6)\n      return 0\n    }\n    print(f())\n'
+                        '  } catch e {\n    print(e)\n  }\n  return 0\n}\n'),
     # The arguments after a closure belong to the statement, not to the closure's last line.
     'closure_line.brat': 'fn f(a: i64) -> i64 {\n  return a\n}\nfn apply(g, x) {\n  return g(x)\n}\nprint(apply(fn(x) {\n  return x\n}, f(1, nope)))\n',
 }
@@ -178,10 +181,10 @@ EXPECT = {
     "raise_drop.brat": [
         "raise_drop.brat:16: error: `save` can raise, and the `Err` it returns is dropped here "
         "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
-        "raise_drop.brat:21: error: `save` can raise, and the `Err` it returns is dropped here "
-        "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
         "raise_drop.brat:43: error: `other` can raise, and the `Err` it returns is dropped here "
         "(hint: `other(...)?` passes it on, `let _ = other(...)` ignores it)",
+        "raise_drop.brat:53: error: `save` can raise, and the `Err` it returns is dropped here "
+        "(hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)",
     ],
     "closure_line.brat": [
         "closure_line.brat:7: error: use of undeclared var `nope`",
