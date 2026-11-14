@@ -121,7 +121,7 @@ rt_prog = os.path.join(TMP, "rt_audit.brat")
 with open(rt_prog, "w", encoding="utf-8") as f:
     f.write('''fn main() -> i64 {
   let big = "a".repeat(700)
-  let joined = big + 42
+  let joined = "{big}{42}"
   assert(len(joined) == 702)
 
   let v = [3, 1, 4, 1, 5]

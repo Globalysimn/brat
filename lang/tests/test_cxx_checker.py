@@ -81,6 +81,12 @@ FIXTURES = {
                        'let m = {"a": 1}\nmatch m.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'
                        'match m.get("a") {\n  None => { print(0) },\n  x => { print(x) }\n}\n'
                        'let c = Cache { n: 7 }\nmatch c.get("a") {\n  Some(x) => { print(x) },\n  None => { print(0) }\n}\n'),
+    # `+` does not turn a number into text and a bool is not a number; a "{...}"
+    # placeholder takes any value. `if` and `while` test a bool.
+    'no_coerce.brat': ('fn pick(x) {\n  let n = 5\n  let ok = n > 3\n  print("n=" + n)\n  print(1.5 + "s")\n'
+                       '  print(ok + 1)\n  print(-ok)\n  print("n={n} ok={ok}" + str(n))\n'
+                       '  if "x" {\n    print(1)\n  }\n  while n {\n    break\n  }\n'
+                       '  if [n] {\n    print(2)\n  }\n  if x {\n    print(3)\n  }\n  return x + 1\n}\n'),
     # A fn that can `raise` hands its caller an `Err`: a call that drops the
     # result loses it. A `raise` under the fn's own `try` does not leave the fn.
     'raise_drop.brat': ('fn save(n) {\n  if n > 9 {\n    raise("too big")\n  }\n  return n\n}\n'
@@ -153,6 +159,15 @@ EXPECT = {
     ],
     "match_get.brat": [
         "match_get.brat:7: error: non-exhaustive match: `get` answers the value itself or `None`, so `Some(...)` never matches (hint: match `None` and `_`)",
+    ],
+    "no_coerce.brat": [
+        "no_coerce.brat:4: error: operator `+` joins two strings, got str and i64 (hint: `str(x)` makes the string)",
+        "no_coerce.brat:5: error: operator `+` joins two strings, got str and f64 (hint: `str(x)` makes the string)",
+        "no_coerce.brat:6: error: operator `+` wants numbers, got bool",
+        "no_coerce.brat:7: error: unary `-` wants a number, got bool",
+        "no_coerce.brat:9: error: condition wants bool, got str",
+        "no_coerce.brat:12: error: condition wants bool, got i64",
+        "no_coerce.brat:15: error: condition wants bool, got vec[i64]",
     ],
     "raise_drop.brat": [
         "raise_drop.brat:16: error: `save` can raise, and the `Err` it returns is dropped here "

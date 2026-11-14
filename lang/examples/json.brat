@@ -27,7 +27,7 @@ pub fn jnum(n: i64) -> str {
   return str(n)
 }
 pub fn jbool(b: i64) -> str {
-  if b {
+  if b != 0 {
     return "true"
   }
   return "false"

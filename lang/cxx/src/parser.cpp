@@ -2697,9 +2697,11 @@ private:
         if (parts.size() == 1 && parts[0].is_text) return mk_rstr(parts[0].text);
         ExprP node = parts[0].is_text ? mk_rstr(parts[0].text)
                                       : mk_bin("+", mk_rstr(""), std::move(parts[0].sub));
+        node->flag = true;
         for (size_t j = 1; j < parts.size(); j++) {
             ExprP rhs = parts[j].is_text ? mk_rstr(parts[j].text) : std::move(parts[j].sub);
             node = mk_bin("+", std::move(node), std::move(rhs));
+            node->flag = true;
         }
         return node;
     }

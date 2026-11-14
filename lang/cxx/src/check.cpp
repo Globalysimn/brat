@@ -1132,6 +1132,15 @@ struct FnTyper {
         arity_and_arena = quiet;
     }
 
+    // `if` and `while` test a bool. A number or a container there is a test for
+    // zero or for empty, which `n != 0` and `len(xs) > 0` say in the open.
+    void cond(const Expr &e) {
+        const Ty t = expr(e);
+        if (t.k == Ty::Str || t.k == Ty::Int || t.k == Ty::Float || t.k == Ty::Vec ||
+            t.k == Ty::Map)
+            must("condition wants bool, got " + type_name(t));
+    }
+
     int current_region() const { return region_stack.back(); }
 
     int decl_region(const std::string &name) const {
@@ -1748,6 +1757,7 @@ Ty FnTyper::expr(const Expr &e) {
                 note("unary `~` wants i64, got " + type_name(t));
             return Ty::of(Ty::Int);
         }
+        if (t.k == Ty::Bool) must("unary `-` wants a number, got bool");
         return numeric(t) ? t : Ty::dyn();
     }
     case EK::Move: return expr(*e.kids[0]);
@@ -1776,7 +1786,14 @@ Ty FnTyper::expr(const Expr &e) {
             return Ty::of(Ty::Int);
         }
         if (op == "&&" || op == "||") return a == b ? a : Ty::dyn();
+        if (!e.flag && (a.k == Ty::Bool || b.k == Ty::Bool))
+            must("operator `" + op + "` wants numbers, got bool");
         if (op == "+") {
+            const Ty &other = a.k == Ty::Str ? b : a;
+            if (!e.flag && (a.k == Ty::Str) != (b.k == Ty::Str) &&
+                (other.k == Ty::Int || other.k == Ty::Float || other.k == Ty::Bool))
+                must("operator `+` joins two strings, got str and " + type_name(other) +
+                     " (hint: `str(x)` makes the string)");
             if (a.k == Ty::Str || b.k == Ty::Str) return Ty::of(Ty::Str);
             if (is_tuple(a) && is_tuple(b)) return Ty::wrap(Ty::Vec, Ty::dyn());
             if (numeric(a) && numeric(b)) {
@@ -2927,7 +2944,7 @@ void FnTyper::stmt(const Stmt &s) {
         break;
     }
     case SK::If: {
-        expr(*s.e1);
+        cond(*s.e1);
         std::string tag_var, tag_name;
         std::string pred_var;
         bool has_tag_scope = false;
@@ -3014,7 +3031,7 @@ void FnTyper::stmt(const Stmt &s) {
         break;
     }
     case SK::While:
-        expr(*s.e1);
+        cond(*s.e1);
         block(s.body);
         break;
     case SK::ForRange: {

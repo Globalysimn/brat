@@ -581,7 +581,7 @@ def test_security_and_soundness_hardening(cxx, env):
             '  }\n'
             '  assert(caught2.contains("arena-assert-9876543210"))\n'
             '  assert(rec_clo() == true)\n'
-            '  let m = {}\n'
+            '  let m = hide_any({})\n'
             '  let mut m_truthy = false\n'
             '  if m { m_truthy = true }\n'
             '  assert(m_truthy == false)\n'

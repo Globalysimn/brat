@@ -100,7 +100,7 @@ fn main() -> i64 {
 }
 '''
 
-BADTYPE = GOOD.replace("return n * 2", 'return n + "bad"')
+BADTYPE = GOOD.replace("return n * 2", 'return "bad" * 1')
 MOVED = '''fn main() -> i64 {
   let parts = ["a"]
   let alias = move parts
@@ -182,7 +182,7 @@ check(msg["params"]["diagnostics"] == [], "recovered: %r" % msg["params"])
 c.notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": 5},
     "contentChanges": [
         {"range": {"start": {"line": 1, "character": 9},
-                   "end": {"line": 1, "character": 14}}, "text": 'n + "bad"'},
+                   "end": {"line": 1, "character": 14}}, "text": '"bad" * 1'},
     ]})
 msg = c.wait_notification("textDocument/publishDiagnostics")
 check([(d["code"], d["range"]["start"]["line"]) for d in msg["params"]["diagnostics"]]

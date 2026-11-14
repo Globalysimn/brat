@@ -101,7 +101,7 @@ struct Expr {
     int64_t i = 0;
     double f = 0;
     bool is_float = false;
-    bool flag = false;                 // Bool value
+    bool flag = false;                 // Bool value; a `+` that a "{...}" placeholder wrote
     std::string a;                     // name / operator / tag / field
     std::string b;                     // method name
     std::vector<ExprP> kids;           // operands, args, items, flat pairs

@@ -105,6 +105,11 @@ All ownership checking is intra-procedural over local places (`x`, `x.f`,
 - `==` and `!=` compare structural value equality on primitives, strings,
   vectors, maps, structs, and enums without implicit type coercion (`1 == "1"`
   is `false`, annotated or not).
+- `+` adds two numbers or joins two strings. A string next to a number and a
+  `bool` in arithmetic are compile errors where the types are known; a
+  `"{expr}"` placeholder takes any value.
+- `if` and `while` test a `bool`. A condition known to be a string, a number, a
+  vector or a map is a compile error.
 - `str` values are valid UTF-8. `len(s)`, `s[i]`, and `for ch in s` operate on
   Unicode scalar values (code points); `std.bytes` exposes raw UTF-8 byte views
   and `O(1)` byte indexing.
