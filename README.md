@@ -2,73 +2,45 @@
 
 [![CI](https://github.com/denionis23/brat/actions/workflows/ci.yml/badge.svg)](https://github.com/denionis23/brat/actions/workflows/ci.yml)
 
-BRAT is an ahead-of-time compiled language that emits C11. It is built for CLI
-tools, small network services, batch jobs, and C glue where you want a single
-native binary and header-checked C interop without a tracing garbage collector
-or `'a` lifetime parameters on types and functions.
+BRAT is a small language that compiles to C11. It is meant for command-line
+tools, small services and glue around C libraries, where you want one native
+binary and no garbage collector.
 
-[Language tour](docs/guide/tour.md) | [By example](docs/guide/by-example.md) |
-[Ownership](docs/guide/ownership.md) | [C interop](docs/guide/ffi.md) |
-[Standard library](docs/guide/stdlib.md) | [Built-ins](docs/guide/builtins.md) |
-[CLI & error codes](docs/guide/cli.md) | [Specification](lang/spec/SPEC.md) |
-[Limits](docs/guide/limits.md) | [FAQ](docs/guide/faq.md)
-
-Heap values use reference counting, local borrows stay inside one function, and
-`arena { ... }` routes request-scoped allocations to a bump region reset at
-scope exit:
+The idea it is built on: ownership is checked inside one function at a time,
+and whatever crosses a function boundary is reference counted. You get `move`,
+`ref` and `mut`, and a checker that refuses use after move, but no lifetime
+parameters in any signature.
 
 ```brat run
-import std.json
-
-fn summarize_batch(raw: str) -> str {
-  // Scratch strings, vectors, and maps stay in a 64 KiB bump chunk;
-  // `own()` copies only the final summary string to the heap on exit.
-  arena {
-    let items = json.parse(raw)?
-    let mut ok_ms = 0
-    let mut failed = 0
-    for row in items {
-      if json.get_bool(row, "ok", false) {
-        ok_ms += json.get_int(row, "ms", 0)
-      } else {
-        failed += 1
-      }
-    }
-    return own("ok={ok_ms}ms failed={failed}")
+fn count_words(text: str) {
+  let mut seen = {}
+  for w in text.lower().split() {
+    seen[w] = seen.get_or(w, 0) + 1
   }
+  return seen
 }
 
 fn main() -> i64 {
-  let payload = "[{\"ok\":true,\"ms\":18},{\"ok\":false,\"ms\":0},{\"ok\":true,\"ms\":24}]"
-  print(summarize_batch(payload))
-  try {
-    print(summarize_batch("{truncated"))
-  } catch e {
-    print("bad input: {e}")
+  let seen = count_words("The cat saw the other cat")
+  for w in seen.keys() {
+    print("{w}: {seen[w]}")
   }
   return 0
 }
 ```
 
 ```output
-ok=42ms failed=1
-bad input: expected string key at byte 1
+the: 2
+cat: 2
+saw: 1
+other: 1
 ```
 
 Every `brat run` and `brat check` block in this README and under `docs/guide/`
-is compiled and checked in CI by `lang/tests/test_docs_examples.py`.
+is run in CI by `lang/tests/test_docs_examples.py`, with the output compared
+byte for byte.
 
-## How it works
-
-### Local ownership, borrows, and `arena` blocks
-
-Strings, vectors, maps, tagged values, and closures are freed deterministically
-by reference counting (plain non-atomic counts on one thread, upgraded to atomic
-operations only when threads or plugins are active). Before emitting C, `brat
-check` tracks `move`, `ref`, and `mut` access on local places (`x`, `x.f`,
-`x[i]`), rejecting use-after-move, aliasing mutable arguments in a call,
-mutating a container while iterating it, and returning values allocated inside
-an `arena` block without `own(...)`:
+## What the checker refuses
 
 ```brat check
 fn consume(buf: move str) {
@@ -92,22 +64,21 @@ example.brat:7: note: `payload` moved here
 example.brat: 0 type error(s)
 ```
 
-Because borrows are checked within one function rather than encoded into types,
-structs and function signatures never carry lifetime parameters. The trade-off
-is that cross-function aliasing is managed by reference counting instead of
-static proofs; see [ownership](docs/guide/ownership.md).
+The same pass refuses two `mut` arguments that alias, a container changed
+while a loop walks it, a value written in one `spawn` and read in another, and
+a value that leaves the `arena { ... }` block it was allocated in. The full
+list, with the cases it gets wrong, is in [ownership](docs/guide/ownership.md).
 
-### Checked C interop and owned pointers
+Because the check stops at the function boundary, it proves less than Rust
+does. Two functions can still build a reference cycle between them, and that
+cycle leaks.
 
-`brat build` refuses to compile `extern fn` declarations unless verified against
-the C side: `--header` checks widths, signedness, and `const` qualifiers and
-emits `_Static_assert(sizeof/offsetof)` checks into the C output; `--object`
-reads ELF, Mach-O, and PE/COFF symbol tables plus DWARF v2-v5 debug info
-without calling `dlopen`; `.bratbind` pins header SHA-256 digests in packages.
-Pass `--unsafe-ffi` only when opting out deliberately.
+## Calling C
 
-Foreign allocations marked `-> move ptr` are tracked across branches and early
-returns so leaked or double-freed C pointers fail `brat check`:
+`brat build` refuses an `extern fn` until it has been compared with the C
+header (`--header`) or with the symbols of the library (`--object`), so a wrong
+width or a missing `const` is a build error. A pointer the C side hands over
+with `-> move ptr` has to be freed or returned on every path:
 
 ```brat check
 extern fn malloc(size: usize) -> move ptr
@@ -136,80 +107,13 @@ example.brat:5: note: `buf` allocated here
 example.brat: 0 type error(s)
 ```
 
-### Structured threads, channels, and deterministic `par for`
-
-`spawn { ... }` runs on the OS worker pool, `scope { ... }` joins every task
-spawned inside the block before exiting, and bounded `chan(cap)` queues transfer
-ownership between threads. While a `spawn` is active, captured bindings obey
-single-writer / multiple-reader exclusivity:
-
-```brat check
-fn main() -> i64 {
-  let mut log = ["boot"]
-  scope {
-    spawn { log.push("worker-a") }
-    spawn { print(len(log)) }
-  }
-  return 0
-}
-```
-
-```diagnostics
-example.brat: 1 error(s), 0 warning(s)
-example.brat:5: error: `log` is written inside `spawn` and touched again with no `join_all()` in between (hint: send the value through a channel)
-  |     spawn { print(len(log)) }
-example.brat: 0 type error(s)
-```
-
-For pure data-parallel loops, `par for x in items reduce(op, unit)` evaluates
-elements across worker threads and folds results in index order (`0..len(items)`)
-so output does not depend on thread scheduling:
-
-```brat run
-fn add_i64(a: i64, b: i64) -> i64 {
-  return a + b
-}
-
-fn range_sq(n: i64) -> i64 {
-  let mut acc = 0
-  for i in 0..n {
-    acc += i * i
-  }
-  return acc
-}
-
-fn main() -> i64 {
-  let jobs = [10, 20, 30, 40]
-  let total = par for n in jobs reduce(add_i64, 0) {
-    return range_sq(n)
-  }
-  print(total)
-  return 0
-}
-```
-
-```output
-31850
-```
-
-### Unboxed scalars, struct SRA, and C11 output
-
-Type annotations are optional. Functions annotated with `i64`, `f64`, `bool`, or
-`vec[i64]`/`vec[f64]` compile to unboxed C scalar signatures alongside boxed
-wrappers for dynamic callers. At `-O2`, scalar replacement splits non-escaping
-local `struct` values into C locals (`brat-cxx cc -O2 --why-opt` prints which
-bindings were scalarized and which bounds or division checks were proved
-redundant). A
-feature bitmask (`BRAT_CRT_MASK`) strips unused runtime subsystems (HTTP, TLS,
-SQLite, regex, worker pool) before invoking the C compiler.
+More in [C interop](docs/guide/ffi.md).
 
 ## Build and run
 
-Building requires `make`, a C++20 compiler (`g++` or `clang++`), and a C11
-compiler (`cc`, `gcc`, `clang`, or `$BRAT_CC`). Python is not required to build
-the compiler or compiled programs; Python 3 is only used by the test runner
-(`lang/tests/run_all.py`) and benchmark script (`scripts/bench.py`). A clean
-build takes ~15 seconds on 4 cores:
+You need `make`, a C++20 compiler and a C11 compiler. Python is not required to
+build the compiler or to run programs; the test runner and the benchmark script
+use Python 3.
 
 ```sh
 git clone https://github.com/denionis23/brat.git brat && cd brat
@@ -222,9 +126,7 @@ printf 'print(40 + 2)\n' > hello.brat
 42
 ```
 
-`make` also creates a `./bin/brat` symlink to `./lang/cxx/bin/brat-cxx`. Check a
-file without invoking the C compiler, inspect the generated C11, or build a
-standalone binary:
+`make` also links `./bin/brat` to that binary:
 
 ```sh
 ./bin/brat check hello.brat
@@ -232,97 +134,80 @@ standalone binary:
 ./bin/brat build -O2 hello.brat -o hello && ./hello
 ```
 
-Compiled binaries link `libc` and `libm`, adding `pthread`, `sqlite3`, or
-OpenSSL only when referenced. `./bin/brat` (~5 MB) includes the compiler, 12
-`std.*` modules (`json`, `sqlite`, `http`, `crypto`, `csv`, `fs`, `path`,
-`bytes`, `cli`, `time`, `env`, `proc`), Pike-VM regexes, `pkg`, `fmt`, `test`,
-`lsp`, and `mcp`.
+## Where to look first
 
-## Benchmarks
+- [Language tour](docs/guide/tour.md): the whole language on one page.
+- [By example](docs/guide/by-example.md): a hash table with inserts and
+  deletes, a doubly linked list and an LRU queue, JSON of unknown size, regexes,
+  SQLite.
+- [Limits](docs/guide/limits.md): overflow, division by zero, recursion depth,
+  what `len` of a string counts.
+- [Built-ins](docs/guide/builtins.md), [standard library](docs/guide/stdlib.md),
+  [modules](docs/guide/modules.md), [CLI and error codes](docs/guide/cli.md).
+- [FAQ](docs/guide/faq.md) and the [specification](lang/spec/SPEC.md).
+- How the compiler works: [architecture](docs/design/ARCHITECTURE.md),
+  [arenas](docs/design/ARENA.md), [`par for`](docs/design/PARFOR.md).
 
-[`scripts/bench.py`](scripts/bench.py) compiles and times every workload from
-source (`make bench`).
+## Speed
 
-Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3, CPython 3.14.2),
-except the two long CPython loops, which run once. Two runs of the same build on that
-CPU model differ by up to 20% in the rows under 0.1 s (BRAT `fib(35)`: 0.050 s and 0.059 s):
+`make bench` runs [`scripts/bench.py`](scripts/bench.py), which compiles and
+times every workload from source.
 
-| Workload | C (`gcc -O2`) | Go 1.27 (`go build`) | BRAT (`brat-cxx build -O2`) | CPython 3.14 |
+Median of 5 runs on Linux x86-64 (AMD EPYC 7763, GCC 13.3.0 `-O2`, Go 1.27.3,
+CPython 3.14.2); the two long CPython loops run once. Rows under 0.1 s move by
+up to 20% between two runs of the same build.
+
+| Workload | C (`gcc -O2`) | Go 1.27 | BRAT (`build -O2`) | CPython 3.14 |
 |---|---:|---:|---:|---:|
-| `int_loop(100M)` (wrapping `i64` loop) | 0.126 s | 0.129 s | 0.126 s | 16.795 s |
-| `vec3_sra(50M)` (nested `struct` step) | 0.134 s | 0.155 s | 0.141 s | 90.569 s |
-| `fib(35)` (29.9M recursive `i64` calls) | 0.024 s | 0.055 s | 0.050 s | 1.167 s |
-| `str_append(200k)` (chained `+` vs `Builder`) | 0.014 s | 0.015 s | 0.031 s | 0.057 s |
-| `dyn_records(100k)` (`map` + `str` + drops) | n/a | 0.017 s | 0.020 s | 0.047 s |
-| `json_roundtrip(5k)` (`std.json` vs stdlib) | n/a | 0.039 s | 0.010 s | 0.067 s |
+| `int_loop(100M)` | 0.126 s | 0.129 s | 0.126 s | 16.795 s |
+| `vec3_sra(50M)` | 0.134 s | 0.155 s | 0.141 s | 90.569 s |
+| `fib(35)` | 0.024 s | 0.055 s | 0.050 s | 1.167 s |
+| `str_append(200k)` | 0.014 s | 0.015 s | 0.031 s | 0.057 s |
+| `dyn_records(100k)` | n/a | 0.017 s | 0.020 s | 0.047 s |
+| `json_roundtrip(5k)` | n/a | 0.039 s | 0.010 s | 0.067 s |
 
-Where BRAT matches C/Go and where it loses:
+These are six microbenchmarks. Annotated integer and float code compiles to
+plain C loops and runs like C. Code that builds strings and maps is slower than
+Go, and `fib` pays for the recursion-depth check that turns a stack overflow
+into an error you can catch. The JSON row is fast because `std.json` is written
+in C.
 
-- `int_loop(100M)` (`0.126 s`) and `vec3_sra(50M)` (`0.141 s`) lower to plain C
-  scalar loops; at `-O2`, nested `struct` locals split into C variables without
-  heap allocation.
-- `fib(35)` (`0.050 s` vs `0.024 s` in unchecked C and `0.055 s` in Go) pays
-  for BRAT's 2,000-frame recursion cap and 64-frame stack-floor probe, which
-  turn stack overflow into a catchable error instead of `SIGSEGV`.
-- `str_append(200k)` (`0.031 s`) and `dyn_records(100k)` (`0.020 s`) trail Go's
-  `strings.Builder` (`0.015 s`) and typed structs (`0.017 s`). Unique (`rc == 1`)
-  strings grow in place across `s = s + ...`, `Val` is 16 bytes with 14-byte
-  inline SSO, and `std.json` runs directly in C (`0.010 s` vs `0.039 s` in Go
-  `encoding/json`).
+## What it is not for
 
-## Limitations
+- Kernels and bare metal. The generated C needs `libc` and `libm`.
+- Programs where a reference cycle must never leak. There is no cycle
+  collector; a long-lived doubly linked list is written with indices into a
+  vector, see [by example](docs/guide/by-example.md#5-doubly-linked-lists-and-lru-queues-without-pointer-cycles).
+- Tight generic code. Generics are type-erased: a container holds 16-byte
+  boxed values, except `vec[i64]` and `vec[f64]`.
+- Unsigned arithmetic. Every integer is a wrapping `i64`; other widths exist
+  only at the C boundary.
+- Running code you do not trust. File access is confined to the program's
+  directory by default, which guards against mistakes and is not a sandbox.
 
-Details on runtime caps and edge cases are in [limits](docs/guide/limits.md) and
-[LEDGER.md](docs/project/LEDGER.md).
+## How it was built
 
-- No freestanding or kernel mode: emitted C requires `libc` and `libm`, and
-  there is no inline assembly. Use C, Zig, or Rust for bare-metal work.
-- Intra-procedural checker only: `brat check` analyzes one function at a time
-  and does not track lifetimes across container graphs or unannotated C pointer
-  stores. Use Rust when you need full inter-procedural aliasing guarantees.
-- Type-erased generics and signed-only integers: generic containers hold 16-byte
-  `Val` slots rather than monomorphized layouts, and all integers inside BRAT
-  are signed `i64` with two's-complement wrapping (`u8`..`u64` and `usize` exist
-  only at C FFI boundaries).
-- No cycle collector: intra-function container cycles are rejected statically,
-  while cycles wired across separate functions leak unless allocated inside an
-  `arena` block. Long-lived doubly-linked lists and LRU queues use `i64` indices
-  into a `vec` (see [BRAT by Example](docs/guide/by-example.md#5-doubly-linked-lists-and-lru-queues-without-pointer-cycles)).
-- Not a sandbox for hostile code: default `O_NOFOLLOW` path confinement, secret
-  env denylists, and defensive SQLite settings guard against accidental bugs in
-  local tools, not untrusted code execution. Isolate untrusted workloads in an
-  OS container.
+Most of the code here was written by an AI model. I decide what the language
+does and what gets merged. The commit history shows it: the first commits are
+large.
 
-## Documentation
-
-| Guide | Reference | Internals |
-|---|---|---|
-| [Language Tour](docs/guide/tour.md) | [Standard Library (`std.*`)](docs/guide/stdlib.md) | [Compiler & Runtime Architecture](docs/design/ARCHITECTURE.md) |
-| [BRAT by Example](docs/guide/by-example.md) | [CLI, Env & Error Codes](docs/guide/cli.md) | [Bump Arenas (`arena`)](docs/design/ARENA.md) |
-| [Ownership & Borrows](docs/guide/ownership.md) | [Modules & `pkg`](docs/guide/modules.md) | [Deterministic `par for`](docs/design/PARFOR.md) |
-| [Verified C FFI](docs/guide/ffi.md) | [Language Spec (v0.7)](lang/spec/SPEC.md) | [Engineering Roadmap](docs/project/ROADMAP.md) |
-| [Design FAQ](docs/guide/faq.md) | [Limits & Sharp Edges](docs/guide/limits.md) | [Known Engineering Limits Ledger](docs/project/LEDGER.md) |
-
-See also [Quickstart Examples](examples/README.md), [Security Policy](SECURITY.md),
-and [Contributing](CONTRIBUTING.md).
-
-## Status and layout
-
-BRAT is experimental single-author software (~56k lines of C++20 in `brat-cxx`
-and ~13k lines of C11 runtime headers). CI builds and tests Linux x86-64 (GCC,
-Clang, ASan/UBSan/LSan), macOS arm64, and Windows x86-64 (MinGW-w64 LLP64) on
-every push.
+The project is experimental and has one maintainer. CI runs on Linux x86-64
+(GCC, Clang, ASan and UBSan), macOS arm64 and Windows x86-64 (MinGW-w64).
 
 ```text
-examples/        quickstart programs (JSON+arena, SQLite, parallel fold, C FFI)
-lang/cxx/src/    C++20 compiler, checker, C11 emitter, and CLI tools (26 .cpp files)
-lang/engine/     crt.h and crt/*.h modular C11 runtime headers
-lang/std/        12 standard-library modules and .bri interfaces
-lang/examples/   64 runnable feature programs
-lang/tests/      175 test files; run_all.py drives local and sharded CI runs
-scripts/         runtime and compile-time benchmark runner (make bench)
-editors/vscode/  VS Code syntax grammar and brat-cxx lsp client
-docs/            guides, stdlib/CLI manuals, and design notes
+examples/        programs to start from
+lang/cxx/src/    the compiler, C++20 (26 .cpp files)
+lang/engine/     the runtime, C11 headers
+lang/std/        12 standard-library modules
+lang/examples/   64 small programs, one feature each
+lang/tests/      175 test files
+scripts/         benchmark runner
+editors/vscode/  syntax grammar and LSP client
+docs/            guides and design notes
 ```
+
+See also [examples](examples/README.md), [security policy](SECURITY.md),
+[contributing](CONTRIBUTING.md), the [roadmap](docs/project/ROADMAP.md) and the
+[known limits](docs/project/LEDGER.md).
 
 License: [Apache-2.0](LICENSE).

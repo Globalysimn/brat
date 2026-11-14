@@ -1,207 +1,112 @@
-# Language Tour
+# Language tour
 
-Build the compiler from the repository root with `make -j4` (requires a C++20
-compiler and a C11 compiler).
+Build the compiler with `make -j4` at the repository root, then:
 
 ```sh
-./lang/cxx/bin/brat-cxx check file.brat
-./lang/cxx/bin/brat-cxx run file.brat
-./lang/cxx/bin/brat-cxx build -O2 file.brat -o file
-./file
+./bin/brat run file.brat
+./bin/brat check file.brat
+./bin/brat build -O2 file.brat -o file
 ```
 
-Blocks marked `brat run` and `brat check` below are compiled and checked by
-`lang/tests/test_docs_examples.py`. Additional complete programs live in
-`lang/examples/` (64 files).
+Every block below marked `brat run` or `brat check` is run in CI together with
+the output printed under it.
 
-## 1. Top level and `main`
-
-Top-level statements execute in source order. A `main` function is optional;
-when defined as `fn main() -> i64` or `fn main() -> Result[i64, str]`, its
-returned integer (or `Ok(code)`) sets the process exit code, while `Err(e)`
-prints to `stderr` and exits with status `1`.
-
-```brat
-let host = "127.0.0.1:9001"
-let view: ref str = host
-print("listening on {view}")
-```
-
-`"{expr}"` interpolates any BRAT expression inside a string literal. Braces that
-do not parse as a single expression stay literal text, so JSON strings such as
-`"{\"a\": 1}"` do not need brace escaping.
-
-## 2. Scalars, containers and records
-
-Scalar types are `i64`, `f64`, `bool` and `str`. Containers are `vec[T]` and
-`map`. Ordinary struct literals require no `struct` declaration: `Point { x: 1,
-y: 2 }` constructs a tagged map with tag `"Point"`.
-
-```brat
-let mut codes = [200, 404]
-codes.push(500)
-let routes = {"GET": 1, "POST": 2}
-let p = Point { x: 10, y: 20 }
-print(p.x + p.y)
-
-for c in codes {
-  print(c)
-}
-for i in 0..3 {
-  print(i)          // 0, 1, 2
-}
-```
-
-Integers are signed 64-bit (`i64`), support decimal, `0x` hex, `0b` binary and
-`0o` octal literals, and wrap on `+`, `-`, `*` and unary `-`. Bitwise operators
-`&`, `|`, `^`, `~`, `<<` and arithmetic `>>` work directly on `i64`.
-Integer `/` rounds toward negative infinity and `%` takes the sign of the
-divisor. An `i64` mixed with an `f64` is promoted (`1 + 2.0` is `3.0`), while an
-`f64` is never narrowed: `let x: i64 = 1.5` is a type error. `i64(x)` converts
-on request and drops the fraction toward zero, `f64(n)` goes the other way.
-`sqrt`, `floor` and the rest of `math.h` are an `extern fn` away, see
-[ffi.md](ffi.md).
-
-## 3. Ownership: `move`, `ref`, `mut`
-
-Bindings are immutable by default; reassignment or mutating methods (`push`,
-`pop`, `set`, `del`, `sort`) require `let mut` or a `mut` parameter.
-
-Assigning a non-Copy value (`let r = s`) creates a borrow that ends at the last
-read of `r` (non-lexical borrow lifetime within a function). `move s` transfers
-ownership and invalidates `s`:
-
-```brat
-fn eat(x: move str) { print(x) }
-fn peek(x: ref str) { print(x) }
-
-fn main() -> i64 {
-  let s = "hello"
-  peek(s)           // borrow ends when peek returns
-  eat(move s)       // transfers ownership
-  return 0
-}
-```
-
-Numbers and bools are `Copy`: `let t = n` copies, and `n` can change afterwards.
-A value counts as one when it is a literal, a call to `len` (or another builtin
-that answers a number or a bool), a binding annotated `i64`, `f64` or `bool`, or
-arithmetic and comparisons over those. An unannotated parameter is dynamic and
-is not, and neither is an element read from a vector without an element type:
-`let t = v[0]` borrows `v`, so swapping two elements needs `vec[i64]` on the
-vector:
+## Values
 
 ```brat run
-fn main() -> i64 {
-  let v = [1, 2, 3]
-  let mut hi = len(v) - 1
-  let end = hi
-  hi = hi - 1
-  let mut w: vec[i64] = [3, 1, 2]
-  let tmp = w[0]
-  w[0] = w[2]
-  w[2] = tmp
-  print("{end} {hi} {w}")
-  return 0
-}
+let name = "Ada"
+let mut visits = 2
+visits += 1
+let scores = [90, 72, 85]
+let ages = {"Ada": 36, "Alan": 41}
+let p = Point { x: 3, y: 4 }
+
+print("{name} came {visits} times, best score {scores.max()}")
+print(ages["Alan"], p.x + p.y, len(scores))
+print(7 / 2, -7 / 2, 7 % -2, 7 / 2.0, i64(3.9), f64(2))
+print(len("naïve"), "naïve".upper(), ord("ï"), chr(960))
 ```
 
 ```output
-2 1 [2, 1, 3]
+Ada came 3 times, best score 90
+41 7 3
+3 -4 -1 3.5 3 2.0
+5 NAÏVE 239 π
 ```
 
-Moving a struct field (`move p.x`) marks `p.x` moved statically while leaving
-other fields like `p.y` usable (unlike Rust partial moves, the parent slot keeps
-a counted reference at run time rather than becoming partially uninitialized).
-See [ownership.md](ownership.md) for branch rules, `try`/`catch` cleanup, and
-checker limits, or run `./bin/brat explain E0382` in the terminal.
+A binding is fixed unless it says `let mut`. The scalar types are `i64`, `f64`,
+`bool` and `str`; the containers are vectors and maps, and a map keeps its keys
+in insertion order. `Point { x: 3, y: 4 }` needs no declaration.
 
-## 4. Errors as values, `Option[T]` and `Result[T, E]`
+`"{expr}"` puts the value of an expression into a string. Braces that do not
+hold an expression stay as they are, so `"{\"a\": 1}"` is the JSON it looks
+like.
 
-`Ok(v)`, `Err(e)`, `Some(v)` and `None` are built-in tagged values, typed as
-`Result[T, E]` and `Option[T]` when annotated (or left dynamic in unannotated
-functions). `?` unwraps `Ok(v)` / `Some(v)`, returning `Err(e)` early from
-`-> Result[T, E]` functions, `None` early from `-> Option[T]` functions, and
-unwinding to `try` / `catch` otherwise;
-`unwrap_or(x, fallback)` (or `x.unwrap_or(fb)`) evaluates `fallback` lazily only
-on `Err`/`None`; `or` provides a fallback for `None` without swallowing `Err`.
+Integers are 64-bit and wrap on overflow. `/` on two integers rounds down and
+`%` takes the sign of the divisor. An integer next to a float becomes a float;
+a float becomes an integer only through `i64(x)`. Strings are UTF-8, and `len`,
+indexing and `for ch in s` count code points.
 
-`try`/`catch` catches both `Err` unwinding and runtime errors (division by zero,
-out-of-bounds indexing, missing map keys):
+Nothing is converted behind your back: `"a" + 5`, `true + 1` and `if "x"` are
+compile errors.
 
-```brat run
+```brat check
 fn main() -> i64 {
-  try {
-    if true {
-      defer print("cleanup")
-      raise("boom")
-    }
-  } catch e {
-    print("caught: {e}")
+  let n = 5
+  print("items: " + n)
+  if n {
+    print("some")
   }
   return 0
 }
 ```
 
-```output
-cleanup
-caught: boom
+```diagnostics
+example.brat: 0 error(s), 0 warning(s)
+example.brat: 2 type error(s)
+example.brat:3: error: operator `+` joins two strings, got str and i64 (hint: `str(x)` makes the string)
+  |   print("items: " + n)
+example.brat:4: error: condition wants bool, got i64
+  |   if n {
 ```
 
-`defer` statements execute in reverse registration order (LIFO) at scope exit on
-both normal control flow and error unwinding.
-
-## 5. `match`, enums, structs and `impl` methods
-
-Record literals do not require a prior `struct` declaration: `Point { x: 3, y: 4 }` creates an
-ad-hoc tagged record immediately, while `struct Point { x: i64, y: i64 }` opts
-into fixed-slot layout and field checking. Likewise, `enum` variants can omit
-types (`Done(ms)`) or declare payload types (`Done(ms: i64)`, `Click(x: i64, y: i64)`);
-`match` checks exhaustiveness across local and imported `pub enum`s, `Option[T]`,
-`Result[T, E]`, and `bool` unless a `_` catch-all arm is present.
-
-`impl Type` attaches methods (`self`, `mut self`, `move self`) and associated
-functions without `self` (`Type.make(...)`):
+## Functions
 
 ```brat run
-impl Point {
-  fn make(x: i64, y: i64) {
-    return Point { x: x, y: y }
+fn area(w: i64, h: i64) -> i64 {
+  return w * h
+}
+
+fn describe(x) {
+  if is_str(x) {
+    return "text"
   }
-  fn sum(self) -> i64 {
-    return self.x + self.y
-  }
+  return "something else"
 }
 
 fn main() -> i64 {
-  let p = Point.make(3, 4)
-  print(p.sum())
+  let twice = fn(n) { return n * 2 }
+  print(area(3, 4), describe("hi"), describe(1.5), twice(21))
+  print([1, 2, 3].map(twice).filter(fn(n) { return n > 2 }))
   return 0
 }
 ```
 
 ```output
-7
+12 text something else 42
+[4, 6]
 ```
 
-User `impl` methods always take precedence over built-in container or string
-methods of the same name. Built-in methods are arity-checked during `brat-cxx
-check`.
+Type annotations are optional. An annotated function is checked at its call
+sites and compiles to plain C types; an unannotated one takes any value.
 
-## 6. Closures and callbacks
+A function returns with `return`. The last expression is not returned for you,
+and a function that declares `-> T` and can reach its end without a `return` is
+a compile error.
 
-Closures (`fn(x) { ... }`) capture outer bindings by shallow copy and can be
-stored in variables or containers. Named top-level functions
-(`fn double(x: i64) -> i64`) are not runtime values (`let f = double` is an
-error): pass them directly as callbacks (`[1, 2, 3].map(double)`) to `map`,
-`filter`, `fold`, `any`, `all`, `find` and `sort_by`, or wrap them in
-`let f = fn(x) { return double(x) }`.
-
-A closure gets its own copy of each captured binding, so it cannot assign to
-one: `n = n + 1` inside the closure is an error, because the write would be gone
-when the call returns. A container behind the binding is shared, and that is
-where a counter keeps its state. A `let` at the top level of the file is not
-captured: every closure reads and writes the same value.
+A closure gets a copy of each binding it captures. It can read the copy but not
+assign to it; a vector or a map behind the binding is shared, so that is where
+a counter keeps its state:
 
 ```brat run
 fn make_counter(step: i64) {
@@ -225,82 +130,315 @@ fn main() -> i64 {
 9
 ```
 
-## 7. Memory and `arena` blocks
+A named function is not a value you can store. Pass it by name to `map`,
+`filter`, `fold`, `any`, `all`, `find` or `sort_by`, or wrap it in a closure.
 
-Strings, vectors, maps, tags and closures are reference-counted. For request
-handlers or parsers that allocate many short-lived objects, `arena { ... }`
-allocates from 64 KiB thread-local bump chunks and releases the entire region on
-block exit:
-
-```brat
-arena {
-  let parts = raw.split(",")
-  let line = parts.join(":")
-  print(line)
-}
-```
-
-The checker rejects returning or storing an arena-allocated value outside the
-block unless copied to the heap with `own(x)`. See [ARENA.md](../design/ARENA.md).
-
-## 8. Threads, `scope` and bounded channels
-
-`spawn { ... }` runs on an OS worker thread. `scope { ... }` joins all tasks
-spawned inside it (including nested spawns) before exiting the block;
-`join_all()` joins tasks spawned in the current frame.
-
-While a `spawn` is live, the checker enforces single-writer / multiple-reader
-access on captured bindings until a `join_all()` or `scope` boundary intervenes.
-To pass values between threads, use a bounded channel (`chan(capacity)`).
-`ch.recv()` returns the next sent value, or `None` once the channel is closed
-and drained:
+## Control flow
 
 ```brat run
 fn main() -> i64 {
-  let ch = chan(2)
-  ch.send(41)
-  ch.close()
-  let first = ch.recv()
-  let after_close = ch.recv()
-  print(first + 1, is_none(after_close))
+  let mut total = 0
+  for i in 0..4 {
+    total += i
+  }
+  for word in ["a", "b"] {
+    print(word)
+  }
+  let mut n = 10
+  while n > 1 {
+    n = n / 3
+  }
+  if total == 6 && n == 1 {
+    print("total {total}, n {n}")
+  } else {
+    print("unexpected")
+  }
   return 0
 }
 ```
 
 ```output
-42 true
+a
+b
+total 6, n 1
 ```
 
-## 9. Built-in structured logging and spans
+`if`, `while`, `for` and `match` are statements. `0..4` stops before 4. The
+logical operators are `&&`, `||` and `!`.
 
-`log.info(...)`, `log.warn(...)` and `trace.span("name") { ... }` are built into
-the parser and emit newline-delimited JSON records with timestamps and active
-span stacks to stdout without external dependencies.
+## Structs, enums and `match`
 
-## 10. Modules, standard library and C FFI
+```brat run
+struct Rect { w: i64, h: i64 }
 
-- `import a.b` loads `a/b.brat` relative to the current file or `vendor/`, or
-  from the 12 built-in `std.*` modules (`std.json`, `std.http`, `std.sqlite`,
-  `std.crypto`, `std.fs`, `std.path`, `std.cli`, `std.csv`, `std.env`,
-  `std.proc`, `std.bytes`, `std.time`). Details: [modules.md](modules.md) and
-  [stdlib.md](stdlib.md).
+enum Shape {
+  Box(r),
+  Circle(radius: i64),
+  Dot,
+}
+
+impl Rect {
+  fn square(side: i64) {
+    return Rect { w: side, h: side }
+  }
+  fn area(self) -> i64 {
+    return self.w * self.h
+  }
+}
+
+fn size(s) -> i64 {
+  match s {
+    Box(r) => { return r.area() },
+    Circle(radius) => { return 3 * radius * radius },
+    Dot => { return 0 },
+  }
+}
+
+fn main() -> i64 {
+  print(size(Box(Rect.square(4))), size(Circle(2)), size(Dot))
+  return 0
+}
+```
+
+```output
+16 12 0
+```
+
+Declaring a `struct` fixes its fields and gives it a flat layout. `impl` adds
+methods, which take `self`, and functions called on the type itself. A `match`
+on an enum, an `Option`, a `Result` or a `bool` has to cover every case or end
+in `_`; a missing case is a compile error.
+
+## Errors
+
+A function that can fail returns `Ok(value)` or `Err(reason)`. `?` after a call
+takes the value out of an `Ok` and leaves the current function on an `Err`.
+Lookups that can come back empty answer the value or `None`, and `or` supplies
+a fallback.
+
+```brat run
+fn port(text: str) -> Result[i64, str] {
+  let n = text.parse_int()?
+  if n < 1 || n > 65535 {
+    return Err("port out of range: {n}")
+  }
+  return Ok(n)
+}
+
+fn main() -> i64 {
+  for text in ["8080", "99999", "http"] {
+    match port(text) {
+      Ok(n) => print("listening on {n}"),
+      Err(why) => print("refused: {why}"),
+    }
+  }
+  let limits = {"cpu": 4}
+  print(limits.get("mem") or 512)
+  return 0
+}
+```
+
+```output
+listening on 8080
+refused: port out of range: 99999
+refused: not a number
+512
+```
+
+Run-time faults (an index out of range, a missing key, division by zero) and a
+failed `?` in a function that does not return a `Result` unwind to the nearest
+`try`. `defer` runs on the way out of its block whichever way the block ends.
+
+```brat run
+fn third(xs) {
+  defer print("checked {len(xs)} items")
+  return xs[2]
+}
+
+fn main() -> i64 {
+  try {
+    print(third([1, 2, 3]))
+    print(third([1]))
+  } catch e {
+    print("caught: {e}")
+  }
+  return 0
+}
+```
+
+```output
+checked 3 items
+3
+checked 1 items
+caught: index out of range
+```
+
+`raise(x)` is caught by a `try` around it in the same function. With no such
+`try` it makes the function return `Err(x)`, so the caller sees a value and
+decides with `?` or `match`. Calling such a function and dropping what it
+returns is a compile error:
+
+```brat check
+fn save(n) {
+  if n > 9 {
+    raise("too big")
+  }
+  return n
+}
+
+fn main() -> i64 {
+  save(12)
+  return 0
+}
+```
+
+```diagnostics
+example.brat: 0 error(s), 0 warning(s)
+example.brat: 1 type error(s)
+example.brat:9: error: `save` can raise, and the `Err` it returns is dropped here (hint: `save(...)?` passes it on, `let _ = save(...)` ignores it)
+  |   save(12)
+```
+
+An error nobody handles ends the program with status 1 and
+`unhandled: Err('...')` on stderr.
+
+## Ownership
+
+Passing or assigning a string, vector or map lends it; `move` gives it away,
+and the old name is dead afterwards (the README shows that error). Changing a
+value through a parameter needs `mut` on the parameter, and one call cannot
+both change a value and read it through another argument. Numbers and bools are
+copied.
+
+```brat check
+fn append_all(mut dst, src) {
+  for x in src {
+    dst.push(x)
+  }
+}
+
+fn main() -> i64 {
+  let mut log = ["boot"]
+  append_all(log, log)
+  return 0
+}
+```
+
+```diagnostics
+example.brat: 1 error(s), 0 warning(s)
+example.brat:9: error: law of exclusivity: `log` borrowed and mutated in one expression (clashes with `log` used by `dst`)
+  |   append_all(log, log)
+example.brat: 0 type error(s)
+```
+
+The check works on one function at a time, and a borrow ends at its last use.
+There are no lifetime annotations. An element read from a vector without an
+element type is a borrow of the vector, so a swap wants `vec[i64]`:
+
+```brat run
+fn main() -> i64 {
+  let mut w: vec[i64] = [3, 1, 2]
+  let tmp = w[0]
+  w[0] = w[2]
+  w[2] = tmp
+  print(w)
+  return 0
+}
+```
+
+```output
+[2, 1, 3]
+```
+
+The rules, the diagnostics and the known false positives are in
+[ownership.md](ownership.md).
+
+## Memory
+
+Strings, vectors, maps and closures are reference counted and freed when the
+last owner goes away. There is no cycle collector: the checker refuses a cycle
+built inside one function, and one built across functions leaks.
+
+`arena { ... }` allocates everything inside the block from a bump region and
+frees it in one step at the end. `own(x)` copies a value out; letting one out
+without it is a compile error.
+
+```brat run
+fn longest(text: str) -> str {
+  arena {
+    let words = text.split(" ")
+    let mut best = ""
+    for w in words {
+      if len(w) > len(best) {
+        best = w
+      }
+    }
+    return own(best)
+  }
+}
+
+fn main() -> i64 {
+  print(longest("a quick brown fox"))
+  return 0
+}
+```
+
+```output
+quick
+```
+
+## Threads
+
+`spawn { ... }` runs a block on a worker thread and `scope { ... }` waits for
+every task started inside it. While a task is running, a binding it writes
+cannot be touched by anyone else; values move between threads through a bounded
+channel. `recv` answers `None` once the channel is closed and empty.
+
+```brat run
+fn main() -> i64 {
+  let ch = chan(4)
+  scope {
+    spawn {
+      for i in 0..3 {
+        ch.send(i * i)
+      }
+      ch.close()
+    }
+  }
+  let mut sum = 0
+  let mut got = ch.recv()
+  while !is_none(got) {
+    sum += got
+    got = ch.recv()
+  }
+  print(sum)
+  return 0
+}
+```
+
+```output
+5
+```
+
+`par for x in items reduce(f, unit) { ... }` runs a loop body on several
+threads and folds the results in index order, see
+[PARFOR.md](../design/PARFOR.md).
+
+## The rest
+
 - Built-in functions and the methods of strings, vectors and maps:
   [builtins.md](builtins.md).
-- `extern fn`, `extern struct`, `extern union`, `ptr[T]`, `slice_of_ptr`,
-  callbacks, `--header` / `--object` verification and `brat-cxx bindgen`:
-  [ffi.md](ffi.md).
-- Complete CLI flags, environment variables, and `brat explain` diagnostic
-  codes: [cli.md](cli.md).
-- Complete runnable recipes (JSON+`arena`, index-backed LRU list, Pike-VM
-  regexes, SQLite, HMAC, `par for`): [by-example.md](by-example.md).
+- `import`, packages and the 12 `std.*` modules: [modules.md](modules.md),
+  [stdlib.md](stdlib.md).
+- Calling C: [ffi.md](ffi.md).
+- Command-line flags and error codes: [cli.md](cli.md).
+- Longer programs: [by-example.md](by-example.md).
 
-## 11. Omissions by design or current scope
+## What is missing
 
-- Generics are type-erased rather than monomorphized.
-- No trait objects, macros, async/await or coroutines.
-- No unsigned integer types outside FFI boundaries (`i64` right-shifts
-  sign-extend) and no `**` exponentiation operator.
-- No centralized package registry (`brat-cxx pkg` resolves against local files,
-  GitHub release/ref tarballs or a JSON index URL you control).
-- Detailed edge cases, measurements, and design Q&A: [limits.md](limits.md) and
-  [faq.md](faq.md).
+- Generics are type-erased.
+- No trait objects, macros or async.
+- No unsigned integers outside the C boundary, and no `**`.
+- No package registry: `brat pkg` reads local files, GitHub tarballs or an
+  index URL you host.
+- More in [limits.md](limits.md) and [faq.md](faq.md).

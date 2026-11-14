@@ -32,7 +32,7 @@ Two conventions run through the tables:
 | `is_ok(x)`, `is_err(x)`, `is_some(x)`, `is_none(x)` | `bool` |
 | `is_int(x)`, `is_float(x)`, `is_str(x)`, `is_bool(x)`, `is_vec(x)`, `is_map(x)` | what the value is at run time |
 | `own(x)` | a heap copy of a value built inside `arena { ... }` |
-| `chan(cap)`, `join_all()`, `sleep_ms(ms)` | channels and tasks, see the [tour](tour.md#8-threads-scope-and-bounded-channels) |
+| `chan(cap)`, `join_all()`, `sleep_ms(ms)` | channels and tasks, see the [tour](tour.md#threads) |
 | `time_ms()`, `mono_ns()` | milliseconds since the epoch; a monotonic clock in nanoseconds |
 | `read_file(path)` | `Ok(text)` or `Err(message)` |
 | `write_file(path, text)`, `append_file(path, text)` | `Ok(bytes written)` or `Err(message)` |
